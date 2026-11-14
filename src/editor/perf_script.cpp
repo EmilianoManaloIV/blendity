@@ -83,7 +83,7 @@ bool is_input_event(EventType t) {
 }
 
 const char *kPerfDragUsage =
-    "perf drag gizmo <x|y|z|rx|ry|rz|free> <pixels> [frames N] [part <part>] [mods ctrl+shift+alt] | puppet <lhand|rhand|lfoot|rfoot|head|hips> <dx> <dy> | "
+    "perf drag gizmo <x|y|z|free|rx|ry|rz|sx|sy|sz|sall> <pixels> [frames N] [part <part>] [mods ctrl+shift+alt] | puppet <lhand|rhand|lfoot|rfoot|head|hips> <dx> <dy> | "
     "key <g|r> <dx> <dy> | ruler <from frame> <to frame> | at <x0> <y0> <x1> <y1> | stop   (any of: queue, loop, frames N)";
 
 /* The short words for the handles' parts (a part is otherwise named as humanoid::kPartNames has it). */
@@ -272,7 +272,7 @@ bool Editor::perf_drag_parse(const std::vector<std::string> &t, PerfScript &s, s
   if (kind == "gizmo") {
     if (!numbers(1, 1, v)) return false;
     s.handle = perf_gizmo_handle(pos[0]);
-    if (s.handle < 0) return Log::warn("perf drag gizmo: no handle called '%s' (x y z free rx ry rz)", pos[0].c_str()), false;
+    if (s.handle < 0) return Log::warn("perf drag gizmo: no handle called '%s' (x y z free rx ry rz sx sy sz sall)", pos[0].c_str()), false;
     s.kind = PerfScript::Gizmo, s.what = "gizmo " + to_lower(pos[0]), s.pixels = v[0];
     return true;
   }
@@ -470,7 +470,7 @@ void Editor::perf_script_advance(double ms) {
       const std::string handle = s.what.substr(s.what.find(' ') + 1);
       if (!pr.drawn) return perf_script_refuse("the gizmo isn't drawn (nothing active, or the tool isn't Move or Rotate)");
       if (!pr.found || !scene_view_rect().contains((int)std::lround(pr.x), (int)std::lround(pr.y)))
-        return perf_script_refuse("the " + handle + " handle is not on screen (the tool must be Move for x y z free, Rotate for rx ry rz)");
+        return perf_script_refuse("the " + handle + " handle is not on screen (the tool must be Move for x y z free, Rotate for rx ry rz, Scale for sx sy sz sall)");
       /* (Whole pixels, as a hand's events are: a test can send the same ones.) */
       s.x0 = std::round(pr.x), s.y0 = std::round(pr.y), s.x1 = std::round(pr.x + pr.dx * s.pixels), s.y1 = std::round(pr.y + pr.dy * s.pixels);
       s.stage = PerfScript::Aim;

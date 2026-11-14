@@ -766,7 +766,7 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
  * frame. The frame is the main thread's whole step_frame_headless (hash, swap, first render mesh of a landed result, the Scene
  * view); a landing is timed from the first move whose mesh had not yet been shown. The builds started, landed and cancelled, and the
  * kernel calls made on the main thread (none), say what the frames paid. */
-static void live_row(Report &rep, const Options &o, bool cancel_stale, bool header) {
+static void live_row(Report &rep, const Options &o, bool cancel_stale, bool header, int gi = -1) {
   Editor ed;
   ed.init_headless(1280, 720);
   ed.set_async_jobs_for_test(true);
@@ -779,7 +779,12 @@ static void live_row(Report &rep, const Options &o, bool cancel_stale, bool head
   GameObject *bo = ed.scene().create("Blockout");
   bo->add<Blockout>();
   bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
-  bo->add<MeshRenderer>();
+  bo->add<MeshRenderer>()->contribute_gi = gi == 1;  // (round 482: the rows with a Blockout that takes part in baked lighting - the Scene view lit, the realtime lightmap laid out for it)
+  if (gi == 1) {  // (the worst case for the realtime lightmap layout: Realtime GI on and following every change, a sun to light the view)
+    ed.scene().create("Sun")->add<Light>();
+    ed.scene().lighting.realtime_gi = true;
+    ed.scene().lighting.update_mode = 1;
+  }
   const std::vector<Piece> src = interior(6, 28);
   std::vector<GameObject *> objs;
   for (const Piece &p : src) {
@@ -830,7 +835,9 @@ static void live_row(Report &rep, const Options &o, bool cancel_stale, bool head
     rep.table({"live: interior 100 in the editor, a door moved every frame for " + std::to_string(frames) + " frames (one every 16.7 ms)", "frame median ms", "frame worst ms",
                "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms", "builds started", "landed", "overtaken by a newer move",
                "main-thread builds", "verdict"});
-  rep.row({cancel_stale ? "a newer snapshot cancels the running build (not shipped)" : "the running build finishes and lands, then the newest starts (ADR 0129)", f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
+  const std::string what = gi >= 0 ? std::string(gi == 1 ? "Realtime GI on (Automatic), a sun, Contribute GI on" : "Contribute GI off, Realtime GI off, no sun") + ": the running build finishes and lands, then the newest starts"
+                                   : cancel_stale ? "a newer snapshot cancels the running build (not shipped)" : "the running build finishes and lands, then the newest starts (ADR 0129)";
+  rep.row({what, f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
            std::to_string(landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0), std::to_string(ed.blockout_landed_for_test() - landed0),
            std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
@@ -918,6 +925,230 @@ static void handle_row(Report &rep, const Options &o) {
            std::to_string(ed.blockout_landed_for_test() - landed0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
 
+/* Round 483 (task 0459): the pass's goal on something the size of real work - `benchscene blockout` (100 pieces: rooms of three
+ * shapes, doors, windows, stairs, arches, a blended column, materials, two lights) and its 400-piece version, live in a headless
+ * editor with workers on. A door slid along its wall every frame for ten seconds (600 frames, one every 16.7 ms), then a room's +X
+ * face handle dragged with real mouse events for as long. Frames a second are what the main thread's frames would allow, capped at
+ * the window's 60; the verdict is the goal's: no frame over 16.7 ms, a landing within 100 ms, no kernel call on the main thread. */
+struct BenchDrag {
+  std::vector<double> frame_ms, landing_ms;
+  uint64_t landed = 0;
+  double oldest = -1.0, start = 0.0;
+  void frame(Editor &ed, int f, const std::vector<platform::Event> &events) {
+    if (oldest < 0.0) oldest = now_seconds();
+    ScopedTimer t;
+    ed.step_frame_headless(events);
+    frame_ms.push_back(t.ms());
+    if (ed.blockout_landed_for_test() != landed) {
+      landed = ed.blockout_landed_for_test();
+      landing_ms.push_back((now_seconds() - oldest) * 1000.0);
+      oldest = -1.0;
+    }
+    const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+    if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+  }
+};
+
+static double fps_of(double frame_ms) { return std::min(60.0, 1000.0 / std::max(frame_ms, 1e-3)); }
+
+static void bench_drag_row(Report &rep, const Options &o, int pieces, bool handle) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  ed.command(pieces == 400 ? "benchscene blockout 400" : "benchscene blockout");
+  ed.command("blockout wait");
+  GameObject *door = nullptr, *room = nullptr;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!door && g.name.rfind("Door X 0.", 0) == 0) door = &g;  // (the first plain door of the ground floor: one of them is the arched one)
+    if (g.name == "Room 1.1.1") room = &g;  // (the upper storey: its handles are not under another floor)
+  });
+  const std::string what = strprintf("%d pieces, %s", pieces, handle ? "a room's +X face handle dragged (Ctrl held: no snapping)" : "a door slid along its wall");
+  if (!door || !room) return rep.row({what + ": the bench scene has no such piece", "", "", "", "", "", "", "", "", "", "", "", "OVER"});
+  int hx = 0, hy = 0;
+  if (handle) {
+    const Vec3 at = room->world_position();
+    ed.command(strprintf("camera 25 60 14 %g %g %g", at.x, at.y, at.z));
+    ed.select_object(room->id);
+  }
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  if (handle && !ed.blockout_handle_pixel_for_test("+x", hx, hy)) return rep.row({what + ": no +X handle in view", "", "", "", "", "", "", "", "", "", "", "", "OVER"});
+  auto mouse = [](platform::EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y, e.mods = platform::MOD_CTRL;
+    return e;
+  };
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), main0 = ed.blockout_main_builds_for_test();
+  if (handle) {
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, hx, hy)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseDown, hx, hy)});
+  }
+  const int frames = o.quick ? 30 : 600;
+  const Vec3 home = door->local().position;
+  BenchDrag d;
+  d.landed = landed0, d.start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    if (handle) {
+      d.frame(ed, f, {mouse(platform::EventType::MouseMove, hx + 1 + f % 40, hy)});
+      continue;
+    }
+    door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
+    d.frame(ed, f, {});
+  }
+  const double drag_end = now_seconds();
+  if (handle) ed.step_frame_headless({mouse(platform::EventType::MouseUp, hx + 1, hy)});
+  ed.command("blockout wait");
+  const double settle_ms = (now_seconds() - drag_end) * 1000.0;
+  std::sort(d.frame_ms.begin(), d.frame_ms.end());
+  const double worst = d.frame_ms.back(), low = d.frame_ms[(size_t)((double)(d.frame_ms.size() - 1) * 0.99)];
+  const double land_median = median(d.landing_ms), land_worst = d.landing_ms.empty() ? 0.0 : *std::max_element(d.landing_ms.begin(), d.landing_ms.end());
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = worst <= 16.7 && !d.landing_ms.empty() && land_median <= 100.0 && main_builds == 0;
+  rep.row({what, f2(median(d.frame_ms)), f2(low), f2(worst), f2(fps_of(median(d.frame_ms))), f2(fps_of(low)), d.landing_ms.empty() ? "none" : f2(land_median),
+           d.landing_ms.empty() ? "none" : f2(land_worst), std::to_string(d.landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0),
+           std::to_string(main_builds), o.quick ? "-" : ok ? "ok" : "OVER"});  // (30 frames on a shared runner say nothing: no verdict with --quick, as the kernel's rows)
+}
+
+static void bench_rows(Report &rep, const Options &o) {
+  rep.table({"live: benchscene blockout in the editor, dragged for " + std::string(o.quick ? "30" : "600") + " frames (one every 16.7 ms)", "frame median ms", "frame 1 % slowest ms", "frame worst ms",
+             "frames a second, median", "frames a second, 1 % low", "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms",
+             "builds started", "main-thread builds", "verdict"});
+  for (int pieces : {100, 400}) {
+    if (o.quick && pieces > 100) continue;  // (as the section's other 400-sized cases)
+    for (bool handle : {false, true}) bench_drag_row(rep, o, pieces, handle);
+  }
+}
+
+/* Round 481 (ADR 0130, task 0457): a blend is meshed in a box of its own and stitched to the rest. What one rounded column costs in
+ * a building - `interior 100` as rooms, a column 0.25 m thick from floor to ceiling in the first room with a Blend radius of 0.15 m -
+ * at each detail, against the same building with the column unblended; and the metaball case, where the boxes are the whole cluster. */
+static Piece blend_column(float blend) {
+  Piece p;
+  p.id = 9001, p.shape = Shape::Cylinder, p.radius = 0.25f, p.height = 2.8f, p.segments = 24, p.blend = blend;
+  p.to_blockout = Mat4::translate({1.0f, 0.0f, 1.0f});
+  return p;
+}
+
+static void blend_rows(Report &rep, const Options &o) {
+  static const char *const kDetail[3] = {"Low", "Medium", "High"};
+  rep.table({"a blended column in interior 100 (rooms), radius 0.15 m", "ms / build", "boxes", "tries again", "built whole", "blend cell", "grid cells", "faces", "of them blended", "result", "verdict (100 ms)"});
+  for (int detail = -1; detail < 3; detail++) {
+    std::vector<Piece> pieces = interior_rooms(6, 28);
+    pieces.push_back(blend_column(detail < 0 ? 0.0f : 0.15f));
+    bl::blockout::Settings st;
+    st.blend_detail = std::max(0, detail);
+    std::vector<double> ms;
+    Run r;
+    for (int i = 0; i < (o.quick ? 1 : 5); i++) {
+      r = on_worker(pieces, st);
+      ms.push_back(r.ms);
+    }
+    size_t blended = 0, boxes = 0, retries = 0, whole = 0, cells = 0;
+    float cell = 0.0f;
+    for (uint32_t side : r.faces.side) blended += side == bl::blockout::kSideBlend;
+    for (const bl::blockout::ClusterReport &c : r.rep.clusters) boxes += c.blend_regions, retries += c.seam_retries, whole += c.blend_whole, cells += c.cells, cell = std::max(cell, c.blend_cell);
+    const std::string bad = r.ok ? problem(r.mesh) : "refused: " + r.rep.why;
+    const double m = median(ms);
+    rep.row({detail < 0 ? "the column unblended" : kDetail[detail], f2(m), std::to_string(boxes), std::to_string(retries), std::to_string(whole), detail < 0 ? "-" : strprintf("%.4f", cell),
+             std::to_string(cells), std::to_string(r.mesh.face_count()), std::to_string(blended), bad.empty() ? "closed" : "PROBLEM: " + bad, detail < 0 ? "-" : m <= 100.0 ? "ok" : "over"});
+  }
+  rep.table({"blobs: 40 spheres and boxes, every one with a Blend radius of 0.2 m", "ms / build", "boxes", "built whole", "blend cell", "grid cells", "faces", "result"});
+  for (int detail = 0; detail < 3; detail++) {
+    std::vector<Piece> pieces = piles(o.quick ? 12 : 40, 3.0f, 11u);
+    for (Piece &p : pieces) p.blend = 0.2f;
+    bl::blockout::Settings st;
+    st.blend_detail = detail, st.max_cells = 64000000;
+    std::vector<double> ms;
+    Run r;
+    for (int i = 0; i < (o.quick ? 1 : 3); i++) {
+      r = on_worker(pieces, st);
+      ms.push_back(r.ms);
+    }
+    size_t boxes = 0, whole = 0, cells = 0;
+    float cell = 0.0f;
+    for (const bl::blockout::ClusterReport &c : r.rep.clusters) boxes += c.blend_regions, whole += c.blend_whole, cells += c.cells, cell = std::max(cell, c.blend_cell);
+    const std::string bad = r.ok ? problem(r.mesh) : "refused: " + r.rep.why;
+    rep.row({kDetail[detail], f2(median(ms)), std::to_string(boxes), std::to_string(whole), strprintf("%.4f", cell), std::to_string(cells), std::to_string(r.mesh.face_count()),
+             bad.empty() ? "closed" : "PROBLEM: " + bad});
+  }
+}
+
+/* The hostile arrangements of "any pieces" with Blend radii on them: none, below the detail, ordinary, larger than the piece, not a
+ * number. The same judge as the sweep's; and how the seams went. (500 arrangements a path, 50 quick: an arrangement with a blend
+ * costs a fine grid, where the sweep's cost a boolean.) */
+static void blend_sweep(Report &rep, const Options &o, bool crisp) {
+  const char *one = std::getenv("BLENDITY_BLOCKOUT_BLEND_SEED");
+  const uint32_t cases = one ? (uint32_t)std::max(1, std::atoi(one)) : o.quick ? 50 : 500;
+  rep.table({"sweep with Blend radii", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "boxes stitched", "clusters built whole",
+             "clusters whose seam would not close", "tries again", "pieces below the detail", "clusters built without their blends"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Auto : Path::Field;
+    if (k == 0 && !crisp) continue;  // (without the exact path Auto is the grid: the second row)
+    const std::string name = path == Path::Auto ? "the rest on the exact path" : "the rest on the grid (cell 0.08)";
+    Tally t;
+    size_t boxes = 0, whole = 0, fallback = 0, retries = 0, below = 0, dropped = 0;
+    for (uint32_t seed = 1; seed <= cases; seed++) {
+      if (one && (uint32_t)std::atoi(one) != seed) continue;
+      std::vector<Piece> pieces = hostile(seed, false);
+      Rand r{seed * 40503u + 481u};
+      for (Piece &p : pieces) {
+        const int pick = r.pick(10);
+        p.blend = pick < 3 ? 0.0f : pick == 3 ? 0.001f : pick < 8 ? 0.05f + 0.05f * (float)r.pick(6) : pick == 8 ? 5.0f : std::numeric_limits<float>::quiet_NaN();
+      }
+      bl::blockout::Settings st;
+      st.path = path, st.cell = 0.08f, st.blend_detail = r.pick(3);
+      Mesh m;
+      bl::blockout::Report rp;
+      bl::blockout::Faces named;
+      if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+        t.refused++;
+        if (std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  blend seed %u (%s) refused: %s\n", seed, name.c_str(), rp.why.c_str());
+        continue;
+      }
+      judge(seed, name.c_str(), m, named, rp, t);
+      for (const bl::blockout::ClusterReport &c : rp.clusters)
+        if (c.blend_dropped && std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  blend seed %u (%s) built without its blends: %s\n", seed, name.c_str(), c.seam_why.c_str());
+      for (const bl::blockout::ClusterReport &c : rp.clusters) boxes += c.blend_regions, whole += c.blend_whole, fallback += c.blend_fallback, retries += c.seam_retries, below += c.blend_below, dropped += c.blend_dropped;
+    }
+    rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(boxes),
+             std::to_string(whole), std::to_string(fallback), std::to_string(retries), std::to_string(below), std::to_string(dropped)});
+    if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+    if (t.unchecked) rep.note(name + strprintf(": %zu results of 20,000 faces or more were not checked for faces on top of each other", t.unchecked));
+  }
+}
+
+/* Round 482: what the slots, the UVs and the shading add to a build - one pass over the result's faces, made on the worker with the mesh. interior rooms 100
+ * with the six materials and a piece override on every tenth piece; the timed part is blockout_finish_mesh alone, against the build it follows. */
+static void surface_row(Report &rep, const Options &o) {
+  rep.table({"slots, UVs and shading on the result (round 482): interior rooms 100", "build ms", "slots + UVs ms", "share of the build %", "faces", "corners", "slots", "verdict"});
+  for (int n : o.quick ? std::vector<int>{28} : std::vector<int>{28, 112}) {
+    const int rooms = n == 28 ? 6 : 12;
+    const std::vector<Piece> pieces = interior_rooms(rooms, n);
+    bl::blockout::Settings st;
+    std::vector<double> build_ms, finish_ms;
+    size_t faces = 0, corners = 0, slot_count = 0;
+    for (int i = 0; i < (o.quick ? 1 : 5); i++) {
+      Run r = on_worker(pieces, st);
+      if (!r.ok) continue;
+      bl::BlockoutSurface surface;
+      surface.scale = 0.5f;
+      for (int k = 0; k < bl::kBlockoutClasses; k++) surface.materials[k] = strprintf("Assets/Materials/Stress%d.mat", k);
+      for (size_t p = 0; p < pieces.size(); p++) {
+        bl::BlockoutSurface::Piece sp;
+        sp.id = pieces[p].id;
+        if (p % 10 == 0) sp.materials[bl::kClassWalls] = "Assets/Materials/StressOverride.mat", sp.offset_u = 0.25f, sp.rotation = 15.0f;
+        surface.pieces.push_back(sp);
+      }
+      ScopedTimer t;
+      const std::vector<std::string> slots = bl::blockout_finish_mesh(r.mesh, r.faces, pieces, surface);
+      finish_ms.push_back(t.ms()), build_ms.push_back(r.ms);
+      faces = r.mesh.face_count(), corners = r.mesh.corner_count(), slot_count = slots.size();
+    }
+    const double b = median(build_ms), f = median(finish_ms);
+    rep.row({strprintf("interior rooms %d", n == 28 ? 100 : 400), f2(b), f2(f), strprintf("%.1f", b > 0.0 ? 100.0 * f / b : 0.0), std::to_string(faces), std::to_string(corners),
+             std::to_string(slot_count), "-"});
+  }
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -933,6 +1164,7 @@ static void test_blockout(Report &rep, const Options &o) {
 
   /* (The live row alone: BLENDITY_BLOCKOUT_LIVE=1; BLENDITY_BLOCKOUT_LIVE_DEBUG=1 lists its frames.) */
   if (std::getenv("BLENDITY_BLOCKOUT_LIVE")) return live_row(rep, o, false, true), live_row(rep, o, true, false);
+  if (std::getenv("BLENDITY_BLOCKOUT_BENCH")) return bench_rows(rep, o);  // (round 483: the bench interior's drags alone)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -1087,5 +1319,11 @@ static void test_blockout(Report &rep, const Options &o) {
   live_row(rep, o, false, true);
   live_row(rep, o, true, false);
   handle_row(rep, o);
+  blend_rows(rep, o);
+  surface_row(rep, o);
+  live_row(rep, o, false, true, 0);  // (round 482: the same drag with the Blockout in baked lighting, against without)
+  live_row(rep, o, false, false, 1);
+  bench_rows(rep, o);
   sweep(rep, o, crisp);
+  blend_sweep(rep, o, crisp);
 }

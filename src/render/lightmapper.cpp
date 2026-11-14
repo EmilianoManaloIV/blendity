@@ -53,7 +53,11 @@ static inline float unit(float v) { return finite_bits(v) ? std::min(1.0f, std::
 
 std::vector<Vec2> lightmap_uvs(const Mesh &m, bool generate, int res, int padding) {
   std::vector<Vec2> uv(m.corner_verts.size(), Vec2());
-  if (!generate && m.has_uvs()) {
+  /* The mesh's own UVs are a lightmap layout only when they lie in 0..1 (what "Generate Lightmap UVs off" promises: they do not overlap there). Tiling
+   * UVs - a Blockout's, a plane repeating a texture - would be clamped into a smear, so they are generated as with the option on (round 482). */
+  bool own = !generate && m.has_uvs();
+  for (size_t c = 0; own && c < m.uvs.size(); c++) own = m.uvs[c].x >= -1e-4f && m.uvs[c].x <= 1.0001f && m.uvs[c].y >= -1e-4f && m.uvs[c].y <= 1.0001f;
+  if (own) {
     for (size_t c = 0; c < uv.size(); c++) uv[c] = Vec2(unit(m.uvs[c].x), unit(m.uvs[c].y));
     return uv;
   }

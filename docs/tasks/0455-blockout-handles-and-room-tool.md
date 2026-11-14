@@ -8,7 +8,7 @@
   Q-04 (interactive), Q-05 (undo)
 - **Decisions:** ADR 0129 (the object); none new expected
 - **Model:** implementer (Sonnet), then test-engineer, then code-reviewer
-- **PR:** (link when opened)
+- **PR:** #380 (https://github.com/EmilianoManaloIV/blendity/pull/380)
 
 ## Goal
 After round 478 a room is made from a menu and sized by typing numbers. After this round the owner **drags** rooms

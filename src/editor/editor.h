@@ -50,6 +50,7 @@
 #include "../scene/import.h"
 #include "../scene/scene.h"
 #include "../scene/blockout_object.h"  // (round 477)
+#include "blockout_pick.h"             // (round 496: DrawnPiece, the Draw Piece tool's preview)
 #include "../scene/pose_counts.h"
 #include "../scene/board.h"
 #include "../scene/quad_remesh.h"
@@ -2492,6 +2493,7 @@ class Editor {
   Recti view_gizmo_rect(const Recti &view) const;
   void draw_scene_overlay_bar(const Recti &r);
   bool gizmo_update(const Recti &r);  // returns true if the gizmo owns the mouse
+  bool gizmo_scale_handle_hot() const;  // (round 496: the Scale tool's handle was under the mouse last frame - it wins a press over a Blockout piece's own handle)
   void draw_gizmo(const Recti &r);
   void pick(const Recti &r, int mx, int my, int mode);
   void box_select(const Recti &r, Recti box, int mode);
@@ -3671,6 +3673,8 @@ class Editor {
     MeshPtr mesh_before;
     std::vector<uint8_t> fsel_before;  // the face selection at the start (rings rebuilt on the way renumber faces)
     std::vector<std::pair<uint64_t, Mat4>> objects;  // id, world matrix at the start
+    BlockoutScaleSet blockout;  // (round 496: of `objects`, those a Scale takes through a Blockout's numbers, with what is below them)
+    bool blockout_written = false;  // (the set was written by a Scale: leaving Scale for G or R puts it back once)
     Vec3 pivot;
     Vec2 pivot_screen;
     Quat local_rot;             // the active object's axes (X / Y / Z pressed twice)
@@ -4127,6 +4131,8 @@ class Editor {
     blockout::Faces faces;
     blockout::Report report;
     bool ok = false;
+    BlockoutSurface surface;           // (round 482: what the worker gives the faces besides their shape, and the slots it made)
+    std::vector<std::string> slots;
     /* A newer snapshot was asked for while this job ran (its hash, so a frame asks once): the pieces as they then are start
      * when this one has returned - the latest wins, nothing queues. */
     bool has_next = false;
@@ -4143,9 +4149,19 @@ class Editor {
    * that never pauses shows the mesh follow, one build behind. On (the measurement's other row, task 0453): a newer snapshot
    * cancels the running build and only the newest lands; a piece moved every frame then shows no new mesh until it rests. */
   bool blockout_cancel_stale_ = false;
-  void blockout_request(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash);
-  void blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash);
-  void blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t piece_count, MeshPtr mesh, blockout::Faces &&faces, const blockout::Report &report, bool ok);
+  void blockout_request(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash, BlockoutSurface &&surface);
+  void blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash, BlockoutSurface &&surface);
+  void blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t piece_count, MeshPtr mesh, blockout::Faces &&faces, const blockout::Report &report, bool ok,
+                     std::vector<std::string> &&slots);
+  void blockout_set_slots(MeshRenderer &mr, Blockout &b, const std::vector<std::string> &slots);  // (round 482: the build's slot list as the renderer's materials)
+  /* Round 482 (task 0458): materials by class, Bake to Mesh and Unbake. */
+  bool blockout_bake(GameObject &g);
+  bool blockout_unbake(GameObject &g, bool force);  // (false: refused, or asked first - the dialog's Unbake answers with force)
+  bool blockout_baked_edited(const GameObject &g) const;  // (the baked mesh is no longer the one the bake left)
+  bool blockout_material_path(const std::string &word, std::string &out);
+  void blockout_surface_command(const std::vector<std::string> &t);  // (blockout set material <class> <material> | texscale <metres>)
+  void draw_blockout_baked_extras(GameObject &g, BlockoutBaked &b, ui::Layout &lay);  // (the Inspector's Unbake)
+  uint64_t unbake_ask_ = 0;  // the baked object whose Unbake is waiting for the dialog's answer
   void blockout_unwant(uint64_t obj);  // (the pieces are back at what the mesh is: the running build and the waiting one dropped)
   void blockout_finish(size_t index);  // (a returned job: its result adopted if still wanted, its cache given back, the next started)
   void blockout_jobs_poll();
@@ -4166,6 +4182,9 @@ class Editor {
   bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall);  // (round 478: a door or window turned to a wall, on its room's floor)
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
+  void draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::Layout &lay);  // (round 496: Apply Scale to Size)
+  bool blockout_apply_scale(const std::vector<GameObject *> &roots, const char *label);  // (round 496: the scale of the roots and of what is between them and their pieces moved into the pieces' numbers; one undo step; false: nothing to move)
+  void blockout_apply_scale_command(const std::vector<std::string> &t);  // (round 496: blockout applyscale [size])
   bool blockout_refuses_edit_mode(const GameObject *g);
   /* Round 479 (task 0455; editor/blockout_handles.cpp, blockout_tool.cpp): handles on the active piece, the Room tool. */
   struct BlockoutDrag {
@@ -4206,7 +4225,21 @@ class Editor {
     Vec3 corner;              // the footprint's other point
     float height = 0.0f;
     std::string typed;
+    /* What is drawn and what a solid does (round 495, task 0479; moved here in round 496). They hold only while Solid is on: `forget`
+     * is called where Solid goes off and where the tool is switched on with Solid off. Subtract itself is `subtract` above. */
+    int piece = 0;            // 0 a box, cylinder or outline as the footprint says; 3 a wedge, 4 stairs, 5 an arch (blockout::Shape)
+    int operation = -1;       // -1 by the direction unless `subtract` (pushed in subtracts, pulled out adds); 0 Add; 2 Intersect
+    uint64_t surface = 0;     // the Blockout whose face the footprint in progress was started on (0: none) - the piece goes into it
+    void forget() { piece = 0, operation = -1, subtract = false; }  // (the surface is the footprint's and stays; a room has no operation, a console-fixed one included)
+    bool flip = false;        // Shift at the click that makes a solid: the other of Add / Subtract (round 496); only set while room_make runs
+    int turns[3] = {0, 0, 0}; // quarter turns round the surface's normal of a wedge, stairs and an arch (R): kept for the next piece of that shape (round 496)
+    std::string shown;        // the label drawn beside the mouse at the last frame (for the tests)
+    DrawnPiece preview;       // the piece the preview showed at the last frame, and how many lines it drew (for the tests; lines 0: none shown)
+    int preview_lines = 0;
   } room_;
+  int room_turn(int kind) const { return kind >= 3 && kind <= 5 ? room_.turns[kind - 3] : 0; }
+  bool blockout_turn_piece(GameObject &g, int quarters);  // (round 496: a wedge, stairs or arch turned about the middle of its footprint, no undo step of its own)
+  void blockout_turn_command(const std::vector<std::string> &t);  // (`blockout turn [quarters]`)
   GameObject *blockout_handle_target();  // the active piece that shows handles (nullptr: none)
   void blockout_handle_view(const GameObject &g, std::vector<BlockoutHandle> &out, bool visible_only = true);  // its handles as the camera sees them now
   int blockout_handle_hot(const Recti &view, const GameObject &g, const std::vector<BlockoutHandle> &hs);  // the handle under the mouse (-1 none)
@@ -4226,6 +4259,7 @@ class Editor {
   void set_room_tool(bool on);
   bool room_update(const Recti &view);
   void room_draw(const Recti &view);
+  void room_draw_preview(const Recti &view, int op);  // (round 496: the piece the drags describe, as a wireframe; `op` the operation it will have)
   bool room_surface_hit(const Recti &view, int mx, int my, Vec3 &p, Vec3 &n);
   Vec3 room_snap_point(Vec3 p, Vec3 n) const;
   void room_extent(float &du, float &dz) const;  // the footprint's size so far: along u and the third axis (a circle: its radius, 0)
@@ -4348,6 +4382,7 @@ class Editor {
   bool bench_scene(const std::string &name);  // (task 0202: the Blender parity scenes, built as tools/bench_blender.py builds them)
   void build_world_like(bool quick);  // (round 411: the Unity-world stand-in, benchscene worldlike)
   void build_avatar_like(bool quick, Vec3 at);  // (round 468: the avatar stand-in, benchscene avatarlike | avatarworld; bench_avatar.cpp)
+  void build_blockout_bench(int pieces);  // (round 483: an interior of about `pieces` pieces in one Blockout, benchscene blockout [400]; bench_blockout.cpp)
   void run_console_command(const std::string &cmd);
   bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();
@@ -4841,6 +4876,7 @@ class Editor {
     Vec3 scale;
   };
   std::vector<GizmoStart> gizmo_starts_;
+  BlockoutScaleSet gizmo_blockout_;  // (round 496: the selected Blockouts, folders and pieces a Scale handle's drag takes through their numbers; empty for any other drag)
   std::vector<Vec3> gizmo_vert_starts_;
   Vec3 gizmo_live_delta_;
   float gizmo_live_angle_ = 0;
@@ -5961,6 +5997,8 @@ class Editor {
     float c = 0.0f, d = 0.0f, e = 0.0f, f = 0.0f;
     int op = 0;
     Vec3 base_p, base_up;
+    bool turnable = false;  // a wedge, stairs or arch: the Turn row (round 496); `turn` the quarter turns asked since the piece was made, `turn_done` those applied
+    int turn = 0, turn_done = 0;
   };
   bool obj_last_valid() const;
   const ObjLastOp &obj_last_for_test() const { return obj_last_; }
@@ -7159,7 +7197,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig, Unbake } dialog_ = Dialog::None;
   int dialog_shown_ = 0;  // which dialog has had its popup opened (task 0290: this editor's own - a file static carried one editor's open dialog into the next)
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
@@ -7277,6 +7315,9 @@ class Editor {
   /* Round 477 (ADR 0129): the live Blockout rebuild's counters - kernel calls made on the main thread (0 while workers are on),
    * builds started on a worker, meshes landed, jobs cancelled or superseded. */
   uint64_t blockout_main_builds_for_test() const { return blockout_main_builds_; }
+  bool unbake_dialog_open_for_test() const { return dialog_ == Dialog::Unbake; }  // (round 482: Unbake of an edited mesh waits for the dialog's answer)
+  bool blockout_baked_edited_for_test(const GameObject &g) const { return blockout_baked_edited(g); }
+  void sculpt_mask_stroked_for_test() { sculpt_mask_version_++; }  // (what a mask stroke does besides writing the mask in place: the Inspector's cache must follow it)
   uint64_t blockout_started_for_test() const { return blockout_started_; }
   uint64_t blockout_landed_for_test() const { return blockout_landed_; }
   uint64_t blockout_cancelled_for_test() const { return blockout_cancelled_; }
@@ -7291,8 +7332,13 @@ class Editor {
   const std::string &blockout_drag_text_for_test() const { return blockout_drag_.text; }
   bool blockout_drag_snapped_for_test() const { return blockout_drag_.snapped; }
   bool room_tool_active_for_test() const { return room_.active; }
+  int room_tool_shape_for_test() const;  // (round 496: the Shape dropdown's entry, 0 Room .. 8 Arch: blockout_pick.h)
+  const std::string &room_tool_label_for_test() const { return room_.shown; }  // (round 496: the text beside the mouse)
   size_t room_tool_points_for_test() const { return room_.points.size(); }   // (round 480: the Polyline option's corners so far)
   bool room_tool_polyline_for_test() const { return room_.polyline; }
+  const DrawnPiece &room_tool_preview_for_test() const { return room_.preview; }  // (round 496: the piece the preview showed, and its line count)
+  int room_tool_preview_lines_for_test() const { return room_.preview_lines; }
+  int room_tool_turn_for_test(int piece) const { return room_turn(piece); }
   uint64_t lightmap_scene_key_for_test() { return lightmap_scene_key(); }    // (round 480: what a bake would be made from)
   int room_tool_stage_for_test() const { return room_.stage; }
   /* Where the active piece's handle `name` is on the screen now (the window's pixels); false when it has none or is behind the camera. */

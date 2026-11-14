@@ -7,7 +7,7 @@
   as a solid that is not convex)
 - **Model:** main session for the kernel's part (scope items 1 and 5: solids that are not convex, the winding
   test), implementer for the shapes, the component and the editor; then test-engineer, then code-reviewer
-- **PR:** branch `task/0456-blockout-more-shapes`, base `main` (https://github.com/EmilianoManaloIV/blendity/pulls?q=head%3Atask%2F0456-blockout-more-shapes)
+- **PR:** #389 (https://github.com/EmilianoManaloIV/blendity/pull/389)
 
 ## Goal
 The owner's list of shapes: "box, cylinder, sphere; wedge, stairs, arch; a drawn outline pulled up; any mesh as a

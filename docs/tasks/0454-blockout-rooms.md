@@ -1,6 +1,6 @@
 # 0454: Rooms (round 478)
 
-- **Status:** approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
+- **Status:** done (round 478, 2026-11-11). Approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
   all passes.", relayed by the hub session); **point 1 of "For your decision" waits for the owner's word** - it
   changes the plan's build order; **done** (round 478, in review) - built as this spec reads, the owner not having
   answered
@@ -8,7 +8,7 @@
 - **Decisions:** ADR 0128 (the kernel; amended in this round: a piece as several solids, the build order with rooms),
   ADR 0129 (the object)
 - **Model:** main session (the kernel is hard geometry), then test-engineer, then code-reviewer
-- **PR:** (link when opened)
+- **PR:** #376 (https://github.com/EmilianoManaloIV/blendity/pull/376)
 
 ## Goal
 The owner asked for "rooms such as rectangles, cylinders" that combine like the other pieces, to lay out interiors.

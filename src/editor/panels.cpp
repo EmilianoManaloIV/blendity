@@ -1820,6 +1820,8 @@ void Editor::draw_inspector(const Recti &r) {
       if (auto *pg = dynamic_cast<LightProbeGroupComponent *>(c)) draw_probe_group_extras(*g, *pg, lay);  // (round 455)
       if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
       if (auto *bo = dynamic_cast<Blockout *>(c)) draw_blockout_extras(*g, *bo, lay);  // (round 477: its status lines)
+      if (auto *bk = dynamic_cast<BlockoutBaked *>(c)) draw_blockout_baked_extras(*g, *bk, lay);  // (round 482: Unbake)
+      if (auto *bpc = dynamic_cast<BlockoutPiece *>(c)) draw_blockout_piece_extras(*g, *bpc, lay);  // (round 496: Apply Scale to Size)
       if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
         const Recti row = lay.row(u.row_h() + u.px(2));
         const int bw = (row.w - u.px(16)) / 3;

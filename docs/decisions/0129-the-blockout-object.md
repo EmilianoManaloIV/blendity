@@ -103,6 +103,23 @@ work on the spot.
 - Picking a piece through the result needs the faces' origins to match the mesh on screen: they land together
   (decision 7) and are dropped when the mesh is replaced by anything else.
 
+## Amended in round 482 (task 0458): surfaces, and Bake to Mesh
+- **What the build's job adds after the kernel** (still on the worker, still from the snapshot alone):
+  `blockout_finish_mesh` gives every face a material slot by its class (Floor, Walls, Ceiling, Outside, Cut, Solid -
+  the Blockout's six materials, a piece's overrides; the list in a fixed order, each material once), UVs on the face's
+  own plane in the Blockout's space over Texture Scale (U and V as the Cube primitive has them), and its shading (flat,
+  or smooth for blended faces and round sides). `BlockoutSurface` is the snapshot of what it reads and is in the
+  snapshot's hash.
+- **The landing sets the mesh and the renderer's material list in one step.** `Blockout::slots_set` (serialized) says
+  the Blockout has written that list: until then a renderer's own, hand-set materials are left alone (older scenes);
+  after it the list is written at every build.
+- **Bake to Mesh** takes the `Blockout` component away and leaves `BlockoutBaked` (serialized: the Blockout's
+  settings, the pieces' holder by id, a hash of the baked mesh's contents, the slots flag); the pieces move, local
+  transforms kept to the bit, under a switched-off child named "Blockout Pieces". **Unbake** is the way back and
+  rebuilds from what is under the holder. A mesh a piece uses stays hidden (`blockout_uses_as_piece`) while its piece
+  sits under a baked object's holder.
+- The kernel is not changed by any of this.
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.

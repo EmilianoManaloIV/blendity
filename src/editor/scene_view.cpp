@@ -874,6 +874,17 @@ void probe_gizmo_handle(GizmoProbe &pr, const ProjectFn &proj, Vec3 pivot, const
     pr.found = true, pr.x = at.x, pr.y = at.y, pr.dx = d.x, pr.dy = d.y;
     return;
   }
+  if (h >= H_SCALE_X && h <= H_SCALE_Z && tool == Tool::Scale) {  // (round 496: a Scale handle, its arrow's line: the same 60 % point)
+    Vec2 a, b;
+    if (!proj(pivot, a) || !proj(pivot + axis[h - H_SCALE_X] * size, b) || length(b - a) < min_arrow_px) return;
+    const Vec2 at = a + (b - a) * 0.6f, d = (b - a) / length(b - a);
+    pr.found = true, pr.x = at.x, pr.y = at.y, pr.dx = d.x, pr.dy = d.y;
+    return;
+  }
+  if (h == H_SCALE_ALL && (tool == Tool::Scale || tool == Tool::Transform)) {  // (the pivot's square: a drag to the right grows)
+    pr.found = true, pr.x = ps.x, pr.y = ps.y, pr.dx = 1.0f, pr.dy = 0.0f;
+    return;
+  }
   if (h < H_ROT_X || h > H_ROT_Z || !do_rot) return;
   const float rscale = tool == Tool::Transform ? 1.25f : 1.0f;
   std::vector<std::vector<Vec2>> pts(3);
@@ -904,8 +915,14 @@ int perf_gizmo_handle(const std::string &word) {
   if (w == "rx") return H_ROT_X;
   if (w == "ry") return H_ROT_Y;
   if (w == "rz") return H_ROT_Z;
+  if (w == "sx") return H_SCALE_X;  // (round 496: the Scale tool's handles)
+  if (w == "sy") return H_SCALE_Y;
+  if (w == "sz") return H_SCALE_Z;
+  if (w == "sall") return H_SCALE_ALL;
   return -1;
 }
+
+bool Editor::gizmo_scale_handle_hot() const { return (tool_ == Tool::Scale || tool_ == Tool::Transform) && gizmo_hot_ >= H_SCALE_X && gizmo_hot_ <= H_SCALE_ALL; }
 
 bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
@@ -1092,6 +1109,7 @@ bool Editor::gizmo_update(const Recti &view) {
     gizmo_live_angle_ = 0;
     gizmo_live_scale_ = Vec3(1.0f);
     gizmo_starts_.clear();
+    gizmo_blockout_ = BlockoutScaleSet();
     gizmo_vert_starts_.clear();
     /* V held: vertex snapping from the selection's vertex nearest the mouse. */
     gizmo_vsnap_ = in.key_down[platform::KEY_V] && gizmo_hot_ <= H_MOVE_FREE;
@@ -1146,6 +1164,8 @@ bool Editor::gizmo_update(const Recti &view) {
       for (int i : cpts) gizmo_vert_starts_.push_back(co->world_matrix().point(co->point_source()->control_point(i)));
     else {
       for (GameObject *g : objs) gizmo_starts_.push_back({g->id, g->world_matrix(), g->world_position(), g->world_rotation(), g->local().scale});
+      /* Round 496 (ADR 0135): a Scale of a Blockout, a folder or a parent piece, or of a piece, goes into the pieces' numbers, not a transform's scale. */
+      if (gizmo_axis_ >= H_SCALE_X && !origin_edit_) blockout_scale_collect(objs, gizmo_blockout_);
     }
     origin_mesh_starts_.clear();
     origin_child_starts_.clear();
@@ -1342,9 +1362,10 @@ bool Editor::gizmo_update(const Recti &view) {
           const Vec3 d = s - pivot;
           return pivot + axis[0] * (dot(d, axis[0]) * f.x) + axis[1] * (dot(d, axis[1]) * f.y) + axis[2] * (dot(d, axis[2]) * f.z);
         });
-      else
+      else {
         for (auto &s : gizmo_starts_)
           if (GameObject *g = scene_->find(s.id)) {
+            if (gizmo_blockout_.has(s.id)) continue;  // (below: through the pieces' numbers)
             g->set_local_scale(s.scale * f);
             if (gizmo_starts_.size() > 1 || pivot_center_) {  // around the gizmo, wherever it is
               Vec3 d = s.pos - pivot;
@@ -1352,6 +1373,12 @@ bool Editor::gizmo_update(const Recti &view) {
               g->set_world_position(pivot + axis[0] * l.x + axis[1] * l.y + axis[2] * l.z);
             }
           }
+        if (!gizmo_blockout_.empty()) {
+          const Mat4 rot = Mat4::rotate(orient);
+          blockout_scale_apply(*scene_, gizmo_blockout_, Mat4::translate(pivot) * rot * Mat4::scale(f) * rot.inverse() * Mat4::translate(pivot * -1.0f));
+          edit_epoch::bump();  // (the numbers of a piece are no transform write: the Blockout's walk looks again)
+        }
+      }
     }
     if (co) label = h <= H_MOVE_FREE ? "Move Points" : h <= H_ROT_VIEW ? "Rotate Points" : "Scale Points";
     else if (origin_edit_ && !eo) {

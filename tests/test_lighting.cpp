@@ -11719,6 +11719,239 @@ static void tests_round487() {
        });
 }
 
+/* ---------------------------------------------------------------- round 482 (task 0458): a Blockout's interior is baked like any mesh */
+
+/* The test engineer's scene: two rooms 4 x 2.6 x 4 m sharing a wall, a door through it, a lamp in each, nothing else lighting them, the lowest samples. */
+static void r482te_hall(Editor &ed) {
+  r35_open(ed);
+  ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+  ed.scene().environment.color = Vec3(0.0f);
+  LightingSettings &ls = ed.scene().lighting;
+  ls.texels_per_unit = 4.0f, ls.indirect_samples = 4, ls.direct_samples = 4;
+  GameObject *bo = ed.scene().create("Hall");
+  bo->add<Blockout>();
+  bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  bo->add<MeshRenderer>()->contribute_gi = true;
+  for (float x : {-2.1f, 2.1f}) {
+    GameObject *room = ed.scene().create(x < 0 ? "Room A" : "Room B", bo);
+    BlockoutPiece *p = room->add<BlockoutPiece>();
+    p->size = {4.0f, 2.6f, 4.0f}, p->room = true, p->wall = p->floor = p->ceiling = 0.2f;
+    room->set_local_position({x, 1.3f, 0.0f});
+    GameObject *lamp = ed.scene().create(x < 0 ? "Lamp A" : "Lamp B");
+    Light *l = lamp->add<Light>();
+    l->type = 1, l->mode = 2, l->intensity = 3.0f, l->range = 30.0f;
+    lamp->set_local_position({x, 2.0f, 0.0f});
+  }
+  GameObject *door = ed.scene().create("Door", bo);
+  BlockoutPiece *dp = door->add<BlockoutPiece>();
+  dp->operation = 1, dp->opening = 1, dp->width = 0.9f, dp->head = 2.1f;
+  door->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));
+  ed.command("blockout wait");
+  r34_steps(ed, 3);
+  ed.commit_change("r482 te hall");
+}
+
+/* The Blockout's build landed (the worker, or the spot): a few frames and the wait. */
+static void r482te_rebuilt(Editor &ed) {
+  r34_steps(ed, 3);
+  ed.command("blockout wait");
+  r34_steps(ed, 2);
+}
+
+/* Whether the object's draw item gets its lightmap (the way a frame asks for it). */
+static bool r482te_attached(Editor &ed, uint64_t id) {
+  const GameObject *g = ed.scene().find(id);
+  const Mesh *m = g ? g->evaluated_mesh(1) : nullptr;
+  if (!m) return false;
+  DrawItem it;
+  it.mesh = &m->render_mesh();
+  ed.attach_lightmap_for_test(*g, *m, it);
+  return it.lightmap != nullptr;
+}
+
+/* Byte for byte: positions, faces, UVs, slots. */
+static bool r482te_same_mesh(const Mesh &a, const Mesh &b) {
+  auto same = [](const auto &x, const auto &y) { return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0); };
+  return same(a.positions, b.positions) && a.face_offsets == b.face_offsets && a.corner_verts == b.corner_verts && same(a.uvs, b.uvs) && a.face_material == b.face_material;
+}
+
+static void tests_round482() {
+  /* A mesh whose own UVs tile (a Blockout's, a plane repeating a texture) is no lightmap layout with Generate Lightmap UVs off: they are generated. */
+  test("lightmap UVs: with Generate Lightmap UVs off, UVs inside 0..1 are the mesh's own and tiling UVs are generated instead (round 482)", [] {
+    Mesh m = *primitives::plane(4.0f, 2);
+    CHECK(m.has_uvs());
+    const std::vector<Vec2> own = lightmap_uvs(m, false, 64, 2);
+    bool same = own.size() == m.uvs.size();
+    for (size_t c = 0; same && c < own.size(); c++) same = own[c].x == m.uvs[c].x && own[c].y == m.uvs[c].y;
+    CHECK(same);
+    for (Vec2 &u : m.uvs) u = u * 4.0f;  // (a texture repeated four times)
+    const std::vector<Vec2> tiled = lightmap_uvs(m, false, 64, 2), generated = lightmap_uvs(m, true, 64, 2);
+    bool made = tiled.size() == generated.size();
+    for (size_t c = 0; made && c < tiled.size(); c++) made = tiled[c].x == generated[c].x && tiled[c].y == generated[c].y;
+    CHECK(made);
+  });
+
+  test("a lightmap bake of a two-room Blockout with a door and a lamp in each room finishes, its lightmap UVs do not overlap, and a texel in a lit room is brighter than one behind the wall (round 482)", [] {
+    Editor ed;
+    r35_open(ed);
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    ed.scene().environment.color = Vec3(0.0f);  // (nothing but the two lamps lights the interior)
+    LightingSettings &ls = ed.scene().lighting;
+    ls.texels_per_unit = 4.0f, ls.indirect_samples = 4, ls.direct_samples = 4;
+    GameObject *bo = ed.scene().create("Hall");
+    bo->add<Blockout>();
+    bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+    bo->add<MeshRenderer>()->contribute_gi = true;  // (as a new Blockout has it)
+    for (float x : {-2.1f, 2.1f}) {  // (two rooms 4 x 2.6 x 4 m sharing a 0.2 m wall at x = 0)
+      GameObject *room = ed.scene().create(x < 0 ? "Room A" : "Room B", bo);
+      BlockoutPiece *p = room->add<BlockoutPiece>();
+      p->size = {4.0f, 2.6f, 4.0f}, p->room = true, p->wall = p->floor = p->ceiling = 0.2f;
+      room->set_local_position({x, 1.3f, 0.0f});
+      GameObject *lamp = ed.scene().create(x < 0 ? "Lamp A" : "Lamp B");
+      Light *l = lamp->add<Light>();
+      l->type = 1, l->mode = 2, l->intensity = 3.0f, l->range = 30.0f;
+      lamp->set_local_position({x, 2.0f, 0.0f});
+    }
+    GameObject *door = ed.scene().create("Door", bo);  // (through the wall between them)
+    BlockoutPiece *dp = door->add<BlockoutPiece>();
+    dp->operation = 1, dp->opening = 1, dp->width = 0.9f, dp->head = 2.1f;
+    door->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));
+    for (int i = 0; i < 16; i++) {  // (sixteen windows in Room B's far wall: its faces are n-gons of many corners)
+      GameObject *w = ed.scene().create("Window " + std::to_string(i), bo);
+      BlockoutPiece *wp = w->add<BlockoutPiece>();
+      const bool high = i >= 8;
+      wp->operation = 1, wp->opening = 2, wp->width = 0.3f, wp->sill = high ? 1.4f : 0.5f, wp->head = high ? 1.8f : 0.8f;
+      w->set_local_position({4.2f, 0.0f, -1.75f + 0.5f * (float)(i % 8)});
+      w->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));
+    }
+    ed.command("blockout wait");
+    r34_steps(ed, 3);
+    ed.commit_change("r482 interior");
+    const Mesh *mesh = bo->evaluated_mesh(1);
+    if (mesh) std::printf("    the mesh: %zu faces, %zu corners, %zu uvs\n", mesh->face_count(), mesh->corner_count(), mesh->uvs.size());
+    CHECK(mesh && mesh->face_count() > 60 && mesh->has_uvs());
+    if (!mesh) return;
+    size_t widest = 0;
+    for (size_t f = 0; f < mesh->face_count(); f++) widest = std::max<size_t>(widest, mesh->face_size(f));
+    std::printf("    the interior: %zu faces, the widest of %zu corners\n", mesh->face_count(), widest);
+    CHECK(r35_uv_problems("blockout interior", *mesh, 128, 2, false) == 0);
+    r35_bake(ed);
+    const LightingData &ld = ed.lighting_data_for_test();
+    CHECK(!ld.pages.empty() && ld.entries.count(bo->id) == 1);
+    Vec3 lit, behind;
+    const bool both = r35_sample(ld, bo->id, *mesh, bo->world_matrix(), {-1.5f, 0.0f, 0.5f}, lit) &&  // (Room A's floor, under its lamp)
+                      r35_sample(ld, bo->id, *mesh, bo->world_matrix(), {4.3f, 0.2f, 0.5f}, behind);   // (the outside of Room B's far wall, under the windows)
+    CHECK(both);
+    const double bright = (lit.x + lit.y + lit.z) / 3.0, dark = (behind.x + behind.y + behind.z) / 3.0;
+    std::printf("    a texel under the lamp %.4f, one on the outside of the far wall %.4f\n", bright, dark);
+    CHECK(bright > 0.0 && bright > 3.0 * dark);
+  });
+
+  /* ---- the test engineer's checks (round 482): a baked LIVE Blockout through edits and through save and load ---- */
+  test("a lightmap of a live two-room Blockout: it attaches, a moved piece, a new Walls material and a new Texture Scale each drop it (the stale map is not put on the new mesh) and the lighting reads out of date; undoing the move, or setting the old value back, attaches it again (round 482)", [] {
+    Editor ed;
+    r482te_hall(ed);
+    GameObject *bo = ed.scene().find_by_name("Hall");
+    GameObject *door = ed.scene().find_by_name("Door");
+    CHECK(bo && door);
+    if (!bo || !door) return;
+    const uint64_t id = bo->id;
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().entries.count(id) == 1);
+    const Mesh baked = *bo->evaluated_mesh(1);
+    CHECK(r482te_attached(ed, id) && !ed.lighting_out_of_date_for_test());
+    /* A piece moves: a different mesh, so the map is dropped (the entry stays in the data until the next bake). */
+    const Vec3 door_at = door->local().position;
+    door->set_local_position(door_at + Vec3(0.0f, 0.0f, 0.5f));
+    ed.commit_change("move the door");
+    r482te_rebuilt(ed);
+    const Mesh *moved = ed.scene().find(id)->evaluated_mesh(1);
+    const bool differs = moved && !r482te_same_mesh(baked, *moved);
+    const bool dropped = !r482te_attached(ed, id), stale = ed.lighting_out_of_date_for_test();
+    std::printf("    door moved 0.5 m: mesh differs %d, lightmap attached %d, out of date %d, entry kept %zu\n", (int)differs, (int)!dropped, (int)stale, ed.lighting_data_for_test().entries.count(id));
+    CHECK(differs && dropped && stale && ed.lighting_data_for_test().entries.count(id) == 1);
+    /* Undo: the same mesh bytes come back and the map attaches again. */
+    ed.command("undo");
+    r482te_rebuilt(ed);
+    GameObject *door_back = ed.scene().find_by_name("Door");
+    CHECK(door_back && std::memcmp(&door_back->local().position, &door_at, sizeof(Vec3)) == 0);
+    const Mesh *again = ed.scene().find(id)->evaluated_mesh(1);
+    const bool same = again && r482te_same_mesh(baked, *again), reattached = r482te_attached(ed, id), fresh = !ed.lighting_out_of_date_for_test();
+    std::printf("    undone: same bytes %d, lightmap attached %d, up to date %d\n", (int)same, (int)reattached, (int)fresh);
+    CHECK(same && reattached && fresh);
+    /* A material for the walls: face slots change, so the hash does. Setting it back to none gives the first mesh and the map again. */
+    create_material_asset(*make_material("R482LWalls", Vec3(0.2f, 0.8f, 0.2f)), "Assets/Materials/R482L/Walls.mat");
+    ed.command("blockout set material walls Assets/Materials/R482L/Walls.mat");
+    r482te_rebuilt(ed);
+    const bool mat_dropped = !r482te_attached(ed, id), mat_stale = ed.lighting_out_of_date_for_test();
+    std::printf("    Walls material set: lightmap attached %d, out of date %d\n", (int)!mat_dropped, (int)mat_stale);
+    CHECK(mat_dropped && mat_stale);
+    ed.command("blockout set material walls none");
+    r482te_rebuilt(ed);
+    const Mesh *none = ed.scene().find(id)->evaluated_mesh(1);
+    const bool none_same = none && r482te_same_mesh(baked, *none);
+    std::printf("    Walls material back to none: same bytes %d, lightmap attached %d\n", (int)none_same, (int)r482te_attached(ed, id));
+    CHECK(none_same && r482te_attached(ed, id));
+    /* Texture Scale: the UVs change. */
+    ed.command("blockout set texscale 0.5");
+    r482te_rebuilt(ed);
+    const bool scale_dropped = !r482te_attached(ed, id), scale_stale = ed.lighting_out_of_date_for_test();
+    std::printf("    Texture Scale 0.5: lightmap attached %d, out of date %d\n", (int)!scale_dropped, (int)scale_stale);
+    CHECK(scale_dropped && scale_stale);
+    ed.command("blockout set texscale 1");
+    r482te_rebuilt(ed);
+    const Mesh *one = ed.scene().find(id)->evaluated_mesh(1);
+    CHECK(one && r482te_same_mesh(baked, *one) && r482te_attached(ed, id));
+    std::remove(resolve_asset_path("Assets/Materials/R482L/Walls.mat").c_str());
+  });
+
+  test("a lightmap of a live two-room Blockout through Save and Open: a fresh editor rebuilds the Blockout to the same bytes under the same object id, the lightmap is attached again and the lit room is still brighter than the texel behind the wall (round 482)", [] {
+    const std::string scene = "Assets/Scenes/R482Lit.scene";
+    std::string dir;
+    Mesh baked;
+    uint64_t id = 0;
+    {
+      Editor ed;
+      r482te_hall(ed);
+      GameObject *bo = ed.scene().find_by_name("Hall");
+      CHECK(bo != nullptr);
+      if (!bo) return;
+      id = bo->id;
+      r35_bake(ed);
+      baked = *bo->evaluated_mesh(1);
+      CHECK(ed.lighting_data_for_test().entries.count(id) == 1 && r482te_attached(ed, id));
+      ed.command("save " + scene);
+      dir = ed.lighting_dir_for_test();
+      CHECK(!dir.empty() && fs::exists(fs::join(dir, "LightingData.bin")));
+    }
+    Editor fresh;
+    r35_open(fresh);
+    CHECK(fresh.open_scene_for_test(fresh.resolve_asset_path_for_test(scene)));  // (not the command: the fresh editor has an unsaved scene, which would ask first)
+    for (int i = 0; i < 400 && !fresh.scene().find_by_name("Hall"); i++) fresh.step_frame_headless();  // (the scene opens on the frames that follow)
+    r482te_rebuilt(fresh);
+    GameObject *bo = fresh.scene().find_by_name("Hall");
+    CHECK(bo != nullptr);
+    if (!bo) return;
+    const LightingData &ld = fresh.lighting_data_for_test();
+    const Mesh *mesh = bo->evaluated_mesh(1);
+    const bool same_id = bo->id == id, same_bytes = mesh && r482te_same_mesh(baked, *mesh), attached = r482te_attached(fresh, bo->id);
+    std::printf("    after Open: same object id %d, entry %zu, mesh bytes %d, lightmap attached %d, out of date %d\n", (int)same_id, ld.entries.count(bo->id), (int)same_bytes, (int)attached,
+                (int)fresh.lighting_out_of_date_for_test());
+    CHECK(same_id && same_bytes && ld.entries.count(bo->id) == 1 && attached);
+    CHECK(!fresh.lighting_out_of_date_for_test());
+    if (!mesh) return;
+    Vec3 lit, behind;
+    const bool both = r35_sample(ld, bo->id, *mesh, bo->world_matrix(), {-1.5f, 0.0f, 0.5f}, lit) && r35_sample(ld, bo->id, *mesh, bo->world_matrix(), {4.3f, 0.2f, 0.5f}, behind);
+    CHECK(both);
+    const double bright = (lit.x + lit.y + lit.z) / 3.0, dark = (behind.x + behind.y + behind.z) / 3.0;
+    std::printf("    after Open: a texel under the lamp %.4f, one on the outside of the far wall %.4f\n", bright, dark);
+    CHECK(bright > 0.0 && bright > 3.0 * dark);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::remove(resolve_asset_path(scene).c_str());
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -11761,4 +11994,5 @@ void run_lighting_tests() {
   tests_round486();
   tests_round486_independent();
   tests_round487();
+  tests_round482();
 }

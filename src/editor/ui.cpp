@@ -1742,6 +1742,8 @@ bool Context::submenu(const std::string &text, int width, std::function<void()> 
     open = true;
   }
   if (open) popup(sid, width, std::move(body));
+  last_widget_ = r;  // (a tooltip written after a submenu is the submenu's: it used to land on the row before - round 482)
+  last_hovered_ = hot;
   return false;
 }
 

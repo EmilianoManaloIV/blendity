@@ -58,8 +58,14 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
        [](const Editor &e) {
          const std::string leave = e.room_.stage > 0 ? "  |  Ctrl: no snapping  |  right-click: drop it  |  Esc: leave the tool" : "  |  Ctrl: no snapping  |  Esc: leave the tool";
          if (e.room_.stage == 3) return "Room: click the next corner  |  click the first corner or Enter: close it  |  Backspace: take the last corner back" + leave;
-         if (e.room_.stage == 1) return std::string(e.room_.circle ? "Room: release to fix the circle's radius" : "Room: release to fix the rectangle") + leave;
-         if (e.room_.stage == 2) return "Room: move the mouse for the height  |  type a height  |  click or Enter: make it" + leave;
+         const bool faces = e.room_.solid && !e.room_.circle && !e.room_.polyline && e.room_.piece >= 3;  // (a wedge, stairs or arch face a way: R turns it a quarter)
+         const std::string turn = faces ? "  |  R: turn it" : "";
+         if (e.room_.stage == 1) {
+          static const char *const kShapes[] = {"Room", "Round Room", "Outline Room", "Box", "Cylinder", "Outline", "Wedge", "Stairs", "Arch"};
+          const std::string shape = kShapes[blockout_draw_shape(e.room_.solid, e.room_.circle, e.room_.polyline, e.room_.piece)];
+          return shape + ": release to fix the " + (e.room_.circle ? "circle's radius" : "rectangle") + turn + leave;
+        }
+         if (e.room_.stage == 2) return std::string(e.room_.solid ? "Draw Piece: move the mouse for the height  |  Shift: the other of Add and Subtract" : "Room: move the mouse for the height") + turn + "  |  type a height  |  click or Enter: make it" + leave;
          if (e.room_.polyline) return "Room: click the first corner of the outline on the ground or a face" + leave;
          return std::string("Room: drag a ") + (e.room_.circle ? "circle from its centre" : "rectangle") + " on the ground or a face" + leave;
        }},

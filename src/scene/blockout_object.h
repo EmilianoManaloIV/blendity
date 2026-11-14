@@ -7,13 +7,48 @@
 #include "blockout.h"
 #include "scene.h"
 
+#include <unordered_set>
+
 namespace bl {
 
 extern const char *const kBlockoutShapeNames[8];  // (blockout::Shape's order: Box, Cylinder, Sphere, Wedge, Stairs, Arch, Outline, Mesh)
 extern const char *const kBlockoutOpNames[3];
+extern const char *const kBlockoutBlendDetailNames[3];
 extern const char *const kBlockoutWallNames[2];
 extern const char *const kBlockoutOpeningNames[3];
 extern const char *const kBlockoutMethodNames[3];
+
+/* The classes of face that take a material (round 482), in the fixed order of the slots: a room's Floor, Walls, Ceiling and Outside (the outer
+ * faces of its shell), a Subtract piece's Cut faces (a door's reveal, a window's), and a plain Add piece's Solid faces. */
+constexpr int kBlockoutClasses = 6;
+enum BlockoutClass { kClassFloor = 0, kClassWalls, kClassCeiling, kClassOutside, kClassCut, kClassSolid };
+extern const char *const kBlockoutClassNames[kBlockoutClasses];
+
+/* The class of the face a piece made on `side` (a blended join: the piece's own Solid or Cut). */
+int blockout_face_class(const blockout::Piece &piece, uint32_t side);
+
+/* What the build needs besides the kernel's pieces (round 482): the materials (project paths of .mat files; empty is the default
+ * material), the texture scale and each piece's own materials, offset and rotation - in the order of the snapshot's pieces. It is part
+ * of the snapshot's hash, so a change of any of it builds again. */
+struct BlockoutSurface {
+  float scale = 1.0f;                       // metres a texture tile
+  std::string materials[kBlockoutClasses];  // the Blockout's
+  struct Piece {
+    uint64_t id = 0;
+    std::string materials[kBlockoutClasses];  // the piece's own (empty: the Blockout's)
+    float offset_u = 0.0f, offset_v = 0.0f, rotation = 0.0f;
+  };
+  std::vector<Piece> pieces;
+};
+
+/* Written into a Blockout's fresh mesh by the build (on the worker): the slot of every face (by the class of the face and the piece that
+ * made it), box-projected UVs at the surface's scale, and the auto-smooth angle. The result is the slots' material paths in the fixed order
+ * - the Blockout's six, then the pieces' overrides in the pieces' order, each material once, unused ones left out; "" is the default
+ * material. `faces` are the kernel's origins for the mesh's faces. */
+std::vector<std::string> blockout_finish_mesh(Mesh &mesh, const blockout::Faces &faces, const std::vector<blockout::Piece> &pieces, const BlockoutSurface &surface);
+
+/* A hash of what a mesh holds that an edit changes (positions, faces, UVs, slots): what a baked Blockout compares to know it was edited. */
+uint64_t blockout_mesh_hash(const Mesh &m);
 
 /* What the last build said, for the Inspector and `blockout info`. */
 struct BlockoutStatus {
@@ -24,7 +59,10 @@ struct BlockoutStatus {
   std::vector<std::pair<uint64_t, std::string>> notes;    // pieces built that give nothing of their own (a room without thickness)
   size_t refused = 0;           // mesh pieces the snapshot left out before the kernel saw them (counted in `pieces`, named in `skipped`)
   size_t clusters = 0, faces = 0, unresolved = 0;
-  std::string path;           // "exact", "field", "exact + field" or "none"
+  size_t blend_regions = 0, seam_retries = 0, blend_below = 0;  // round 481: blends meshed in boxes of their own, the seam's retries, pieces whose radius is below the detail
+  bool blend_fallback = false;  // a cluster's seam would not close: it was built whole on the grid (or without its blends: blend_dropped)
+  bool blend_dropped = false;   // a cluster was built without its blends: no grid closed over it with them
+  std::string path;          // "exact", "field", "exact + field" or "none"
   double ms = 0.0;
   std::string refusal;          // why the last build was refused (the last good mesh stays)
 };
@@ -61,11 +99,48 @@ struct Blockout : ComponentBase<Blockout> {
   static constexpr const char *kName = "Blockout";
   float cell = 0.1f;   // the field path's grid step, in metres
   int method = 0;      // blockout::Path: Auto, Exact (crisp), Field
+  int blend_detail = 1;  // how finely a Blend radius is meshed: 0 Low, 1 Medium, 2 High (round 481)
   float default_wall = 0.2f;  // fills a new room's Wall, Floor and Ceiling (the kernel never reads it)
+  /* Round 482 (task 0458): a material for each class of face (project paths of .mat files; empty: the default material), and the metres a
+   * texture tile covers on every face. */
+  std::string material[kBlockoutClasses];
+  float texture_scale = 1.0f;
+  /* Whether a landing has put its slots in the renderer (saved; kept through Bake and Unbake). A build with nothing but the default material
+   * leaves the renderer's own materials alone until then (a scene from before round 482 may have set one by hand); once set, every build
+   * writes the list - the default alone clears it. */
+  bool slots_set = false;
   BlockoutState state;
   void reflect(Reflector &r) override;
   blockout::Settings settings() const;  // made safe (finite, in range)
+  float safe_texture_scale() const;
 };
+
+/* What Bake to Mesh leaves on the object (round 482): the Blockout's settings, to bring the component back with Unbake, and the hash
+ * of the mesh the bake left, to know whether it was edited since. The pieces are under the disabled child "Blockout Pieces". */
+struct BlockoutBaked : ComponentBase<BlockoutBaked> {
+  static constexpr const char *kName = "BlockoutBaked";
+  float cell = 0.1f;
+  int method = 0;
+  int blend_detail = 1;
+  float default_wall = 0.2f;
+  float texture_scale = 1.0f;
+  std::string material[kBlockoutClasses];
+  std::string mesh_hash;  // blockout_mesh_hash of the baked mesh, as text (files hold no 64-bit numbers)
+  std::string pieces_id;  // the disabled child's object id as text (its name is the fallback)
+  bool slots_set = false; // the Blockout's, to give back
+  /* What blockout_baked_edited last worked out, for the mesh it looked at (not saved): the Inspector asks every frame. */
+  mutable const Mesh *seen_mesh = nullptr;
+  mutable uint64_t seen_uid = 0, seen_version = 0, seen_deform = 0, seen_mask = 0;  // (seen_mask: the editor's sculpt mask version - a mask stroke writes the mesh in place and moves no mesh version)
+  mutable bool seen_edited = false;
+  void reflect(Reflector &r) override;
+};
+constexpr const char *kBlockoutPiecesName = "Blockout Pieces";  // the disabled child a bake moves the pieces under
+
+/* The disabled child that holds a baked object's pieces: by the id the bake stored (when it is still a child), else by name. nullptr: none. */
+GameObject *blockout_pieces_holder(const GameObject &baked);
+/* The objects the mesh pieces under a baked object's holder use as meshes: they stay out of the views, the colliders, the bakes and the exports
+ * as they were while the Blockout was live (the holder being inactive does not matter). */
+void blockout_baked_sources(const GameObject &baked, std::vector<uint64_t> &out);
 
 /* A shape that adds to its Blockout or cuts from it. It has no mesh of its own: the Blockout's mesh is its result. */
 struct BlockoutPiece : ComponentBase<BlockoutPiece> {
@@ -98,6 +173,11 @@ struct BlockoutPiece : ComponentBase<BlockoutPiece> {
    * origin (the floor line it was put on), Depth through the wall. 0: not an opening. */
   int opening = 0;     // None, Door, Window
   float width = 0.9f, head = 2.1f, sill = 0.0f, depth = 0.5f;
+  /* Round 482: this piece's own materials (empty: the Blockout's), for the classes of face it has, and where its faces' texture starts
+   * (tiles) and how far it is turned (degrees). */
+  std::string material[kBlockoutClasses];
+  float texture_offset_u = 0.0f, texture_offset_v = 0.0f, texture_rotation = 0.0f;
+  bool has_class(int cls) const;  // whether the piece makes faces of this class (its Inspector shows those materials)
   void reflect(Reflector &r) override;
   /* Made safe for the kernel. A mesh piece looks its object up: `mesh_why` (when given) gets the reason it cannot be used, empty when it can,
    * and `source` the object it uses. */
@@ -108,6 +188,8 @@ struct BlockoutPiece : ComponentBase<BlockoutPiece> {
   /* Whether the piece is a room the kernel builds as one: Room is on, it is no opening and its shape has an inside to walk in
    * (not stairs, an arch or a mesh). */
   bool is_room() const;
+  /* Whether the piece has a Blend radius to set (round 481): a box, cylinder or sphere that is no room, no opening and not an Intersect. */
+  bool takes_blend() const;
   /* A mesh piece's reasons not to be used (empty: none): no object chosen, not in the scene, no mesh, or the object is this piece's own
    * Blockout or one of its pieces (or reaches back to it through another Blockout's mesh pieces). The snapshot leaves such a piece out
    * and the Blockout's status names it. Always empty for another shape. */
@@ -147,6 +229,7 @@ Mat4 blockout_piece_matrix(const GameObject &piece, const GameObject &blockout);
 struct BlockoutSnapshotNotes {
   std::vector<std::pair<uint64_t, std::string>> refused;
   std::vector<uint64_t> sources;
+  BlockoutSurface surface;  // (round 482: the materials, the scale, each piece's own - in the order of the pieces)
 };
 
 /* The Blockout's pieces in the order the kernel wants them (the hierarchy's, depth first; an enabled piece in an active
@@ -175,11 +258,11 @@ GameObject *blockout_of_piece(const GameObject &piece);
 
 /* A handle on a piece: a place on one of its faces and the way it pulls, both in the piece's own space. */
 struct BlockoutHandle {
-  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill, OutlinePoint, OutlineAdd };
+  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill, OutlinePoint, OutlineAdd, Blend };
   Kind kind = BoxFace;
   int axis = 0;     // the own axis a box face or a cylinder's cap stands on; an outline's point, or (OutlineAdd) the segment's first point
   Vec3 at, dir;     // where it is, and the unit way out
-  std::string name; // what the console calls it: "+x" "-x" "+y" "-y" "+z" "-z", "top", "bottom", "side", "radius", "wall", "width", "head", "sill"
+  std::string name; // what the console calls it: "+x" "-x" "+y" "-y" "+z" "-z", "top", "bottom", "side", "radius", "wall", "width", "head", "sill", "blend" (a radius outside the face that looks at the viewer)
 };
 
 /* An outline's point handle moves in the piece's XZ plane (its `dir` is the plane's normal, Y); the "+" between two points adds a point. */
@@ -192,6 +275,8 @@ void blockout_outline_move(BlockoutPiece &p, const BlockoutPiece &before, int in
 
 /* The smallest a handle leaves a piece's size or an opening's height: dragging through zero stops here, never turned inside out. */
 constexpr float kBlockoutMinSize = 0.01f;
+/* The largest a number made by a scale can be (F9 stops its sizes at the same 10000). */
+constexpr float kBlockoutMaxSize = 10000.0f;
 
 /* The piece's handles: a box's six faces; a cylinder's top, bottom and the side turned toward `toward` (the viewer in the piece's own
  * space); a sphere's surface toward it; a room's faces move its air and one more handle on the outside of the wall nearest `toward`
@@ -208,5 +293,54 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
 
 /* The handle the console's name picks ("x+" reads as "+x"; "width" is a door's "+x"; "radius" is "side"). nullptr: none. */
 const BlockoutHandle *blockout_handle_named(const std::vector<BlockoutHandle> &handles, const std::string &name);
+
+/* ---- Scale (round 496, task 0480, ADR 0135): a Blockout takes scale in its numbers ---- */
+
+/* `p`'s numbers scaled along the piece's own axes by `f` (X, Y, Z): a box's, wedge's and stairs' size; a cylinder's radius (by the factor of its round
+ * axes that is farthest from 1: it stays round) and height; a sphere's radius; an arch's two radii and depth; an outline's points and height; an
+ * opening's width, head, sill and depth; a Blend radius by the smallest factor (the scale set's own apply puts it back to what the user's scale made of it: a fillet is metres in the Blockout's space). A room's wall, floor and ceiling are in the Blockout's space and stay.
+ * Sizes stop at kBlockoutMinSize. False (nothing changed): a mesh piece, whose numbers are its mesh's. */
+bool blockout_piece_scale(BlockoutPiece &p, Vec3 f);
+
+/* The objects one scale of the selection goes through the Blockout's numbers for: each root that is a Blockout, a piece, or a folder / parent
+ * piece under a Blockout, with everything below it. A scale of anything else is the transform's, as before. */
+struct BlockoutScaleSet {
+  enum Role {
+    Numbers,  // a piece with numbers: they scale, its transform's scale is 1 1 1
+    Carrier,  // a Blockout, or a folder / object without numbers above pieces (a parent piece with numbers is Numbers): its scale stays what it was, the pieces below take it
+    Leaf      // any other object below (a mesh piece, a light, a mesh): its transform's scale grows
+  };
+  struct Entry {
+    uint64_t id = 0;
+    Role role = Leaf;
+    Transform local0;         // its local transform at the start (every frame is made from it: no drift)
+    Mat4 world0;              // its world matrix at the start
+    Vec3 outer{1, 1, 1};      // |scale| of the Blockout above it when that Blockout is in the set (a fold takes it out of the mesh's space); else 1
+    BlockoutPiece before;     // a Numbers entry's component at the start
+  };
+  std::vector<Entry> entries;  // parents before children
+  std::unordered_set<uint64_t> ids;
+  bool empty() const { return entries.empty(); }
+  bool has(uint64_t id) const { return ids.count(id) != 0; }
+};
+
+/* Fills `out` from the roots that go through the numbers (the others are left to the caller: `out.has(id)` says which are taken). */
+void blockout_scale_collect(const std::vector<GameObject *> &roots, BlockoutScaleSet &out);
+/* The set scaled by the world matrix `d` (a scale about a pivot): each place goes through `d`, a piece's numbers grow by what each of its own axes
+ * grew (the length of `d` on the axis, so a turned piece under a one-axis scale is never sheared), a Leaf's scale grows the same. With `fold`
+ * the Carriers' own scales go to 1 as well (d = identity: the same world sizes, the scale moved into the numbers below; a round piece keeps the rest of an uneven
+ * ratio on its own Scale so its shape stays; `outer` is the product of the Blockouts above). A place that would not be finite stays where it is. */
+void blockout_scale_apply(Scene &scene, const BlockoutScaleSet &set, const Mat4 &d, bool fold = false);
+/* Every object of the set as it was at the start (an Esc, a mode change). */
+void blockout_scale_restore(Scene &scene, const BlockoutScaleSet &set);
+
+/* A scale already in a scene that shears a turned piece: the objects at or above `blockout`, and the folders and parent pieces between it and its
+ * pieces, whose scale is uneven. `above` is true for the ones above the Blockout (not its to change). */
+struct BlockoutUnevenScale {
+  uint64_t id = 0;
+  bool above = false;
+};
+void blockout_uneven_scales(const GameObject &blockout, std::vector<BlockoutUnevenScale> &out);
+bool blockout_scale_uneven(const Vec3 &s);
 
 }  // namespace bl

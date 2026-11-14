@@ -33,7 +33,8 @@ from bench_table import write_between_markers  # noqa: E402
 
 DEFAULT_SECTIONS = ["responsiveness", "operations", "world_like", "editor_render", "bake", "pathtracer", "serialization", "undo", "livelink",
                     "parity", "memory", "physics", "animation", "filters",  # (round 432: the last five were run by hand only)
-                    "posing"]  # (round 468: posing, scrubbing and playing a skinned avatar, alone and in a world)
+                    "posing",  # (round 468: posing, scrubbing and playing a skinned avatar, alone and in a world)
+                    "blockout"]  # (round 483: the Blockout kernel, the live drag and the blend rows - each row carries its own verdict - the kernel and mesh rows against 100 ms, the live rows also needing no frame over 16.7 ms - so --check needs no threshold of its own)
 
 
 def read_tables(path):

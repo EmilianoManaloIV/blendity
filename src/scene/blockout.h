@@ -66,7 +66,7 @@ struct Piece {
    * asked for); a closed one that is inside out is turned round. */
   std::shared_ptr<const Mesh> mesh;
   uint64_t mesh_key = 0;
-  float blend = 0.0f;      // the Blend radius, in the Blockout's units; above 0 sends its cluster to the field path
+  float blend = 0.0f;      // the Blend radius, in the Blockout's units: the join with what the piece touches is rounded by it (ADR 0130)
   Mat4 to_blockout;        // piece space -> the Blockout's space
   /* A room (task 0454): the shape is its air; `op` and `blend` are not read. The thicknesses are metres in the
    * Blockout's space, measured square to the piece's own sides (0 to 1000; a negative or non-finite one is 0).
@@ -87,6 +87,13 @@ struct Settings {
   float cell = 0.1f;           // the field path's grid step, in the Blockout's units
   Path path = Path::Auto;
   int64_t max_cells = 4000000;  // the field path's budget of surface cells per cluster: past it the cell grows
+  /* How finely a blended join is meshed (ADR 0130): its grid's cell is a third (0, Low), a sixth (1, Medium) or a
+   * twelfth (2, High) of the Blend radius - never coarser than `cell`, never finer than a thirty-second of it. */
+  int blend_detail = 1;
+  /* For tests: every build of a cluster WITH its blends counts as one that did not close, so the last rung of ADR 0130's
+   * ladder - the cluster without its blends - is reached on any machine. (An arrangement that gets there by itself is a
+   * heap of turned pieces whose grids fail by a hair: not the same heap on every compiler.) */
+  bool fail_blends_for_test = false;
 };
 
 /* For each face of the result, in the mesh's face order: the piece (its id) and the side it came from, and whether
@@ -112,6 +119,17 @@ struct ClusterReport {
   double ms = 0.0;           // the whole cluster...
   double ms_soup = 0.0;      // ...of which the boolean (crisp) or the grid (field)...
   double ms_faces = 0.0;     // ...and the face maker
+  /* A cluster with a Blend radius (ADR 0130): each blend is meshed in a box of its own on a finer grid and stitched to
+   * the rest, which is built as if nothing were blended. */
+  uint32_t blend_regions = 0;    // the boxes (0 with `blend_whole`: one box held the whole cluster - no rest, no seam)
+  bool blend_whole = false;      // the whole cluster on the grid with its blends, at `blend_cell` (the blend's cell; the Blockout's when the blend's grid would not close)
+  bool blend_fallback = false;   // a seam was tried and did not close (`seam_retries` more boxes, `seam_why`): the cluster was built whole, or without its blends
+  uint32_t seam_retries = 0;     // times the boxes were grown by a cell and built again
+  uint32_t blend_below = 0;      // pieces whose Blend radius is below the finest blend cell (a thirty-second of `cell`): built unblended
+  float blend_cell = 0.0f;       // the blend grid's cell: the coarsest any box was meshed at (its budget may raise it), or the whole cluster's
+  size_t seam_points = 0;        // corners of the boxes' insides made one with a corner of the rest
+  std::string seam_why;          // the last try that did not close: what kept it from closing
+  bool blend_dropped = false;    // no grid closed over the cluster with its blends: it was built without them (crisp joins)
 };
 
 struct Skipped {

@@ -132,8 +132,9 @@ bool Editor::set_paint(bool on) {
     refuse("Paint: stop Play first", "stop", "stop Play");
     return false;
   }
-  if (mf->mesh->uvs.size() != mf->mesh->corner_verts.size() && g->get<Blockout>()) {  // (round 477: Unwrap is not offered - its UVs would go at the next rebuild)
-    Log::warn("Paint: '%s' is a Blockout - its mesh is rebuilt from its pieces and has no UVs to paint on", g->name.c_str());
+  if (g->get<Blockout>()) {  // (round 477: Unwrap is not offered - its UVs would go at the next rebuild; round 482: it has UVs now, but they repeat one tile over every face - no layout to paint on)
+    refuse("Paint: '" + g->name + "' is a Blockout - its mesh is rebuilt from its pieces and its UVs repeat one texture tile over every face, so there is nothing to paint on (Bake to Mesh, then unwrap)",
+           "blockout bake", "bake it");
     return false;
   }
   std::string why;

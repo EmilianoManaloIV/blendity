@@ -9,7 +9,7 @@
   no to: "For your decision" at the end.
 - **Model:** main session (hard geometry), then test-engineer, then code-reviewer; the worker session runs the timed
   runs on a quiet machine and writes the tables
-- **PR:** branch `task/0452-blockout-kernel-measured`, against `main`
+- **PR:** #368 (https://github.com/EmilianoManaloIV/blendity/pull/368)
 
 ## Goal
 The owner asked (2026-11-09) for "meta-ball like modeling but with primitives", and for "rooms such as rectangles,
