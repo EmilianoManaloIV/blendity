@@ -73,10 +73,10 @@ asks for fewer only where the exact path builds the base; a question for the mod
 mesh's address), the Inspector's dim line, the lesson's text.
 
 <!-- docs/ARCHITECTURE.md -->
-after: | `src/editor/blockout_editor.cpp`
+after: | `Editor::blockout_hit`, `blockout_wall_under_mouse`
 | `src/editor/blockout_modifiers.cpp` | Round 502: a Blockout that carries a modifier stack - `blockout_stack_changes_faces`, `blockout_pick_takes_whole` (picking names a piece only while the stack keeps the faces), `blockout_pick_piece_shown` / `blockout_box_select_shown` (the piece of a drawn face through deformers), `blockout_stacks_settle` (the stacks brought to the landed meshes now: `blockout wait`). The stack itself is `GameObject::evaluated_mesh`'s; `blockout_stack_follows` (scene.cpp) sends it to the evaluation worker after every landing. |
 
 <!-- docs/USABILITY.md -->
-after: | A Blockout
+after: | A Blockout's rooms and pieces were sized by typing numbers
 | A Blockout with a Mirror or a Bevel: a click named a piece from faces that were not the drawn ones; Apply refused with no way on | fixed (round 502): the click selects the Blockout and says why; Apply offers Bake to Mesh |
 | Apply All on a mesh whose last component is a modifier crashed the editor | fixed (round 502): it runs after the Inspector's rows are drawn |
