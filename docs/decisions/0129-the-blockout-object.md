@@ -120,6 +120,96 @@ work on the spot.
   sits under a baked object's holder.
 - The kernel is not changed by any of this.
 
+## Amended in round 498 (task 0482): a styled window is one piece that makes its own kernel pieces
+- **A style is numbers on the piece, not objects in the scene.** `BlockoutPiece` gains `style` (Opening Only, Single,
+  Double, Arched, Fixed, Grid, Round), Frame Width and Depth, Panes Across and Up, Arch Rise, Glass, Sill Board and its
+  overhang. Opening Only (0) is the hole of round 478 and reads none of them: a scene from before the round builds to
+  the same bytes. **No child objects are made**: the Hierarchy, the handles, undo and the file hold one piece.
+- **`blockout_snapshot` makes the kernel's pieces** (`blockout_window_pieces`): an Add "blank" that fills the opening
+  and an optional sill board, then Subtract reveals and one "light" for each pane, leaving the frame, the bars and -
+  with Glass on - a thin pane standing. The kernel is not changed and knows nothing of windows.
+- **A made piece's id** has bit 63 set (no object id, which count up from 1, is mistaken for it), the window's object
+  id in the low 32 bits and the part's number above bit 48. Faces name these ids; **`blockout_piece_owner(id)`** is the
+  piece the user means, and everything that answers "which piece is this face" (picking, outlines, the status, the
+  materials) goes through it. `blockout_user_piece_count` counts a window's parts as one.
+- **A seventh class, Glass**, after the six of round 482 (their slots and numbers stay): a Blockout material and a
+  piece override, as the others; the pane's faces alone are in it.
+- **On the grid path a window is made as the grid can show it** (`fit_to_grid`; the snapshot passes the Field Cell
+  when the Method is Field, or Auto in a build with no exact path): a part under about a cell and a half - the frame,
+  a bar, the pane, a frame face's gap to the wall's face - cannot be meshed cleanly there, so the pane is left out,
+  the frame and bars are held at one cell and the frame is as deep as the wall; when a light itself would be under a
+  cell and a half, the window is the plain hole. The piece's own numbers are never changed; the status line says what
+  was held back and which Field Cell would show it (`BlockoutWindowFit`). A cluster Auto sends to the grid for a blend
+  or an open mesh is not known at snapshot time: its windows are made for the exact path (a known limit).
+- **Every way to set a style** (the Inspector, F9, the console, a new window) goes through
+  `blockout_window_set_style` / `blockout_piece_edited`: a window that becomes Round starts as a circle, an opening
+  that is not a window has no style (round 499 gives doors theirs).
+
+## Amended in round 499 (task 0483): a styled door, the same way
+- **A door's Style** (Single, Double, Sliding, Arched, Revolving; Opening Only is the hole of round 478 and builds to
+  the same bytes) uses round 498's mechanism: one piece, kernel pieces made by `blockout_snapshot`, ids that name the
+  door. New numbers: Leaf, Leaf Thickness, Open Amount, Hinge Side, Slide Direction, Drum Radius. `style` is a number
+  in the file and means a door's style on a door, a window's on a window; changing Opening between the two resets it
+  (`blockout_opening_set_style`, `blockout_piece_edited(piece, style_before, opening_before)`).
+- **An eighth class, Leaf**, after Glass: a Blockout material and a piece override; a leaf's faces alone are in it.
+- **A hinged leaf is not an Add solid.** The doorway is cut as its plan with the leaf's footprint left out, so the
+  leaf is what the cut leaves of the blank and is one with the frame at its hinge. A Sliding leaf is an Add box on
+  the wall's face. Revolving is a ring (Add) with a drum and two entries cut (Subtract): the space of a revolving
+  door, nothing in it (the owner's answer).
+- **An open leaf cuts what stands in its swing - a known cost, not a wish.** The kernel adds before it subtracts and
+  a made Add cannot be joined to a cutter's planes to the bit (ADR 0128), so the part of a swung leaf that stands out
+  of the wall is also left by a cut: the blank and its cutters reach past the door's Depth as far as the leaf does
+  (+5 cm), over the doorway's width. A piece or a wall standing there is cut. Measured alternatives: the leaf's
+  outer part as an Add solid left 2-4 unresolved places a build on the exact path, and with a 1 mm overlap 414
+  problems in the 2,000-door sweep, against 0 for the cut. So: Open Amount 0 (the default) cuts nothing; an open
+  leaf's cut is named in the Blockout's status ("Door 'X': its open leaf cuts 'Y'" / "cuts into room 'Y'"); an
+  Arched door's leaf is closed only. A clean leaf needs the kernel to keep an Add after the Subtracts (a build order
+  per piece) - not decided here.
+- **Limits before the kernel:** a styled door over 100 m in any size is left out and named in the status; a swung
+  leaf is no thicker than the frame is wide (its outer face would lie in the reveal's plane).
+- **An added opening stands upright (found when the owner tried it: doors lay flat in rooms drawn onto a wall).** A door
+  or window gets the Blockout's up (+Y in its frame), not its room's: `blockout_stand_opening` used the room's own up,
+  and a room turned onto its side or leaning gave it to the opening. A wall is accepted only when it is vertical within
+  2 degrees in the Blockout's frame (`|normal.y| <= sin 2 deg`); a leaning wall is refused with a status line that says
+  how much it leans, and a click on a face within 30 degrees of horizontal (a floor, a ceiling) is no wall, so the
+  opening goes in the room's fallback wall and the status says so. The fallback (the mouse on no wall, the Door button)
+  is the room's MOST UPRIGHT wall - every side of a box and its caps, a cylinder's facets and caps, an outline's
+  segments, the one whose normal in the Blockout's frame has the smallest |y|, a tie keeping the first so an upright room
+  still gets -X - not always the room's -X, which is a floor in a room turned 90 degrees about Z; with none within 2
+  degrees of vertical it refuses. The feet: an upright room keeps its floor line (bytes unchanged); another room has none,
+  so the feet stand on the floor under the opening - a ray down from each jamb's foot to the first face of the mesh in
+  the room - on the higher of the two (a sloped floor leaves a small step of wall at the low jamb instead of a cut
+  through the floor slab), else on the room's lowest point. Only the adding paths do this: a turn the user makes after
+  is theirs.
+- **Each style carries a preset size** (`blockout_opening_preset`): doors 0.9 x 2.1 m, Double 1.8 x 2.1 (two 0.9 m
+  leaves), Revolving 1.2 wide (its two entries); windows 1.2 x 2.0, Double 1.5. A new opening takes its style's size
+  (the typed numbers replace it, even one that equals another style's preset); switching style on an existing opening
+  takes the new style's only when Width and Head still equal the old style's by value - so a size typed that happens to equal the old
+  preset counts as untouched. A Round window is the exception: its Head is its circle's (Sill + Width), no preset, so
+  leaving Round keeps the numbers (round 498's rule, pinned by its tests). Nothing runs on
+  load: a saved number never changes. Before this, every door style was 0.9 x 2.1 and every window 1.2 x 2.0.
+
+## Amended in round 500 (task 0484): architectural pieces, the same way
+- **A piece's `preset`** (Column, Pilaster, Beam, Railing, Roof, Stairs L, Stairs U, Spiral Stairs, Arcade; None is the
+  piece as before and builds to the same bytes) uses round 498's mechanism: one piece with numbers, its kernel pieces
+  made by `blockout_snapshot` (`blockout_preset_pieces`, in `blockout_presets.cpp`), ids that name the piece; no child
+  objects. The numbers are in the Inspector, F9 and the console (`blockout set <word>`); a preset is a number in the file.
+- **A ninth class, Roof**, after Leaf: a roof's faces that look up (ADR 0128's Convex count); the rest of a preset is
+  Solid. A Blockout material and a piece override, like the others.
+- **Pieces that touch are made to overlap where they can**, because two solids meeting in one plane leave faces on top
+  of each other on the exact path (ADR 0128): a shaft reaches half way into its plinth and capital, a post ends inside
+  its top rail, a railing's corner is a newel post standing above the rails, a stair flight starts inside its landing.
+  What still meets in a plane is named with the numbers (the round's changelog): a spiral's steps (an overlapping
+  wedge puts two bottoms in one plane), overlapping rectangles of an outlined roof, an arcade's columns through a wall.
+- **Over an outline** a roof is one roof over each rectangle the outline cuts into, the ridge along the long side; its
+  handles and Ridge Height follow the widest rectangle, and only the top handle is offered (the others would move the
+  piece, not size it). A railing follows the outline's sides, collinear corners dropped.
+- **Limits:** counts (posts a side, steps, arches) at most 256; a size over 200 m is left out and named; Turn 0, a
+  spiral held at 1440°, an arch rise held at 170° and a shaft the hull refuses are named in the status.
+- **Scale** grows lengths by their axis, and a zero (Roof Thickness, Overhang, Base / Capital Height, Inner Radius)
+  stays zero; Post Spacing scales (the same posts, farther apart); a roof's Pitch follows the slope (tan(pitch) times
+  the Y scale over the span's).
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.
