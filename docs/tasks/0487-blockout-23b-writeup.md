@@ -1,6 +1,7 @@
 # 0487: Pass 23b's write-up (round 503, Pass 23b R6)
 
-- **Status:** approved with Pass 23b (the owner, 2026-11-11, through the hub). Not started; after round 502.
+- **Status:** done 2026-11-15 (round 503, on #416), with the deviations and the two added items below; approved with
+  Pass 23b (the owner, 2026-11-11, through the hub).
 - **Requirements:** the documentation duties of `CLAUDE.md`; R-09 (the Learn tab)
 - **Decisions:** none new
 - **Model:** the worker session; a code-reviewer pass over the documents' claims against the code
