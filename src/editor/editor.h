@@ -803,6 +803,10 @@ class Editor {
   size_t window_count_for_test() const { return windows_.size() + 1; }
   EditorWindow *window_for_test(int id) { return editor_window(id); }
   const Image &main_fb_for_test() const { return fb_; }
+  const Mesh *collider_wire_for_test(const GameObject &g) {  // (round 515: the collider wire's cache, for tests)
+    const ColliderComponent *c = g.get<ColliderComponent>();
+    return c ? collider_wire(g, *c) : nullptr;
+  }
   void set_monitors_for_test(const std::vector<platform::Monitor> &m) { test_monitors_ = m; }
   std::string windows_layout_for_test() { return windows_layout(); }
   void restore_windows_for_test(const std::string &s) { restore_windows(s); }
@@ -4243,6 +4247,17 @@ class Editor {
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   void draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::Layout &lay);  // (round 496: Apply Scale to Size)
+  /* Round 515 (task 0497, ADR 0136): a door's leaves are objects (BlockoutLeaf) the editor makes and keeps in step with the door's numbers, on each walk of update_blockouts. */
+  void blockout_sync_leaves();
+  void blockout_sync_door(GameObject &door);
+  void blockout_leaf_made(GameObject &leaf, const BlockoutLeafPlan &plan, const std::string &material, float texture_scale, uint64_t key);  // (mesh, collider, materials, key)
+  void blockout_leaf_command(const std::vector<std::string> &t);  // (blockout leaf select)
+  void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
+  std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_leaves_seen_;  // (door id -> its leaf objects' ids as the last walk left them: one gone with the door still there was deleted by hand)
+  const Scene *blockout_leaves_scene_ = nullptr;  // (the scene those ids are of: another scene - a load, an undo - starts them again; the address can repeat, the ids are checked against the scene too)
+  std::vector<uint64_t> blockout_sync_doors_, blockout_sync_strays_;  // (the walk's scratch: not allocated again for a scene whose doors did not change)
+  bool blockout_preview_now_ = false, blockout_preview_was_ = false, blockout_preview_ended_ = false;  // (a preview or Play moves objects: leaves only follow; the walk after it ends settles them)
+  void blockout_join_step(const char *label);  // (a change the leaf sync makes: the pending step's, or the last kept one amended - never a step of its own after a user's)
   bool blockout_apply_scale(const std::vector<GameObject *> &roots, const char *label);  // (round 496: the scale of the roots and of what is between them and their pieces moved into the pieces' numbers; one undo step; false: nothing to move)
   void blockout_apply_scale_command(const std::vector<std::string> &t);  // (round 496: blockout applyscale [size])
   bool blockout_refuses_edit_mode(const GameObject *g);
@@ -6066,7 +6081,7 @@ class Editor {
     BlockoutPiece pre;  // a preset just made (round 500, n 7): its numbers - F9 edits this copy and puts it back on the piece
     /* A door (round 499): style is then BlockoutDoorStyle (-1: not a door or window), `opening` says which (1 door, 2 window); these are its leaf's numbers. */
     int opening = 0, hinge = 0, slide = 0;
-    bool leaf = true;
+    bool leaf = true, wings = false;
     float leaf_thickness = 0.04f, open_amount = 0.0f, drum_radius = 1.0f;
   };
   bool obj_last_valid() const;
@@ -7458,6 +7473,7 @@ class Editor {
   bool blockout_baked_edited_for_test(const GameObject &g) const { return blockout_baked_edited(g); }
   void sculpt_mask_stroked_for_test() { sculpt_mask_version_++; }  // (what a mask stroke does besides writing the mask in place: the Inspector's cache must follow it)
   uint64_t blockout_started_for_test() const { return blockout_started_; }
+  std::vector<std::pair<std::string, bool>> blockout_status_lines_for_test(const GameObject &g) const { return blockout_status_lines(g, *g.get<Blockout>()); }  // (round 515: what the Inspector says of the Blockout)
   bool blockout_wall_under_mouse_for_test(GameObject &bo) {
     BlockoutHit h;
     return blockout_wall_under_mouse(bo, h);

@@ -12,6 +12,10 @@
 
 using namespace bl;
 
+// Round 515's tests live in test_blockout_leaf.cpp (this file's object reached the MSVC section limit); run from run_blockout_tests below.
+void tests_round515();
+void tests_round515_te();
+
 namespace {
 
 using blockout::Op;
@@ -19736,7 +19740,9 @@ static void tests_round498_more() {
      * reads: Opening Only none, Revolving (5, which a window style number would also be) the Drum Radius and no frame. */
     CHECK(has(rows(1, kDoorOpeningOnly, true), "Style") && !has(rows(1, kDoorOpeningOnly, true), "Frame Width") && !has(rows(1, kDoorOpeningOnly, true), "Leaf"));
     CHECK(has(rows(1, kDoorSingle, true), "Style") && has(rows(1, kDoorSingle, true), "Frame Width") && has(rows(1, kDoorSingle, true), "Leaf") && !has(rows(1, kDoorSingle, true), "Panes Across"));
-    CHECK(has(rows(1, kDoorRevolving, true), "Drum Radius") && !has(rows(1, kDoorRevolving, true), "Frame Width") && !has(rows(1, kDoorRevolving, true), "Leaf"));
+    /* Round 515 (ADR 0136): a Revolving door's Leaf row is its wings (off by default), so the row is there and what it switches on - Leaf Thickness, Open Amount - is not. */
+    CHECK(has(rows(1, kDoorRevolving, true), "Drum Radius") && !has(rows(1, kDoorRevolving, true), "Frame Width") && has(rows(1, kDoorRevolving, true), "Leaf") &&
+          !has(rows(1, kDoorRevolving, true), "Leaf Thickness") && !has(rows(1, kDoorRevolving, true), "Open Amount"));
     CHECK(!has(rows(0, kWindowGrid, true), "Style") && !has(rows(0, kWindowGrid, true), "Glass"));
     Blockout b;
     R478Probe probe;
@@ -21710,52 +21716,17 @@ std::vector<R499Probe> r499_probes(const R499Variant &v) {
   p.push_back({{0.42f, 1.0f, 0.0f}, true, "the right jamb"});
   p.push_back({{-0.42f, 1.0f, 0.0f}, true, "the left jamb"});
   p.push_back({{0.0f, 2.07f, 0.0f}, true, "the head of the frame"});
+  /* Round 515 (ADR 0136): the leaf is an object of its own, so the doorway is clear whatever the style, Open Amount, Hinge Side and Slide Direction say. Round 499's probes of the leaf -
+   * closed in the frame, swung into the room, slid along the wall, a Double's slit - are the doorway's now: nothing of the leaf is in the mesh. */
   const float h = v.hinge == 1 ? -1.0f : 1.0f;  // (the hinged jamb's side: Left is +X - the engine is left-handed, so on your left when you stand in the room the door opens into, facing it)
-  if (v.style == kDoorSingle && v.open == 0.0f) {
-    p.push_back({{0.0f, 1.0f, 0.0f}, true, "the closed leaf"});
-    p.push_back({{0.0f, 1.0f, 0.035f}, false, "behind the leaf, inside the frame"});
-    p.push_back({{0.0f, 1.0f, -0.035f}, false, "in front of the leaf, inside the frame"});
-    p.push_back({{0.0f, 1.0f, 0.075f}, false, "the reveal behind the frame"});
-  }
-  if (v.style == kDoorSingle && v.open == 1.0f) {
-    p.push_back({{h * 0.39f, 1.0f, 0.1f}, true, "the swung leaf, still in the back reveal"});
-    p.push_back({{h * 0.39f, 1.0f, 0.5f}, true, "the swung leaf, standing out in the room"});
-    p.push_back({{h * 0.39f, 1.0f, 0.7f}, true, "the swung leaf, near its free end"});
-    p.push_back({{h * 0.39f, 1.0f, 0.85f}, false, "past the swung leaf's free end"});
-    p.push_back({{0.0f, 1.0f, 0.0f}, false, "the doorway, open"});
-    p.push_back({{-h * 0.3f, 1.0f, 0.4f}, false, "the room where the leaf has swung away from"});
-  }
-  if (v.style == kDoorSingle && v.open == 0.5f) {  // (45 degrees: the leaf's centre line from the hinge at (h * 0.39, 0) runs along (-h, 1) / 1.414)
-    p.push_back({{h * 0.249f, 1.0f, 0.141f}, true, "the half-open leaf in the back reveal"});
-    p.push_back({{h * 0.036f, 1.0f, 0.354f}, true, "the half-open leaf past the wall"});
-    p.push_back({{-h * 0.2f, 1.0f, 0.2f}, false, "the doorway beside the half-open leaf"});
-  }
-  if (v.style == kDoorDouble && v.open == 0.0f) {
-    p.push_back({{0.0f, 1.0f, 0.0f}, true, "the leaves meet with no slit when closed"});
-    p.push_back({{0.2f, 1.0f, 0.0f}, true, "the right leaf, closed"});
-    p.push_back({{-0.2f, 1.0f, 0.0f}, true, "the left leaf, closed"});
-    p.push_back({{0.2f, 1.0f, 0.035f}, false, "behind the right leaf, inside the frame"});
-  }
-  if (v.style == kDoorDouble && v.open == 1.0f) {
-    p.push_back({{0.39f, 1.0f, 0.3f}, true, "the right leaf, open"});
-    p.push_back({{-0.39f, 1.0f, 0.3f}, true, "the left leaf, open"});
-    p.push_back({{0.0f, 1.0f, 0.0f}, false, "the doorway, open"});
-    p.push_back({{0.0f, 1.0f, 0.3f}, false, "between the open leaves"});
-  }
-  if (v.style == kDoorSliding) {
-    p.push_back({{0.0f, 1.0f, 0.0f}, false, "inside the frame (the leaf is on the wall's face)"});
-    p.push_back({{0.0f, 1.0f, 0.075f}, false, "the reveal behind the frame"});
-    if (v.open == 0.0f) p.push_back({{0.0f, 1.0f, 0.12f}, true, "the closed leaf, on the wall's face"});
-    if (v.open == 1.0f) {
-      const float s = v.slide == 1 ? -1.0f : 1.0f;  // (Left is +X, as the hinge)
-      p.push_back({{0.0f, 1.0f, 0.12f}, false, "the doorway, the leaf slid away"});
-      p.push_back({{s * 1.0f, 1.0f, 0.12f}, true, "the leaf, slid along the wall"});
-      p.push_back({{-s * 1.0f, 1.0f, 0.12f}, false, "the wall's face on the other side"});
-    }
-  }
+  for (float z : {-0.035f, 0.0f, 0.035f, 0.075f, 0.12f, 0.3f, 0.5f}) p.push_back({{0.0f, 1.0f, z}, false, "the doorway, with no leaf in the mesh"});
+  p.push_back({{h * 0.39f, 1.0f, 0.5f}, false, "where a swung leaf stood"});
+  p.push_back({{-h * 0.3f, 1.0f, 0.4f}, false, "the room where the leaf swung away from"});
+  p.push_back({{0.2f, 1.0f, 0.0f}, false, "the right half of a Double's doorway"});
+  p.push_back({{-0.2f, 1.0f, 0.0f}, false, "the left half of a Double's doorway"});
+  p.push_back({{1.0f, 1.0f, 0.12f}, false, "where a slid leaf stood"});
+  p.push_back({{-1.0f, 1.0f, 0.12f}, false, "the wall's face on the other side"});
   if (v.style == kDoorArched) {
-    p.push_back({{0.0f, 1.0f, 0.0f}, true, "the closed leaf"});
-    p.push_back({{0.0f, 1.0f, 0.035f}, false, "behind the leaf, inside the frame"});
     p.push_back({{0.4f, 2.05f, front}, true, "the wall in the corner the round head leaves"});
     p.push_back({{0.0f, 2.05f, front}, false, "the doorway under the round head"});
   }
@@ -21789,6 +21760,30 @@ R499Scene r499_pair(Editor &ed, const std::string &door_words, int method = 0, f
   return s;
 }
 
+/* ---- Round 515 (ADR 0136): a door's leaf is an object under it; what the tests of the round and the round 499 ones read of it ---- */
+
+/* The door's leaf objects, in the order they stand. */
+std::vector<GameObject *> r515_leaves(const GameObject &door) {
+  std::vector<GameObject *> out;
+  for (GameObject *c : door.children)
+    if (c->get<BlockoutLeaf>()) out.push_back(c);
+  return out;
+}
+
+/* Builds and lets the editor keep the leaves in step: the walk that makes them runs on a frame. */
+void r515_settle(Editor &ed) {
+  r495_built(ed);
+  r477_settle(ed, 3);
+  r495_built(ed);
+}
+
+/* The Blockout's mesh bytes, as a hash. */
+uint64_t r515_bytes(const GameObject &bo) {
+  const Mesh *m = r495_mesh(bo);
+  return m ? blockout_mesh_hash(*m) : 0;
+}
+
+
 }  // namespace
 
 static void tests_round499_styles() {
@@ -21813,7 +21808,7 @@ static void tests_round499_styles() {
       }
   });
 
-  test("blockout door styles (499): a closed leaf is the Leaf class's faces, standing between the frame's - Solid - and a hole's reveal - Cut - and a door with its Leaf off has no Leaf faces and is an open doorway", [] {
+  test("blockout door styles (499, 515): a door's frame is the Solid class and the hole's reveal the Cut class; the leaf is not in the Blockout's mesh any more - no Leaf faces, a clear doorway, the same bytes with the Leaf on or off - it is an object (ADR 0136)", [] {
     for (int method : r498_methods())
       for (int style : {kDoorSingle, kDoorDouble, kDoorSliding, kDoorArched}) {
         Editor ed;
@@ -21821,18 +21816,20 @@ static void tests_round499_styles() {
         const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
         const R498Class leaf = r498_class(*w.bo, *w.door, kClassLeaf), frame = r498_class(*w.bo, *w.door, kClassSolid), cut = r498_class(*w.bo, *w.door, kClassCut);
         std::printf("    %s: %zu Leaf faces, %zu Solid, %zu Cut\n", label.c_str(), leaf.faces, frame.faces, cut.faces);
-        CHECK(leaf.faces >= 2 && frame.faces >= 4 && cut.faces >= 4);
-        if (style == kDoorSingle || style == kDoorArched) CHECK(leaf.z_lo > -0.05f && leaf.z_hi < 0.05f);  // (inside the frame's 10 cm)
-        CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));  // (a Double closed is one slab: its leaves meet with no slit)
+        CHECK(leaf.faces == 0 && frame.faces >= 4 && cut.faces >= 4);
+        CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}));  // (the doorway is clear: the leaf is an object)
+        r515_settle(ed);
+        CHECK(r515_leaves(*w.door).size() == (style == kDoorDouble ? 2u : 1u));
+        const uint64_t bytes = r515_bytes(*w.bo);
         w.door->get<BlockoutPiece>()->leaf = false;
         r495_built(ed);
-        CHECK(r498_judge(*w.bo).empty());
-        CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces == 0);
-        CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}) && r498_matter(*w.bo, *w.door, {0.42f, 1.0f, 0.0f}));
+        r515_settle(ed);
+        CHECK(r498_judge(*w.bo).empty() && r515_bytes(*w.bo) == bytes && r515_leaves(*w.door).empty());
+        CHECK(r498_matter(*w.bo, *w.door, {0.42f, 1.0f, 0.0f}));  // (the jamb stays)
       }
   });
 
-  test("blockout door styles (499): in a wall between two rooms the doors are sound on each path, a door with its leaf off joins the rooms and a closed leaf separates them (the exact path: the field path at the default Field Cell leaves a 4 cm leaf out, and says so)", [] {
+  test("blockout door styles (499, 515): in a wall between two rooms the doors are sound on each path and every door joins the rooms in the Blockout's mesh - the leaf, on or off, is an object of its own, not a wall in the doorway (ADR 0136)", [] {
     for (int method : r498_methods())
       for (int style = 1; style < kBlockoutDoorStyles; style++) {
         Editor ed;
@@ -21844,7 +21841,9 @@ static void tests_round499_styles() {
         const std::string why = r498_judge(*s.bo, &small);
         std::printf("    %s: %s (%zu faces, small %zu, %zu unresolved)\n", label.c_str(), why.empty() ? "sound" : why.c_str(), r495_mesh(*s.bo)->face_count(), small, s.bo->get<Blockout>()->state.status.unresolved);
         CHECK(why.empty());
-        const bool joined_with_leaf = style == kDoorRevolving || method == 2;  // (no leaf on the grid at this Field Cell: the Revolving door has none)
+        /* Round 499 had a closed leaf separate the rooms on the exact path; since round 515 (ADR 0136) the leaf is an object and
+         * the doorway is clear on every path, the leaf on or off. */
+        const bool joined_with_leaf = true;
         const float z = style == kDoorSliding ? 0.12f : 0.0f;
         const float x = style == kDoorDouble ? 0.2f : 0.0f;
         CHECK(r498_matter(*s.bo, *s.door, {x, 1.0f, z}) == !joined_with_leaf);
@@ -21853,10 +21852,11 @@ static void tests_round499_styles() {
         r495_built(ed);
         CHECK(r498_judge(*s.bo).empty());
         CHECK(!r498_matter(*s.bo, *s.door, {0.0f, 1.0f, 0.0f}) && !r498_matter(*s.bo, *s.door, {0.0f, 1.0f, 0.3f}) && !r498_matter(*s.bo, *s.door, {0.0f, 1.0f, -0.3f}));
-        if (method == 1) {  // (and the leaf's own class is there when it is on)
+        if (method == 1) {  // (and with the Leaf on again the mesh has no Leaf faces: the leaf is an object, round 515)
           s.door->get<BlockoutPiece>()->leaf = true;
           r495_built(ed);
-          CHECK(r498_class(*s.bo, *s.door, kClassLeaf).faces >= 2);
+          r515_settle(ed);
+          CHECK(r498_class(*s.bo, *s.door, kClassLeaf).faces == 0 && !r515_leaves(*s.door).empty());
         }
       }
   });
@@ -22030,9 +22030,9 @@ static void tests_round499_numbers() {
     CHECK(bp->style == kDoorSliding && bp->open_amount == 0.5f && bp->width == 1.0f);
     CHECK(r496_has(ed, "adjust:Slide Direction") && !r496_has(ed, "adjust:Hinge Side") && r496_has(ed, "adjust:Open Amount"));
     CHECK(r496_pick_combo(ed, "adjust:Style", "Arched"));
-    CHECK(bp->style == kDoorArched && r496_has(ed, "adjust:Arch Rise") && !r496_has(ed, "adjust:Open Amount") && r496_has(ed, "adjust:Leaf Thickness"));
+    CHECK(bp->style == kDoorArched && r496_has(ed, "adjust:Arch Rise") && r496_has(ed, "adjust:Open Amount") && r496_has(ed, "adjust:Hinge Side") && r496_has(ed, "adjust:Leaf Thickness"));  // (round 515: an Arched leaf is square and swings)
     CHECK(r496_pick_combo(ed, "adjust:Style", "Revolving"));
-    CHECK(bp->style == kDoorRevolving && r496_has(ed, "adjust:Drum Radius") && !r496_has(ed, "adjust:Frame Width") && !r496_has(ed, "adjust:Leaf"));
+    CHECK(bp->style == kDoorRevolving && r496_has(ed, "adjust:Drum Radius") && !r496_has(ed, "adjust:Frame Width") && r496_has(ed, "adjust:Leaf") && !r496_has(ed, "adjust:Open Amount"));  // (round 515: its Leaf is the wings, off)
     CHECK(r479_type(ed, "adjust:Drum Radius", "1.4"));
     CHECK_NEAR(bp->drum_radius, 1.4f, 1e-6f);
     CHECK(r496_pick_combo(ed, "adjust:Style", "Opening Only"));
@@ -22135,7 +22135,7 @@ static void tests_round499_numbers() {
         const float half = bp->width * 0.5f;
         CHECK(r498_matter(*w.bo, *w.door, {half - 0.03f, 1.0f, 0.0f}) && r498_matter(*w.bo, *w.door, {-half + 0.03f, 1.0f, 0.0f}));
         CHECK(!r498_matter(*w.bo, *w.door, {half - 0.03f, 1.0f, -0.075f}));
-        CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));
+        CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));  // (round 515: the doorway is clear, the leaf is an object)
         CHECK(r498_matter(*w.bo, *w.door, {0.0f, bp->head - 0.03f, 0.0f}));  // (the head of the frame, at the new head)
       }
   });
@@ -22143,7 +22143,7 @@ static void tests_round499_numbers() {
 
 static void tests_round499_more() {
   /* ---- Criterion 6: the Leaf class ---- */
-  test("blockout door styles (499): the leaf is in the Leaf class's slot, the frame in Solid's; a Blockout's Leaf Material and a door's own override put a material on the leaf only, and the UVs follow round 482's rule", [] {
+  test("blockout door styles (499, 515): the Blockout's Leaf Material and a door's own override put a material on the leaf object only - the Blockout's mesh has no Leaf faces and the frame stays in Solid's slot - and the UVs of the faces square to Z follow round 482's rule", [] {
     for (int method : r498_methods()) {
       Editor ed;
       const R499Wall w = r499_wall(ed, kDoorSingle, method);
@@ -22154,51 +22154,41 @@ static void tests_round499_more() {
       ed.command("blockout set material solid " + solid);
       ed.command("blockout set material leaf " + leaf);
       r495_built(ed);
+      r515_settle(ed);
       const Blockout *b = w.bo->get<Blockout>();
       const MeshRenderer *mr = w.bo->get<MeshRenderer>();
       const Mesh *m = r495_mesh(*w.bo);
       CHECK(b->material[kClassLeaf] == leaf && b->material[kClassSolid] == solid && m && mr);
       if (!m || !mr) return;
+      auto leaf_material = [&]() -> std::string {
+        const std::vector<GameObject *> leaves = r515_leaves(*w.door);
+        const MeshRenderer *lr = leaves.empty() ? nullptr : leaves[0]->get<MeshRenderer>();
+        return lr && lr->materials.size() == 1 && lr->materials[0] ? lr->materials[0]->asset_path : std::string();
+      };
+      CHECK(leaf_material() == leaf);  // (the leaf object takes the Blockout's Leaf Material)
       std::vector<blockout::Piece> pieces;
       blockout::Settings settings;
       blockout_snapshot(*w.bo, pieces, settings);
-      auto expect = [&](size_t f, const std::string &door_solid, const std::string &door_leaf, int *cls_out) {
+      size_t leaf_faces = 0, solid_faces = 0, wrong = 0;
+      for (size_t f = 0; f < m->face_count(); f++) {
         const blockout::Piece *piece = nullptr;
         for (const blockout::Piece &p : pieces)
           if (p.id == b->state.faces.piece[f]) piece = &p;
         const int cls = piece ? blockout_face_class(*piece, b->state.faces.side[f]) : -1;
-        if (cls_out) *cls_out = cls;
-        const bool mine = piece && blockout_piece_owner(piece->id) == w.door->id;
-        if (cls == kClassLeaf) return mine ? door_leaf : leaf;
-        if (cls == kClassSolid) return mine ? door_solid : solid;
-        return std::string();
-      };
-      size_t leaf_faces = 0, solid_faces = 0, wrong = 0;
-      for (size_t f = 0; f < m->face_count(); f++) {
-        int cls = -1;
-        const std::string want = expect(f, solid, leaf, &cls);
         leaf_faces += cls == kClassLeaf, solid_faces += cls == kClassSolid;
-        if (r482_face_material(*m, *mr, f) != want) wrong++;
+        if (cls == kClassSolid && r482_face_material(*m, *mr, f) != solid) wrong++;
       }
-      CHECK(leaf_faces >= 2 && solid_faces > 10 && wrong == 0);
-      size_t on_leaf = 0;
-      for (size_t f = 0; f < m->face_count(); f++) on_leaf += r482_face_material(*m, *mr, f) == leaf;
-      CHECK(on_leaf == leaf_faces);
+      CHECK(leaf_faces == 0 && solid_faces > 10 && wrong == 0);
       CHECK(r482_scratch_same(*w.bo));
-      /* The door's own override of Leaf: the leaf changes, nothing else does. */
-      std::vector<std::string> before;
-      for (size_t f = 0; f < m->face_count(); f++) before.push_back(r482_face_material(*m, *mr, f));
+      /* The door's own override of Leaf: the leaf object changes, the Blockout's mesh does not. */
+      const uint64_t mesh_bytes = blockout_mesh_hash(*m);
       ed.select_for_test(w.door->id, false);
       ed.command("blockout set material leaf " + own);
       r495_built(ed);
+      r515_settle(ed);
+      CHECK(leaf_material() == own);
       m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
-      size_t changed = 0, on_own = 0;
-      for (size_t f = 0; m && f < m->face_count(); f++) {
-        const std::string now = r482_face_material(*m, *mr, f);
-        changed += now != before[f], on_own += now == own;
-        if (now != before[f]) CHECK(before[f] == leaf && now == own);
-      }
-      CHECK(changed == leaf_faces && on_own == leaf_faces);
+      CHECK(m && blockout_mesh_hash(*m) == mesh_bytes);
       /* The door's Solid override takes the frame's faces and not the wall's. */
       ed.command("blockout set material solid " + own_solid);
       r495_built(ed);
@@ -22211,7 +22201,8 @@ static void tests_round499_more() {
         wall_faces += wall;
         if (wall && now == own_solid) bad_wall++;
       }
-      CHECK(on_frame >= 6 && bad_wall == 0 && wall_faces > 0);  // (a door's frame is two jambs and a head: fewer faces than a window's)
+      std::printf("    the door's Solid override: %zu frame faces, %zu wall faces, %zu of them wrongly\n", on_frame, wall_faces, bad_wall);
+      CHECK(on_frame >= 5 && bad_wall == 0 && wall_faces > 0);  // (round 515: five faces of the frame take the override now that no leaf stands in it - the printed count; round 499 counted six or more with the leaf's edges)
       CHECK(r482_scratch_same(*w.bo));
       /* A door with its Leaf off, and a Revolving one, has no Leaf class: the console says so. */
       ed.command("blockout set leaf off");
@@ -22231,11 +22222,11 @@ static void tests_round499_more() {
           if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) uv_bad++;
         }
       }
-      CHECK(uv_faces >= 6 && uv_bad == 0);
+      CHECK(uv_faces >= 4 && uv_bad == 0);  // (round 515: the wall's and the frame's faces; the leaf's two are no longer among them)
     }
   });
 
-  test("blockout door styles (499): the Leaf class is the eighth - the seven before it keep their names and numbers - and a door's leaf, its numbers and the Blockout's Leaf Material each change the snapshot's hash", [] {
+  test("blockout door styles (499): the Leaf class is the eighth - the seven before it keep their names and numbers - and only what the Blockout builds from changes the snapshot's hash - the style and the frame do; the Leaf Material (the Blockout's or a door's own), Leaf, Leaf Thickness, Open Amount and Hinge Side belong to the leaf object and do not (round 515: Open Amount never asks for a build)", [] {
     CHECK(kBlockoutClasses == 9 && kClassLeaf == 7 && std::string(kBlockoutClassNames[kClassLeaf]) == "Leaf");  // (round 500 added Roof as the ninth: Leaf is still the eighth class, number 7)
     const char *const want[8] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass", "Leaf"};
     for (int k = 0; k < 8; k++) CHECK(std::string(kBlockoutClassNames[k]) == want[k]);
@@ -22254,21 +22245,23 @@ static void tests_round499_more() {
     struct Edit {
       const char *what;
       std::function<void()> apply, undo;
+      bool changes;  // (whether the Blockout is built again: round 515 - the leaf is an object, its numbers are not the Blockout's)
     };
     const BlockoutPiece base = *bp;
     const std::vector<Edit> edits = {
-        {"the Blockout's Leaf Material", [&] { w.bo->get<Blockout>()->material[kClassLeaf] = "Assets/Materials/X.mat"; }, [&] { w.bo->get<Blockout>()->material[kClassLeaf].clear(); }},
-        {"the door's own Leaf Material", [&] { bp->material[kClassLeaf] = "Assets/Materials/X.mat"; }, [&] { bp->material[kClassLeaf].clear(); }},
-        {"the style", [&] { bp->style = kDoorSliding; }, [&] { bp->style = base.style; }},
-        {"the Leaf switch", [&] { bp->leaf = false; }, [&] { bp->leaf = base.leaf; }},
-        {"the Leaf Thickness", [&] { bp->leaf_thickness = 0.05f; }, [&] { bp->leaf_thickness = base.leaf_thickness; }},
-        {"the Open Amount", [&] { bp->open_amount = 0.4f; }, [&] { bp->open_amount = base.open_amount; }},
-        {"the Hinge Side", [&] { bp->open_amount = 0.4f, bp->hinge_side = 1; }, [&] { bp->open_amount = base.open_amount, bp->hinge_side = base.hinge_side; }},
-        {"the Frame Width", [&] { bp->frame_width = 0.08f; }, [&] { bp->frame_width = base.frame_width; }},
+        {"the Blockout's Leaf Material", [&] { w.bo->get<Blockout>()->material[kClassLeaf] = "Assets/Materials/X.mat"; }, [&] { w.bo->get<Blockout>()->material[kClassLeaf].clear(); }, false},  // (round 515 review: the leaf object reads the Leaf material; no face of the mesh has it, so the kernel's snapshot does not)
+        {"the door's own Leaf Material", [&] { bp->material[kClassLeaf] = "Assets/Materials/X.mat"; }, [&] { bp->material[kClassLeaf].clear(); }, false},  // (the same for a door's own Leaf material)
+        {"the style (Arched: a round head)", [&] { bp->style = kDoorArched; }, [&] { bp->style = base.style; }, true},
+        {"the Leaf switch", [&] { bp->leaf = false; }, [&] { bp->leaf = base.leaf; }, false},
+        {"the Leaf Thickness", [&] { bp->leaf_thickness = 0.05f; }, [&] { bp->leaf_thickness = base.leaf_thickness; }, false},
+        {"the Open Amount", [&] { bp->open_amount = 0.4f; }, [&] { bp->open_amount = base.open_amount; }, false},
+        {"the Hinge Side", [&] { bp->open_amount = 0.4f, bp->hinge_side = 1; }, [&] { bp->open_amount = base.open_amount, bp->hinge_side = base.hinge_side; }, false},
+        {"the Frame Width", [&] { bp->frame_width = 0.08f; }, [&] { bp->frame_width = base.frame_width; }, true},
     };
     for (const Edit &e : edits) {
       e.apply();
-      CHECK(hash() != h0);
+      CHECK((hash() != h0) == e.changes);
+      if ((hash() != h0) != e.changes) std::printf("    %s: the hash %s\n", e.what, e.changes ? "did not change" : "changed");
       e.undo();
       CHECK(hash() == h0);
     }
@@ -22323,38 +22316,34 @@ static void tests_round499_more() {
       }
   });
 
-  test("blockout door styles (499): the numbers are held to what a leaf can be - a swung leaf at most six tenths of the frame's depth, the pieces stay finite and few, the Open Amount outside 0 to 1 is held to it, and a Sliding leaf may be as thick as it likes", [] {
+  test("blockout door styles (499, 515): the numbers are held to what a leaf can be - a swung leaf at most six tenths of the frame's depth thick, the Open Amount outside 0 to 1 held to it, a Sliding leaf as thick as it likes - and the kernel is given the frame and the doorway only", [] {
     Editor ed;
     const R499Wall w = r499_wall(ed, kDoorSingle, 1, 0.005f);
     BlockoutPiece *bp = w.door->get<BlockoutPiece>();
     bp->leaf_thickness = 5.0f, bp->open_amount = 1.0f;
-    auto made = [&](std::vector<blockout::Piece> &pieces) {
-      pieces.clear();
-      blockout::Settings settings;
-      blockout_snapshot(*w.bo, pieces, settings);
-      size_t n = 0;
-      for (const blockout::Piece &p : pieces) n += blockout_id_generated(p.id);
-      return n;
+    auto thickness = [&] {
+      std::vector<BlockoutLeafPlan> plans;
+      blockout_leaf_plans(*bp, plans);
+      return plans.size() == 1 && plans[0].boxes.size() == 1 ? plans[0].boxes[0].second.z - plans[0].boxes[0].first.z : -1.0f;
     };
+    CHECK_NEAR(thickness(), 0.6f * bp->frame_depth, 1e-5f);  // (a leaf 5 m thick is held inside the frame's slab)
     std::vector<blockout::Piece> pieces;
-    CHECK(made(pieces) > 4 && made(pieces) < 30);
-    for (const blockout::Piece &p : pieces)
-      if (blockout_id_generated(p.id))
-        for (const Vec2 &q : p.outline) CHECK(finite_bits(q.x) && finite_bits(q.y) && std::fabs(q.x) < 100.0f && std::fabs(q.y) < 100.0f);  // (a leaf 5 m thick would be 100 m of plan)
+    blockout::Settings settings;
+    blockout_snapshot(*w.bo, pieces, settings);
+    size_t made = 0;
+    for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
+    CHECK(made >= 3 && made < 12);  // (the blank, the two reveals and the clear opening: no piece of the leaf, whatever its thickness or Open Amount)
     bp->open_amount = 5.0f;  // (held to 1: the same pieces as 1)
+    CHECK(blockout_door_open(*bp) == 1.0f);
     std::vector<blockout::Piece> again;
-    made(again);
-    CHECK(again.size() == pieces.size());
+    blockout_snapshot(*w.bo, again, settings);
     bool same = again.size() == pieces.size();
-    for (size_t i = 0; same && i < again.size(); i++) same = again[i].id == pieces[i].id && std::memcmp(again[i].to_blockout.m, pieces[i].to_blockout.m, sizeof(again[i].to_blockout.m)) == 0 && again[i].outline.size() == pieces[i].outline.size();
+    for (size_t i = 0; same && i < again.size(); i++) same = again[i].id == pieces[i].id && std::memcmp(again[i].to_blockout.m, pieces[i].to_blockout.m, sizeof(again[i].to_blockout.m)) == 0;
     CHECK(same);
+    bp->open_amount = std::numeric_limits<float>::quiet_NaN();
+    CHECK(blockout_door_open(*bp) == 0.0f);
     bp->style = kDoorSliding, bp->open_amount = 0.0f;
-    std::vector<blockout::Piece> slid;
-    made(slid);
-    float deepest = 0.0f;
-    for (const blockout::Piece &p : slid)
-      if (blockout_id_generated(p.id) && p.shape == blockout::Shape::Box) deepest = std::max(deepest, p.size.z);
-    CHECK(deepest > 4.9f && deepest < 5.1f);  // (a Sliding leaf stands on the wall's face: its thickness is its own)
+    CHECK_NEAR(thickness(), 5.0f, 1e-5f);  // (a Sliding leaf stands on the wall's face: its thickness is its own)
   });
 }
 
@@ -22622,7 +22611,7 @@ static void tests_round499_ui() {
     fs::remove_file(path);
   });
 
-  test("blockout door styles (499): Bake to Mesh keeps the styled door's mesh and the door's numbers under the disabled child, Unbake gives the same mesh and numbers back, and OBJ, FBX and GLB export the leaf in a material of its own", [] {
+  test("blockout door styles (499, 515): Bake to Mesh keeps the styled door's mesh and the door's numbers under the disabled child, Unbake gives the same mesh and numbers back, and OBJ, FBX and GLB export the leaf object in a material of its own", [] {
     for (int method : r498_methods()) {
       Editor ed;
       const R499Wall s = r499_wall(ed, kDoorSingle, method);
@@ -22630,23 +22619,25 @@ static void tests_round499_ui() {
       ed.select_for_test(s.bo->id, false);
       ed.command("blockout set material leaf " + leaf);
       r495_built(ed);
+      r515_settle(ed);
       const uint64_t bo_id = s.bo->id, door_id = s.door->id;
       const Mesh live = *r495_mesh(*s.bo);
       const BlockoutPiece numbers = *s.door->get<BlockoutPiece>();
-      const std::map<std::string, size_t> want = r482_triangles(*s.bo);
-      std::string leaf_name;  // (the only material of the mesh with a name: the others are the default material)
+      CHECK(r482_triangles(*s.bo).size() == 1);  // (the default material only: the leaf is not in the Blockout's mesh)
       size_t leaf_triangles = 0;
-      for (const auto &w : want)
-        if (!w.first.empty()) leaf_name = w.first, leaf_triangles = w.second;
-      CHECK(want.size() == 2 && leaf_triangles > 0);
+      for (const GameObject *l : r515_leaves(*s.door)) {
+        const MeshFilter *mf = l->get<MeshFilter>();
+        for (size_t f = 0; mf && mf->mesh && f < mf->mesh->face_count(); f++) leaf_triangles += mf->mesh->face_size(f) - 2;
+      }
+      CHECK(leaf_triangles == 12);  // (one box)
       for (const char *format : {"fbx", "glb", "obj"}) {
         const std::string name = std::string("r499_live.") + format;
         const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
-        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs);
+        CHECK(back.ok && back.mesh_nodes == 2 && back.uvs);  // (the Blockout's mesh and the leaf's)
         if (std::string(format) == "obj") continue;
         size_t got = 0;
         for (const auto &t : back.triangles)
-          if (!leaf_name.empty() && t.first.find(leaf_name) != std::string::npos) got += t.second;
+          if (t.first.find("R499Door") != std::string::npos) got += t.second;
         CHECK(got == leaf_triangles);
       }
       ed.select_for_test(bo_id, false);
@@ -22659,8 +22650,8 @@ static void tests_round499_ui() {
       const R482Back after = r482_read(r482_export(ed, "glb", "r499_baked.glb"));
       size_t got = 0;
       for (const auto &t : after.triangles)
-        if (!leaf_name.empty() && t.first.find(leaf_name) != std::string::npos) got += t.second;
-      CHECK(after.ok && got == leaf_triangles);
+        if (t.first.find("R499Door") != std::string::npos) got += t.second;
+      CHECK(after.ok && got == leaf_triangles);  // (the leaf object stays in the scene when the Blockout is baked)
       ed.select_for_test(bo_id, false);
       ed.command("blockout unbake");
       r495_built(ed);
@@ -22672,6 +22663,7 @@ static void tests_round499_ui() {
             back->leaf == numbers.leaf && back->leaf_thickness == numbers.leaf_thickness && back->open_amount == numbers.open_amount && back->hinge_side == numbers.hinge_side &&
             back->drum_radius == numbers.drum_radius);
       CHECK(baked && baked->get<Blockout>()->material[kClassLeaf] == leaf);
+      CHECK(held && r515_leaves(*held).size() == 1);  // (back under their door)
     }
   });
 
@@ -22688,13 +22680,13 @@ static void tests_round499_ui() {
     for (const std::string &l : lines)
       if (l.find("Door 'Door'") != std::string::npos) note = l;
     std::printf("    %s\n", note.c_str());
-    CHECK(note.find("its frame, leaf or ring is finer than Field Cell 0.10 m - lower Field Cell to ") != std::string::npos);
+    CHECK(note.find("its frame or ring is finer than Field Cell 0.10 m - lower Field Cell to ") != std::string::npos);  // (round 515: the leaf is an object, no part of the grid's)
     const size_t at = note.find("lower Field Cell to ");
     const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
     CHECK(advised > 0.0f && advised < 0.1f);
     w.bo->get<Blockout>()->cell = advised;
     r495_built(ed);
-    CHECK(w.bo->get<Blockout>()->state.window_fits.empty() && r498_class(*w.bo, *w.door, kClassLeaf).faces > 0);  // (the Field Cell the status advises shows the leaf)
+    CHECK(w.bo->get<Blockout>()->state.window_fits.empty());  // (the Field Cell the status advises shows the whole frame)
     CHECK(!r498fix_has(r498fix_status(ed, *w.bo), "Door 'Door'"));
     /* A Revolving door. */
     Editor rev;
@@ -22731,7 +22723,7 @@ static void tests_round499_ui() {
         r477_settle(ed, 3);
         const GameObject *wall = ed.scene().find_by_name("Wall");
         auto at = [&](Vec3 local) { return w.door->world_matrix().point(local); };
-        GameObject *thing = style == kDoorRevolving ? r479p_click(ed, at({0.7f, 1.0f, 0.8f})) : r479p_click(ed, at({0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));
+        GameObject *thing = style == kDoorRevolving ? r479p_click(ed, at({0.7f, 1.0f, 0.8f})) : r479p_click(ed, at({0.42f, 1.0f, 0.0f}));  // (round 515: the frame's jamb - the leaf is an object that selects itself)
         GameObject *beside = r479p_click(ed, at({1.4f, 1.0f, 0.0f}));
         const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
         if (thing != w.door || beside != wall) std::printf("    %s: door part %s, wall %s\n", label.c_str(), thing ? thing->name.c_str() : "-", beside ? beside->name.c_str() : "-");
@@ -22775,7 +22767,7 @@ static void tests_round499_review() {
   /* ---- The review's fixes (round 499): what a swing cuts, and what the status says of it ---- */
   /* Part 2 measured the Add variant (the leaf past the Depth as an Add solid, no cutter past the Depth): 414 of 2,000 door arrangements with problems on the exact path against 2 with
    * the strip, so the cutters reach as far as the leaf does over the doorway's width (kSwingAddsBeyondDepth false) and the status names every piece that cut overlaps. */
-  test("blockout door styles (499 review): a swung leaf clears the doorway's width as far into the room as it reaches - a column, a raised floor and another wall in front of a Single door are cut there at Open Amount 0.5 and 1, a column beside the strip is not - and the status names each cut piece; the leaf is there in the Leaf class", [] {
+  test("blockout door styles (499 review, 515): an open leaf cuts nothing in front of the wall - a column, a raised floor and another wall in front of a Single door are all there at Open Amount 0.5 and 1, a column beside it too, and the status names no cut", [] {
     struct Thing {
       const char *what;
       Vec3 centre, size, probe;  // (the door's own space: z in front of the wall; the rig's door stands at world y -1.2)
@@ -22791,22 +22783,15 @@ static void tests_round499_review() {
           w.door->get<BlockoutPiece>()->open_amount = open;
           r477_piece(ed, *w.bo, "Thing", 0, 0, {t.centre.x, t.centre.y - 1.2f, t.centre.z}, t.size);
           const bool column = &t == &things[0];
-          if (column) r477_piece(ed, *w.bo, "Beside", 0, 0, {t.centre.x + 0.9f, t.centre.y - 1.2f, t.centre.z}, t.size);  // (0.9 m along: outside the doorway's width)
+          if (column) r477_piece(ed, *w.bo, "Beside", 0, 0, {t.centre.x + 0.9f, t.centre.y - 1.2f, t.centre.z}, t.size);
           r495_built(ed);
           const std::string label = std::string(r498_method_name(method)) + " " + t.what + " at " + (open == 1.0f ? "1" : "0.5");
           const std::string why = r498_judge(*w.bo);
           if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
           CHECK(why.empty());
-          CHECK(!r498_matter(*w.bo, *w.door, t.probe));  // (cut: the strip the leaf swings through)
+          CHECK(r498_matter(*w.bo, *w.door, t.probe));  // (kept: no swing cuts it - the leaf is an object, ADR 0136)
           if (column) CHECK(r498_matter(*w.bo, *w.door, {t.probe.x + 0.9f, t.probe.y, t.probe.z}));
-          CHECK(r498_matter(*w.bo, *w.door, open == 1.0f ? Vec3(0.39f, 1.0f, 0.3f) : Vec3(0.249f, 1.0f, 0.141f)));  // (the leaf, hinged on the +X jamb)
-          CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces > 0);
-          size_t named = 0, wrongly = 0;
-          for (const std::string &c : w.bo->get<Blockout>()->state.swing_cuts) {
-            named += c == "Door 'Door': its open leaf cuts 'Thing'";
-            wrongly += c.find("'Beside'") != std::string::npos || c.find("'Wall'") != std::string::npos;
-          }
-          CHECK(named == 1 && wrongly == 0);
+          CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces == 0 && w.bo->get<Blockout>()->state.swing_cuts.empty());
         }
     /* A closed door, and a Sliding or an Opening Only one, cut nothing past the Depth and say nothing. */
     for (int style : {kDoorOpeningOnly, kDoorSingle, kDoorSliding}) {
@@ -22818,24 +22803,35 @@ static void tests_round499_review() {
     }
   });
 
-  test("blockout door styles (499 review): Hinge Side Left is the jamb on your left when you stand in the room the door opens into, facing it - local +X - and Slide Direction Left slides that way", [] {
+  test("blockout door styles (499 review, 515): Hinge Side Left is the jamb on your left when you stand in the room the door opens into, facing it - local +X - and Slide Direction Left slides that way: the leaf object's pivot is on that jamb and it swings into the room (+Z)", [] {
     for (int method : r498_methods()) {
       Editor ed;
       const R499Wall w = r499_wall(ed, kDoorSingle, method, 0.02f);
       BlockoutPiece *bp = w.door->get<BlockoutPiece>();
       bp->open_amount = 1.0f;
+      auto door_space = [&](const GameObject &leaf, Vec3 p) { return w.door->world_matrix().inverse().point(leaf.world_matrix().point(p)); };
       for (int hinge : {0, 1}) {
         bp->hinge_side = hinge;
         r495_built(ed);
+        r515_settle(ed);
+        const std::vector<GameObject *> leaves = r515_leaves(*w.door);
+        CHECK(leaves.size() == 1);
+        if (leaves.size() != 1) continue;
         const float x = hinge == 0 ? 0.39f : -0.39f;
-        CHECK(r498_matter(*w.bo, *w.door, {x, 1.0f, 0.5f}) && !r498_matter(*w.bo, *w.door, {-x, 1.0f, 0.5f}));
+        const Vec3 pivot = door_space(*leaves[0], Vec3(0.0f)), free_end = door_space(*leaves[0], Vec3(hinge == 0 ? -0.78f : 0.78f, 0.0f, 0.0f));
+        CHECK_NEAR(pivot.x, x, 1e-4f);
+        CHECK(free_end.z > 0.7f && std::fabs(free_end.x - x) < 0.05f);  // (swung 90 degrees into the room: its free end is 0.78 m out, over its hinge)
       }
       bp->style = kDoorSliding;
       for (int slide : {0, 1}) {
         bp->slide_direction = slide;
         r495_built(ed);
+        r515_settle(ed);
+        const std::vector<GameObject *> leaves = r515_leaves(*w.door);
+        CHECK(leaves.size() == 1);
+        if (leaves.size() != 1) continue;
         const float x = slide == 0 ? 1.0f : -1.0f;
-        CHECK(r498_matter(*w.bo, *w.door, {x, 1.0f, 0.12f}) && !r498_matter(*w.bo, *w.door, {-x, 1.0f, 0.12f}));
+        CHECK(door_space(*leaves[0], Vec3(0.0f)).x * x > 0.5f);  // (slid toward Left = +X, a leaf's width)
       }
     }
   });
@@ -22862,24 +22858,26 @@ static void tests_round499_review() {
   });
 
   /* ---- A Double door closed is one slab; its slit is where it is open ---- */
-  test("blockout door styles (499 review): a Double door closed has no slit - a line through x = 0 meets the leaves - and open has one; the grid path makes a slit under a cell and a half as one slab and says so", [] {
+  test("blockout door styles (499 review, 515): a Double door's two leaf objects meet in the middle when closed with no slit - each reaches x = 0 - and the doorway through the wall is clear; there is no slit for the grid to hold, so no fit is noted", [] {
     for (int method : r498_methods()) {
       Editor ed;
       const R499Wall w = r499_wall(ed, kDoorDouble, method, 0.01f);
-      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
-      for (float z : {-0.01f, 0.0f, 0.01f}) CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, z}));
+      r515_settle(ed);
+      for (float z : {-0.01f, 0.0f, 0.01f}) CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, z}));
       CHECK(r498_judge(*w.bo).empty());
-      bp->open_amount = 0.5f;
-      r495_built(ed);
-      CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && r498_judge(*w.bo).empty());
+      const std::vector<GameObject *> leaves = r515_leaves(*w.door);
+      CHECK(leaves.size() == 2);
+      if (leaves.size() != 2) continue;
+      for (const GameObject *l : leaves) {  // (each leaf's free end, in the door's space, is the middle)
+        const float sign = l->local().position.x > 0.0f ? 1.0f : -1.0f;
+        CHECK_NEAR(w.door->world_matrix().inverse().point(l->world_matrix().point(Vec3(-sign * 0.39f, 0.0f, 0.0f))).x, 0.0f, 1e-4f);
+      }
     }
     Editor ed;
     const R499Wall w = r499_wall(ed, kDoorDouble, 2, 0.02f);
     w.door->get<BlockoutPiece>()->open_amount = 0.3f;
     r495_built(ed);
-    const std::vector<BlockoutWindowFit> &fits = w.bo->get<Blockout>()->state.window_fits;
-    CHECK(fits.size() == 1 && fits[0].coarse && fits[0].door && fits[0].narrowest <= 0.0201f);  // (the 2 cm slit under 1.5 cells of 2 cm)
-    CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces > 0 && r498_judge(*w.bo).empty());
+    CHECK(w.bo->get<Blockout>()->state.window_fits.empty() && r498_judge(*w.bo).empty());  // (the 2 cm slit the grid had to hold went with the leaf)
   });
 
   /* ---- Numbers a style does not read, and numbers too large ---- */
@@ -22897,7 +22895,7 @@ static void tests_round499_review() {
       Editor ed;
       const R499Wall w = r499_wall(ed, kDoorSingle, 1, 0.05f);
       w.door->get<BlockoutPiece>()->drum_radius = nan;
-      CHECK(made(w) > 4);
+      CHECK(made(w) > 2);  // (round 515: the frame - the blank, the reveals, the opening - and no piece of the leaf)
       w.door->get<BlockoutPiece>()->leaf = false, w.door->get<BlockoutPiece>()->leaf_thickness = nan;
       CHECK(made(w) > 2);
       w.door->get<BlockoutPiece>()->style = kDoorRevolving, w.door->get<BlockoutPiece>()->frame_width = nan, w.door->get<BlockoutPiece>()->arch_rise = nan, w.door->get<BlockoutPiece>()->drum_radius = 1.0f;  // (a Revolving door reads the Drum Radius: the earlier NaN is put right)
@@ -23036,10 +23034,7 @@ static void tests_round499_review() {
     };
     CHECK(cuts().empty());  // (closed)
     ed.command("blockout set open 1");
-    const std::vector<std::string> named = cuts();
-    size_t into = 0;
-    for (const std::string &c : named) into += c == "Door '" + door->name + "': its open leaf cuts into room '" + room->name + "'";
-    CHECK(into == 1 && named.size() == 1);
+    CHECK(cuts().empty());  // (round 515: an open leaf cuts nothing, into a room or out of it: ADR 0136)
     CHECK(r498_judge(*bo).empty());
     ed.command("blockout set open 0");
     CHECK(cuts().empty());  // (Open Amount 0 cuts nothing)
@@ -23306,7 +23301,7 @@ static void tests_round499_te() {
   });
 
   /* ---- What a swung leaf does to what stands near it ---- */
-  test("blockout door styles (499 te): the strip a swung door clears into the room - a column, a floor slab (a raised room) and another wall standing in it are cut by the swing and only by the swing, and the status names them; a closed or Opening Only door leaves them be, and things beside or beyond the strip stay (the numbers are printed)", [] {
+  test("blockout door styles (499 te): what stands in the strip a swung door used to clear into the room - a column, a floor slab (a raised room) and another wall - is kept at every style and Open Amount, and the status names no cut (round 515: the leaf is an object; the numbers are printed)", [] {
     struct Var {
       const char *what;
       int style;
@@ -23344,16 +23339,11 @@ static void tests_round499_te() {
             CHECK(why.empty());
             const bool a = r498_matter(*r.bo, *r.door, in_strip), b = r498_matter(*r.bo, *r.door, beside), f = scenario == 2 ? true : r498_matter(*r.bo, *r.door, far);
             std::printf("    %s: in the strip %s, beside it %s, beyond it %s\n", label.c_str(), a ? "kept" : "CUT", b ? "kept" : "CUT", f ? "kept" : "CUT");
-            CHECK(b);  // (a door is one doorway wide: what stands beside the strip is never cut)
-            if (scenario != 2) CHECK(f);  // (and what stands beyond the leaf's reach)
-            const bool swung = (v.style == kDoorSingle || v.style == kDoorDouble) && v.open > 0.0f;
-            if (v.style == kDoorOpeningOnly || (v.style == kDoorSingle && v.open == 0.0f) || v.style == kDoorSliding) CHECK(a);  // (no swing: the old reach of the door's Depth, 0.2 m into the room)
-            /* (A Double's leaves reach only 0.38 m: the probe at 0.5 m is past them, so only a Single is held to cut it.) */
-            if (swung && v.open == 1.0f && scenario == 0 && v.style == kDoorSingle) CHECK(!a);  // (the claim: the width of the doorway cleared as far as the leaf reaches)
-            /* Round 499 review (part 2): the Add variant that would have kept them was measured and dropped (414 problems in 2,000 door arrangements); the strip stays, and the status names what the swing cuts. */
-            const std::vector<std::string> &cuts = r.bo->get<Blockout>()->state.swing_cuts;
-            if (swung) CHECK(r498_class(*r.bo, *r.door, kClassLeaf).faces > 0 && (a || !cuts.empty()));  // (what the leaf does not reach is not cut and not named)
-            else CHECK(cuts.empty());
+            CHECK(b);
+            if (scenario != 2) CHECK(f);
+            /* Round 515 (ADR 0136): the leaf is an object, so nothing swings through the Blockout: what stands in the strip is kept at every Open Amount, nothing is named, and no Leaf face is in the mesh. */
+            CHECK(a);
+            CHECK(r.bo->get<Blockout>()->state.swing_cuts.empty() && r498_class(*r.bo, *r.door, kClassLeaf).faces == 0);
           }
   });
 
@@ -23408,7 +23398,7 @@ static void tests_round499_te() {
   });
 
   /* ---- Criterion 1, with a walk through the doorway ---- */
-  test("blockout door styles (499 te): a walk along the door's Z at several heights is stopped by a closed leaf (twice: in and out of it) from the floor line to the head, and passes an open door, a slid leaf and a door with its Leaf off (the Revolving ring's crossings and a Double's slit are printed)", [] {
+  test("blockout door styles (499 te): a walk along the door's Z at several heights passes every style's doorway - closed leaf, open leaf, slid leaf, Leaf off - because the leaf is an object and not in the mesh (round 515)", [] {
     for (int method : r498_methods())
       for (int style = 1; style < kBlockoutDoorStyles; style++) {
         Editor ed;
@@ -23425,10 +23415,9 @@ static void tests_round499_te() {
             CHECK(hits == 0);  // (round 499 review: the ring has two entries along the door's Z - one walks in, through the drum and out; this printed a closed tube's crossings)
             continue;
           }
-          if (hits != 2) std::printf("    %s closed leaf at y %.2f: %d crossings\n", name.c_str(), y, hits);
-          CHECK(hits == 2);
+          if (hits != 0) std::printf("    %s closed leaf at y %.2f: %d crossings\n", name.c_str(), y, hits);
+          CHECK(hits == 0);  // (round 515: a closed leaf is an object, not in the mesh: the walk is not stopped)
         }
-        if (style == kDoorDouble) std::printf("    %s: a walk through the middle of the closed leaves (the slit) crosses %d triangles\n", name.c_str(), walk(0.0f, 1.0f));
         if (style == kDoorRevolving) continue;
         bp->leaf = false;
         r495_built(ed);
@@ -23446,13 +23435,12 @@ static void tests_round499_te() {
             if (hits != 0) std::printf("    %s open at y %.2f: %d crossings\n", name.c_str(), y, hits);
             CHECK(hits == 0);
           }
-          if (style == kDoorSingle) CHECK(t499_walk(*w.bo, *w.door, {-0.39f, 1.0f, -0.3f}, {-0.39f, 1.0f, 1.2f}) >= 2);  // (the swung leaf is in the room: a walk along it crosses it)
         }
       }
   });
 
   /* ---- Criterion 4, odd amounts ---- */
-  test("blockout door styles (499 te): Open Amount at 1e-6, 0.05, 0.95 and 0.999999 for Single (either hinge), Double and Sliding (either way) is sound on each path, with no unresolved place on the exact path, and a hair off closed is closed and a hair off open is open", [] {
+  test("blockout door styles (499 te): Open Amount at 1e-6, 0.05, 0.95 and 0.999999 for Single (either hinge), Double and Sliding (either way) is sound on each path, with no unresolved place on the exact path, and the doorway clear at each (round 515: the leaf's pose is its object's)", [] {
     struct Run {
       int style, hinge, slide;
       const char *what;
@@ -23465,7 +23453,6 @@ static void tests_round499_te() {
         const R499Wall w = r499_wall(ed, r.style, method, 0.01f);
         BlockoutPiece *bp = w.door->get<BlockoutPiece>();
         bp->hinge_side = r.hinge, bp->slide_direction = r.slide;
-        const float h = r.hinge == 1 ? -1.0f : 1.0f, s = r.slide == 1 ? -1.0f : 1.0f;  // (round 499 review: Left is +X - on your left when you stand in the room the door opens into, facing it; this had Left as -X)
         for (float open : {1e-6f, 0.05f, 0.95f, 0.999999f}) {
           bp->open_amount = open;
           r495_built(ed);
@@ -23475,18 +23462,8 @@ static void tests_round499_te() {
           if (!why.empty() || (method == 1 && unresolved)) std::printf("    %s %s at %g: %s (%zu unresolved, %zu small)\n", r498_method_name(method), r.what, (double)open, why.c_str(), unresolved, small);
           CHECK(why.empty());
           if (method == 1) CHECK(unresolved == 0);
-          if (r.style == kDoorSingle) {
-            if (open == 1e-6f) CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}));
-            if (open == 0.999999f) CHECK(r498_matter(*w.bo, *w.door, {h * 0.39f, 1.0f, 0.5f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}));
-          }
-          if (r.style == kDoorSliding) {
-            if (open == 1e-6f) CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}));
-            if (open == 0.999999f) CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}) && r498_matter(*w.bo, *w.door, {s * 1.0f, 1.0f, 0.12f}));
-          }
-          if (r.style == kDoorDouble) {
-            if (open == 1e-6f) CHECK(r498_matter(*w.bo, *w.door, {0.2f, 1.0f, 0.0f}));
-            if (open == 0.999999f) CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && r498_matter(*w.bo, *w.door, {0.39f, 1.0f, 0.3f}));
-          }
+          /* Round 515: the doorway is clear at every Open Amount (the leaf's pose is the leaf object's), and it is the same doorway. */
+          CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}));
         }
       }
   });
@@ -23634,7 +23611,7 @@ static void tests_round499_te() {
   });
 
   /* ---- Criterion 8: every style saved, opened, exported ---- */
-  test("blockout door styles (499 te): each of the six styles, swung or slid a little, keeps its numbers and its mesh bytes through save and open, and a GLB export has the leaf in the Leaf Material's slot (and none where the style has no leaf)", [] {
+  test("blockout door styles (499 te, 515): each of the six styles, swung or slid a little, keeps its numbers and its mesh bytes through save and open - the leaf objects with them - and a GLB export has the leaf object in the Leaf Material (and none where the style has no leaf)", [] {
     const std::string leaf_mat = r482_material("R499TeLeaf", Vec3(0.2f, 0.6f, 0.9f));
     for (int method : r498_methods())
       for (int style = 0; style < kBlockoutDoorStyles; style++) {
@@ -23645,17 +23622,20 @@ static void tests_round499_te() {
         ed.select_for_test(w.bo->id, false);
         ed.command("blockout set material leaf " + leaf_mat);
         r495_built(ed);
+        r515_settle(ed);
         const std::string name = t499_name(method, style);
         const Mesh before = *r495_mesh(*w.bo);
         const BlockoutPiece numbers = *bp;
-        const std::map<std::string, size_t> tris = r482_triangles(*w.bo);
-        size_t leaf_tris = 0;
-        for (const auto &t : tris)
-          if (!t.first.empty()) leaf_tris += t.second;
+        for (const auto &t : r482_triangles(*w.bo)) CHECK(t.first.empty());  // (the Blockout's mesh has no material of the leaf's)
         const bool has_leaf = style != kDoorOpeningOnly && style != kDoorRevolving;
+        size_t leaf_tris = 0;
+        for (const GameObject *l : r515_leaves(*w.door)) {
+          const MeshFilter *mf = l->get<MeshFilter>();
+          for (size_t f = 0; mf && mf->mesh && f < mf->mesh->face_count(); f++) leaf_tris += mf->mesh->face_size(f) - 2;
+        }
         std::printf("    %s: %zu leaf triangles\n", name.c_str(), leaf_tris);
-        if (has_leaf) CHECK(leaf_tris > 0);
-        else CHECK(leaf_tris == 0);
+        CHECK(has_leaf ? leaf_tris > 0 : leaf_tris == 0);
+        const size_t leaves = r515_leaves(*w.door).size();
         const R482Back back = r482_read(r482_export(ed, "glb", "r499te.glb"));
         size_t got = 0;
         for (const auto &t : back.triangles)
@@ -23666,17 +23646,18 @@ static void tests_round499_te() {
         ed.command("newscene");
         CHECK(ed.open_scene_for_test(path));
         for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
-        r495_built(ed);
+        r515_settle(ed);
         GameObject *bo = r477_find(ed), *door = ed.scene().find_by_name("Door");
         const BlockoutPiece *lp = door ? door->get<BlockoutPiece>() : nullptr;
         CHECK(bo && lp && lp->style == style && lp->opening == 1 && lp->open_amount == numbers.open_amount && lp->hinge_side == 1 && lp->slide_direction == 1 && lp->frame_width == numbers.frame_width && lp->drum_radius == numbers.drum_radius);
         CHECK(bo && r495_mesh(*bo) && r477_same(before, *r495_mesh(*bo)) && blockout_mesh_hash(before) == blockout_mesh_hash(*r495_mesh(*bo)));
+        CHECK(door && r515_leaves(*door).size() == leaves);
         fs::remove_file(path);
       }
   });
 
   /* ---- Criterion 6: UVs in a scaled Blockout ---- */
-  test("blockout door styles (499 te): the UVs of a Single door's leaf follow the same rule as the wall's faces beside it, in a Blockout of scale 1 and of scale 2 (the ratio of U to X is printed)", [] {
+  test("blockout door styles (499 te, 515): the UVs of a Single door's leaf object follow the same rule as the wall's faces beside it, in a Blockout of scale 1 and of scale 2 (the ratio of U to X is printed)", [] {
     for (int method : r498_methods())
       for (float scale : {1.0f, 2.0f}) {
         Editor ed;
@@ -23685,38 +23666,41 @@ static void tests_round499_te() {
         ed.select_for_test(w.bo->id, false);
         ed.command("blockout set texscale 0.5");
         r495_built(ed);
+        r515_settle(ed);
         const Mesh *m = r495_mesh(*w.bo);
         const Blockout *b = w.bo->get<Blockout>();
         CHECK(m != nullptr && b->state.faces.piece.size() == (m ? m->face_count() : 0) && b->state.status.refusal.empty());
-        if (!m) continue;
-        std::vector<blockout::Piece> pieces;
-        blockout::Settings settings;
-        blockout_snapshot(*w.bo, pieces, settings);
-        double leaf_sum = 0, other_sum = 0;
-        size_t leaf_n = 0, other_n = 0, leaf_off = 0, other_off = 0;
-        std::vector<float> leaf_r, other_r;
-        for (size_t f = 0; f < m->face_count(); f++) {
-          const Vec3 n = m->face_normal(f);
-          if (std::fabs(n.z) < 0.9999f) continue;
-          const blockout::Piece *piece = nullptr;
-          for (const blockout::Piece &p : pieces)
-            if (p.id == b->state.faces.piece[f]) piece = &p;
-          const bool leaf = piece && blockout_face_class(*piece, b->state.faces.side[f]) == kClassLeaf;
-          const uint32_t first = m->face_offsets[f];
-          for (uint32_t i = 0; i < m->face_size(f); i++) {
-            const Vec3 p = m->positions[m->face_verts(f)[i]];
-            if (std::fabs(p.x) < 0.05f) continue;
-            const float ratio = m->uvs[first + i].x / (p.x * (n.z > 0 ? 1.0f : -1.0f));
-            (leaf ? leaf_r : other_r).push_back(ratio);
+        const std::vector<GameObject *> leaves = r515_leaves(*w.door);
+        CHECK(leaves.size() == 1);
+        if (!m || leaves.size() != 1) continue;
+        /* U over X on the faces square to Z, as the mean: the Blockout's own faces and the leaf's. */
+        auto ratios = [](const Mesh &mesh, std::vector<float> &out) {
+          for (size_t f = 0; f < mesh.face_count(); f++) {
+            const Vec3 n = mesh.face_normal(f);
+            if (std::fabs(n.z) < 0.9999f) continue;
+            const uint32_t first = mesh.face_offsets[f];
+            for (uint32_t i = 0; i < mesh.face_size(f); i++) {
+              const Vec3 p = mesh.positions[mesh.face_verts(f)[i]];
+              if (std::fabs(p.x) < 0.05f) continue;
+              out.push_back(mesh.uvs[first + i].x / (p.x * (n.z > 0 ? 1.0f : -1.0f)));
+            }
           }
-        }
-        for (float r : leaf_r) leaf_sum += r, leaf_n++;
-        for (float r : other_r) other_sum += r, other_n++;
-        const float lm = leaf_n ? (float)(leaf_sum / (double)leaf_n) : 0.0f, om = other_n ? (float)(other_sum / (double)other_n) : 0.0f;
+        };
+        std::vector<float> leaf_r, other_r;
+        ratios(*m, other_r);
+        const MeshFilter *lf = leaves[0]->get<MeshFilter>();
+        CHECK(lf && lf->mesh);
+        if (!lf || !lf->mesh) continue;
+        ratios(*lf->mesh, leaf_r);
+        double leaf_sum = 0, other_sum = 0;
+        for (float r : leaf_r) leaf_sum += r;
+        for (float r : other_r) other_sum += r;
+        const float lm = leaf_r.empty() ? 0.0f : (float)(leaf_sum / (double)leaf_r.size()), om = other_r.empty() ? 0.0f : (float)(other_sum / (double)other_r.size());
+        size_t leaf_off = 0, other_off = 0;
         for (float r : leaf_r) leaf_off += std::fabs(r - lm) > 1e-3f;
         for (float r : other_r) other_off += std::fabs(r - om) > 1e-3f;
-        std::printf("    %s scale %.0f: U/X on the leaf %.4f (%zu corners), on the other faces %.4f (%zu corners)\n", r498_method_name(method), (double)scale, (double)lm, leaf_n, (double)om, other_n);
-        CHECK(leaf_n >= 4 && other_n >= 4 && leaf_off == 0 && other_off == 0 && std::fabs(lm - om) < 1e-3f);
+        std::printf("    %s scale %.0f: U/X on the leaf %.4f (%zu corners), on the other faces %.4f (%zu corners)\n", r498_method_name(method), (double)scale, (double)lm, leaf_r.size(), (double)om, other_r.size());
+        CHECK(leaf_r.size() >= 4 && other_r.size() >= 4 && leaf_off == 0 && other_off == 0 && std::fabs(lm - om) < 1e-3f);
       }
   });
 }
@@ -26824,4 +26808,6 @@ void run_blockout_tests() {
   tests_round499_upright_console();
   tests_round500();
   tests_round500_te();
+  tests_round515();
+  tests_round515_te();
 }

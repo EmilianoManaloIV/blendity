@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -78,7 +79,7 @@ const char *const kMaterialHelp[kBlockoutClasses] = {
     "The material of the faces a Subtract piece cut (a door's or window's reveal, a pocket's sides), and of what an Intersect piece trimmed.",
     "The material of the faces of a plain Add piece that is no room, and of a styled window's or door's frame, bars and sill board (and a Revolving door's ring). A face made of several pieces' faces in one plane takes the material of the first of them.",
     "The material of a styled window's pane (a thin sheet in its light, when its Glass is on).",
-    "The material of a styled door's leaf (one flat box; a Revolving door has none).",
+    "The material of a styled door's leaf object (one flat box, or the Wings of a Revolving door): the leaf takes it, not the Blockout's mesh.",
     "The material of the top faces of a Roof preset (the faces that look up; its underside, its gable ends and its eave's edge are Solid)."};
 
 float safe_scale(float v) { return finite_bits(v) && v > 0.0f ? std::min(1000.0f, std::max(0.001f, v)) : 1.0f; }
@@ -183,23 +184,29 @@ static void reflect_door_rows(Reflector &r, BlockoutPiece &p, bool all, int st) 
   }
   if (all || st == kDoorArched) {
     r.field("Arch Rise", p.arch_rise, 0.01f, 0.0f, 1000.0f);
-    r.help("How high the round head rises above the line it springs from, in metres: 0 is a half circle (half the Width). The head ends at the door's Head. An Arched door's leaf stays closed.");
+    r.help("How high the round head rises above the line it springs from, in metres: 0 is a half circle (half the Width). The head ends at the door's Head. An Arched door's leaf is square: it stands up to the line the round head springs from, and the round head above it stays open.");
   }
+  /* (Round 515: the leaf is an object under the door. For a Revolving door the Leaf row is its wings, `wings` - off by default: the drum alone is the blocked-out space.) */
   if (all || !revolving) {
     r.field("Leaf", p.leaf);
-    r.help("The door's leaf: one flat box in its own material class (Leaf). Off: the frame alone, an open doorway. A closed leaf fills the opening and separates the two rooms.");
+    r.help("The door's leaf: its own object under the door (an object with a mesh, pivot at the hinge) that Open Amount - or the Rotate tool - swings without rebuilding the wall. Off: no leaf object, an open doorway. The frame and the doorway are in the Blockout's mesh whatever the Leaf says; a closed leaf is not part of the lightmap bake.");
   }
-  if (all || (!revolving && p.leaf)) {
+  if (!all && revolving) {
+    r.field("Leaf", p.wings);
+    r.help("The Wings: four vanes in a cross, one object under the door, turning about the drum's axis with Open Amount (1 is a quarter turn). Off (the default): the drum is only the blocked-out space of a revolving door.");
+  }
+  if (all || p.leaf_on()) {
     r.field("Leaf Thickness", p.leaf_thickness, 0.005f, kBlockoutMinSize, 1000.0f);
-    r.help("How thick the leaf is, through the wall, in metres. A leaf that swings or stays closed in the frame is held to six tenths of the Frame Depth; a Sliding leaf on the wall's face may be as thick as you like.");
+    r.help("How thick the leaf (or each vane) is, through the wall, in metres. A leaf that swings in the frame is held to six tenths of the Frame Depth; a Sliding leaf on the wall's face may be as thick as you like.");
   }
-  if (all || (!revolving && st != kDoorArched && p.leaf)) {
+  if (all || p.leaf_on()) {
     r.field("Open Amount", p.open_amount, 0.01f, 0.0f, 1.0f);
-    r.help("0 closed to 1 open: a Single or Double leaf swings that fraction of 90 degrees about its hinge, into the room the door faces (its +Z side); a Sliding leaf slides that fraction of its own width along the wall. A number for the view: nothing animates. An open Single or Double leaf clears the doorway's width in front of the wall as far as the leaf reaches: pieces and walls standing there are cut, and the Blockout's status names them. Open Amount 0 (the default) cuts nothing.");
+    r.help("0 closed to 1 open: a Single, Double or Arched leaf swings that fraction of 90 degrees about its hinge, into the room the door faces (its +Z side); a Sliding leaf slides that fraction of its own width along the wall; the Wings turn that fraction of a quarter turn. "
+           "Only the leaf object moves - the Blockout's mesh is not built again, and nothing in front of the wall is cut. Turning a leaf with the Rotate tool writes the angle back here.");
   }
-  if (all || (st == kDoorSingle && p.leaf)) {
+  if (all || ((st == kDoorSingle || st == kDoorArched) && p.leaf)) {
     r.enumeration("Hinge Side", p.hinge_side, kBlockoutSideNames, 2);
-    r.help("Which jamb a Single leaf hangs on. Left: the hinge is on your left when you stand in the room the door opens into, facing the door (its +X side); Right is the other jamb. (A Double hangs one on each.)");
+    r.help("Which jamb a Single (or Arched) leaf hangs on. Left: the hinge is on your left when you stand in the room the door opens into, facing the door (its +X side); Right is the other jamb. (A Double hangs one on each.)");
   }
   if (all || (st == kDoorSliding && p.leaf)) {
     r.enumeration("Slide Direction", p.slide_direction, kBlockoutSideNames, 2);
@@ -207,7 +214,7 @@ static void reflect_door_rows(Reflector &r, BlockoutPiece &p, bool all, int st) 
   }
   if (all || revolving) {
     r.field("Drum Radius", p.drum_radius, 0.01f, kBlockoutMinSize, 1000.0f);
-    r.help("A Revolving door is only the blocked-out space: a round drum of this radius cut through the wall, and a ring one wall-thickness thick round it that stands out of both faces of the wall. No leaf, no wings.");
+    r.help("A Revolving door is the blocked-out space: a round drum of this radius cut through the wall, and a ring one wall-thickness thick round it that stands out of both faces of the wall. Its Wings (Leaf on) are a separate object inside the drum.");
   }
 }
 
@@ -218,7 +225,7 @@ static void reflect_opening_style(Reflector &r, BlockoutPiece &p, bool all) {
   if (door) {
     r.enumeration("Style", p.style, kBlockoutDoorStyleNames, kBlockoutDoorStyles);
     r.help("What the door adds to the wall besides the hole. Opening Only: nothing (a plain cut). Single: a frame and one leaf hinged at one jamb. Double: a leaf on each jamb. "
-           "Sliding: a leaf on the wall's face that slides along it. Arched: a Single with a round head (its leaf stays closed). Revolving: only the blocked-out space - a round drum "
+           "Sliding: a leaf on the wall's face that slides along it. Arched: a Single with a round head (its square leaf stands up to where the head springs). Revolving: the blocked-out space - a round drum "
            "cut through the wall and a ring round it (Width is the two entries through the ring, at most eight tenths of the drum's width). A style brings its own size when it is chosen "
            "(Double 1.8 m wide: two 0.9 m leaves; Revolving 1.2 m) when the Width and Head are still the old style's; a size you set stays. The frame and a Revolving door's ring take the Solid material, the leaf the Leaf material, the hole's reveal the Cut material.");
     reflect_door_rows(r, p, false, std::min(kBlockoutDoorStyles - 1, std::max(0, p.style)));
@@ -232,6 +239,7 @@ static void reflect_opening_style(Reflector &r, BlockoutPiece &p, bool all) {
   reflect_window_rows(r, p, all, std::min(kBlockoutWindowStyles - 1, std::max(0, p.style)));
   if (all) {  // (the door's own numbers: one row each, the window's shared ones above)
     r.field("Leaf", p.leaf);
+    r.field("Wings", p.wings);  // (round 515: a Revolving door's Leaf row; a file of round 499 has none and loads with the drum alone)
     r.field("Leaf Thickness", p.leaf_thickness, 0.005f, kBlockoutMinSize, 1000.0f);
     r.field("Open Amount", p.open_amount, 0.01f, 0.0f, 1.0f);
     r.enumeration("Hinge Side", p.hinge_side, kBlockoutSideNames, 2);
@@ -470,7 +478,7 @@ bool BlockoutPiece::has_class(int cls) const {
   if (is_preset()) return cls == kClassSolid || (preset == kPresetRoof && cls == kClassRoof);
   if (is_room()) return cls <= kClassOutside;
   if (is_styled_window()) return cls == kClassCut || cls == kClassSolid || (cls == kClassGlass && glass);  // (round 498: the hole's reveal, the frame, the pane)
-  if (is_styled_door()) return cls == kClassCut || cls == kClassSolid || (cls == kClassLeaf && leaf && style != kDoorRevolving);  // (round 499: the reveal, the frame or ring, the leaf)
+  if (is_styled_door()) return cls == kClassCut || cls == kClassSolid || (cls == kClassLeaf && leaf_on());  // (round 499: the reveal, the frame or ring, the leaf - round 515: an object of its own, which takes this piece's Leaf material)
   const bool adds = opening == 0 && operation == (int)blockout::Op::Add;
   return cls == (adds ? kClassSolid : kClassCut);
 }
@@ -737,19 +745,15 @@ namespace {
  * pieces that bound what is left are the frame's and the pane's, so the part says which class each side is (window_face_class). */
 enum WindowPart : int {
   kPartBlank = 1, kPartBoard, kPartRevealFront, kPartRevealBack, kPartLight, kPartLightFront, kPartLightBack,
-  /* Round 499, a door's: kPartCut + 3 * (class of its top) + (class of its bottom) is a Subtract outline whose sides over its corners each say a class in the index
-   * field (2 bits a side, the first eight); the leaf of a Sliding door or a swung leaf's part beyond the frame; a Revolving door's ring (Add) and its drum (Subtract). */
-  kPartCut = 8, kPartLeaf = 17, kPartRing, kPartDrum
+  /* Round 499, a door's: a Revolving door's ring (Add) and its drum (Subtract). The numbers 8 to 17 were round 499's swung-leaf cutters and leaf; round 515 made the leaf an
+   * object of its own (ADR 0136), so they are gone and the ring and the drum keep theirs. */
+  kPartRing = 18, kPartDrum = 19
 };
 constexpr int kPartDoorFlag = 0x20;  // (added to the part of anything a door makes: its Glass is the Leaf class)
 constexpr uint64_t kBoardFlag = 0x8000;  // (in the index field: the window has a sill board, so the hole's floor is its top)
 
 uint64_t window_piece_id(uint64_t owner, int part, uint32_t index, bool board) {
   return kBlockoutGeneratedBit | ((uint64_t)part << 48) | ((uint64_t)(index & 0x7FFF) | (board ? kBoardFlag : 0)) << 32 | (owner & 0xFFFFFFFFull);
-}
-/* A door's outline cutter: the bits above the part (55 to 62) count the door's pieces, so every id stays one of its own; the index field holds the sides' classes. */
-uint64_t door_cut_id(uint64_t owner, int part, uint32_t counter, uint32_t classes) {
-  return kBlockoutGeneratedBit | ((uint64_t)(counter & 0xFF) << 55) | ((uint64_t)part << 48) | (uint64_t)(classes & 0xFFFF) << 32 | (owner & 0xFFFFFFFFull);
 }
 int window_part(uint64_t id) { return (int)((id >> 48) & 0x7F); }
 bool window_board(uint64_t id) { return ((id >> 32) & kBoardFlag) != 0; }
@@ -762,7 +766,7 @@ struct WindowShape {
   float fd = 0, gt = 0;     // frame depth, glass thickness
   int nx = 1, ny = 1;       // lights across and up
   float rise = 0;           // Arched: the head's rise (its semi-axis up)
-  bool glass = false, board = false;  // (a door's leaf is `glass`: the same thin sheet in the light)
+  bool glass = false, board = false;  // (a window's pane and sill board; a door has neither: its leaf is an object, ADR 0136)
   float overhang = 0;
   float board_t = 0.05f;    // the sill board's thickness
   /* Round 499: a door's shape. `arched` and `round` say what the head and the whole are (the style numbers of a door and a window differ). */
@@ -771,7 +775,6 @@ struct WindowShape {
   int hinge = 0, slide = 0; // 0 Left (-X), 1 Right (+X)
   float drum = 0, ring = 0; // Revolving: the drum's radius and the ring's thickness (the wall's)
   float entry = 0;          // Revolving: the width of the two entries cut through the ring (the door's Width, held under the drum's diameter)
-  float slit = 0;           // Double: the gap between the two leaves where they are open (the leaves meet with none when closed)
 };
 
 constexpr float kBoardThickness = 0.05f;
@@ -780,11 +783,6 @@ constexpr float kSmallest = 1e-4f;  // (a part thinner than this is left out: th
 constexpr float kSlidingLeafMax = 10.0f;  // (a Sliding leaf stands on the wall's face and may be thick; 10 m is the most a number of it makes)
 constexpr float kDrumMax = 100.0f;        // (a Revolving drum's largest radius: a bigger number is held to it, as the other pieces' sizes are held to kBlockoutMaxSize)
 constexpr float kEntryShare = 1.6f;       // (the entries through a Revolving door's ring are at most this many drum radii wide: eight tenths of its diameter)
-/* A swung leaf's part past the door's Depth: true makes it an Add solid that overlaps what the cutters keep inside the Depth, so that no cutter reaches past the Depth and
- * a swing never cuts another piece. False (the fallback, until the exact path's numbers decide): the cutters and the blank reach as far as the leaf does, over the
- * leaf's own stretch of the doorway. */
-constexpr bool kSwingAddsBeyondDepth = false;  // (measured in round 499 part 2: true gave 414 problems in 2000 door arrangements on the exact path and 95 with small faces on top, against 2 with the strip; see the CHANGELOG)
-constexpr double kBeyondGrow = 1e-3;  // (the Add solid past the Depth is a millimetre fatter than the footprint the cutters keep: where it overlaps them the cutters trim it to the footprint, so no face of it lies in the plane of one of theirs; past the Depth a step of a millimetre is left)
 constexpr float kLeafShare = 0.6f;  // (a leaf in the frame is at most this much of the frame's depth, so that it and its hinge stay inside the frame's slab)
 
 bool window_shape(const BlockoutPiece &bp, WindowShape &s) {
@@ -798,7 +796,6 @@ bool window_shape(const BlockoutPiece &bp, WindowShape &s) {
   else {
     if (!round_door) vals.push_back(bp.frame_width), vals.push_back(bp.frame_depth);
     if (bp.style == kDoorArched) vals.push_back(bp.arch_rise);
-    if (bp.leaf && !round_door) vals.push_back(bp.leaf_thickness);
     if (round_door) vals.push_back(bp.drum_radius);
   }
   for (float v : vals)
@@ -820,14 +817,13 @@ bool window_shape(const BlockoutPiece &bp, WindowShape &s) {
     /* The leaf: the thickness asked for, held inside the frame's slab when the leaf stands in the frame (a Sliding leaf is on the wall's face and may be any thickness); a
      * Revolving door has none. NaN is not asked (the numbers above are finite); an Open Amount that is NaN is closed. */
     const float lt = std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, finite_bits(bp.leaf_thickness) ? std::fabs(bp.leaf_thickness) : 0.04f));
-    s.glass = bp.leaf && !s.revolving;
+    s.glass = false;  // (round 515: the leaf is an object of its own, not a pane in the Blockout's mesh)
     s.gt = s.sliding ? std::min(lt, kSlidingLeafMax) : std::min(lt, kLeafShare * s.fd);
     s.open = finite_bits(bp.open_amount) ? std::min(1.0f, std::max(0.0f, bp.open_amount)) : 0.0f;
     s.hinge = bp.hinge_side == 1 ? 1 : 0, s.slide = bp.slide_direction == 1 ? 1 : 0;
     s.drum = std::min(kDrumMax, std::max(kBlockoutMinSize, finite_bits(bp.drum_radius) ? std::fabs(bp.drum_radius) : 1.0f));
     s.ring = std::max(0.05f, s.depth - 2.0f * kOpeningOvershoot);  // (one wall's thickness: a door's Depth is the wall and 0.1 m each side)
     s.entry = std::min(s.w, kEntryShare * s.drum);
-    s.slit = 0.02f;
     if (s.revolving) return true;
   }
   s.overhang = std::min(kBlockoutMaxSize, std::max(0.0f, bp.sill_overhang));  // (a negative reach is none)
@@ -874,19 +870,12 @@ bool fit_to_grid(WindowShape &s, float cell, BlockoutWindowFit &fit) {
   const float narrow = bars ? std::min(s.fw, s.bw) : s.fw, gap = std::fabs(wall_half - 0.5f * s.fd);
   const bool shallow = s.fd < limit, near_face = gap > 1e-4f && gap < limit, short_board = s.board && s.overhang > 1e-4f && s.overhang < limit;  // (a board ending near the cutters' ends - 0.1 m past the wall - measured no worse on the grid: 837 unresolved places in 200 arrangements at cell 0.02 against 820)
   const bool thin_pane = s.glass && s.gt < limit;
-  /* A Double's slit (where its leaves are open) is a part too: under a cell and a half the leaves are made as one slab, the slit left out. */
-  const bool thin_slit = s.doubled && s.glass && s.open > 0.0f && s.slit < limit;
-  const float slit_narrow = thin_slit ? s.slit : 1e30f;
-  if (thin_slit) s.slit = 0.0f;
   /* The lights are checked first, with the numbers as they are: a Grid of 12 x 12 on 0.6 m has lights of 12 mm whatever else is fine. */
   const float lw0 = (s.w - 2.0f * s.fw - (float)(s.nx - 1) * s.bw) / (float)s.nx, lh0 = (s.h - rails * s.fw - (float)(s.ny - 1) * s.bw) / (float)s.ny;
   const bool closed_lights = lw0 < limit || lh0 < limit;
-  if (!(narrow < limit) && !shallow && !near_face && !short_board && !thin_pane && !closed_lights) {
-    if (thin_slit) fit.coarse = true, fit.frame = s.fw, fit.narrowest = slit_narrow;
-    return true;
-  }
+  if (!(narrow < limit) && !shallow && !near_face && !short_board && !thin_pane && !closed_lights) return true;
   fit.coarse = true, fit.frame = s.fw;
-  fit.narrowest = std::min(slit_narrow, std::min(narrow, std::min(shallow ? s.fd : 1e30f, std::min(near_face ? gap : 1e30f, short_board && s.overhang < limit ? s.overhang : 1e30f))));
+  fit.narrowest = std::min(narrow, std::min(shallow ? s.fd : 1e30f, std::min(near_face ? gap : 1e30f, short_board && s.overhang < limit ? s.overhang : 1e30f)));
   if (thin_pane) fit.narrowest = std::min(fit.narrowest, s.gt);
   if (closed_lights) fit.narrowest = std::min(fit.narrowest, std::min(lw0, lh0));
   s.glass = false;
@@ -921,21 +910,6 @@ struct WindowMaker {
     blockout::Piece p = start(part, op, blockout::Shape::Box);
     p.size = Vec3(x1 - x0, y1 - y0, z1 - z0);
     p.to_blockout = base * Mat4::translate(Vec3(0.5f * (x0 + x1), 0.5f * (y0 + y1), 0.5f * (z0 + z1)));
-    out.push_back(std::move(p));
-  }
-  /* A door's outline piece (round 499): the plan polygon (x, z) pulled up from y0 to y1. `part` is kPartLeaf, or kPartCut + 3 * top + bottom with the classes of the top and
-   * bottom sides - the sides over the corners take theirs from the corners. */
-  template <class Poly>
-  void prism(const Poly &poly, blockout::Op op, int part, float y0, float y1) {
-    if (poly.size() < 3 || !(y1 - y0 > kSmallest)) return;
-    uint32_t classes = 0;
-    for (size_t i = 0; i < poly.size() && i < 8; i++) classes |= (uint32_t)poly[i].cls << (2 * i);
-    blockout::Piece p;
-    p.id = door_cut_id(owner, part | kPartDoorFlag, index++, classes);
-    p.op = op, p.shape = blockout::Shape::Outline;
-    for (const auto &q : poly) p.outline.push_back(Vec2((float)q.x, (float)q.z));
-    p.height = y1 - y0;
-    p.to_blockout = base * Mat4::translate(Vec3(0.0f, 0.5f * (y0 + y1), 0.0f));
     out.push_back(std::move(p));
   }
   /* A vertical column of `radius` from y0 to y1 about the window's axis (a Revolving door's drum and ring). */
@@ -1009,12 +983,6 @@ uint32_t window_depth_side(const blockout::Piece &p, bool plus) {
 int window_face_class(const blockout::Piece &p, uint32_t side) {
   const int raw = window_part(p.id), part = raw & ~kPartDoorFlag;
   const int sheet = (raw & kPartDoorFlag) ? kClassLeaf : kClassGlass;  // (what a thin sheet in the light is: a window's pane, a door's leaf)
-  if (part >= kPartCut && part < kPartCut + 9) {
-    /* A door's outline cutter: side 0 is its bottom, 1 its top, 2 + i the wall over corner i to the next - whose class the index field holds, 2 bits each. */
-    const int top = (part - kPartCut) / 3, bottom = (part - kPartCut) % 3;
-    const int cls = side == 0 ? bottom : side == 1 ? top : side < 10 ? (int)((p.id >> (32 + 2 * (side - 2))) & 3u) : 0;
-    return cls == 2 ? kClassLeaf : cls == 1 ? kClassSolid : kClassCut;
-  }
   switch (part) {
     case kPartBlank:
     case kPartBoard: return kClassSolid;
@@ -1026,151 +994,19 @@ int window_face_class(const blockout::Piece &p, uint32_t side) {
     }
     case kPartLightFront: return side == window_depth_side(p, true) ? sheet : kClassSolid;
     case kPartLightBack: return side == window_depth_side(p, false) ? sheet : kClassSolid;
-    case kPartLeaf: return kClassLeaf;
     case kPartRing: return kClassSolid;
     case kPartDrum: return kClassCut;
     default: return kClassSolid;  // (a light with no pane: the frame's inner sides)
   }
 }
 
-/* ---- A door's pieces (round 499, task 0483) ---- */
-
-/* A corner of a plan polygon (x across, z through the wall) and the class of the side that starts there and runs to the next corner: 0 Cut, 1 Solid, 2 Leaf. */
-struct Corner {
-  double x, z;
-  int cls;
-};
-using Plan = std::vector<Corner>;
-
-Plan plan_rect(double x0, double x1, double z0, double z1, int front, int right, int back, int left) {
-  return {{x0, z0, front}, {x1, z0, right}, {x1, z1, back}, {x0, z1, left}};  // (anticlockwise in (x, z))
-}
-
-/* `in` cut to the half plane a*x + b*z + c >= 0; the side along the cutting line says `cls`, the others keep theirs. */
-Plan plan_clip(const Plan &in, double a, double b, double c, int cls) {
-  Plan out;
-  const size_t n = in.size();
-  for (size_t i = 0; i < n; i++) {
-    const Corner &p = in[i], &q = in[(i + 1) % n];
-    const double dp = a * p.x + b * p.z + c, dq = a * q.x + b * q.z + c;
-    const bool p_in = dp >= 0.0, q_in = dq >= 0.0;
-    if (p_in) out.push_back(p);
-    if (p_in == q_in) continue;
-    const double t = dp / (dp - dq);
-    out.push_back({p.x + t * (q.x - p.x), p.z + t * (q.z - p.z), p_in ? cls : p.cls});  // (leaving: the cut line goes on from here; entering: the old side)
-  }
-  return out;
-}
-
-/* Corners at one place are one; false when what is left has no area worth a piece (a sliver the kernel would skip and name). */
-bool plan_usable(Plan &p) {
-  for (size_t i = 0; i < p.size() && p.size() >= 3;) {
-    const Corner &q = p[(i + 1) % p.size()];
-    if (std::hypot(p[i].x - q.x, p[i].z - q.z) < 1e-6) p.erase(p.begin() + (std::ptrdiff_t)i);
-    else i++;
-  }
-  if (p.size() < 3) return false;
-  double area = 0.0;
-  for (size_t i = 0; i < p.size(); i++) area += p[i].x * p[(i + 1) % p.size()].z - p[(i + 1) % p.size()].x * p[i].z;
-  return std::fabs(area) * 0.5 > 1e-6;
-}
-
-/* `region` less the convex leaf `leaf` (anticlockwise), as convex pieces that do not cover the leaf: the part outside the leaf's first side, then what is outside the
- * second and inside the first, and so on. A piece reaches `eps` over the lines of the sides before it (the pieces are all cutters: overlapping each other leaves no hairline
- * of matter between them), never into the leaf; the sides along the leaf say Leaf. */
-void plan_less_leaf(const Plan &region, const Plan &leaf, double eps, std::vector<Plan> &out) {
-  const size_t n = leaf.size();
-  std::vector<double> nx(n), nz(n);
-  for (size_t i = 0; i < n; i++) {
-    const double ex = leaf[(i + 1) % n].x - leaf[i].x, ez = leaf[(i + 1) % n].z - leaf[i].z, len = std::hypot(ex, ez);
-    nx[i] = -ez / len, nz[i] = ex / len;  // (the inside is on the left)
-  }
-  for (size_t i = 0; i < n; i++) {
-    Plan p = plan_clip(region, -nx[i], -nz[i], nx[i] * leaf[i].x + nz[i] * leaf[i].z, 2);
-    for (size_t j = 0; j < i && !p.empty(); j++) p = plan_clip(p, nx[j], nz[j], -(nx[j] * leaf[j].x + nz[j] * leaf[j].z) + eps, 0);
-    if (plan_usable(p)) out.push_back(std::move(p));
-  }
-}
-
-/* A Single or Double door with its leaf in the frame, which may be swung (Open Amount). A leaf cannot be a plain Add piece in the doorway: every Subtract piece that
- * clears the doorway would cut it. So the doorway is made as the plan seen from above - the frame's slab (|z| < half the Frame Depth) and the two reveals - with each
- * leaf's footprint left out of the cutters: the frame's slab and the part of the leaf in it and in the back reveal are what a blank (Add) keeps, the cutters being the
- * plan less the leaf (convex outline pieces, plan_less_leaf), and what swings out beyond the Depth is an Add piece of its own. The leaf hangs on a pin inside the jamb
- * (it reaches `pin` into the jamb, and a closed one `pin` into the far jamb too), so it and the frame are one solid and no edge of it touches the frame along a line only.
- * The leaf stands from the floor line to the frame's head; there is no clearance round it (it is one with the frame when closed). */
-/* Whether a Single or Double door's leaf can be made: a Double narrower than its two pins (each leaf is half the clear width less half the slit, and hangs `pin` inside its
- * jamb) has no leaf rather than a polygon turned inside out; the door is then the frame alone. */
-bool swing_leaf_fits(const WindowShape &s) {
-  const double clear = (double)s.w - 2.0 * s.fw, pin = std::min(0.5 * (double)s.fw, 0.3 * 0.5 * (double)s.fd);
-  if (!(clear > 1e-3)) return false;
-  return !s.doubled || 0.5 * clear - 0.5 * (double)s.slit > pin + 1e-3;
-}
-
-void swung_leaf_pieces(WindowMaker &mk) {
-  using blockout::Op;
-  const WindowShape &s = mk.s;
-  const double half_f = 0.5 * s.fd, half_d = 0.5 * s.depth, clear = (double)s.w - 2.0 * s.fw;
-  const double turn = (double)s.open * 1.5707963267948966, cs = std::cos(turn), sn = std::sin(turn);
-  const double half_t = 0.5 * s.gt, pin = std::min(0.5 * s.fw, 0.3 * half_f), eps = 1e-3;
-  const float y0 = s.sill, y1 = s.head - s.fw;
-  /* A leaf hung on the jamb at x = sgn * clear / 2: from `pin` inside the jamb to `length` along its way (toward the other jamb, swung into +Z). */
-  auto leaf_plan = [&](double sgn, double length, double grow = 0.0) {
-    const double px = sgn * 0.5 * clear, dx = -sgn * cs, dz = sn, nx = -dz, nz = dx;
-    auto at = [&](double along, double side) { return Corner{px + dx * along + nx * side, dz * along + nz * side, 2}; };
-    return Plan{at(-pin, -half_t - grow), at(length + grow, -half_t - grow), at(length + grow, half_t + grow), at(-pin, half_t + grow)};
-  };
-  struct Hung {
-    Plan leaf;
-    double x0, x1;  // the stretch of the doorway it cuts round: all of it, or a half of a Double (the halves reach `eps` over the middle)
-    Plan wide;      // the same footprint a millimetre fatter: what stands out past the Depth (below)
-  };
-  std::vector<Hung> hung;
-  if (s.doubled) {
-    /* The halves stand `slit` apart where they are open; closed, each reaches 2 eps past the middle so that they are one slab with no crack between them. */
-    const double reach = s.slit > 0.0f && s.open > 0.0f ? 0.5 * clear - 0.5 * (double)s.slit : 0.5 * clear + 2.0 * eps;
-    hung.push_back({leaf_plan(-1.0, reach), -1e30, eps, leaf_plan(-1.0, reach, kBeyondGrow)});  // (hung on the -X jamb: it cuts round the x < eps half)
-    hung.push_back({leaf_plan(1.0, reach), -eps, 1e30, leaf_plan(1.0, reach, kBeyondGrow)});
-  }
-  else hung.push_back({leaf_plan(s.hinge == 1 ? -1.0 : 1.0, clear + pin), -1e30, 1e30, leaf_plan(s.hinge == 1 ? -1.0 : 1.0, clear + pin, kBeyondGrow)});  // (Left is +X: seen from the room the door faces, looking at it, the left jamb is +X)
-  /* How far the cutters and the blank reach. The target: the Depth, no further - nothing past it is subtracted, so a swing never cuts another piece, and what of the leaf stands
-   * past the Depth is an Add solid of its own (below). The fallback (kSwingAddsBeyondDepth false): they reach as far as the leaf does, 0.05 m past it. */
-  double z_end = half_d, z_leaf = half_d;
-  for (const Hung &h : hung)
-    for (const Corner &c : h.leaf) z_leaf = std::max(z_leaf, c.z);
-  if (!kSwingAddsBeyondDepth && z_leaf > half_d) z_end = z_leaf + 0.05;
-  mk.whole(kPartBlank, Op::Add, 0.0f, -(float)half_f, (float)z_end);
-  mk.whole(kPartRevealFront, Op::Subtract, 0.0f, -(float)half_d, -(float)half_f);
-  const int top_solid = 1, leaf_bottom = 2;
-  std::vector<Plan> cut;
-  for (const Hung &h : hung) {
-    /* The frame's slab, its clear width: sides are the jambs' inner faces (Solid), the planes it shares with the reveals are inside the cutters. */
-    cut.clear();
-    plan_less_leaf(plan_rect(std::max(-0.5 * clear, h.x0), std::min(0.5 * clear, h.x1), -half_f, half_f, 0, h.x1 < 1e29 ? 0 : 1, 0, h.x0 > -1e29 ? 0 : 1), h.leaf, eps, cut);
-    for (const Plan &p : cut) mk.prism(p, Op::Subtract, kPartCut + 3 * top_solid + 0, y0, y1);
-    /* The back reveal under the leaf's top: the plane it shares with the slab is the frame's face (Solid), its sides the hole's (Cut). */
-    cut.clear();
-    plan_less_leaf(plan_rect(std::max(-0.5 * s.w, h.x0), std::min(0.5 * s.w, h.x1), half_f, z_end, 1, 0, 0, 0), h.leaf, eps, cut);
-    for (const Plan &p : cut) mk.prism(p, Op::Subtract, kPartCut + 3 * 0 + 0, y0, y1);
-  }
-  /* The back reveal over the leaf's top, whole: its floor is the top of the leaf where a leaf stands under it. */
-  mk.prism(plan_rect(-0.5 * s.w, 0.5 * s.w, half_f, z_end, 1, 0, 0, 0), Op::Subtract, kPartCut + 3 * 0 + leaf_bottom, y1, s.head);
-  if (!kSwingAddsBeyondDepth || !(z_leaf > half_d + 1e-6)) return;
-  /* What of a leaf stands out past the Depth: the same turned footprint, from half way through the back reveal on (so that it overlaps what the cutters keep by a real stretch
-   * of the Depth, not a plane), sill to head of the leaf. Its sides are the footprint's own lines - the clip cuts the footprint along z only - so they lie in the planes of the
-   * kept part's sides to the rounding of one interpolation. It is Add: it passes through whatever stands in its way. */
-  const double z_from = half_f + 0.5 * (half_d - half_f);
-  for (const Hung &h : hung) {
-    Plan beyond = plan_clip(h.wide, 0.0, 1.0, -z_from, 2);
-    if (plan_usable(beyond)) mk.prism(beyond, Op::Add, kPartLeaf, y0, y1);
-  }
-}
-
-/* The pieces of a styled door (round 499): the frame (blank, reveals, the clear opening cut out of it - no bottom rail), then the style's own. False: nothing made. */
+/* The pieces of a styled door: the frame (blank, reveals, the clear opening cut out of it - no bottom rail), or for a Revolving door its drum and ring. The leaf is no piece: it is an
+ * object of its own under the door (round 515, ADR 0136), so the doorway is the same whatever Open Amount, Hinge Side, Leaf and Leaf Thickness say. */
 void door_pieces(WindowMaker &mk) {
   using blockout::Op;
   const WindowShape &s = mk.s;
-  const float half_d = 0.5f * s.depth, half_f = 0.5f * s.fd, half_g = 0.5f * s.gt;
-  if (s.revolving) {  // (only the blocked-out space: the drum cut through the wall and a ring of the wall's thickness round it)
+  const float half_d = 0.5f * s.depth, half_f = 0.5f * s.fd;
+  if (s.revolving) {  // (the drum cut through the wall and a ring of the wall's thickness round it)
     mk.column(kPartRing, Op::Add, s.drum + s.ring, s.sill, s.head);
     mk.column(kPartDrum, Op::Subtract, s.drum, s.sill, s.head);
     /* The two entries: a box of the door's Width (held to 1.6 drum radii) from the floor line to the head, along the door's Z through the ring on both sides (and 5 cm past it),
@@ -1179,23 +1015,10 @@ void door_pieces(WindowMaker &mk) {
     mk.box(kPartDrum, Op::Subtract, -0.5f * s.entry, 0.5f * s.entry, s.sill, s.head, -reach, reach);
     return;
   }
-  if (s.glass && !s.arched && !s.sliding && swing_leaf_fits(s)) return swung_leaf_pieces(mk);
-  /* (A Single or Double whose leaf cannot be made - a Double narrower than its pins - is the frame alone.) */
-  const bool has_leaf = s.glass && (s.arched || s.sliding);
-  /* A Sliding leaf stands on the wall's face (an Add piece with its back on the plane the reveal stops at, so no cutter touches it): the reveal ends at the wall's face. */
-  const bool slid = s.sliding && has_leaf;
-  const float face = std::max(half_f, half_d - kOpeningOvershoot);
   mk.whole(kPartBlank, Op::Add, 0.0f, -half_f, half_f);
   mk.whole(kPartRevealFront, Op::Subtract, 0.0f, -half_d, -half_f);
-  mk.whole(kPartRevealBack, Op::Subtract, 0.0f, half_f, slid ? face : half_d);
-  if (has_leaf && s.arched) {  // (an Arched door's leaf is the closed leaf in the frame's slab, the pane's way)
-    mk.lights(kPartLightFront, -half_f, -half_g);
-    mk.lights(kPartLightBack, half_g, half_f);
-  }
-  else mk.lights(kPartLight, -half_f, half_f);
-  if (!slid) return;
-  const float cover = s.fw, width = s.w + 2.0f * cover, at = (s.slide == 1 ? -1.0f : 1.0f) * s.open * width;  // (Left is +X: see Hinge Side)
-  mk.box(kPartLeaf, Op::Add, at - 0.5f * width, at + 0.5f * width, s.sill, s.head + cover, face, face + s.gt);
+  mk.whole(kPartRevealBack, Op::Subtract, 0.0f, half_f, half_d);
+  mk.lights(kPartLight, -half_f, half_f);
 }
 
 }  // namespace
@@ -1295,7 +1118,8 @@ namespace {
 BlockoutSurface::Piece surface_of(const BlockoutPiece &bp, uint64_t id) {
   BlockoutSurface::Piece sp;
   sp.id = id;
-  for (int k = 0; k < kBlockoutClasses; k++) sp.materials[k] = bp.material[k];
+  for (int k = 0; k < kBlockoutClasses; k++)
+    if (k != kClassLeaf) sp.materials[k] = bp.material[k];  // (round 515: the Leaf material is read by the leaf object, no face of the mesh has it)
   sp.offset_u = finite_bits(bp.texture_offset_u) ? bp.texture_offset_u : 0.0f;
   sp.offset_v = finite_bits(bp.texture_offset_v) ? bp.texture_offset_v : 0.0f;
   sp.rotation = finite_bits(bp.texture_rotation) ? bp.texture_rotation : 0.0f;
@@ -1342,66 +1166,6 @@ bool styled_too_large(const BlockoutPiece &bp) {
     if (!finite_bits(x)) return false;
   return std::fabs(bp.width) > kStyledDoorMax || std::fabs(bp.depth) > kStyledDoorMax || std::fabs(bp.sill) > kStyledDoorMax || std::fabs(bp.head) > kStyledDoorMax ||
          std::fabs(bp.head - bp.sill) > kStyledDoorMax;
-}
-
-/* How far into the room (z, the door's own space) a swung leaf reaches: the far corners of its footprint (the same numbers as swung_leaf_pieces'). */
-double swing_z_reach(const WindowShape &s) {
-  const double clear = (double)s.w - 2.0 * s.fw, half_f = 0.5 * s.fd, pin = std::min(0.5 * s.fw, 0.3 * half_f), turn = (double)s.open * 1.5707963267948966;
-  const double length = s.doubled ? (s.slit > 0.0f && s.open > 0.0f ? 0.5 * clear - 0.5 * (double)s.slit : 0.5 * clear + 0.002) : clear + pin;
-  return std::sin(turn) * length + std::cos(turn) * 0.5 * s.gt;
-}
-
-/* The box a piece occupies in the Blockout's space (its bounds' corners put through `m`). */
-void bounds_in_blockout(const Vec3 &lo, const Vec3 &hi, const Mat4 &m, Vec3 &out_lo, Vec3 &out_hi) {
-  out_lo = Vec3(1e30f), out_hi = Vec3(-1e30f);
-  for (int k = 0; k < 8; k++) {
-    const Vec3 p = m.point(Vec3((k & 1) ? hi.x : lo.x, (k & 2) ? hi.y : lo.y, (k & 4) ? hi.z : lo.z));
-    for (int a = 0; a < 3; a++) out_lo[a] = std::min(out_lo[a], p[a]), out_hi[a] = std::max(out_hi[a], p[a]);
-  }
-}
-
-/* A swung leaf's cutters and blank reach past the door's Depth as far as the leaf does, over the doorway's width (swung_leaf_pieces, the fallback the round settled on): the status
- * names each other piece whose box that stretch of the doorway overlaps - rooms and openings aside, whose own walls and holes are the door's business - so the cut is not a surprise. */
-void note_swing_cuts(const GameObject &blockout, BlockoutSnapshotNotes &notes) {
-  std::vector<const GameObject *> objects;
-  blockout_piece_objects(blockout, objects);
-  for (const GameObject *door : objects) {
-    const BlockoutPiece *dp = door->get<BlockoutPiece>();
-    WindowShape s;
-    if (!dp->is_styled_door() || !window_shape(*dp, s) || !s.glass || s.arched || s.sliding || !swing_leaf_fits(s)) continue;
-    const double half_d = 0.5 * s.depth, reach = swing_z_reach(s);
-    if (kSwingAddsBeyondDepth || !(reach > half_d + 1e-6)) continue;  // (the Add variant cuts nothing past the Depth)
-    const Mat4 dm = blockout_piece_matrix(*door, blockout);
-    Vec3 cut_lo, cut_hi;
-    bounds_in_blockout(Vec3(-0.5f * s.w, s.sill, (float)half_d), Vec3(0.5f * s.w, s.head, (float)(reach + 0.05)), dm, cut_lo, cut_hi);
-    for (const GameObject *other : objects) {
-      const BlockoutPiece *op = other->get<BlockoutPiece>();
-      if (other == door || op->opening != 0) continue;
-      Vec3 lo, hi, o_lo, o_hi;
-      blockout_piece_bounds(*op, lo, hi);
-      if (op->is_room()) {
-        /* A room: the strip cuts into it when it reaches its outer box (the air grown by the wall, floor and ceiling - measured in the room's own space, so an approximation for a
-         * scaled room) but is not wholly inside its air (an approximation too for a cylinder or an outline room: their bounds are used as a box; a "cuts" that is not one is
-         * better than silence). The room the door opens into holds the strip in its air, and the one the door stands in the wall of is not reached: neither is named. */
-        const float w = finite_bits(op->wall) ? std::max(0.0f, op->wall) : 0.0f, f = finite_bits(op->floor) ? std::max(0.0f, op->floor) : 0.0f, c = op->open_top || !finite_bits(op->ceiling) ? 0.0f : std::max(0.0f, op->ceiling);
-        const Mat4 rm = blockout_piece_matrix(*other, blockout);
-        Vec3 a_lo, a_hi;
-        bounds_in_blockout(lo, hi, rm, a_lo, a_hi);
-        bounds_in_blockout(Vec3(lo.x - w, lo.y - f, lo.z - w), Vec3(hi.x + w, hi.y + c, hi.z + w), rm, o_lo, o_hi);
-        bool reaches = true, inside = true;
-        for (int a = 0; a < 3; a++) {
-          reaches = reaches && o_lo[a] < cut_hi[a] && o_hi[a] > cut_lo[a];
-          inside = inside && cut_lo[a] >= a_lo[a] - 1e-3f && cut_hi[a] <= a_hi[a] + 1e-3f;
-        }
-        if (reaches && !inside) notes.swing_cuts.push_back("Door '" + door->name + "': its open leaf cuts into room '" + other->name + "'");
-        continue;
-      }
-      bounds_in_blockout(lo, hi, blockout_piece_matrix(*other, blockout), o_lo, o_hi);
-      bool overlap = true;
-      for (int a = 0; a < 3; a++) overlap = overlap && o_lo[a] < cut_hi[a] && o_hi[a] > cut_lo[a];
-      if (overlap) notes.swing_cuts.push_back("Door '" + door->name + "': its open leaf cuts '" + other->name + "'");
-    }
-  }
 }
 
 /* Depth first, in the hierarchy's order. `to_here` is the product of the local matrices from the Blockout down to `g`'s
@@ -1461,13 +1225,13 @@ void blockout_snapshot(const GameObject &blockout, std::vector<blockout::Piece> 
   settings = b ? b->settings() : blockout::Settings();
   if (notes && b) {
     notes->surface.scale = b->safe_texture_scale();
-    for (int k = 0; k < kBlockoutClasses; k++) notes->surface.materials[k] = b->material[k];
+    for (int k = 0; k < kBlockoutClasses; k++)
+      if (k != kClassLeaf) notes->surface.materials[k] = b->material[k];  // (the Leaf material is the leaf object's)
   }
   /* A styled window meshed on the grid is made as the grid can show it (fit_to_grid). Whether it is: the Method says Field, or Auto in a build with no exact
    * path. (A cluster that Auto sends to the grid for a blend or an open mesh is not known here: its window is made for the exact path.) */
   const bool grid = settings.path == blockout::Path::Field || (settings.path == blockout::Path::Auto && !blockout::crisp_available());
   collect(blockout, Mat4::identity(), pieces, notes, grid && finite_bits(settings.cell) && settings.cell > 0.0f ? settings.cell : 0.0f);
-  if (notes) note_swing_cuts(blockout, *notes);  // (round 499)
 }
 
 uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, const blockout::Settings &settings, const BlockoutSnapshotNotes *notes) {
@@ -1986,6 +1750,140 @@ std::vector<std::string> blockout_finish_mesh(Mesh &mesh, const blockout::Faces 
   return slots;
 }
 
+/* ===================================================================== */
+/* A door's leaf as an object (round 515, task 0497, ADR 0136)            */
+/* ===================================================================== */
+
+void BlockoutLeaf::reflect(Reflector &r) {
+  if (r.inspector()) {
+    /* The Inspector shows the door's own numbers here (editing them edits the door): the leaf has none of its own to edit. The note above them, and the door they belong to, is
+     * drawn by the editor (draw_blockout_leaf_extras). */
+    const GameObject *door_object = owner ? owner->parent : nullptr;
+    BlockoutPiece *door_piece = door_object ? door_object->get<BlockoutPiece>() : nullptr;
+    if (!door_piece || !door_piece->is_styled_door()) return;
+    r.field("Open Amount", door_piece->open_amount, 0.01f, 0.0f, 1.0f);
+    r.help("The door's Open Amount: 0 closed to 1 open. Turning this leaf with the Rotate tool writes the angle here; typing it here turns the leaf.");
+    if (door_piece->style == kDoorSingle || door_piece->style == kDoorArched) {
+      r.enumeration("Hinge Side", door_piece->hinge_side, kBlockoutSideNames, 2);
+      r.help("The door's Hinge Side: which jamb the leaf hangs on. Changing it makes the leaf again on the other jamb.");
+    }
+    return;
+  }
+  r.field("Index", index, 0, 255);
+  r.text("Made From", made_from);
+  r.field("Open Seen", open_seen, 0.01f, 0.0f, 1.0f);
+  r.text("Door", door);
+  r.text("Made By", made_by);
+}
+
+float blockout_door_open(const BlockoutPiece &p) { return finite_bits(p.open_amount) ? std::min(1.0f, std::max(0.0f, p.open_amount)) : 0.0f; }
+
+namespace {
+
+constexpr float kHalfPi = 1.57079632679489661923f;
+
+BlockoutLeafPlan make_leaf_plan(BlockoutLeafPlan::Kind kind, int index, const char *name, Vec3 origin, float sign, float travel) {
+  BlockoutLeafPlan p;
+  p.kind = kind, p.index = index, p.name = name, p.origin = origin, p.sign = sign, p.travel = travel;
+  return p;
+}
+
+/* A slab in the leaf's own space (low and high corners), kept only when none of its sides is thinner than a part the kernel would also leave out. */
+void add_slab(BlockoutLeafPlan &p, Vec3 lo, Vec3 hi) {
+  if (hi.x - lo.x > kSmallest && hi.y - lo.y > kSmallest && hi.z - lo.z > kSmallest) p.boxes.push_back({lo, hi});
+}
+
+}  // namespace
+
+void blockout_leaf_plans(const BlockoutPiece &bp, std::vector<BlockoutLeafPlan> &out) {
+  out.clear();
+  WindowShape s;
+  if (!bp.is_styled_door() || !bp.leaf_on() || styled_too_large(bp) || !window_shape(bp, s)) return;
+  using Plan = BlockoutLeafPlan;
+  if (s.revolving) {  // (the wings: a post and four vanes in a cross, turning about the drum's axis; they stop just short of the drum's wall)
+    const float r = 0.96f * s.drum, t = std::min(s.gt, r), h = s.head - s.sill;
+    Plan p = make_leaf_plan(Plan::Wings, 0, "Wings", Vec3(0.0f, s.sill, 0.0f), 1.0f, 0.0f);
+    add_slab(p, Vec3(-0.5f * t, 0.0f, -0.5f * t), Vec3(0.5f * t, h, 0.5f * t));
+    add_slab(p, Vec3(0.5f * t, 0.0f, -0.5f * t), Vec3(r, h, 0.5f * t));
+    add_slab(p, Vec3(-r, 0.0f, -0.5f * t), Vec3(-0.5f * t, h, 0.5f * t));
+    add_slab(p, Vec3(-0.5f * t, 0.0f, 0.5f * t), Vec3(0.5f * t, h, r));
+    add_slab(p, Vec3(-0.5f * t, 0.0f, -r), Vec3(0.5f * t, h, -0.5f * t));
+    if (!p.boxes.empty()) out.push_back(std::move(p));
+    return;
+  }
+  if (s.sliding) {  // (a slab on the wall's face, its back on the plane the reveal stops at, a frame's width wider than the opening each side and as much above it)
+    const float cover = s.fw, width = s.w + 2.0f * cover, face = std::max(0.5f * s.fd, 0.5f * s.depth - kOpeningOvershoot);
+    Plan p = make_leaf_plan(Plan::Slide, 0, "Leaf", Vec3(0.0f, s.sill, face), s.slide == 1 ? -1.0f : 1.0f, width);  // (Left is +X: see Hinge Side)
+    add_slab(p, Vec3(-0.5f * width, 0.0f, 0.0f), Vec3(0.5f * width, s.head + cover - s.sill, s.gt));
+    if (!p.boxes.empty()) out.push_back(std::move(p));
+    return;
+  }
+  /* Hinged: the clear opening between the jambs, from the floor line to the frame's head (an Arched door's: to the line its round head springs from). Each leaf hangs on a jamb's inner
+   * edge, at the frame's middle depth, and reaches toward the other jamb. */
+  const float clear = s.w - 2.0f * s.fw;
+  const float top = s.arched ? std::max(s.head - s.rise, s.sill) : s.head - s.fw;
+  if (!(clear >= kBlockoutMinSize) || !(top - s.sill > kBlockoutMinSize)) return;
+  auto hinged = [&](int index, const char *name, float sign, float length) {
+    Plan p = make_leaf_plan(Plan::Swing, index, name, Vec3(sign * 0.5f * clear, s.sill, 0.0f), sign, 0.0f);
+    const float far = -sign * length;
+    add_slab(p, Vec3(std::min(0.0f, far), 0.0f, -0.5f * s.gt), Vec3(std::max(0.0f, far), top - s.sill, 0.5f * s.gt));
+    if (!p.boxes.empty()) out.push_back(std::move(p));
+  };
+  if (s.doubled) {  // (the +X jamb is Left, as for a Single: Leaf L hangs there)
+    hinged(0, "Leaf L", 1.0f, 0.5f * clear);
+    hinged(1, "Leaf R", -1.0f, 0.5f * clear);
+  }
+  else hinged(0, "Leaf", s.hinge == 1 ? -1.0f : 1.0f, clear);
+}
+
+void blockout_leaf_pose(const BlockoutLeafPlan &plan, float open, Vec3 &position, float &yaw_degrees) {
+  position = plan.origin, yaw_degrees = 0.0f;
+  if (plan.kind == BlockoutLeafPlan::Slide) position.x += plan.sign * open * plan.travel;
+  else yaw_degrees = plan.sign * open * 90.0f;
+}
+
+bool blockout_leaf_open_of(const BlockoutLeafPlan &plan, const Transform &local, float &open) {
+  if (plan.kind == BlockoutLeafPlan::Slide) return false;
+  const Vec3 forward = local.rotation.rotate(Vec3(0.0f, 0.0f, 1.0f)), up = local.rotation.rotate(Vec3(0.0f, 1.0f, 0.0f));
+  if (!(up.y > 0.9995f)) return false;  // (tipped over by hand: it is just an object turned)
+  open = plan.sign * std::atan2(forward.x, forward.z) / kHalfPi;
+  return finite_bits(open);
+}
+
+MeshPtr blockout_leaf_mesh(const BlockoutLeafPlan &plan, float texture_scale) {
+  auto mesh = std::make_shared<Mesh>();
+  mesh->name = plan.name;
+  static const uint32_t kFaces[6][4] = {{0, 1, 3, 2}, {4, 6, 7, 5}, {0, 4, 5, 1}, {2, 3, 7, 6}, {0, 2, 6, 4}, {1, 5, 7, 3}};
+  for (const auto &box : plan.boxes) {
+    const Vec3 lo = box.first, hi = box.second, centre = (lo + hi) * 0.5f;
+    const uint32_t first = (uint32_t)mesh->positions.size();
+    for (int i = 0; i < 8; i++) mesh->add_vert(Vec3(i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z));
+    for (const auto &f : kFaces) {
+      uint32_t v[4] = {first + f[0], first + f[1], first + f[2], first + f[3]};
+      const Vec3 a = mesh->positions[v[0]], b = mesh->positions[v[1]], c = mesh->positions[v[2]];
+      if (dot(cross(b - a, c - a), (a + c) * 0.5f - centre) < 0.0f) std::swap(v[1], v[3]);  // (faces outward, as the Cube's)
+      mesh->add_face({v[0], v[1], v[2], v[3]});
+    }
+  }
+  mesh->uvs.assign(mesh->corner_verts.size(), Vec2(0.0f, 0.0f));
+  const double scale = texture_scale > 0.0f && finite_bits(texture_scale) ? (double)texture_scale : 1.0;
+  for (size_t f = 0; f < mesh->face_count(); f++) project_face(*mesh, f, scale, nullptr);
+  mesh->face_material.assign(mesh->face_count(), 0);
+  mesh->touch();
+  return mesh;
+}
+
+uint64_t blockout_leaf_key(const BlockoutLeafPlan &plan, float texture_scale, const std::string &material) {
+  uint64_t h = hash_mix(kFnvBasis, (uint64_t)plan.kind | (uint64_t)(uint32_t)plan.index << 8 | (uint64_t)plan.boxes.size() << 40);
+  h = fnv1a(plan.name, std::strlen(plan.name), h);
+  for (int a = 0; a < 3; a++) h = mix_float(h, plan.origin[a]);
+  h = mix_float(mix_float(h, plan.sign), plan.travel);
+  for (const auto &box : plan.boxes)
+    for (int a = 0; a < 3; a++) h = mix_float(mix_float(h, box.first[a]), box.second[a]);
+  h = mix_float(h, texture_scale);
+  return fnv1a(material.data(), material.size(), h);
+}
+
 uint64_t blockout_mesh_hash(const Mesh &m) {
   uint64_t h = hash_mix(kFnvBasis, m.positions.size());
   h = mix_bytes(h, m.positions.data(), m.positions.size() * sizeof(Vec3));
@@ -2211,6 +2109,7 @@ bool takes_scale_in_numbers(const GameObject &g) {
 
 void collect_scale(const GameObject &g, BlockoutScaleSet &out, Vec3 outer) {
   if (out.has(g.id)) return;
+  if (g.get<BlockoutLeaf>()) return;  // (round 515: a door's leaf object takes its size and place from the door's numbers, which the scale changes: the editor makes it again)
   if (g.get<Blockout>()) {  // (the scale a fold takes out of this Blockout's own transform: what a room's wall in its space grows by)
     const Vec3 s = g.local().scale;
     for (int a = 0; a < 3; a++) outer[a] *= finite_bits(s[a]) && s[a] != 0.0f ? std::fabs(s[a]) : 1.0f;  // (a Blockout inside a Blockout: the product, both are folded out of the walls below)

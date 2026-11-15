@@ -198,6 +198,9 @@ void register_builtin_components() {
   reg<BlockoutPiece>("Mesh", "A shape that adds to the Blockout above it or cuts from it (a door, a window). It has no mesh of its own: the\n"
                              "Blockout's mesh is its result.",
                      "a Boolean object (Union / Difference) or a ProBuilder shape in a CSG blockout");
+  reg<BlockoutLeaf>("Mesh", "A door's leaf, made and kept by the editor under the door: its own object with a mesh, a collider and its pivot at the hinge. Open Amount\n"
+                            "(or the Rotate tool) swings it without building the Blockout again; its shape follows the door's numbers.",
+                    "a door prefab's leaf, turned about its hinge by an Animator");
   reg<BlockoutBaked>("Mesh", "What Bake to Mesh leaves on a Blockout turned into a plain mesh: its settings, so Unbake can bring the Blockout back from the pieces under\n"
                              "the disabled child 'Blockout Pieces'.",
                      "Apply of a CSG blockout, kept so it can be redone");

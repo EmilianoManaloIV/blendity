@@ -186,7 +186,7 @@ void Editor::blockout_last_rerun() {
     if (bp->opening == 1 && o.style >= 0) {  // (round 499: a door's style and numbers)
       bp->style = std::min(kBlockoutDoorStyles - 1, std::max(0, o.style));
       bp->frame_width = size(o.frame_width), bp->frame_depth = size(o.frame_depth), bp->arch_rise = thick(o.arch_rise);
-      bp->leaf = o.leaf, bp->leaf_thickness = size(o.leaf_thickness), bp->open_amount = finite_bits(o.open_amount) ? std::min(1.0f, std::max(0.0f, o.open_amount)) : 0.0f;
+      bp->leaf = o.leaf, bp->wings = o.wings, bp->leaf_thickness = size(o.leaf_thickness), bp->open_amount = finite_bits(o.open_amount) ? std::min(1.0f, std::max(0.0f, o.open_amount)) : 0.0f;
       bp->hinge_side = o.hinge == 1 ? 1 : 0, bp->slide_direction = o.slide == 1 ? 1 : 0, bp->drum_radius = size(o.drum_radius);
     }
   }
@@ -257,13 +257,16 @@ void Editor::draw_obj_last_panel(const Recti &view) {
           rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
           rows.push_back({"Frame Depth", &o.frame_depth, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
           if (o.style == kDoorArched) rows.push_back({"Arch Rise", &o.arch_rise, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
-          rows.push_back({"Leaf", nullptr, nullptr, &o.leaf, 0, 0, 0, 0, 0});
-          if (o.leaf) rows.push_back({"Leaf Thickness", &o.leaf_thickness, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
-          if (o.leaf && o.style != kDoorArched) rows.push_back({"Open Amount", &o.open_amount, nullptr, nullptr, 0.01f, 0.0f, 1.0f, 0, 0});
-          if (o.leaf && o.style == kDoorSingle) rows.push_back({"Hinge Side", nullptr, &o.hinge, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
-          if (o.leaf && o.style == kDoorSliding) rows.push_back({"Slide Direction", nullptr, &o.slide, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
         }
-        else rows.push_back({"Drum Radius", &o.drum_radius, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+        /* (Round 515: the leaf is an object under the door; for a Revolving door the Leaf row is its wings, off by default.) */
+        rows.push_back({"Leaf", nullptr, nullptr, revolving ? &o.wings : &o.leaf, 0, 0, 0, 0, 0});
+        if (revolving ? o.wings : o.leaf) {
+          rows.push_back({"Leaf Thickness", &o.leaf_thickness, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          rows.push_back({"Open Amount", &o.open_amount, nullptr, nullptr, 0.01f, 0.0f, 1.0f, 0, 0});
+          if (o.style == kDoorSingle || o.style == kDoorArched) rows.push_back({"Hinge Side", nullptr, &o.hinge, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
+          if (o.style == kDoorSliding) rows.push_back({"Slide Direction", nullptr, &o.slide, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
+        }
+        if (revolving) rows.push_back({"Drum Radius", &o.drum_radius, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       }
       if (!door && o.style > kWindowOpeningOnly) {  // (only the rows the style reads, as the Inspector shows them)
         rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
