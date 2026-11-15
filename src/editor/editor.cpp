@@ -3,6 +3,7 @@
 #include "../scene/unity_scene.h"
 #include "../scene/budget.h"
 #include "editor.h"
+#include "../scene/blockout_piece_stack.h"  // (round 514)
 #include "../core/profiling.h"
 #include "../core/hash.h"
 #include "../render/canvas.h"
@@ -2503,6 +2504,7 @@ void Editor::redo() {
 void Editor::new_scene() {
   save_job_wait();  // (round 413: a save in flight lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's - the next scene's ids start again)
+  blockout_piece_stack_cache_clear();  // (round 514: the pieces' evaluated stacks are the scene's too)
   blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: a footprint drawn in the last scene made a room in this one at the next click)
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
@@ -2584,6 +2586,7 @@ void Editor::open_job_poll() {
 bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s) {
   save_job_wait();  // (round 413: a save started while the file loaded lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's)
+  blockout_piece_stack_cache_clear();  // (round 514: the pieces' evaluated stacks are the scene's too)
   blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: the last scene's drag and footprint)
   export_waits_drop("another scene opened");  // (review 354)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
