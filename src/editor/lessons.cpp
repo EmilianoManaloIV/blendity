@@ -2411,6 +2411,32 @@ A Blockout takes modifiers like any mesh object, and they stay live: the pieces 
 ? You press Apply on the Bevel of a live Blockout. What happens, and how do you make the bevel permanent? | It is refused: the mesh is rebuilt from the pieces, so an applied bevel would vanish at the next rebuild. The message offers Bake to Mesh - the baked object is an ordinary mesh with the Bevel still on it, and Apply works there.
 ? With a Subdivision Surface on a Blockout you click a wall in the Scene view. What is selected? | The Blockout, and the status says the modifiers change the faces: the drawn faces are no longer the pieces' own, so no piece can be named from them. Select the piece in the Hierarchy or click its outline; its handles still work.
 )"},
+    {"Modifiers on a piece", "Bevel just the arches, an Array of ten columns from one, a Mirror on one wing: a stack on a single Blockout piece", R"(
+A Blockout piece can carry modifiers of its own. They run on that piece's shape - before it is added to or cut from the rest - so one column can be bevelled, repeated or mirrored while every other piece stays exact. Select the piece and use its Inspector's Modifiers section, as on any object.
+
+# Try it
+! cmd:blockout new | 1. A Blockout with its 2 m box selected
+! cmd:component BevelModifier; set BevelModifier.Width 0.2 | 2. Bevel just this piece: every edge of the box gets a 20 cm chamfer, in the Blockout's mesh
+! cmd:component ArrayModifier; set ArrayModifier.Count 4 | 3. Then an Array of 4: four bevelled boxes in a row along the piece's own X, joined where their flat ends touch (the chamfers between them stay as grooves)
+! cmd:blockout info | 4. The status names the piece, says it is built as a mesh, and how full the cache of evaluated stacks is
+
+# How it works
+- The stack runs on the piece's own shape, in its own axes: a Mirror mirrors across the piece's planes, an Array steps along its X, Y and Z. Turn the piece and the whole row turns with it.
+- It runs on the build's background worker, and the result is kept: moving or turning the piece takes it from there and runs nothing; changing one of its numbers or a modifier's field runs the stack once.
+- Order: each piece's stack first, then the pieces are combined, then the Blockout's own modifiers (if it has any) run over the combined result.
+- A piece with a stack is built as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches (a mesh piece turns off the rounding of its cluster; the status says so). Flat faces it makes still merge with its neighbours' in one plane, and its curved faces shade smooth.
+- A stack that leaves no closed solid (Decimate to a sliver, a Screw part way round) is not used: the piece is built from its numbers and the status says why.
+
+# What a piece takes
+- Every modifier that changes a mesh by itself: Bevel, Array, Mirror, Solidify, Subdivision Surface, Displace, Decimate, Triangulate, Weld, Wireframe, Screw, Cast, Simple Deform, Smooth.
+- Not: modifiers that read another object (Boolean - on a Blockout use a Subtract piece; Curve, Lattice, Mesh Deform, Armature, Normal Transfer) or only change shading (Smooth Normals). They are off in a piece's Add Modifier list, with the reason.
+- Not on a room, a door or window, or an Intersect piece yet: their section says so, and a stack put there by the console does nothing (the Blockout's status names the piece).
+- Apply is refused on a piece: Bake the Blockout to Mesh to keep the result as a mesh. Bake and Unbake keep every piece's modifiers.
+
+? You put an Array of 10 on one column and then drag that column across the room. Does the Array run again on every frame? | No: the stack's result is kept by the piece's numbers and modifiers, not by its place - moving or turning the piece takes the kept mesh, and only changing a number or a modifier runs the stack again.
+? The Blockout has a Mirror of its own and one column carries a Bevel. Which runs first? | The column's Bevel, on the column's shape; then the pieces are combined; then the Blockout's Mirror mirrors the whole result - bevelled column included.
+? Why is the Boolean modifier off for a piece? | A Boolean reads another object, and a piece's shape is made from its numbers alone; on a Blockout the same cut is a Subtract piece - exact and live.
+)"},
     {"Building rooms with Blockout", "From an empty scene to a lit interior: two rooms, a door, a window, a rounded column, materials and Bake to Mesh", R"(
 This lesson is the whole path in one sitting, with the other Blockout lessons as its chapters: you make a Blockout, make two materials, drag out two rooms side by side and give each its floor and walls, cut a door between them and a window in an outer wall, stand a column in one room with a rounded foot and bake the result to an ordinary mesh. At every step the mesh is built again from the pieces, so you can go back and change any number. It starts best from File > New Scene: each Try-it works on what the one before it left selected (a piece you draw is selected, and the commands that follow act on its Blockout), so a Blockout left over from another lesson would take the rooms in.
 

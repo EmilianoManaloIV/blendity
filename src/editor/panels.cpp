@@ -7,6 +7,7 @@
 #include "../texture/procedural_texture.h"
 #include "../texture/surface.h"
 #include "../scene/stroke_object.h"
+#include "../scene/blockout_piece_stack.h"  // (round 514: a Blockout piece's modifiers)
 
 #include "../core/core.h"
 #include <cstring>
@@ -2026,8 +2027,9 @@ void Editor::draw_inspector(const Recti &r) {
   }
 
   /* The modifier stack (Blender's Modifier Properties): applied top to
-   * bottom, each with Blender's header toggles and menu. */
-  if (g->get<MeshFilter>()) {
+   * bottom, each with Blender's header toggles and menu. Round 514 (ADR 0138): a Blockout piece has one too - run on its own shape. */
+  const BlockoutPiece *mod_piece = g->get<BlockoutPiece>();
+  if (g->get<MeshFilter>() || mod_piece) {
     std::vector<size_t> mods;
     for (size_t ci = 0; ci < g->components.size(); ci++)
       if (g->components[ci]->is_modifier()) mods.push_back(ci);
@@ -2045,9 +2047,13 @@ void Editor::draw_inspector(const Recti &r) {
       u.tooltip("Blender: Modifier Properties > Add Modifier (Edit / Generate / Deform).");
       /* Round 502 (task 0486): Apply on a Blockout is refused with the way on - its mesh is rebuilt from its pieces, so what Apply
        * wrote would go at the next rebuild; baked, the object is an ordinary mesh with the same stack still on it. */
-      const bool on_blockout = g->get<Blockout>() != nullptr;
+      const bool on_blockout = g->get<Blockout>() != nullptr || mod_piece;  // (a piece's stack runs at every build too: Apply is refused there as well)
       bool apply_all = false;  // (run after the rows are drawn: it takes the modifiers off the list the rows walk - round 502's test engineer: a crash when the last component was a modifier)
-      auto refuse_apply_on_blockout = [this, g](const std::string &what) {
+      auto refuse_apply_on_blockout = [this, g, mod_piece](const std::string &what) {
+        if (mod_piece)
+          return refuse(what + ": '" + g->name + "' is a Blockout piece - it has no mesh of its own, its modifiers run over its shape at every build. "
+                               "Bake the Blockout to Mesh to keep the result as a mesh (the pieces keep their modifiers)",
+                        "blockout bake", "Bake to Mesh");
         refuse(what + ": '" + g->name + "' is a Blockout - its mesh is rebuilt from its pieces, so what Apply wrote would go at the next rebuild. "
                       "Bake to Mesh first (the modifiers stay on the baked mesh)",
                "blockout bake", "Bake to Mesh");
@@ -2056,15 +2062,30 @@ void Editor::draw_inspector(const Recti &r) {
         if (on_blockout) refuse_apply_on_blockout("Apply All");
         else apply_all = true;
       }
-      u.tooltip(on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
+      u.tooltip(mod_piece ? "Refused on a Blockout piece: Bake the Blockout to Mesh to keep the result as a mesh."
+                : on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
-      if (on_blockout && !mods.empty()) {
+      if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
+        const std::string why = blockout_piece_stack_refusal(*mod_piece);
+        const bool live = mods.empty() || blockout_piece_stack_live(*g);  // (no modifiers yet: nothing to warn of)
+        Recti nr = lay.row();
+        u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h},
+                !why.empty() ? "This piece takes no modifiers: " + why + "." : live ? std::string("Runs on this piece's own shape before it is added or cut.")
+                                                                            : std::string("Its modifiers do nothing yet - the Blockout's status says why."),
+                why.empty() && live ? u.theme.text_dim : u.theme.warning);
+        u.tooltip(!why.empty() ? "Modifiers on a room, a door or window, a preset or an Intersect piece are not built yet: a stack put on one stays on it and does nothing."
+                  : live ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
+                           "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
+                           "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
+                         : "None of this piece's modifiers runs: each is off, or of a kind a piece does not take. The Blockout's status names each and why.");
+      }
+      if (on_blockout && !mod_piece && !mods.empty()) {
         Recti nr = lay.row();
         u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, "Live over the Blockout's result: runs again when a piece moves.", u.theme.text_dim);
         u.tooltip("The modifiers take the mesh the pieces make and run again, on a background worker, each time a piece moves or changes. "
                   "The handles and the Draw Piece tool keep working on the pieces. Apply needs Bake to Mesh first.");
       }
-      u.popup(add_mod, u.px(230), [this] {
+      u.popup(add_mod, u.px(230), [this, for_piece = mod_piece != nullptr] {
         auto &u = ui_;
         struct Item { const char *label, *type; };
         static const Item kEdit[] = {{"Weld", "WeldModifier"}};
@@ -2079,8 +2100,10 @@ void Editor::draw_inspector(const Recti &r) {
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
           for (size_t i = 0; i < n; i++) {
-            if (u.menu_item(items[i].label, nullptr, false, true, Icon::Gear)) add_component_to_selection(items[i].type);
-            if (const ComponentInfo *info = find_component_info(items[i].type)) u.tooltip(info->help + "\nBlender: " + info->blender);
+            const std::string no = for_piece ? blockout_piece_modifier_refusal(items[i].type) : std::string();  // (round 514: off for a piece, with the reason)
+            if (u.menu_item(items[i].label, nullptr, false, no.empty(), Icon::Gear)) add_component_to_selection(items[i].type);
+            if (!no.empty()) u.tooltip("Off for a Blockout piece: " + no + ".");
+            else if (const ComponentInfo *info = find_component_info(items[i].type)) u.tooltip(info->help + "\nBlender: " + info->blender);
           }
         };
         group("Edit", kEdit, 1);
@@ -2254,11 +2277,19 @@ void Editor::draw_inspector(const Recti &r) {
           }
           case CopyToSelected: {
             int n = 0;
-            for (GameObject *o : selected_objects(false))
-              if (o != g && o->get<MeshFilter>()) {
-                o->add_component(g->components[act_ci]->clone());
-                n++;
+            const char *type = g->components[act_ci]->type_name();
+            for (GameObject *o : selected_objects(false)) {
+              const BlockoutPiece *to_piece = o->get<BlockoutPiece>();  // (round 514: a piece takes a stack too - one that cannot is skipped and named)
+              if (o == g || (!o->get<MeshFilter>() && !to_piece)) continue;
+              const std::string kind_no = to_piece ? blockout_piece_modifier_refusal(type) : std::string();
+              const std::string no = !to_piece ? std::string() : !kind_no.empty() ? kind_no : blockout_piece_stack_refusal(*to_piece);
+              if (!no.empty()) {
+                Log::warn("Copy to Selected: not to '%s' - %s", o->name.c_str(), no.c_str());
+                continue;
               }
+              o->add_component(g->components[act_ci]->clone());
+              n++;
+            }
             Log::info("Copied %s to %d object(s)", g->components[act_ci]->type_name(), n);
             mark_changed("Copy Modifier to Selected");
             break;
