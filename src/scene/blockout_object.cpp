@@ -965,7 +965,8 @@ std::vector<std::string> blockout_finish_mesh(Mesh &mesh, const blockout::Faces 
   for (size_t f = 0; f < count && named; f++) {
     const auto at = index.find(faces.piece[f]);
     const bool flat = f < faces.flat.size() ? faces.flat[f] != 0 : true;
-    mesh.face_smooth[f] = !flat || faces.side[f] == blockout::kSideBlend || (at != index.end() && curved_side(pieces[at->second], faces.side[f]));
+    mesh.face_smooth[f] = !flat || faces.side[f] == blockout::kSideBlend || (at != index.end() && curved_side(pieces[at->second], faces.side[f])) ||
+                          (at != index.end() && blockout_piece_stacked(surface, at->second));  // (round 514: a stacked piece shades by angle)
   }
   mesh.touch();
   return slots;

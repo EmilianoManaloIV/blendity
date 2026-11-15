@@ -1981,6 +1981,61 @@ void tests_round514_engineer() {
     CHECK(array && boolean);
     CHECK(bo && r514_numbers_build(*bo));
   });
+
+  test("blockout piece modifiers: a click on an Array copy whose top merged with an earlier piece's, and on a bevelled face, selects the stacked piece (the owners are named from the meshes the build used)", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r514e_empty(ed);
+    ed.command("camera 25 60 9 0 0 0");
+    GameObject *bo = r514e_hand(ed);
+    /* The unstacked piece FIRST: the merged top face is named for it, and only the stacked meshes can say the copy's part is Left's. */
+    GameObject *right = r514e_piece(ed, *bo, "Right", 0, 0, {1.0f, 0.0f, 0.0f}, {2.0f, 1.0f, 6.0f});
+    GameObject *left = r514e_piece(ed, *bo, "Left", 0, 0, {-1.0f, 0.0f, 0.0f}, {2.0f, 1.0f, 2.0f});
+    ed.select_for_test(left->id, false);
+    ed.command("component ArrayModifier");
+    ArrayModifier *ar = left->get<ArrayModifier>();
+    ar->count = 3, ar->relative_offset = Vec3(0.0f, 0.0f, 1.0f), ar->constant_offset = Vec3(0.0f);
+    r34_steps(ed, 4);
+    r514e_land(ed, *bo);
+    r514_settle(ed, 3);
+    CHECK(r514e_click_world(ed, {1.0f, 0.5f, 2.0f}) == right);  // (Right's own part of the merged top)
+    CHECK(r514e_click_world(ed, {-1.0f, 0.5f, 2.0f}) == left);  // (the first copy's part: not Left's numbers - its stacked mesh)
+    CHECK(r514e_click_world(ed, {-1.0f, 0.5f, -2.0f}) != left);  // (nothing of Left there: Right's side or empty)
+    /* A Bevel on Left instead: a click on its chamfer selects it. */
+    ar->enabled = false;
+    ed.select_for_test(left->id, false);
+    ed.command("component BevelModifier");
+    left->get<BevelModifier>()->width = 0.3f;
+    r34_steps(ed, 4);
+    r514e_land(ed, *bo);
+    r514_settle(ed, 3);
+    CHECK(r514e_click_world(ed, {-1.9f, 0.4f, 0.0f}) == left);  // (on the chamfer between Left's top and its -x side)
+  });
+
+  test("blockout piece modifiers: a bevelled cylinder column shades smooth by angle - every face of its stacked mesh is marked smooth, a plain box's are not", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *box = r514_box(ed);
+    CHECK(box != nullptr);
+    if (!box) return;
+    GameObject *bo = blockout_of_piece(*box);
+    const Mesh *m0 = r514_mesh(*bo);
+    size_t smooth0 = 0;
+    for (size_t f = 0; m0 && f < m0->face_smooth.size(); f++) smooth0 += m0->face_smooth[f] != 0;
+    CHECK(smooth0 == 0);  // (a plain box: flat)
+    BlockoutPiece *bp = box->get<BlockoutPiece>();
+    bp->shape = 1, bp->radius = 0.5f, bp->height = 3.0f, bp->segments = 24;
+    ed.command("select " + box->name);
+    ed.command("component BevelModifier");
+    ed.command("blockout wait");
+    const Mesh *m = r514_mesh(*bo);
+    size_t smooth = 0;
+    for (size_t f = 0; m && f < m->face_smooth.size(); f++) smooth += m->face_smooth[f] != 0;
+    std::printf("    bevelled cylinder: %zu of %zu faces smooth\n", smooth, m ? m->face_count() : 0);
+    CHECK(m && m->face_count() > 0 && smooth == m->face_count());
+  });
 }
 
 }  // namespace

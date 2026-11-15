@@ -1146,7 +1146,9 @@ struct Editor::BlockoutOwners {
     blockout::Settings settings;
     BlockoutSnapshotNotes notes;  // (the hash the faces were landed under holds the materials and the scale too: the same notes)
     blockout_snapshot(g, pieces, settings, &notes);
-    if (b && b->state.hash_valid && b->state.faces_hash == blockout_snapshot_hash(pieces, settings, &notes)) faces = std::make_unique<blockout::FaceOwners>(pieces);
+    const bool landed = b && b->state.hash_valid && b->state.faces_hash == blockout_snapshot_hash(pieces, settings, &notes);
+    blockout_piece_stacks_cached(pieces, notes.surface);  // (round 514, after the hash: the stacked pieces as the meshes the build used - from the cache, never evaluated)
+    if (landed) faces = std::make_unique<blockout::FaceOwners>(pieces);
   }
 };
 
