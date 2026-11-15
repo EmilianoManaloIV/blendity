@@ -1,7 +1,8 @@
 # 0496: Modifiers on a Blockout piece (round 514)
 
-- **Status:** approved 2026-11-14 with ADR 0138 (the owner, through the hub: "Approve 514 and 515"; the three choices below as
-  recommended). Not started: round 514's own files may start; the regions in Pass 23's files wait for the hub's word.
+- **Status:** done (round 514, 2026-11-15, on main after rounds 498-502; presets added to the pieces that take no stack after
+  the merge of round 500). Approved 2026-11-14 with ADR 0138 (the owner, through the hub: "Approve 514 and 515"; the three
+  choices below as recommended).
 - **Requirements:** R-02, R-03 (modeling, modifiers), Q-06 (responsiveness), U-01, C-02, R-09
 - **Decisions:** ADR 0138 (new: modifiers on a Blockout piece); ADR 0129 and 0128 amended by it; round 502 (task 0486)
 - **Model:** main session for the kernel and job parts, implementer for the Inspector and console, then test-engineer,

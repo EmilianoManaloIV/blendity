@@ -42,7 +42,19 @@ the picking names a piece by the meshes the build used.
 the cell; its Blend radius is not read, nor that of the pieces in its cluster (round 480's rule for mesh pieces); stairs, arches and outlines are united by a build of the piece alone before the
 stack (on builds without Blender's libraries, by the grid). No stacks on rooms, doors / windows, presets and Intersect pieces.
 
-**Checked:** CHECKED_514
+**Checked:** the round's groups (`blockout_piece_modifiers` new, `blockout_modifiers`, `blockout_join`, `blockout`,
+`modeling`, `editor`), not the full suite: Windows with Blender's libraries 38,547 checks, dependency-free Windows
+31,201 and Linux 31,207, 0 failed (the editor test "Browse... without a file dialog: said so" failed once under load -
+its toast expires by the clock - and passes alone; not this round's code). Three code reviews, the last two's findings
+fixed (a false warning on every plain piece's Modifiers section among them). Tests that need the exact path or Decimate
+(meshoptimizer's) say so where a build has neither. `blendity_stress --only blockout_piece_modifiers` in a timed window,
+exact path: a stacked column in `interior 100` changed to the drawn mesh in 19.6 ms median (Bevel) and 24.6 ms (Array of
+10), budget 100 ms, one evaluation a change; a drag of the column or of a door, 120 frames: worst frame 5.2 - 6.5 ms,
+0 stack evaluations, 0 main-thread builds. Untimed sweep, every allowed modifier on every shape, added and subtracted,
+in a small building: 448 cases, 448 built, 0 problems on each path; faces newly on top of each other 6 on the exact
+path (2 each with Bevel, Wireframe and Decimate) and 2 on the grid (Solidify) - a new section, so no earlier count;
+not yet traced to their cases (an open item). Extremes (an Array of 6,000 faces, Subdivision 4 of a sphere, 70,656
+faces) build, 0 problems. `--only blockout`: every count the same as round 500 recorded.
 
 <!-- docs/ARCHITECTURE.md -->
 after: | `Editor::blockout_hit`, `blockout_wall_under_mouse`
