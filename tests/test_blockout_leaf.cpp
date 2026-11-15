@@ -144,6 +144,9 @@ bool r496_pick_combo(Editor &ed, const char *rect_key, const char *item) {
   ed.record_buttons_for_test(true);
   r477_settle(ed, 2);
   Recti c;
+  /* (As test_blockout.cpp's original since round 509: a long label in the Modeling Tools grid takes a row of its own, and
+   * in a 900 x 600 window the Blockout style dropdowns are below the fold - scrolled into view first.) */
+  if (std::string(rect_key).rfind("tools:", 0) == 0 && !r509_scroll_to(ed, WindowKind::Tools, rect_key, c)) return false;
   if (!ed.button_rect_for_test(rect_key, c)) return false;
   r477_click(ed, c.x + c.w / 2, c.y + c.h / 2);
   r477_settle(ed, 2);
