@@ -12167,8 +12167,16 @@ static void tests_round507_te() {
     const size_t since = Log::fetch(0, log);
     std::printf("    files still moving at the open: %s\n", ed.lighting_moving_for_test() ? "yes" : "no");
     ed.command("open " + scene);  // (reads on a worker and lands a frame or more later: the files may still be moving then)
-    for (int i = 0; i < 20; i++) ed.step_frame_headless();
-    CHECK(!ed.lighting_moving_for_test());
+    /* (Round 511: until the open has landed and the files have moved, not a fixed 20 frames - a loaded machine took longer
+     * over both, and the pages below were then the scene's before it opened.) */
+    auto settle = [&] {
+      ed.step_frame_headless();
+      for (int i = 0; i < 5000 && (ed.open_job_running_for_test() || ed.lighting_moving_for_test()); i++)
+        ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    };
+    settle();
+    CHECK(!ed.open_job_running_for_test() && !ed.lighting_moving_for_test());
     const auto at_once = r507_pages(ed);
     CHECK(at_once.size() == baked_pages && !ed.lighting_data_for_test().empty());
     log.clear();
@@ -12179,7 +12187,7 @@ static void tests_round507_te() {
       if (e.level != LogLevel::Info) std::printf("    warned: %s\n", e.text.c_str());
     }
     ed.command("open " + scene);  // (the control: a late open)
-    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    settle();
     const auto late = r507_pages(ed);
     CHECK(late.size() == at_once.size());
     for (size_t k = 0; k < std::min(late.size(), at_once.size()); k++)

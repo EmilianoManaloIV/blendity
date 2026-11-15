@@ -15647,6 +15647,23 @@ static std::string import_text(Editor &ed, size_t *objects = nullptr) {
 
 static void tests_round507_import() {
   test("importing a Unity scene again (round 507): the second import finds Assets as it was and keeps the GUID index; the scene is the same as the first, and as one made with the index walked afresh", [] {
+    /* (Round 511: a project of its own, named for this run. The tests' scratch project is one folder for every test run on
+     * the machine, and another session's tests writing into its Assets between the two imports changed the fingerprint:
+     * the second import walked again - rightly - and the check below failed on a shared machine, never on CI.) */
+    const std::string proj = fs::join(test_dir(), strprintf("r507_import_%llu", (unsigned long long)std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::make_dirs(fs::join(proj, "Assets/Scenes"));
+    const std::string root_was = asset_root();
+    set_env("BLENDITY_PROJECT", proj);
+    set_asset_root(proj);
+    struct Back {
+      std::string root, proj;
+      ~Back() {
+        set_env("BLENDITY_PROJECT", "");
+        set_asset_root(root);
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::u8path(proj), ec);
+      }
+    } back{root_was, proj};
     r507b::write_package(60, 3, true);
     Editor a, b, c;
     a.init_headless(1200, 900), b.init_headless(1200, 900), c.init_headless(1200, 900);
