@@ -27,7 +27,7 @@ static const SweepCommand kSweepCommands[] = {
   {"body", "body show on", ""},
   {"bone", "bone add Bone 1", ""},
   {"boolean", "boolean difference", ""},
-  {"budget", "budget list", ""},
+  {"budget", "budget pc", ""},
   {"camera", "camera 0 0 6", ""},
   {"camerapreview", "camerapreview lock", ""},
   {"clear", "", "clears the log"},

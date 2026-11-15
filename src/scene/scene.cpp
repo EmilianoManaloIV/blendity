@@ -3174,6 +3174,17 @@ static bool evaluation_slow(const Mesh &base, const std::vector<std::unique_ptr<
   return work >= 200000.0;
 }
 
+/* Round 502 (task 0486): a Blockout's stack follows its pieces on the worker whatever its size - the base mesh is replaced
+ * at every landing of a build, many times in one drag, and the frame that adopts a landing must not also pay for the
+ * stack. Only once there is a result to keep showing meanwhile (the first evaluation - a modifier just added - goes by the
+ * rule above, so the stack is seen at once), and never a stack that reads another object (the worker's copy has no scene). */
+static bool blockout_stack_follows(const GameObject &g, bool has_result, const std::vector<std::unique_ptr<Component>> &components, const std::function<bool(const Component &)> &on) {
+  if (!has_result || !g.get<Blockout>()) return false;
+  for (const auto &c : components)
+    if (on(*c) && c->modifier_dependency_hash() != 0) return false;
+  return true;
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 8));
   const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
@@ -3185,6 +3196,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   bool any = false;
   auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
   mix((uint64_t)(uintptr_t)mf->mesh.get());
+  mix(mf->mesh->uid.v);  // (round 502: a Blockout's base is a new mesh at every landing, and a new mesh can stand at the address of one that went, with the same version - its result must not pass for this one's)
   mix(mf->mesh->version);
   uint64_t topo_key = key;  // (ADR 0075: the key without the base's deform_version - what the subdivision chain follows)
   auto tmix = [&](uint64_t v) { topo_key = (topo_key ^ v) * kFnvPrime; };
@@ -3249,7 +3261,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
    * base's positions moved since the last result (a dab, a drag: the chain follows them here, ADR 0075), and not inside
    * an EvaluateNowScope. */
   const bool deform_only = eval_mesh_[kind] && eval_shape_key_[kind] == shape_key;
-  if (slow_eval_hook && tl_evaluate_now == 0 && kind <= 2 && !deform_only && (eval_pending_[kind] == key || evaluation_slow(*mf->mesh, components, on)) &&
+  if (slow_eval_hook && tl_evaluate_now == 0 && kind <= 2 && !deform_only &&
+      (eval_pending_[kind] == key || evaluation_slow(*mf->mesh, components, on) || blockout_stack_follows(*this, eval_mesh_[kind] != nullptr, components, on)) &&
       slow_eval_hook(*this, kind, key)) {
     eval_pending_[kind] = key;
     eval_timer.count = false;  // (handed to the worker: not evaluated here)
