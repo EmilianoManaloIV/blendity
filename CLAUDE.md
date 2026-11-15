@@ -111,6 +111,10 @@ non-trivial.
    what conflicts. It is the one allowed top over several stacks; every stack it carries must be in it up to that
    stack's own top (`stack_check.sh` fails otherwise: run `integrate.sh` again after a push). Each PR still targets
    `main` and can still be merged on its own.
+7. **Nothing waits on a PR** (the user, 2026-11-15). No round, fix, write-up or verification is held until a PR is
+   merged or published: build on the open PR's head and publish stacked on it; work that needs several open stacks
+   builds on a local merge of their tops and publishes as the single top of the joined stack (say which stacks it
+   joins in the body). Only the user's merges wait on the user.
 
 Run agents one after another; don't fan out. For a one-line fix, implement in the main session and still
 run the reviewer.
