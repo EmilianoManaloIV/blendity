@@ -89,6 +89,7 @@ void run_vr_tests();
 void run_blockout_tests();
 void run_blockout_modifiers_tests();
 void run_blockout_join_tests();
+void run_blockout_piece_modifiers_tests();
 void run_runner_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
@@ -110,6 +111,7 @@ static const TestGroup kTestGroups[] = {
     {"blockout", run_blockout_tests},
     {"blockout_modifiers", run_blockout_modifiers_tests},
     {"blockout_join", run_blockout_join_tests},
+    {"blockout_piece_modifiers", run_blockout_piece_modifiers_tests},
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 
