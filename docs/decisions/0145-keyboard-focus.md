@@ -36,6 +36,7 @@ Two things stand in the way of the usual answer ("Tab walks everything"):
    stays inside it and wraps; Space or Enter presses a button, ticks a checkbox, opens a dropdown or a colour, folds
    or unfolds; Left and Right step a slider; Up and Down move in an open list or menu, Right opens a submenu, Left
    closes it, Left and Right on the menu bar change menu; Esc lets the focus go (a second Esc closes the popup).
+   In an open dropdown list Up / Down skip its headings and separators (2026-11-14, round 513).
    Only those keys are taken: every other shortcut of the keymap still runs.
 4. **The mouse lets it go:** a press anywhere drops the focus and its ring, so the mouse user never sees it. So does
    a modal tool starting (Grab, Push/Pull, Bevel by their shortcuts): Enter, Esc and Space are the tool's.

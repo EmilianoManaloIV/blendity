@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <functional>
 
 namespace bl {
 
@@ -37,11 +38,332 @@ bool is_number_word(const std::string &w) {
   return !w.empty() && (std::isdigit((unsigned char)w[0]) || w[0] == '-' || w[0] == '.' || w[0] == '+');
 }
 
+/* ===================================================================== */
+/* A door or a window drawn on a wall (round 513, task 0495)              */
+/* ===================================================================== */
+
+/* RoomTool::piece for the two openings (editor.h lists 0, 3, 4, 5): negative, so that no test of `piece >= 3` elsewhere takes one for a
+ * wedge, stairs or an arch. With Solid on, as the other pieces. */
+constexpr int kPieceDoor = -1, kPieceWindow = -2;
+constexpr float kMinOpening = 0.2f;  // metres: the smallest door or window the tool draws, each way
+constexpr float kSillSlack = 0.05f;  // metres: how far under its floor a window's drag may start (the sill is raised to the floor)
+constexpr float kDoorReach = 0.6f;   // metres: how far above its floor the drag of a door may start (the door's bottom snaps down to the floor)
+
+int opening_of(int piece) { return piece == kPieceDoor ? 1 : piece == kPieceWindow ? 2 : 0; }  // 1 door, 2 window, 0 neither
+
+bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
+
+const char *const kNoWall = "A door or window goes in a wall of a Blockout: press on a room's wall or on the side of a piece (the ground and other meshes have none).";
+
+/* A wall face of a Blockout, as the tool reads it in the Blockout's space (a turned Blockout is not special: its up is the Blockout's own +Y). */
+struct OpeningWall {
+  Vec3 point, normal, u;  // a point of the face; its normal out of the matter (horizontal); the axis along it, to the right of a viewer facing it
+  float u_lo = 0, u_hi = 0, v_lo = 0, v_hi = 0;  // the face's extent along u and up (y): the rectangle a drag is held to
+  float end_inset = 0, top_inset = 0;  // a room's wall and ceiling thickness: a drag is held that far inside the face, so a jamb never cuts the wall that meets this one
+  uint64_t piece_id = 0;               // the piece that made the face (an id: the scene may be swapped by an undo; the floor under it is blockout_opening_feet's to say)
+};
+
+/* What the planning functions need from the editor: the scene, who owns the wall cache, the lean a wall may have, and the floor an opening of a width stands on
+ * (Editor::blockout_opening_feet, passed in because it is a member). */
+struct OpeningEnv {
+  Scene &scene;
+  const void *owner;
+  bool cached;  // may the wall kept by the drag in progress stand for the one at this point (only that drag's own preview and release)
+  float lean;  // sin of the greatest lean from vertical (Editor::kOpeningWallLean)
+  std::function<bool(const BlockoutHit &, float, float &)> feet;
+};
+
+struct WallTri {
+  float u[3], v[3];
+  float u_lo, u_hi, v_lo, v_hi;
+  bool taken = false;
+};
+
+/* The wall face of `bo` at a world point whose normal is `world_n`: false with `why` (a sentence saying what is wrong and what to do) when it is a floor,
+ * a ceiling, a sloped face, the inside of an opening, or no face of the Blockout at all. The face is found in the Blockout's mesh: the coplanar
+ * triangles that join the one under the point make its rectangle. */
+bool find_opening_wall(const OpeningEnv &env, GameObject &bo, Vec3 world_p, Vec3 world_n, OpeningWall &w, std::string &why) {
+  Scene &scene = env.scene;
+  const Blockout *b = bo.get<Blockout>();
+  const MeshFilter *mf = bo.get<MeshFilter>();
+  const Mat4 inv = bo.world_matrix().inverse();
+  const Vec3 p = inv.point(world_p);
+  Vec3 n = inv.dir(world_n);
+  if (!b || !mf || !mf->mesh || !finite3(p) || !finite3(n) || !(length(n) > 1e-6f)) return why = kNoWall, false;
+  n = normalize(n);
+  if (std::fabs(n.y) > 0.9f) {
+    why = n.y > 0.0f ? "A door or window goes in a wall, and this face is a floor: drag on an upright wall instead."
+                     : "A door or window goes in a wall, and this face is a ceiling: drag on an upright wall instead.";
+    return false;
+  }
+  if (std::fabs(n.y) > env.lean) {  // (as far from vertical as blockout_stand_opening holds the Door and Window buttons to)
+    why = strprintf("That wall leans %.1f degrees: a door or window stands in an upright wall - drag on a vertical face instead.", (double)(std::asin(std::min(1.0f, std::fabs(n.y))) * 57.29578f));
+    return false;
+  }
+  const Vec3 face_n = n;  // (the face's own normal: its triangles are coplanar to it, a wall leaning a degree or two is not to its horizontal part)
+  n.y = 0.0f;
+  n = normalize(n);
+  const Vec3 u = normalize(cross(Vec3(0.0f, 1.0f, 0.0f), n));
+  const Mesh &m = *mf->mesh;
+  const BlockoutState &s = b->state;
+  if (s.faces_mesh != &m || s.faces_version != m.version || s.faces.piece.size() != m.face_count())
+    return why = "The Blockout is still being built: try again in a moment.", false;
+  const RenderMesh &rm = m.render_mesh();
+  const float pu = dot(p, u), pv = p.y;
+  std::vector<WallTri> tris;
+  uint32_t face = UINT32_MAX;
+  bool face_facing = false;
+  float lo_u = 0, hi_u = 0, lo_v = 0, hi_v = 0;
+  for (size_t t = 0; t < rm.tri_count() && t < rm.tri_face.size(); t++) {
+    const Vec3 a = rm.positions[rm.indices[t * 3]], c1 = rm.positions[rm.indices[t * 3 + 1]], c2 = rm.positions[rm.indices[t * 3 + 2]];
+    Vec3 tn = cross(c1 - a, c2 - a);
+    if (!(length(tn) > 1e-12f)) continue;
+    tn = normalize(tn);
+    if (std::fabs(dot(tn, face_n)) < 0.995f || std::fabs(dot(a - p, face_n)) > 5e-3f) continue;  // (on the face's plane only)
+    WallTri wt;
+    const Vec3 c[3] = {a, c1, c2};
+    for (int k = 0; k < 3; k++) wt.u[k] = dot(c[k], u), wt.v[k] = c[k].y;
+    wt.u_lo = std::min({wt.u[0], wt.u[1], wt.u[2]}), wt.u_hi = std::max({wt.u[0], wt.u[1], wt.u[2]});
+    wt.v_lo = std::min({wt.v[0], wt.v[1], wt.v[2]}), wt.v_hi = std::max({wt.v[0], wt.v[1], wt.v[2]});
+    /* The press is in this triangle when it is on the inner side of all three edges, to a hair (the press is on a shared edge as often as not). */
+    float side[3];
+    for (int k = 0; k < 3; k++) {
+      const int j = (k + 1) % 3;
+      side[k] = (wt.u[j] - wt.u[k]) * (pv - wt.v[k]) - (wt.v[j] - wt.v[k]) * (pu - wt.u[k]);
+    }
+    const float eps = 2e-3f * (std::fabs(wt.u_hi - wt.u_lo) + std::fabs(wt.v_hi - wt.v_lo) + 1.0f);
+    const bool inside = (side[0] >= -eps && side[1] >= -eps && side[2] >= -eps) || (side[0] <= eps && side[1] <= eps && side[2] <= eps);
+    if (inside) {
+      const bool facing = dot(tn, face_n) > 0.0f;  // (the piece named is the one whose face looks at the viewer, where two lie on one plane)
+      if (face == UINT32_MAX) lo_u = wt.u_lo, hi_u = wt.u_hi, lo_v = wt.v_lo, hi_v = wt.v_hi;
+      else lo_u = std::min(lo_u, wt.u_lo), hi_u = std::max(hi_u, wt.u_hi), lo_v = std::min(lo_v, wt.v_lo), hi_v = std::max(hi_v, wt.v_hi);
+      if (face == UINT32_MAX || (facing && !face_facing)) face = rm.tri_face[t], face_facing = facing;
+      wt.taken = true;
+    }
+    tris.push_back(wt);
+  }
+  if (face == UINT32_MAX || face >= s.faces.piece.size()) return why = kNoWall, false;
+  /* The face is every coplanar triangle that touches what is found so far (a wall with a doorway cut in it is one face round the hole). */
+  for (int round = 0; round < 64; round++) {
+    bool grew = false;
+    for (WallTri &wt : tris) {
+      if (wt.taken || wt.u_hi < lo_u - 1e-3f || wt.u_lo > hi_u + 1e-3f || wt.v_hi < lo_v - 1e-3f || wt.v_lo > hi_v + 1e-3f) continue;
+      wt.taken = grew = true;
+      lo_u = std::min(lo_u, wt.u_lo), hi_u = std::max(hi_u, wt.u_hi), lo_v = std::min(lo_v, wt.v_lo), hi_v = std::max(hi_v, wt.v_hi);
+    }
+    if (!grew) break;
+  }
+  const GameObject *owner = scene.find(blockout_piece_owner(s.faces.piece[face]));
+  const BlockoutPiece *bp = owner ? owner->get<BlockoutPiece>() : nullptr;
+  if (!bp) return why = kNoWall, false;
+  if (bp->opening) return why = "That is the inside of a door or window: draw on the wall round it.", false;
+  if (!(hi_u > lo_u) || !(hi_v > lo_v)) return why = kNoWall, false;
+  w.point = p, w.normal = n, w.u = u;
+  w.u_lo = lo_u, w.u_hi = hi_u, w.v_lo = lo_v, w.v_hi = hi_v;
+  /* The walls that meet this one are in the way only from outside: on the room's inner face the drag may reach the air's corner and ceiling (the normal points into the air). */
+  const Vec3 centre = blockout_piece_matrix(*owner, bo).point(Vec3(0.0f));
+  const bool outer = bp->is_room() && finite3(centre) && dot(n, p - centre) > 0.0f;
+  w.end_inset = outer && finite_bits(bp->wall) ? std::max(0.0f, std::min(10.0f, bp->wall)) : 0.0f;
+  w.top_inset = outer && finite_bits(bp->ceiling) ? std::max(0.0f, std::min(10.0f, bp->ceiling)) : 0.0f;
+  w.piece_id = owner->id;
+  return true;
+}
+
+/* One wall at a time is kept while it is dragged on: the preview asks every frame and the release asks again, and the wall's triangle scan is not done twice for the same press
+ * (a different press, Blockout, mesh or version asks the scan again). Only a found wall is kept. */
+struct WallCache {
+  const void *owner = nullptr;
+  uint64_t bo = 0;
+  const Mesh *mesh = nullptr;
+  uint64_t version = 0;
+  Vec3 at, normal;
+  OpeningWall wall;
+};
+WallCache g_wall_cache;
+bool g_release_uses_cache = false;  // set while the tool's release runs the console words: that drag's own wall may be used
+void drop_wall_cache() { g_wall_cache = WallCache(); }
+
+bool wall_at(const OpeningEnv &env, GameObject &bo, Vec3 at, Vec3 normal, OpeningWall &w, std::string &why) {
+  const MeshFilter *mf = bo.get<MeshFilter>();
+  const Mesh *mesh = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  WallCache &c = g_wall_cache;
+  if (env.cached && mesh && c.owner == env.owner && c.bo == bo.id && c.mesh == mesh && c.version == mesh->version && length(c.at - at) < 1e-6f && length(c.normal - normal) < 1e-6f) {
+    w = c.wall;
+    return true;
+  }
+  return find_opening_wall(env, bo, at, normal, w, why);  // (nothing is kept here: only a press keeps the wall, for its own drag)
+}
+
+/* The wall's axes in the world, for a normal read from the surface: the Blockout's up (not the room's - the cause of the #405 fix Pass 23
+ * is making to the Door and Window buttons' placement), the right of a viewer facing the wall. */
+bool wall_axes(const GameObject &bo, Vec3 world_n, Vec3 &u, Vec3 &up) {
+  const Mat4 m = bo.world_matrix();
+  up = m.dir(Vec3(0.0f, 1.0f, 0.0f));
+  if (!finite3(up) || !(length(up) > 1e-6f)) return false;
+  up = normalize(up);
+  Vec3 flat = world_n - up * dot(world_n, up);
+  if (!finite3(flat) || !(length(flat) > 0.3f)) return false;
+  flat = normalize(flat);
+  u = normalize(cross(up, flat));
+  return finite3(u);
+}
+
+/* What a drag on a wall makes: the piece's numbers in the Blockout's units, where its wall point is, and the rectangle the preview draws (world). */
+struct OpeningPlan {
+  bool ok = false;
+  std::string why;    // when !ok: the sentence for the status line (what is wrong, what to do)
+  std::string brief;  // and the short form beside the mouse
+  std::string note;   // a drag that ran past the wall's edge, or a sill raised to the floor: said once the piece is made
+  OpeningWall wall;
+  float feet = 0;     // the height the opening stands on (blockout_opening_feet: the one place the floor under a wall is decided)
+  float width = 0, head = 0, sill = 0;  // the piece's numbers: Head and Sill are measured from the feet
+  Vec3 centre;        // Blockout space: a point of the wall plane, at the rectangle's middle along the wall
+  Vec3 rect[4];       // the dragged rectangle on the wall, in the world
+  bool have_rect = false;
+  float width_m = 0, height_m = 0;
+};
+
+/* The opening a drag from the world point `a` to `b` on the wall `n` (the surface's normal) at `a` makes. `kind`: 1 door, 2 window. Everything is read
+ * in the Blockout's space; a Blockout's even scale turns its units into metres for the sizes the user is told. The drag is held to the wall's face, inside the
+ * thickness of the walls that meet it at each end and under the ceiling. The floor is `env.feet`'s. */
+OpeningPlan plan_opening(const OpeningEnv &env, GameObject &bo, int kind, Vec3 a, Vec3 b, Vec3 n) {
+  OpeningPlan plan;
+  const Mat4 m = bo.world_matrix();
+  const float scale = length(m.dir(Vec3(1.0f, 0.0f, 0.0f)));
+  const char *not_finite = "That drag has no size the Blockout can hold (the numbers are not finite): press and drag again on the wall.";
+  if (!finite3(a) || !finite3(b) || !finite3(n) || !finite_bits(scale) || !(scale > 1e-6f)) {
+    plan.why = not_finite, plan.brief = "not finite";
+    return plan;
+  }
+  if (!wall_at(env, bo, a, n, plan.wall, plan.why)) {
+    plan.brief = "no wall here";
+    return plan;
+  }
+  const OpeningWall &w = plan.wall;
+  const Mat4 inv = m.inverse();
+  const Vec3 la = inv.point(a), lb = inv.point(b);
+  const float lim = 1e-3f;
+  /* The room: held inside its end walls and under its ceiling, when the face is wider and taller than that (a face too narrow for it is held to its own edges). */
+  const bool in_u = w.u_hi - w.u_lo > 2.0f * w.end_inset + 4.0f * lim, in_v = w.v_hi - w.v_lo > w.top_inset + 4.0f * lim;
+  const float u_min = w.u_lo + (in_u ? w.end_inset : 0.0f), u_max = w.u_hi - (in_u ? w.end_inset : 0.0f), v_min = w.v_lo, v_max = w.v_hi - (in_v ? w.top_inset : 0.0f);
+  auto held = [&](float v, float lo, float hi) { return std::max(lo, std::min(hi, v)); };
+  const float ua = held(dot(la, w.u), u_min, u_max), ub = held(dot(lb, w.u), u_min, u_max);
+  const float va = held(la.y, v_min, v_max), vb = held(lb.y, v_min, v_max);
+  const bool clamped = std::fabs(ua - dot(la, w.u)) > lim || std::fabs(ub - dot(lb, w.u)) > lim || std::fabs(va - la.y) > lim || std::fabs(vb - lb.y) > lim;
+  const float lo_u = std::min(ua, ub), hi_u = std::max(ua, ub), lo_v = std::min(va, vb), hi_v = std::max(va, vb);
+  auto on_wall = [&](float uu, float vv) { return m.point(w.point + w.u * (uu - dot(w.point, w.u)) + Vec3(0.0f, vv - w.point.y, 0.0f)); };
+  auto fill_rect = [&](float bottom) {
+    plan.rect[0] = on_wall(lo_u, bottom), plan.rect[1] = on_wall(hi_u, bottom), plan.rect[2] = on_wall(hi_u, hi_v), plan.rect[3] = on_wall(lo_u, hi_v);
+    plan.have_rect = true;
+    plan.width_m = (hi_u - lo_u) * scale, plan.height_m = (hi_v - bottom) * scale;
+  };
+  fill_rect(lo_v);
+  plan.centre = w.point + w.u * (0.5f * (lo_u + hi_u) - dot(w.point, w.u));
+  BlockoutHit hit;
+  hit.piece = w.piece_id, hit.point = plan.centre, hit.normal = w.normal;
+  if (!env.feet || !env.feet(hit, hi_u - lo_u, plan.feet) || !finite_bits(plan.feet)) {
+    plan.why = "A door or window can't stand on this wall: its piece is flat or its numbers are not finite.";
+    plan.brief = "no floor here";
+    return plan;
+  }
+  const float feet = plan.feet;
+  const char *name = kind == 1 ? "door" : "window";
+  const float least = kMinOpening / scale, top = hi_v;
+  if (kind == 1 && (lo_v - feet) * scale > kDoorReach) {
+    plan.why = strprintf("A door stands on the floor, and this drag starts %.2f m above it: start the drag at the floor, or choose Window for an opening up the wall.", (lo_v - feet) * scale);
+    plan.brief = "a door starts at the floor";
+    return plan;
+  }
+  /* A window's sill is the drag's lower edge. Below the floor it cannot be: a few centimetres under are raised to it (and the status says so), more is refused. */
+  const float under = feet - lo_v;
+  if (kind == 2 && under * scale > kSillSlack) {
+    plan.why = strprintf("The floor under this wall is %.2f m above the lower edge of the drag: start the window at the floor or higher up the wall.", under * scale);
+    plan.brief = "starts under the floor";
+    return plan;
+  }
+  const float bottom = kind == 1 ? feet : std::max(lo_v, feet);
+  if (hi_u - lo_u < least || top - bottom < least) {
+    const bool floor_short = kind == 1 && top - feet < least && hi_u - lo_u >= least;
+    plan.why = floor_short ? strprintf("A door has to reach up from the floor, and this drag ends %.2f m above it: drag up the wall, at least %.2f m.", (top - feet) * scale, kMinOpening)
+                           : strprintf("Too small: a %s is at least %.2f x %.2f m and this drag is %.2f x %.2f m - drag a larger rectangle on the wall.", name, kMinOpening, kMinOpening,
+                                       (hi_u - lo_u) * scale, std::max(0.0f, top - bottom) * scale);
+    plan.brief = floor_short ? "ends below a door's reach" : strprintf("too small (least %.2f m)", kMinOpening);
+    return plan;
+  }
+  fill_rect(bottom);
+  plan.width = hi_u - lo_u, plan.sill = kind == 1 ? 0.0f : bottom - feet, plan.head = top - feet;
+  if (clamped) plan.note = "the drag ran past the wall's edge and was held to the wall";
+  if (kind == 2 && under > lim) plan.note += std::string(plan.note.empty() ? "" : "; ") + strprintf("the sill was raised %.0f cm to the floor", (double)(under * scale * 100.0f));
+  plan.ok = finite_bits(plan.width) && finite_bits(plan.head) && finite_bits(plan.sill) && finite3(plan.centre);
+  if (!plan.ok) plan.why = not_finite, plan.brief = "not finite";
+  return plan;
+}
+
+/* The grid, in the wall's own frame: the two coordinates in the wall (along it and up it) rounded to `step`. (room_snap_point snaps only a
+ * surface that lies square to a world axis; a turned room's wall or a turned Blockout's does not.) */
+Vec3 snap_in_wall(Vec3 p, Vec3 u, Vec3 up, float step) {
+  const float su = dot(p, u), sv = dot(p, up);
+  return p + u * (std::round(su / step) * step - su) + up * (std::round(sv / step) * step - sv);
+}
+
+/* The console's words for a drag, which the tool sends when the button is let go (so that what the tool makes is what `blockout draw door` makes). */
+std::vector<std::string> opening_words(int kind, Vec3 at, Vec3 normal, float du, float dv) {
+  auto f = [](float v) { return strprintf("%.9g", (double)v); };
+  return {"blockout", "draw", kind == 1 ? "door" : "window", "auto", "at", f(at.x), f(at.y), f(at.z), "normal", f(normal.x), f(normal.y), f(normal.z), "size", f(du), f(dv), "0"};
+}
+
+/* A press for a door or window: on a wall face of `bo` (the Blockout under the pointer, nullptr: none) at the world point `p` with the surface's normal `n`.
+ * The footprint then lies in the wall: width along it, height up the Blockout's up, held inside the face (a press snapped past the face's edge is not on it).
+ * The wall found is kept for the preview and the release (wall_at). `step` the grid, 0 for none. False with `why`: nothing began. */
+template <class Tool>
+bool begin_opening_drag(Tool &r, const OpeningEnv &env, GameObject *bo, Vec3 p, Vec3 n, float step, std::string &why) {
+  OpeningWall wall;
+  if (!bo) return why = kNoWall, false;
+  if (!find_opening_wall(env, *bo, p, n, wall, why)) return false;
+  const Mat4 m = bo->world_matrix();
+  const Vec3 wn = normalize(m.dir(wall.normal));
+  Vec3 u, up;
+  if (!wall_axes(*bo, wn, u, up)) return why = kNoWall, false;
+  Vec3 at = step > 0.0f ? snap_in_wall(p, u, up, step) : p;
+  const Vec3 l = m.inverse().point(at);
+  const float inset = 1e-3f;
+  auto inside = [&](float v, float lo, float hi) { return hi - lo > 4.0f * inset ? std::max(lo + inset, std::min(hi - inset, v)) : 0.5f * (lo + hi); };
+  const float uu = inside(dot(l, wall.u), wall.u_lo, wall.u_hi), vv = inside(l.y, wall.v_lo, wall.v_hi);
+  at = m.point(wall.point + wall.u * (uu - dot(wall.point, wall.u)) + Vec3(0.0f, vv - wall.point.y, 0.0f));
+  if (!finite3(at)) return why = kNoWall, false;
+  r.normal = wn, r.u = u;
+  r.origin = r.corner = at;
+  r.surface = bo->id;
+  r.height = 0.0f, r.typed.clear(), r.points.clear();
+  r.stage = 1;
+  const MeshFilter *mf = bo->get<MeshFilter>();
+  if (mf && mf->mesh) {
+    WallCache &c = g_wall_cache;
+    c.owner = env.owner, c.bo = bo->id, c.mesh = mf->mesh.get(), c.version = mf->mesh->version, c.at = at, c.normal = wn, c.wall = wall;
+  }
+  return true;
+}
+
+/* Whether a choice of piece turns a door or window on or off: a footprint in progress is for the piece that began it and is dropped (stage 0, no corners) - a
+ * click would make a piece of the other kind from it. */
+template <class Tool>
+struct DropOnSwitch {
+  Tool &r;
+  int was;
+  explicit DropOnSwitch(Tool &t) : r(t), was(t.solid ? opening_of(t.piece) : 0) {}
+  ~DropOnSwitch() {
+    if ((r.solid ? opening_of(r.piece) : 0) == was) return;
+    r.stage = 0, r.typed.clear(), r.points.clear();
+    drop_wall_cache();
+  }
+};
+
 /* The tool's Piece choice by its word: a room, a solid of the footprint's shape, or a wedge, stairs or an arch (whose footprint is
- * the rectangle). False: no such word. */
+ * the rectangle), or (round 513) a door or window. False: no such word. */
 template <class Tool>
 bool set_draw_piece(const std::string &word, Tool &r) {
-  const int piece = word == "wedge" ? 3 : word == "stairs" ? 4 : word == "arch" ? 5 : 0;
+  DropOnSwitch<Tool> drop(r);
+  const int piece = word == "wedge" ? 3 : word == "stairs" ? 4 : word == "arch" ? 5 : word == "door" ? kPieceDoor : word == "window" ? kPieceWindow : 0;
   if (word != "room" && word != "solid" && !piece) return false;
   r.solid = word != "room";
   if (!r.solid) r.forget();  // (a room has no such choices)
@@ -68,7 +390,7 @@ int blockout_draw_shape(bool solid, bool circle, bool polyline, int piece) {
   return piece >= 3 ? piece + 3 : 3 + footprint;  // (3 wedge, 4 stairs, 5 arch -> entries 6, 7, 8)
 }
 
-int Editor::room_tool_shape_for_test() const { return blockout_draw_shape(room_.solid, room_.circle, room_.polyline, room_.piece); }
+int Editor::room_tool_shape_for_test() const { return opening_of(room_.solid ? room_.piece : 0) ? 9 + opening_of(room_.piece) : blockout_draw_shape(room_.solid, room_.circle, room_.polyline, room_.piece); }
 
 int blockout_draw_operation(bool solid, int chosen, bool subtract, bool flip, float height, bool nothing_to_cut) {
   if (!solid) return 0;
@@ -100,6 +422,7 @@ void Editor::set_room_tool(bool on) {
   if (on == room_.active) return;
   if (!on) {
     room_.active = false, room_.stage = 0, room_.typed.clear(), room_.points.clear();
+    drop_wall_cache();
     ui_.redraw = true;
     Log::info("Room tool: off");
     return;
@@ -114,7 +437,8 @@ void Editor::set_room_tool(bool on) {
   room_.active = true, room_.stage = 0, room_.typed.clear();
   if (!room_.solid) room_.forget();  // (the Draw and Operation choices hold with Solid only)
   ui_.redraw = true;
-  if (room_.polyline) Log::info("Room tool: click the corners of an outline on the ground or a face, close it on the first corner or with Enter, then move the mouse for the height and click  |  Esc leaves");
+  if (room_.solid && opening_of(room_.piece)) Log::info("Room tool: drag a rectangle on a wall of a Blockout, and the %s stands in it  |  Esc leaves", opening_of(room_.piece) == 1 ? "door" : "window");
+  else if (room_.polyline) Log::info("Room tool: click the corners of an outline on the ground or a face, close it on the first corner or with Enter, then move the mouse for the height and click  |  Esc leaves");
   else Log::info("Room tool: drag a rectangle on the ground or a face%s, then move the mouse for the height and click  |  Esc leaves", room_.circle ? " (a circle from its centre)" : "");
 }
 
@@ -194,6 +518,7 @@ bool Editor::room_update(const Recti &view) {
   RoomTool &r = room_;
   if (playing_ || edit_mode_ || !scene_) {
     r.active = false, r.stage = 0;
+    drop_wall_cache();
     return false;
   }
   if (in.key_pressed[platform::KEY_ESCAPE] && !u.wants_keyboard()) {
@@ -204,6 +529,7 @@ bool Editor::room_update(const Recti &view) {
   if (in.pressed[1] && r.stage > 0) {
     in.pressed[1] = false;
     r.stage = 0, r.typed.clear(), r.points.clear();
+    drop_wall_cache();
     return true;
   }
   /* Round 496: R turns the piece's direction a quarter round the surface's normal while one is in progress (elsewhere R keeps its keymap meaning;
@@ -211,7 +537,8 @@ bool Editor::room_update(const Recti &view) {
   const bool plain_r = !in.ctrl() && !in.shift() && !in.alt();
   if ((r.stage == 1 || r.stage == 2) && plain_r && in.key_pressed[platform::KEY_R] && !u.wants_keyboard()) {
     in.key_pressed[platform::KEY_R] = false;
-    if (r.solid && !r.circle && !r.polyline && r.piece >= 3) r.turns[r.piece - 3] = (r.turns[r.piece - 3] + 1) & 3;
+    if (r.solid && opening_of(r.piece)) Log::info("R does nothing for a door or window: it turns with its wall (draw it on another wall to face the other way).");
+    else if (r.solid && !r.circle && !r.polyline && r.piece >= 3) r.turns[r.piece - 3] = (r.turns[r.piece - 3] + 1) & 3;
     u.redraw = true;
   }
   const Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
@@ -223,14 +550,21 @@ bool Editor::room_update(const Recti &view) {
       Log::warn("Room: click on a surface or the ground");
       return true;
     }
-    r.normal = n;
-    r.u = surface_axis(n);
-    r.origin = r.corner = room_snap_point(p, n);
     /* Round 495: a piece drawn on a face of a Blockout is that Blockout's - the face under the press itself (the ground may lie
      * before it, and then the surface is the ground). */
     SceneHit under;
     const bool face = scene_raycast(*scene_, ray.origin, normalize(ray.dir), 1e5f, under) && under.object && under.object->get<Blockout>() &&
                       length(under.point - p) <= 1e-3f * (1.0f + length(p));
+    if (r.solid && opening_of(r.piece)) {
+      /* Round 513: a door or window starts on a wall face of a Blockout and says why when the press is anywhere else. */
+      std::string why;
+      const OpeningEnv env{*scene_, &room_, false, kOpeningWallLean, nullptr};  // (the press needs no floor)
+      if (!begin_opening_drag(r, env, face ? scene_->find(under.object->id) : nullptr, p, n, u.in.ctrl() ? 0.0f : std::max(1e-3f, snap_move_), why)) Log::warn("%s", why.c_str());
+      return true;
+    }
+    r.normal = n;
+    r.u = surface_axis(n);
+    r.origin = r.corner = room_snap_point(p, n);
     room_.surface = face ? under.object->id : 0;
     r.height = 0.0f, r.typed.clear(), r.points.clear();
     if (r.polyline) r.points.push_back(r.origin), r.stage = 3;  // (the first corner: the others are clicked)
@@ -269,9 +603,30 @@ bool Editor::room_update(const Recti &view) {
   }
   if (r.stage == 1) {
     float t;
-    if (ray_plane(ray, r.origin, r.normal, t)) r.corner = room_snap_point(ray.origin + ray.dir * t, r.normal);
+    const int opening = r.solid ? opening_of(r.piece) : 0;
+    const Vec3 up = cross(r.normal, r.u);  // (an opening's: the Blockout's up; the footprint of any other piece has no up)
+    if (ray_plane(ray, r.origin, r.normal, t)) {
+      const Vec3 on_plane = ray.origin + ray.dir * t;
+      r.corner = !opening ? room_snap_point(on_plane, r.normal) : in.ctrl() ? on_plane : snap_in_wall(on_plane, r.u, up, std::max(1e-3f, snap_move_));
+    }
     u.redraw = true;
     if (in.down[0]) return true;
+    if (opening) {
+      /* Let go: the console's `blockout draw door|window` makes it, from the same numbers - one way to make one, and what the tool makes is what a script makes. */
+      const float du = dot(r.corner - r.origin, r.u), dv = dot(r.corner - r.origin, up);
+      const Vec3 origin = r.origin, normal = r.normal;
+      r.stage = 0, r.typed.clear();
+      if (!(std::fabs(du) >= 1e-3f && std::fabs(dv) >= 1e-3f)) {
+        drop_wall_cache();
+        Log::warn("A door or window is drawn by dragging a rectangle on a wall: press at one corner, drag to the opposite corner and let go.");
+        return true;
+      }
+      g_release_uses_cache = true;  // (this drag's own wall, kept at its press; any other caller of the words finds the wall again)
+      room_command(opening_words(opening, origin, normal, du, dv));
+      g_release_uses_cache = false;
+      drop_wall_cache();
+      return true;
+    }
     float du, dz;
     room_extent(du, dz);
     const bool empty = r.circle ? std::fabs(du) < 1e-3f : std::fabs(du) < 1e-3f || std::fabs(dz) < 1e-3f;
@@ -303,6 +658,11 @@ bool Editor::room_update(const Recti &view) {
   if (!((in.pressed[0] && scene_hovered_ && !u.any_active()) || in.key_pressed[platform::KEY_ENTER])) return true;
   u.consume_click();
   in.key_pressed[platform::KEY_ENTER] = false;
+  if (r.solid && r.piece < 0) {  // (backstop: a door or window is no piece room_make draws; the choice of one drops a footprint in progress, so this is not reached)
+    r.stage = 0, r.points.clear();
+    Log::warn("A door or window is drawn by dragging a rectangle on a wall: choose a box, room or other shape to draw that.");
+    return true;
+  }
   const Vec3 origin = r.origin, up = r.u, n = r.normal;
   const float height = r.height;
   const bool circle = r.circle;
@@ -331,7 +691,8 @@ void Editor::room_draw(const Recti &view) {
   };
   const uint32_t yellow = Color::hex(0xFFD040), blue = Color::hex(0x4A8CFF);
   std::string label;
-  if (r.stage == 0 && scene_hovered_) {
+  const int opening = r.solid ? opening_of(r.piece) : 0;
+  if (r.stage == 0 && scene_hovered_ && !opening) {  // (an opening starts on a wall, not on the ground: no ground marker for it)
     const Ray ray = scene_r3d_.screen_ray((float)(u.in.mx - view.x), (float)(u.in.my - view.y));
     float t;
     Vec2 s;
@@ -340,7 +701,23 @@ void Editor::room_draw(const Recti &view) {
       u.canvas.fill_circle(s.x, s.y, (float)u.px(4), yellow);
     }
   }
-  if (r.stage == 3) {
+  if (opening && r.stage > 0) {
+    /* Round 513: the opening's rectangle in the wall, in a Subtract's colour (it cuts), with its size beside the mouse; a drag that would be refused says why. */
+    GameObject *bo = scene_->find(r.surface);
+    const OpeningEnv env{*scene_, &room_, true, kOpeningWallLean, [this, bo](const BlockoutHit &h, float w, float &y) { return bo && blockout_opening_feet(*bo, h, w, y); }};
+    const OpeningPlan plan = bo ? plan_opening(env, *bo, opening, r.origin, r.corner, r.normal) : OpeningPlan();
+    const uint32_t cut = (blockout_operation_colour(1, false) & 0x00FFFFFFu) | 0xFF000000u;  // (as room_draw_preview takes the colour of an operation)
+    if (plan.have_rect)
+      for (int k = 0; k < 4; k++) line(plan.rect[k], plan.rect[(k + 1) % 4], cut), room_.preview_lines++;
+    label = strprintf("%.2f x %.2f m  %s", plan.width_m, plan.height_m, opening == 1 ? "Door" : "Window");
+    if (!plan.ok) label += "  - " + (plan.brief.empty() ? std::string("no wall here") : plan.brief);
+    else if (!plan.note.empty()) label += "  (held to the wall)";
+    const int tw = u.font.text_width(label) + u.px(12);
+    const Recti box{u.in.mx + u.px(16), u.in.my + u.px(12), tw, u.row_h()};
+    u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 230));
+    u.label(box, label, u.theme.text_bright, ui::Align::Center);
+  }
+  else if (r.stage == 3) {
     /* The corners so far, joined, and the next one at the mouse; the first corner is marked so the closing click is seen. */
     for (size_t i = 0; i + 1 < r.points.size(); i++) line(r.points[i], r.points[i + 1], yellow);
     line(r.points.back(), r.corner, yellow);
@@ -453,11 +830,22 @@ void Editor::room_command(const std::vector<std::string> &t) {
       for (int i = 0; i < 3; i++) slot[i] = turns[i];
     }
   } keep_turns(room_.turns);
+  /* Round 513: a door or window chosen as the tool's shape is no piece room_make draws: the console's footprint commands below make the plain solid. */
+  struct KeepPiece {
+    int &slot;
+    int piece;
+    explicit KeepPiece(int &s) : slot(s), piece(s) {
+      if (s < 0) s = 0;
+    }
+    ~KeepPiece() { slot = piece; }
+  } keep_piece(room_.piece);
   if (t.size() > 1 && to_lower(t[1]) == "draw") {
     /* blockout draw <piece> <operation> at <x y z> normal <x y z> size <du dz height>: what the tool's drags make on that surface
      * point, whatever the tool's own options are (they are put back). A cylinder: du its radius. */
     const char *usage = "blockout draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height> "
-                        "(metres; a cylinder: du its radius; on a face of a Blockout the piece is that Blockout's)";
+                        "(metres; a cylinder: du its radius; on a face of a Blockout the piece is that Blockout's) | "
+                        "blockout draw door|window auto at <x y z> normal <x y z> size <width height 0> (a rectangle on a wall of a Blockout: from the point, width to the right "
+                        "of a viewer facing the wall, height up; the wall's normal is the face's)";
     if (t.size() != 16 || to_lower(t[4]) != "at" || to_lower(t[8]) != "normal" || to_lower(t[12]) != "size") return Log::warn("%s", usage);
     float v[9] = {};
     const size_t at[9] = {5, 6, 7, 9, 10, 11, 13, 14, 15};
@@ -468,6 +856,46 @@ void Editor::room_command(const std::vector<std::string> &t) {
     const Vec3 p(v[0], v[1], v[2]), n(v[3], v[4], v[5]);
     if (!(length(n) > 1e-6f)) return Log::warn("blockout draw: the normal has no length - nothing made");
     const std::string piece = to_lower(t[2]), op = to_lower(t[3]);
+    if (piece == "door" || piece == "window") {
+      /* Round 513: what the Draw Piece tool makes when a rectangle is dragged on a wall - the same numbers, the same piece. `at` is one corner of the rectangle
+       * on the wall's face; the size runs along the wall to the right of a viewer facing it and up the Blockout's up (negative: the other way). */
+      if (op != "auto") return Log::warn("%s", usage);  // (an opening has no operation: it always cuts)
+      const int kind = piece == "door" ? 1 : 2;
+      GameObject *bo = scene_->find(blockout_at_surface(*scene_, p, normalize(n)));
+      if (!bo) return Log::warn("blockout draw %s: %s", piece.c_str(), kNoWall);
+      if (const Blockout *b = bo->get<Blockout>(); b && !b->state.hash_valid) blockout_jobs_wait(bo->id);
+      Vec3 across, up;
+      const bool axes = wall_axes(*bo, n, across, up);  // (a floor's or a ceiling's normal has none: the plan then says what that face is)
+      const OpeningEnv env{*scene_, &room_, g_release_uses_cache, kOpeningWallLean, [this, bo](const BlockoutHit &h, float w, float &y) { return blockout_opening_feet(*bo, h, w, y); }};
+      const OpeningPlan plan = plan_opening(env, *bo, kind, p, axes ? p + across * v[6] + up * v[7] : p, n);
+      if (!plan.ok) return Log::warn("%s", plan.why.c_str());
+      if (!axes) return Log::warn("blockout draw %s: %s", piece.c_str(), kNoWall);
+      const std::string name = unique_object_name(kind == 1 ? "Door" : "Window");
+      GameObject *g = scene_->create(name, bo);
+      BlockoutPiece *bp = g->add<BlockoutPiece>();
+      bp->shape = 0, bp->operation = 1, bp->opening = kind;
+      const int style = kind == 1 ? blockout_door_style_ : blockout_window_style_;
+      if (style != 0) blockout_opening_set_style(*bp, style);
+      bp->width = plan.width, bp->sill = plan.sill, bp->head = plan.head;  // (after the style: a Round window's own Head is the drag's)
+      if (kind == 1 && bp->style == kDoorRevolving) bp->drum_radius = std::max(1.0f, 0.625f * bp->width);
+      /* The Door and Window buttons' placement: the wall's thickness, the turn to it and the feet. The opening's up is the Blockout's, as round 499's fix places the
+       * buttons' openings, not the room's. */
+      BlockoutHit wall;
+      wall.piece = plan.wall.piece_id, wall.point = plan.centre, wall.normal = plan.wall.normal;
+      std::string why;
+      if (!blockout_stand_opening(*bo, *g, wall, &why)) {
+        scene_->destroy(std::vector<GameObject *>{g});
+        return Log::warn("blockout draw %s: can't be put there - %s", piece.c_str(), why.empty() ? "the wall's piece is flat or its numbers are not finite" : why.c_str());
+      }
+      /* (Head and Sill are measured from the feet the plan took from blockout_opening_feet - the code blockout_stand_opening stood the origin on.) */
+      expanded_.insert(bo->id);
+      select(g->id);
+      update_blockouts(true);
+      mark_changed(std::string("Create Blockout ") + (kind == 1 ? "Door" : "Window"));
+      record_blockout_last(g);
+      Log::info("%s %.2f x %.2f m drawn on the wall%s%s", kind == 1 ? "Door" : "Window", plan.width_m, plan.height_m, plan.note.empty() ? "" : ": ", plan.note.c_str());
+      return;
+    }
     const RoomTool tool = room_;
     room_.circle = piece == "cylinder", room_.polyline = false;
     /* (A box and a cylinder are the tool's Solid by the footprint; "solid" itself is not a word here - it would not say which.) */
@@ -518,6 +946,7 @@ void Editor::room_command(const std::vector<std::string> &t) {
 
 /* blockout roomopt circle|solid|subtract on|off | wall <metres>: the tool's options (as its bar sets them). */
 void Editor::room_options_command(const std::vector<std::string> &t) {
+  DropOnSwitch<decltype(room_)> drop(room_);  // (a choice that turns a door or window on or off drops the footprint in progress)
   const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";
   const bool on = value == "on" || value == "true" || value == "1" || value == "yes", off = value == "off" || value == "false" || value == "0" || value == "no";
   if (key == "wall") {
@@ -526,7 +955,7 @@ void Editor::room_options_command(const std::vector<std::string> &t) {
     room_.wall = m;
     return;
   }
-  const char *usage = "blockout roomopt circle|polyline|solid|subtract on|off | piece room|solid|wedge|stairs|arch | operation auto|add|subtract|intersect | wall <metres>";
+  const char *usage = "blockout roomopt circle|polyline|solid|subtract on|off | piece room|solid|wedge|stairs|arch|door|window | operation auto|add|subtract|intersect | wall <metres>";
   if (key == "piece" || key == "operation") {
     /* Round 495: what is drawn, and what a solid does to its Blockout (an operation holds while a solid is the piece). */
     const bool known = key == "piece" ? set_draw_piece(value, room_) : set_draw_operation(value, room_);
@@ -551,16 +980,34 @@ namespace {
 
 /* The Shape dropdown's nine entries - what the tool draws - and the tool's fields each one sets (round 496): a shape names its footprint,
  * so a Round Room and a Cylinder are the circle, the Outline ones the polyline, and the rest the rectangle. */
-constexpr int kRoomShapeCount = 9;
-const char *const kRoomShapeNames[kRoomShapeCount] = {"Room", "Round Room", "Outline Room", "Box", "Cylinder", "Outline", "Wedge", "Stairs", "Arch"};
+/* Round 513: the dropdown's rows are the nine shapes, a heading and the two openings. A row's number is its place in this list, the heading
+ * counted (the toolkit's combo indexes its options array); the nine keep their numbers (blockout_draw_shape's), the openings are 10 and 11. */
+constexpr int kRoomShapeRows = 12, kRowDoor = 10, kRowWindow = 11;
+const char *const kRoomShapeNames[kRoomShapeRows] = {"Room", "Round Room", "Outline Room", "Box", "Cylinder", "Outline", "Wedge", "Stairs", "Arch",
+                                                     "\001Openings", "Door", "Window"};
 const char *const kRoomShapeTips = "What the tool draws.\n"
                                "Room, Round Room, Outline Room: walls, a floor and a ceiling round the footprint (a rectangle, a circle from its centre, any outline).\n"
                                "Box, Cylinder, Outline: a plain solid by the same footprints. Pulled out it adds, pushed into a face it cuts; Shift while pulling "
                                "makes the other one.\n"
-                               "Wedge, Stairs, Arch: over the dragged rectangle.";
+                               "Wedge, Stairs, Arch: over the dragged rectangle.\n"
+                               "Door, Window: drag a rectangle on a wall of a Blockout and it stands in that wall, upright, the size of the drag, in the Door Style or Window Style "
+                               "chosen below. A door's bottom sits on the floor; a window's sill is the drag's lower edge.";
+
+/* The dropdown's row for the tool's fields. */
+int shape_row(bool solid, bool circle, bool polyline, int piece) {
+  if (solid && piece == kPieceDoor) return kRowDoor;
+  if (solid && piece == kPieceWindow) return kRowWindow;
+  return blockout_draw_shape(solid, circle, polyline, piece);
+}
 
 template <class Tool>
 void set_shape(Tool &r, int index) {
+  DropOnSwitch<Tool> drop(r);
+  if (index == kRowDoor || index == kRowWindow) {
+    r.solid = true, r.circle = r.polyline = false;
+    r.piece = index == kRowDoor ? kPieceDoor : kPieceWindow;
+    return;
+  }
   r.solid = index >= 3;
   r.circle = index == 1 || index == 4;
   r.polyline = index == 2 || index == 5;
@@ -642,10 +1089,10 @@ void Editor::draw_room_tools(ui::Layout &lay) {
             "Ctrl: no snapping. Shift while pulling the height: the other of Add and Subtract. Esc leaves. Console: tool room, blockout room, blockout draw.");
   row = lay.row();
   u.label({row.x + u.px(4), row.y, row.w / 2, row.h}, "Shape");
-  int shape = blockout_draw_shape(room_.solid, room_.circle, room_.polyline, room_.piece);
+  int shape = shape_row(room_.solid, room_.circle, room_.polyline, room_.piece);
   const Recti shape_rect{row.x + row.w / 2, row.y, row.w / 2 - u.px(6), row.h};
   if (u.record_buttons) u.button_rects["tools:shape"] = shape_rect;
-  if (u.combo(u.id("tools_room_shape"), shape_rect, shape, kRoomShapeNames, kRoomShapeCount)) {
+  if (u.combo(u.id("tools_room_shape"), shape_rect, shape, kRoomShapeNames, kRoomShapeRows)) {
     set_shape(room_, shape);
     if (!room_.polyline && room_.stage == 3) room_.points.clear(), room_.stage = 0;
     ui_.redraw = true;

@@ -1287,6 +1287,24 @@ bool Context::slider(Id i, const Recti &r, float &v, float mn, float mx) {
   return changed;
 }
 
+/* The first row past `from` in direction `dir` (+1 down, -1 up) that can be chosen, or -1 when there is none that way.
+ * Headings and separators are not choices (round 513). */
+static int combo_choosable_from(const char *const *options, int count, int from, int dir) {
+  for (int step = 1; step <= count; step++) {
+    const int k = from + dir * step;
+    if (k < 0 || k >= count) break;
+    if (Context::combo_choosable(options[k])) return k;
+  }
+  return -1;
+}
+
+static int combo_snap(const char *const *options, int count, int k) {
+  k = std::max(0, std::min(count - 1, k));
+  if (count <= 0 || Context::combo_choosable(options[k])) return k;
+  const int down = combo_choosable_from(options, count, k, 1);
+  return down >= 0 ? down : combo_choosable_from(options, count, k, -1);
+}
+
 bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, int count) {
   bool changed = false;
   auto it = int_results_.find(i);
@@ -1297,17 +1315,17 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   }
   bool hot = hovered(r);
   combo_rects_[i] = r;
-  if (record_buttons) record_control("combo", r, (v >= 0 && v < count) ? options[v] : "", true);
-  if (focus_start_id_ == i && focus_id_ == i && popup_open(i)) combo_keys(i, count);  // (its list is open: Up / Down / Enter / Esc are the list's)
+  const std::string cur = (v >= 0 && v < count && combo_choosable(options[v])) ? options[v] : "";  // (never a heading's text)
+  if (record_buttons) record_control("combo", r, cur, true);
+  if (focus_start_id_ == i && focus_id_ == i && popup_open(i)) combo_keys(i, options, count);  // (its list is open: Up / Down / Enter / Esc are the list's)
   const bool keyed_open = focus_stop(i, r) == kActivated && !popup_open(i);
   frame(r, theme.button, hot ? theme.field_hover : theme.border, px(3));
-  std::string cur = (v >= 0 && v < count) ? options[v] : "";
   label({r.x + px(5), r.y, r.w - r.h - px(5), r.h}, cur, theme.text_bright);
   int a = font.line_height() - px(6);
   if (r.w >= a + px(5)) draw_icon(Icon::ArrowDown, {r.right() - a - px(5), r.y + (r.h - a) / 2, a, a}, theme.text);  // (a combo narrower than its arrow and margin would draw it left of itself)
   if (keyed_open) {
     combo_open(i, r);
-    combo_hi_[i] = std::max(0, std::min(count - 1, v));
+    combo_hi_[i] = combo_snap(options, count, v);  // (the highlight starts on the chosen row; a heading is not one)
   }
   if (hot && in.pressed[0]) {
     if (popup_open(i)) {
@@ -1330,8 +1348,29 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   if (popup_open(i)) {
     std::vector<std::string> opts(options, options + std::max(0, count));
     const int hi = focus_id_ == i ? combo_hi_[i] : -1;  // (opened by key: the row Enter would pick)
-    popup(i, std::max(r.w, px(120)), [this, i, v, hi, opts = std::move(opts)] {
+    /* Round 513: the list is as wide as its longest row (a menu row's check column, text and margins) - a long option in
+     * a narrow combo was cut. The combo's own width and 120 px stay the least. */
+    int list_w = std::max(r.w, px(120));
+    for (const std::string &o : opts) {
+      const char *t = o.c_str();
+      if (combo_is_separator(t)) continue;
+      if (combo_is_heading(t)) t += 1;
+      list_w = std::max(list_w, font.text_width(t) + font.line_height() + px(24));
+    }
+    popup(i, list_w, [this, i, v, hi, opts = std::move(opts)] {
       for (int k = 0; k < (int)opts.size(); k++) {
+        const char *o = opts[(size_t)k].c_str();
+        if (combo_is_separator(o)) {
+          menu_separator();
+          continue;
+        }
+        if (combo_is_heading(o)) {
+          if (k > 0) menu_separator();
+          const Recti hr = popup_row();
+          record_control("heading", hr, o + 1);
+          canvas.text(font, hr.x + px(8), hr.y + (hr.h - font.line_height()) / 2, o + 1, theme.text_dim);
+          continue;
+        }
         if (k == hi) canvas.fill_rect({popup_area_.x, popup_cursor_y_, popup_area_.w, row_h()}, theme.selection);
         if (menu_item(opts[(size_t)k].c_str(), nullptr, k == v)) {
           int_results_[i] = k;
@@ -1359,12 +1398,17 @@ void Context::combo_open(Id i, const Recti &r) {
 
 /* The keys of a combo that has the focus and an open list: Up / Down move the highlighted row, Enter or Space pick it, Esc
  * closes the list and the focus stays on the combo (Tab closes it and walks on). */
-void Context::combo_keys(Id i, int count) {
+void Context::combo_keys(Id i, const char *const *options, int count) {
   int &hi = combo_hi_[i];
-  if (fk_.down) hi = std::min(count - 1, hi + 1);
-  if (fk_.up) hi = std::max(0, hi - 1);
+  hi = combo_snap(options, count, hi);
+  /* Up / Down skip headings and separators and stop at the ends (round 513). */
+  if (fk_.down) hi = std::max(hi, combo_choosable_from(options, count, hi, 1));
+  if (fk_.up) {
+    const int up = combo_choosable_from(options, count, hi, -1);
+    if (up >= 0) hi = up;
+  }
   fk_.up = fk_.down = false;
-  if (fk_.activate && count > 0) int_results_[i] = std::max(0, std::min(count - 1, hi));
+  if (fk_.activate && count > 0 && hi >= 0) int_results_[i] = hi;
   if (fk_.activate || fk_.esc || fk_.tab) close_popup(i);
   fk_.activate = fk_.esc = false;
   redraw = true;
