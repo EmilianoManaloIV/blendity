@@ -448,7 +448,28 @@ static void vr_nav_tests() {
     }
     std::printf("    %zu triangles: built in %.1f ms; 40 segments %d hits, %d agree; every triangle %.3f ms a segment, the BVH %.4f ms\n", idx.size() / 3, built * 1e3, hits, agree,
                 brute / 40 * 1e3, fast / 40 * 1e3);
-    CHECK(agree == 40 && hits > 30 && fast * 20 < brute);
+    /* Round 517 (ADR 0056): "the BVH 20 times faster than every triangle" was asserted from the clock and failed on a busy
+     * machine (0.19 ms against 2.9). The times are printed above; what the name promises - a few node visits - is checked
+     * from the hierarchy itself: the nodes whose box a segment's box reaches, walked from the root as a search does, are a
+     * small part of all of them (a list in disguise, or boxes that cover everything, would reach most). */
+    size_t most_reached = 0;
+    for (int k = 0; k < 40; k++) {
+      const Vec3 a(0.5f + k * 0.7f, 1.0f, 3.0f + k * 0.5f), b = a + Vec3(0.3f, -1.5f, 0.2f);
+      const Vec3 lo(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)), hi(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
+      size_t reached = 0;
+      std::vector<uint32_t> stack{0};
+      while (!stack.empty() && !bvh.nodes.empty()) {
+        const xr::SegmentBvh::Node &n = bvh.nodes[stack.back()];
+        stack.pop_back();
+        if (n.hi.x < lo.x || n.lo.x > hi.x || n.hi.y < lo.y || n.lo.y > hi.y || n.hi.z < lo.z || n.lo.z > hi.z) continue;
+        reached++;
+        if (n.count == 0) stack.push_back(n.first), stack.push_back(n.right);  // (an inner node: its two children)
+      }
+      most_reached = std::max(most_reached, reached);
+    }
+    std::printf("    a segment's box reaches at most %zu of the %zu nodes\n", most_reached, bvh.nodes.size());
+    CHECK(agree == 40 && hits > 30);
+    CHECK(!bvh.nodes.empty() && most_reached * 50 < bvh.nodes.size());
   });
   test("VR View's hands in the editor (round 384): both squeezes pulled together scale the world 1:2; the right trigger held then let go teleports to where the arc lands; the right A button toggles the tape between the hands", [] {
     Editor ed;
