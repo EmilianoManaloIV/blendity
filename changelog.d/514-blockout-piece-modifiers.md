@@ -51,9 +51,19 @@ fixed (a false warning on every plain piece's Modifiers section among them). Tes
 exact path: a stacked column in `interior 100` changed to the drawn mesh in 19.6 ms median (Bevel) and 24.6 ms (Array of
 10), budget 100 ms, one evaluation a change; a drag of the column or of a door, 120 frames: worst frame 5.2 - 6.5 ms,
 0 stack evaluations, 0 main-thread builds. Untimed sweep, every allowed modifier on every shape, added and subtracted,
-in a small building: 448 cases, 448 built, 0 problems on each path; faces newly on top of each other 6 on the exact
-path (2 each with Bevel, Wireframe and Decimate) and 2 on the grid (Solidify) - a new section, so no earlier count;
-not yet traced to their cases (an open item). Extremes (an Array of 6,000 faces, Subdivision 4 of a sphere, 70,656
+in a small building: 448 cases, 448 built, 0 problems on each path. Faces newly on top of each other: 6, in three cases
+(a new section, so no earlier count; the sweep now prints each case, its face pairs and the stacked mesh's own count):
+- **sphere + Bevel, cut through the wall between two rooms (exact path), 2 pairs:** tiny back-to-back triangles
+  (0.0015 m2) where the bevelled sphere's surface nearly grazes the wall's planes. The stacked mesh itself has none
+  (482 faces, 0 pairs): it is the exact path's boolean meeting a nearly tangent surface - the kernel's contact class
+  for any mesh piece (round 480), not the stack.
+- **outline + Wireframe, cut through that wall (exact path), 2 pairs:** a sliver in the plane of the wall's face and
+  one in the cut's floor. The Wireframe's own output already holds 4 pairs on top of each other (its struts' ends
+  overlap at the outline's sharp corners) - the Wireframe modifier's result, the same on an ordinary object; round 514
+  passes it to the kernel as it is (it is closed, so it is not refused). A follow-up for the Wireframe modifier.
+- **cylinder + Decimate, cut through that wall (grid path), 2 pairs:** slanted faces of the decimated cylinder finer
+  than the 0.2 m cell; the stacked mesh has none (18 faces) - the grid's known class.
+(On the dependency-free build the grid counted 2 with Solidify instead: the same grid class.) Extremes (an Array of 6,000 faces, Subdivision 4 of a sphere, 70,656
 faces) build, 0 problems. `--only blockout`: every count the same as round 500 recorded.
 
 <!-- docs/ARCHITECTURE.md -->

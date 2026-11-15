@@ -234,6 +234,32 @@ static size_t overlaps_of(const Mesh &m, size_t &unchecked) {
   return pairs.size();
 }
 
+/* Each pair of faces on top of each other in `m`: where it is, which way each face looks and how large - so a count in the table can be
+ * traced to the faces that make it. */
+static void print_overlaps(const Mesh &m, const char *what) {
+  const AABB bb = m.bounds();
+  std::vector<std::pair<uint32_t, uint32_t>> pairs;
+  meshops::overlapping_faces(m, 1e-4f * length(bb.max - bb.min), &pairs);
+  auto centre = [&m](uint32_t f) {
+    Vec3 c(0.0f);
+    const uint32_t a = m.face_offsets[f], b = m.face_offsets[f + 1];
+    for (uint32_t i = a; i < b; i++) c = c + m.positions[m.corner_verts[i]];
+    return c * (1.0f / (float)std::max<uint32_t>(1, b - a));
+  };
+  auto area = [&m](uint32_t f) {
+    Vec3 n(0.0f);
+    const uint32_t a = m.face_offsets[f], b = m.face_offsets[f + 1];
+    for (uint32_t i = a; i < b; i++) n = n + cross(m.positions[m.corner_verts[i]], m.positions[m.corner_verts[i + 1 < b ? i + 1 : a]]);
+    return 0.5f * length(n);
+  };
+  for (const auto &pr : pairs) {
+    const Vec3 ca = centre(pr.first), cb = centre(pr.second), na = m.face_normal(pr.first), nb = m.face_normal(pr.second);
+    std::printf("    on top (%s): face %u at (%.3f %.3f %.3f) n (%.2f %.2f %.2f) area %.4f, %u corners | face %u at (%.3f %.3f %.3f) n (%.2f %.2f %.2f) area %.4f, %u corners\n", what,
+                pr.first, ca.x, ca.y, ca.z, na.x, na.y, na.z, area(pr.first), m.face_offsets[pr.first + 1] - m.face_offsets[pr.first], pr.second, cb.x, cb.y, cb.z, nb.x,
+                nb.y, nb.z, area(pr.second), m.face_offsets[pr.second + 1] - m.face_offsets[pr.second]);
+  }
+}
+
 struct Tally {
   size_t cases = 0, built = 0, refused = 0, skipped = 0, problems = 0, newly = 0, unchecked = 0;
   std::string first;
@@ -270,6 +296,15 @@ static void sweep_case(size_t s, size_t k, const ShapeCase &shape, const ModCase
     bad = bkstress::problem(out);
     const size_t over = overlaps_of(out, t.unchecked);
     t.newly += over > baseline ? over - baseline : 0;
+    if (over > baseline) {
+      const std::string what = strprintf("%s + %s, %s, %s path", shape.name, mod_case.name, subtract ? "subtracted" : "added", field ? "field" : "auto");
+      std::printf("  faces newly on top: %s: %zu (the building alone %zu)\n", what.c_str(), over, baseline);
+      print_overlaps(out, what.c_str());
+      const Piece &stacked = pieces.back();  // (the stacked piece's own mesh: are the faces its, or the cut's?)
+      size_t own_unchecked = 0;
+      const size_t own = stacked.mesh ? overlaps_of(*stacked.mesh, own_unchecked) : 0;
+      std::printf("    the stacked piece's own mesh: %zu faces, %zu pairs on top of each other\n", stacked.mesh ? stacked.mesh->face_count() : 0, own);
+    }
   }
   if (bad.empty()) return;
   t.problems++;
