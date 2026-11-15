@@ -562,19 +562,25 @@ SHOTS = [
     ("layout-learning", "Learning", ["lesson 1"]),
     ("layout-drawing", "Drawing", []),
     # The Blockout figures (round 512): each builds its Blockout from the console, as the Learn lessons' Try-it buttons do;
-    # "blockout wait" lands the worker's mesh before the picture is taken.
+    # "camera <yaw> <pitch> <distance> <target>" frames the Blockout (nothing frames the view by itself); "blockout wait" lands
+    # the worker's mesh before the picture is taken.
     ("blockout-rooms", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout add window 1.2 2 0.9",
-                                       "blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door", "blockout wait"]),
+                                       "blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door",
+                                       "camera 35 32 15 4.2 1.2 2", "blockout wait"]),
     ("blockout-draw-piece", "Blocking Out", ["blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2",
                                             "blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5",
                                             "blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1",
                                             "blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2",
-                                            "blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1", "blockout wait"]),
+                                            "blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1",
+                                            "camera 40 28 8 1.5 1 1.5", "blockout wait"]),
     ("blockout-door-leaf", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door single 1 2.1",
-                                           "blockout set open 0.5", "blockout wait"]),
-    ("blockout-architecture", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 6 5 2.6", "blockout add column 0.2 2.6",
+                                           "blockout set open 0.5", "camera 60 22 9 2 1.2 2", "blockout wait"]),
+    # (The room centred on the Blockout's origin, where the pieces go; open at the top to see them.)
+    ("blockout-architecture", "Blocking Out", ["blockout draw room auto at -3 0 -2.5 normal 0 1 0 size 6 5 2.6", "blockout set opentop on",
+                                              "blockout add column 0.2 2.6",
                                               "blockout add pilaster 0.2 2.6", "blockout add railing 5 1",
-                                              "blockout add stairs spiral 1 0.1 3 16 270", "blockout wait"]),
+                                              "blockout add stairs spiral 1 0.1 3 16 270",
+                                              "camera 35 50 12 0 1 0", "blockout wait"]),
 ]
 
 
