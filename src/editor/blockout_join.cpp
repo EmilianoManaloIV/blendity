@@ -399,7 +399,7 @@ void Editor::draw_blockout_join_row(GameObject &g, Blockout &, ui::Layout &lay) 
   if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Join Blockouts"))
     defer([this] { run_console_command("blockout join"); });  // (after the panel's loop: it removes the objects being drawn)
   u.tooltip("Moves the pieces of the Blockouts that touch this one under it, each keeping its place in the world, and removes the emptied objects: one mesh, the shared\n"
-            "walls merged. The settings that differ (Field Cell, Texture Scale, class materials...) take this Blockout's. One Undo step. Console: blockout join [name, name ...].");
+            "walls merged. The settings that differ (Field Cell, Texture Scale, class materials...) take this Blockout's. One Undo step.");  // (round 513: no "Console:" tail - the button is the control)
 }
 
 /* ===================================================================== */

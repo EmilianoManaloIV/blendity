@@ -28,6 +28,10 @@
   this round.
 - **The status bar names a drawn door or window** ("Door: release to cut the opening | R does nothing: it turns with its wall"),
   not "Box".
+- **Two Blockout tooltips found by the HCI audits** (texts of Pass 23's, cleared by the hub): Turn 90's names Adjust Last
+  Operation's key from the keymap (Ctrl+F9 in Maya, where F9 is a mode - it said F9 everywhere), and neither Turn 90's nor
+  Join Blockouts' ends in "Console: ..." (the button is the control). The console audit is back at its baseline (6), the
+  label audit at 0.
 
 **Fixed (tests)** Pass 23's style tests pick the Tools window's style dropdowns after scrolling them into view (in their
 900 x 600 window they sit below the fold since round 509; at 1366x768 and larger they show without scrolling).

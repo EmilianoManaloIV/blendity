@@ -1928,8 +1928,10 @@ void Editor::draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::La
         update_blockouts(true);
         mark_changed("Turn Blockout Piece");
       });
+    /* (Round 513, HCI: the key comes from the keymap - Ctrl+F9 in presets where F9 is a mode - and no "Console:" tail: the button is the control.) */
     u.tooltip("Turns the piece a quarter turn round the surface's normal, about the middle of its footprint: a wedge's or stairs' two footprint sizes swap so it\n"
-              "stays in the same box, an arch spans the other way. One Undo step. The same turn is the Turn row of Adjust Last Operation (F9) right after the piece is drawn; Console: blockout turn.");
+              "stays in the same box, an arch spans the other way. One Undo step. The same turn is the Turn row of Adjust Last Operation (" + hint_key("edit.adjust_last", "F9") +
+              ") right after the piece is drawn.");
   }
   const Vec3 s = g.local().scale;
   const bool numbers = bp.shape != (int)blockout::Shape::Mesh || bp.opening != 0;

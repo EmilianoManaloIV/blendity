@@ -1092,4 +1092,45 @@ void run_blockout_openings_tests() {
     CHECK(bp != nullptr);
     if (bp) CHECK_NEAR(bp->width, 0.8f, 0.01f);
   });
+
+  test("blockout tooltips (round 513, HCI): Turn 90's names Adjust Last Operation's key from the keymap - F9, Ctrl+F9 in Maya where F9 is a mode - and neither Turn 90's nor Join Blockouts' sends the artist to the Console", [] {
+    auto tip = [](Editor &ed, const char *key) {
+      Recti r;
+      if (!ed.button_rect_for_test(key, r)) return std::string("(no '") + key + "')";
+      const auto it = ed.ui_for_test().tooltip_texts.find(std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.w) + "," + std::to_string(r.h));
+      return it == ed.ui_for_test().tooltip_texts.end() ? std::string("(no tooltip)") : it->second;
+    };
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    oo_empty(ed);
+    GameObject *bo = oo_blockout(ed, 0.0f, Vec3(0.0f));
+    GameObject *stairs = ed.scene().create("Stairs", bo);
+    BlockoutPiece *sp = stairs->add<BlockoutPiece>();
+    sp->shape = 4, sp->operation = 0, sp->size = {2.0f, 1.0f, 4.0f};  // (the kernel's stairs, shape 4: they face a way, so the Inspector offers Turn 90)
+    GameObject *room = oo_room(ed, *bo, 0.0f);
+    room->set_local_position({0.0f, 1.5f, 8.0f});
+    GameObject *bo2 = oo_blockout(ed, 0.0f, Vec3(6.4f, 0.0f, 8.0f));  // (its room's outer wall on the first room's: the two touch)
+    oo_room(ed, *bo2, 0.0f, 0.0f, "Other Room");
+    oo_built(ed, bo);
+    oo_built(ed, bo2);
+    ed.command("layout Default");
+    ed.record_buttons_for_test(true);
+    for (const char *preset : {"Blender", "Maya"}) {
+      ed.command(std::string("keymap ") + preset);
+      ed.select_for_test(stairs->id, false);
+      oo_settle(ed, 3);
+      Recti seen;
+      r509_scroll_to(ed, WindowKind::Inspector, "Turn 90", seen);  // (below the Inspector's fold in some layouts)
+      const std::string turn = tip(ed, "Turn 90");
+      const std::string want = std::string("Adjust Last Operation (") + (std::string(preset) == "Maya" ? "Ctrl+F9" : "F9") + ")";
+      CHECK(turn.find(want) != std::string::npos);
+      CHECK(turn.find("Console") == std::string::npos);
+      if (turn.find(want) == std::string::npos) std::printf("    %s: Turn 90's tooltip: %s\n", preset, turn.c_str());
+    }
+    ed.select_for_test(bo->id, false);
+    oo_settle(ed, 3);
+    const std::string join = tip(ed, "Join Blockouts");
+    CHECK(join.find("One Undo step.") != std::string::npos && join.find("Console") == std::string::npos);
+    if (join.find("One Undo step.") == std::string::npos) std::printf("    Join Blockouts' tooltip: %s\n", join.c_str());
+  });
 }
