@@ -36,8 +36,8 @@
 **Fixed (tests)** Pass 23's style tests pick the Tools window's style dropdowns after scrolling them into view (in their
 900 x 600 window they sit below the fold since round 509; at 1366x768 and larger they show without scrolling).
 
-**Checked:** Windows with Blender's libraries, fresh folders: hci 1,842, blockout 22,989, editor 2,356, 0 failed; Linux: hci
-and blockout 1,840 and 17,639, editor 2,333, 0 failed; the full 12-configuration HCI sweep identical with and without the round (at or below the baseline);
+**Checked:** Windows with Blender's libraries, fresh folders: hci 1,849, blockout 29,281, editor 2,359, 0 failed; Linux: hci
+1,847, blockout 22,065, editor 2,333, 0 failed; the full 12-configuration HCI sweep identical with and without the round (at or below the baseline);
 the test-engineer's eleven edge tests; two code reviews (changes needed, all made: the floor from Pass 23's
 `blockout_opening_feet`, a shape switch mid-drag dropped, the wall found at the press kept by id for that drag only) and an
 approval. Not run: stress (no geometry kernel changed - the opening is Pass 23's piece).
