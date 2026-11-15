@@ -800,6 +800,10 @@ class Editor {
   size_t window_count_for_test() const { return windows_.size() + 1; }
   EditorWindow *window_for_test(int id) { return editor_window(id); }
   const Image &main_fb_for_test() const { return fb_; }
+  const Mesh *collider_wire_for_test(const GameObject &g) {  // (round 515: the collider wire's cache, for tests)
+    const ColliderComponent *c = g.get<ColliderComponent>();
+    return c ? collider_wire(g, *c) : nullptr;
+  }
   void set_monitors_for_test(const std::vector<platform::Monitor> &m) { test_monitors_ = m; }
   std::string windows_layout_for_test() { return windows_layout(); }
   void restore_windows_for_test(const std::string &s) { restore_windows(s); }

@@ -31,7 +31,9 @@ none. Each leaf's origin is its hinge (a Sliding leaf's: its closed place; the w
 - Learn: "Doors with a style" swings a leaf with Open Amount, then with the Rotate tool.
 
 **Fixed on the way:** a NaN Open Amount made the door look changed every frame (a float compare); a NaN Leaf Thickness
-turned the door into a plain hole.
+turned the door into a plain hole. A collider's wire cache key converted `centre * 10000` to an unsigned number, which
+is undefined for a negative centre (a leaf's collider sits off its hinge) and stopped the sanitizer build; the key now
+uses the fields' bits (`world_kit.cpp`, round 362's code).
 
 **Limits, said plainly:** a leaf turned during an animation or Sequencer preview, or while playing, is not written back
 (the preview's pose is not the user's); after the preview the leaf goes back to Open Amount. A leaf's shape follows the
