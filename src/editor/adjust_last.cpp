@@ -161,10 +161,34 @@ void Editor::blockout_last_rerun() {
   if (!bp) return;
   auto size = [](float v) { return finite_bits(v) ? std::max(kBlockoutMinSize, std::min(10000.0f, v)) : kBlockoutMinSize; };
   auto thick = [](float v) { return finite_bits(v) ? std::max(0.0f, std::min(1000.0f, v)) : 0.0f; };
+  if (o.n == 7) {  // (round 500: a preset: the numbers are the copy's, from the piece as it was made; its bottom stays where it was)
+    *bp = o.pre;
+    g->set_world_position(o.base_p);
+    if (o.turnable && o.turn != o.turn_done) {
+      const int quarters = o.turn - o.turn_done;
+      o.turn_done = o.turn;
+      blockout_turn_piece(*g, quarters);
+    }
+    edit_epoch::bump();
+    amend_last_step();
+    return;
+  }
   if (bp->opening) {
     bp->width = size(o.a);
     bp->sill = thick(o.c);
     bp->head = std::max(size(o.b), bp->sill + kBlockoutMinSize);
+    if (bp->opening == 2 && o.style >= 0) {  // (round 498: the style and the numbers it reads, as the rows hold them)
+      bp->style = std::min(kBlockoutWindowStyles - 1, std::max(0, o.style));
+      bp->frame_width = size(o.frame_width), bp->frame_depth = size(o.frame_depth), bp->arch_rise = thick(o.arch_rise), bp->sill_overhang = thick(o.sill_overhang);
+      bp->panes_across = std::min(12, std::max(1, o.panes_across)), bp->panes_up = std::min(12, std::max(1, o.panes_up));
+      bp->glass = o.glass, bp->sill_board = o.sill_board;
+    }
+    if (bp->opening == 1 && o.style >= 0) {  // (round 499: a door's style and numbers)
+      bp->style = std::min(kBlockoutDoorStyles - 1, std::max(0, o.style));
+      bp->frame_width = size(o.frame_width), bp->frame_depth = size(o.frame_depth), bp->arch_rise = thick(o.arch_rise);
+      bp->leaf = o.leaf, bp->leaf_thickness = size(o.leaf_thickness), bp->open_amount = finite_bits(o.open_amount) ? std::min(1.0f, std::max(0.0f, o.open_amount)) : 0.0f;
+      bp->hinge_side = o.hinge == 1 ? 1 : 0, bp->slide_direction = o.slide == 1 ? 1 : 0, bp->drum_radius = size(o.drum_radius);
+    }
   }
   else {
     if (bp->shape == 0 || bp->shape == 3 || bp->shape == 4) bp->size = {size(o.a), size(o.c), size(o.b)};
@@ -221,9 +245,74 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     title = "Blockout " + o.what;
     const float mn = kBlockoutMinSize, mx = 10000.0f;
     if (o.n == 3) {
+      const bool door = o.opening == 1;  // (round 499: a door's style words and rows)
+      if (o.style >= 0)
+        rows.push_back({"Style", nullptr, &o.style, nullptr, 0, 0, 0, 0, (door ? kBlockoutDoorStyles : kBlockoutWindowStyles) - 1, door ? kBlockoutDoorStyleNames : kBlockoutWindowStyleNames});  // (round 498: a dropdown of words)
       rows.push_back({"Width", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Head", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Sill", &o.c, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+      if (door && o.style > kDoorOpeningOnly) {  // (round 499: a door's rows, as the Inspector shows them)
+        const bool revolving = o.style == kDoorRevolving;
+        if (!revolving) {
+          rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          rows.push_back({"Frame Depth", &o.frame_depth, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          if (o.style == kDoorArched) rows.push_back({"Arch Rise", &o.arch_rise, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+          rows.push_back({"Leaf", nullptr, nullptr, &o.leaf, 0, 0, 0, 0, 0});
+          if (o.leaf) rows.push_back({"Leaf Thickness", &o.leaf_thickness, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          if (o.leaf && o.style != kDoorArched) rows.push_back({"Open Amount", &o.open_amount, nullptr, nullptr, 0.01f, 0.0f, 1.0f, 0, 0});
+          if (o.leaf && o.style == kDoorSingle) rows.push_back({"Hinge Side", nullptr, &o.hinge, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
+          if (o.leaf && o.style == kDoorSliding) rows.push_back({"Slide Direction", nullptr, &o.slide, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
+        }
+        else rows.push_back({"Drum Radius", &o.drum_radius, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      }
+      if (!door && o.style > kWindowOpeningOnly) {  // (only the rows the style reads, as the Inspector shows them)
+        rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+        rows.push_back({"Frame Depth", &o.frame_depth, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+        if (o.style == kWindowGrid) {
+          rows.push_back({"Panes Across", nullptr, &o.panes_across, nullptr, 0, 0, 0, 1, 12});
+          rows.push_back({"Panes Up", nullptr, &o.panes_up, nullptr, 0, 0, 0, 1, 12});
+        }
+        if (o.style == kWindowArched) rows.push_back({"Arch Rise", &o.arch_rise, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+        rows.push_back({"Glass", nullptr, nullptr, &o.glass, 0, 0, 0, 0, 0});
+        if (o.style != kWindowFixed && o.style != kWindowRound) {
+          rows.push_back({"Sill Board", nullptr, nullptr, &o.sill_board, 0, 0, 0, 0, 0});
+          if (o.sill_board) rows.push_back({"Sill Overhang", &o.sill_overhang, nullptr, nullptr, 0.005f, 0.0f, mx, 0, 0});
+        }
+      }
+    }
+    else if (o.n == 7) {  // (round 500: a preset's numbers, as the Inspector shows them: what the preset reads)
+      BlockoutPiece &p = o.pre;
+      const int k = p.preset;
+      const bool column = k == kPresetColumn || k == kPresetPilaster, stairs = k == kPresetStairsL || k == kPresetStairsU;
+      auto f = [&](const char *label, float *v, float speed, float lo, float hi) { rows.push_back({label, v, nullptr, nullptr, speed, lo, hi, 0, 0}); };
+      auto i = [&](const char *label, int *v, int lo, int hi) { rows.push_back({label, nullptr, v, nullptr, 0, 0, 0, lo, hi}); };
+      auto b = [&](const char *label, bool *v) { rows.push_back({label, nullptr, nullptr, v, 0, 0, 0, 0, 0}); };
+      if (column) {
+        f("Radius", &p.radius, 0.01f, mn, mx), f("Height", &p.height, 0.01f, mn, mx);
+        if (k == kPresetColumn) b("Square Shaft", &p.square);
+        f("Base Height", &p.base_height, 0.01f, 0.0f, mx), f("Capital Height", &p.capital_height, 0.01f, 0.0f, mx), f("Base Width", &p.base_width, 0.01f, mn, mx);
+        f("Capital Width", &p.capital_width, 0.01f, mn, mx), f("Taper", &p.taper, 0.01f, 0.05f, 2.0f);
+        if (k == kPresetColumn) i("Segments", &p.segments, 3, 256);
+      }
+      if (k == kPresetBeam) f("Length", &p.size.x, 0.01f, mn, mx), f("Depth", &p.size.y, 0.01f, mn, mx), f("Width", &p.size.z, 0.01f, mn, mx);
+      if (k == kPresetRailing) {
+        f("Length", &p.length, 0.01f, mn, mx), f("Rail Height", &p.rail_height, 0.01f, mn, mx), f("Post Spacing", &p.post_spacing, 0.01f, mn, mx);
+        f("Post Size", &p.post_size, 0.005f, mn, mx), f("Rail Size", &p.rail_size, 0.005f, mn, mx), b("Bottom Rail", &p.bottom_rail);
+      }
+      if (k == kPresetRoof) {
+        rows.push_back({"Roof Style", nullptr, &p.roof_style, nullptr, 0, 0, 0, 0, kBlockoutRoofStyles - 1, kBlockoutRoofStyleNames});
+        f("Length", &p.length, 0.01f, mn, mx), f("Span", &p.span, 0.01f, mn, mx), f("Pitch", &p.pitch, 0.5f, 0.0f, 85.0f), f("Overhang", &p.overhang, 0.01f, 0.0f, mx);
+        f("Thickness", &p.thickness, 0.01f, 0.0f, mx);
+      }
+      if (stairs) f("Flight Width", &p.stair_width, 0.01f, mn, mx), f("Total Height", &p.total_height, 0.01f, mn, mx), f("Length", &p.length, 0.01f, mn, mx);
+      if (k == kPresetSpiral) f("Radius", &p.radius, 0.01f, mn, mx), f("Inner Radius", &p.inner_radius, 0.01f, 0.0f, mx), f("Total Height", &p.total_height, 0.01f, mn, mx), f("Turn", &p.turn, 1.0f, -1440.0f, 1440.0f);
+      if (stairs || k == kPresetSpiral) i("Steps", &p.steps, 1, 256), b("Fill Under", &p.fill_under);
+      if (k == kPresetArcade) {
+        i("Count", &p.count, 1, 256);
+        f("Span", &p.span, 0.01f, mn, mx), f("Height", &p.height, 0.01f, mn, mx), f("Column Width", &p.column_width, 0.01f, mn, mx), f("Arch Rise", &p.arch_rise, 0.01f, 0.0f, mx);
+        f("Depth", &p.depth, 0.01f, mn, mx), f("Arch Thickness", &p.arch_thickness, 0.01f, mn, mx);
+      }
+      if (o.turnable) rows.push_back({"Quarter Turns", nullptr, &o.turn, nullptr, 0, 0, 0, 0, 3});  // (stairs: quarter turns about the origin; a spiral has its own Turn in degrees)
     }
     else if (o.n == 6) rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2, kOperations});  // (a mesh piece's numbers are its mesh's)
     else {
@@ -261,6 +350,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     u.consume_click();
   }
   bool changed = false;
+  const int style_was = o.style;
   int y = hr.bottom() + u.px(2);
   for (size_t k = 0; k < (size_t)nrows; k++, y += rh + u.px(2)) {
     const Row &row = rows[k];
@@ -273,6 +363,13 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     else if (row.i) changed |= u.int_field(id, fr, *row.i, row.imn, row.imx);
     else if (row.b) changed |= u.checkbox({fr.x, fr.y + u.px(2), rh - u.px(4), rh - u.px(4)}, *row.b);
   }
+  if (changed && o.kind == "blockout" && o.n == 3 && o.opening != 0 && style_was >= 0 && o.style >= 0 && o.style != style_was && !(o.opening == 2 && style_was == kWindowRound)) {  // (a new style's preset size, over the old style's only; a Round window keeps its size)
+    float ow, oh, nw, nh;
+    blockout_opening_preset(o.opening, style_was, ow, oh);
+    blockout_opening_preset(o.opening, o.style, nw, nh);
+    if (o.a == ow && o.b == oh) o.a = nw, o.b = nh;  // (a Round window keeps its size when switched away: its Head is its circle's, as the Inspector does)
+  }
+  if (changed && o.kind == "blockout" && o.n == 3 && o.opening == 2 && o.style == kWindowRound && style_was != kWindowRound) o.b = o.c + o.a;  // (a Round window starts as a circle: Head = Sill + Width)
   if (changed) obj_last_rerun();
 }
 

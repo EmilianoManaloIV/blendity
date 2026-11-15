@@ -577,6 +577,58 @@ const char *fixed_operation_word(const Tool &r) {
 
 }  // namespace
 
+/* The Door Style and Window Style dropdowns under the Blockout buttons (round 498 had the window's above Draw Piece; round 499 puts both with the Door and Window buttons
+ * they belong to): the style the next Door or Window made from a button or a menu has, the last one chosen. The console's `create Blockout Piece: Door` and `blockout add
+ * door <style>` do not read them: the first makes Opening Only, the second says its own. */
+void Editor::draw_blockout_style_rows(ui::Layout &lay) {
+  auto &u = ui_;
+  struct Row { const char *label, *id, *key, *tip; int *style; const char *const *names; int count; };
+  const Row rows[] = {
+      {"Door Style", "tools_door_style", "tools:door_style",
+       "What the next Door (the button above, GameObject > Blockout) adds to the wall besides the hole: a frame and a leaf, a leaf that slides, a round head, or only the blocked-out\n"
+       "space of a revolving door. Opening Only is the plain cut. The numbers (Leaf, Open Amount, Hinge Side...) are in the Inspector and Adjust Last Operation. Console: blockout add door <style>.",
+       &blockout_door_style_, kBlockoutDoorStyleNames, kBlockoutDoorStyles},
+      {"Window Style", "tools_window_style", "tools:window_style",
+       "What the next Window (the button above, GameObject > Blockout) adds to the wall besides the hole: a frame, bars, a sill board and a pane, in the\n"
+       "style chosen. Opening Only is the plain cut. The numbers (Frame Width, Panes...) are in the Inspector and Adjust Last Operation. Console: blockout add window <style>.",
+       &blockout_window_style_, kBlockoutWindowStyleNames, kBlockoutWindowStyles}};
+  for (const Row &r : rows) {
+    const Recti row = lay.row(u.row_h() + u.px(2));
+    u.label({row.x + u.px(4), row.y, row.w / 2, row.h}, r.label);
+    const Recti style_rect{row.x + row.w / 2, row.y, row.w / 2 - u.px(6), row.h};
+    if (u.record_buttons) u.button_rects[r.key] = style_rect;
+    u.combo(u.id(r.id), style_rect, *r.style, r.names, r.count);
+    u.tooltip(r.tip);
+  }
+  /* Round 500: ONE dropdown for the architectural pieces and one Add button (not nine more buttons: round 496's lesson). */
+  {
+    const Recti row = lay.row(u.row_h() + u.px(2));
+    /* The label takes what its text needs and the dropdown the rest; when the longest name still does not fit beside the label (Linux's wider font in a narrow pane at
+     * UI scale 1.5 clipped "Spiral Stairs"), the label stands alone and the dropdown shares the next row with Add - still two rows, so nothing below moves out of
+     * a short window. */
+    int widest = 0;
+    for (int k = 1; k < kBlockoutPresets; k++) widest = std::max(widest, u.font.text_width(kBlockoutPresetNames[k]));
+    const int label_w = std::min(row.w / 2, u.font.text_width("Architecture") + u.px(12));
+    const bool beside = widest + u.px(28) <= row.w - label_w - u.px(10);
+    u.label({row.x + u.px(4), row.y, beside ? label_w : row.w - u.px(8), row.h}, "Architecture");
+    const Recti add_row = lay.row(u.row_h() + u.px(2));
+    const int add_w = beside ? add_row.w - u.px(8) : u.font.text_width("Add") + u.px(24);
+    const Recti add{add_row.x + add_row.w - u.px(4) - add_w, add_row.y, add_w, add_row.h};
+    const Recti pick = beside ? Recti{row.x + u.px(4) + label_w, row.y, row.w - label_w - u.px(10), row.h} : Recti{add_row.x + u.px(4), add_row.y, add_row.w - add_w - u.px(12), add_row.h};
+    if (u.record_buttons) u.button_rects["tools:architecture"] = pick;
+    blockout_architecture_ = std::min(kBlockoutPresets - 2, std::max(0, blockout_architecture_));
+    u.combo(u.id("tools_architecture"), pick, blockout_architecture_, kBlockoutPresetNames + 1, kBlockoutPresets - 1);
+    u.tooltip("Column, Pilaster, Beam, Railing, Roof, Stairs L, Stairs U, Spiral Stairs or Arcade: one piece with numbers (Inspector, Adjust Last Operation, handles). GameObject > Blockout has them too.\n"
+              "Console: blockout add column|pilaster|beam|railing|roof|stairs l|stairs u|stairs spiral|arcade [numbers].");
+    if (u.record_buttons) u.button_rects["tools:architecture_add"] = add;
+    if (u.button(add, "Add")) {
+      const std::string kind = std::string("Blockout Piece: ") + (blockout_architecture_ == kPresetSpiral - 1 ? "Stairs Spiral" : kBlockoutPresetNames[blockout_architecture_ + 1]);
+      create_object(kind);
+    }
+    u.tooltip("Makes the piece chosen in Architecture under the selected Blockout (a new Blockout when none is selected). A Pilaster stands against the wall under the mouse or the selected room's first wall.");
+  }
+}
+
 /* The tool's switch and its options, in the Modeling Tools window (Create > Blockout): the switch, the Shape and, for a room, its wall. */
 void Editor::draw_room_tools(ui::Layout &lay) {
   auto &u = ui_;
@@ -603,14 +655,15 @@ void Editor::draw_room_tools(ui::Layout &lay) {
   if (const char *fixed = fixed_operation_word(room_)) {
     row = lay.row();
     const Recti line{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
-    u.label(line, std::string("Operation: ") + fixed + " (console) - click to clear", u.theme.text_dim);
+    u.label(line, std::string("Operation: ") + fixed + " (fixed) - click to clear", u.theme.text_dim);
     if (u.record_buttons) u.button_rects["tools:operation_line"] = line;
     if (u.hovered(line) && u.in.pressed[0]) {
       room_.operation = -1, room_.subtract = false;
       u.consume_click();
       u.redraw = true;
     }
-    u.tooltip("The Operation was set from the console (blockout roomopt operation): it holds whichever way the height is pulled. Click: Auto again.");
+    u.tooltip("The Operation is fixed: it holds whichever way the height is pulled. Click this line: Auto again, where pulling out adds and pushing in subtracts (Shift while\n"
+              "pulling flips it for one piece). Only the console fixes it - blockout roomopt operation add|subtract|intersect - there is no button for it here.");
   }
   if (blockout_draw_shape(room_.solid, room_.circle, room_.polyline, room_.piece) > 2) return;  // (only a room has a wall)
   row = lay.row();
