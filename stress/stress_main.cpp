@@ -5777,7 +5777,82 @@ struct LinkReader {
   ~LinkReader() { close(); }
 };
 
-static void test_livelink(Report &rep, const Options &o) {
+/* Round 517 (ADR 0056): the time the unit test "Live Link never pauses the editor (round 382)" asserted and no longer does -
+ * the link's tick with four clients, 200 objects, a 100,000-vertex mesh deformed, a 50-bone rig posed and a clip keyed every
+ * frame - recorded here, where a number is read and compared rather than failing a run on a busy machine. */
+static void livelink_heavy_tick_row(Report &rep, const Options &o) {
+  Editor ed;
+  ed.init_headless(800, 600);
+  ed.command("stress 200 Cube");
+  GameObject *dense = ed.scene().create("Dense");
+  dense->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 400, 250);
+  dense->add<MeshRenderer>();
+  GameObject *rig = ed.scene().create("Rig");
+  rig->add<Armature>();
+  std::vector<GameObject *> bones;
+  GameObject *parent = rig;
+  for (int b = 0; b < 50; b++) {
+    parent = ed.scene().create(strprintf("Bone %d", b), parent);
+    parent->add<Bone>();
+    bones.push_back(parent);
+  }
+  const std::string clip_path = "Assets/Animations/stress_r517_clip.anim";
+  AnimationClipPtr clip = create_clip_asset(clip_path, "Stress");
+  if (!clip) {
+    rep.note("The heavy tick row: the clip asset could not be written.");
+    return;
+  }
+  for (int b = 0; b < 50; b++)
+    for (int f = 0; f <= 600; f += 10) clip->track(strprintf("Bone %d", b), "Rotation", 2).set_key((float)f, (float)(f % 90));
+  clip->touch();
+  rig->add<Animation>()->clip = clip_path;
+  auto forget = [&] {
+    forget_clip_assets(clip_path);
+    std::remove(resolve_asset_path(clip_path).c_str());
+  };
+  if (!ed.livelink_start(0) || !ed.livelink_for_test()->running()) {
+    rep.note("The heavy tick row: the link didn't start (no sockets here).");
+    forget();
+    return;
+  }
+  livelink::Link *link = ed.livelink_for_test();
+  link->set_interval_for_test(0);
+  std::vector<std::unique_ptr<LinkReader>> rs;
+  for (int k = 0; k < 4; k++) {
+    rs.push_back(std::make_unique<LinkReader>());
+    rs.back()->open(link->port());
+  }
+  for (int i = 0; i < 30; i++) ed.step_frame_headless();  // (the syncs)
+  link->wait_meshes_for_test();
+  const size_t verts = dense->mesh_filter()->mesh->vert_count();
+  MeshPtr base = dense->mesh_filter()->mesh;
+  const int frames = o.quick ? 40 : 120;
+  double total = 0.0, worst = 0.0;
+  for (int f = 0; f < frames; f++) {
+    MeshPtr d = mesh_make_mutable(dense->mesh_filter()->mesh);
+    const float sc = 1.0f + 0.001f * (float)(f % 10);
+    for (size_t v = 0; v < verts; v++) d->positions[v] = base->positions[v] * sc;
+    d->deform_version++;
+    for (GameObject *b : bones) b->set_local_rotation(Quat::euler(Vec3(0, 0, (float)(f % 30))));
+    clip->track("Bone 0", "Rotation", 2).set_key((float)(f % 600), (float)f);
+    clip->touch();
+    link->tick(ed.scene(), false, 1e7 + f / 60.0);
+    const double ms = link->stats().tick_ms;
+    total += ms;
+    worst = std::max(worst, ms);
+  }
+  link->wait_meshes_for_test();
+  const livelink::Stats st = link->stats();
+  rep.row({strprintf("4 clients; a %zu-vertex mesh deformed, a 50-bone rig posed, a clip keyed - every frame (the link's tick alone)", verts),
+           "-", strprintf("%.2f / %.2f", total / frames, worst), "-", "-",
+           strprintf("%llu deforms, %llu poses, %llu clips sent over %d frames (the unit test checks they all go)", (unsigned long long)st.deforms,
+                     (unsigned long long)st.poses, (unsigned long long)st.clips, frames)});
+  for (auto &r : rs) r->close();
+  ed.livelink_stop();
+  forget();
+}
+
+static void livelink_frame_rows(Report &rep, const Options &o) {
   rep.title("Live Link (task 0172): what the link costs the editor's frame",
             "Headless editor at 1280x720, 1,000 cubes moved every frame (each one a transform message), 120 frames a case; the "
             "link compares the scene at most 60 times a second; the clients are threads reading as fast as they can on 127.0.0.1.");
@@ -5899,6 +5974,12 @@ static void test_livelink(Report &rep, const Options &o) {
   rep.note(strprintf("One client cost the frame %.2f ms on average against the link off (%.2f vs %.2f ms; the views' rendering is most of a frame).",
                      one.first - off.first, one.first, off.first));
   ed.livelink_stop();
+}
+
+/* The section: the frame with the link on, then (round 517) the heavy tick row - in its own editor, after the first one is gone. */
+static void test_livelink(Report &rep, const Options &o) {
+  livelink_frame_rows(rep, o);
+  livelink_heavy_tick_row(rep, o);
 }
 
 /* Task 0083: what headless runs can't see - putting a frame on a real window, and how evenly a frame-rate cap holds.

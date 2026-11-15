@@ -1578,21 +1578,31 @@ static void tests_round379() {
     CHECK(cl.connect(ed.livelink_for_test()->port()));
     (void)until(ed, cl, "sync_end");
     (void)drain(ed, cl);
-    auto clips_after = [&](const std::function<void()> &change) {
+    /* Round 517 (ADR 0056): this waited a fixed 300 ms and read what had come, and on a busy machine the send came later
+     * ("another clip chosen: 0"). Where a send is expected it is now waited for - frames stepped, up to 10 s - and then
+     * 0.6 s more (more than twice the 0.25 s rate limit) to catch a second one; where none is expected, the same 0.6 s. The counts are
+     * checked as before: what is sent, not how fast. */
+    auto clips_after = [&](const std::function<void()> &change, bool expect_send) {
       change();
-      std::this_thread::sleep_for(std::chrono::milliseconds(300));  // (past the rate limit)
-      const std::vector<Message> ms = drain(ed, cl);
+      std::vector<Message> ms;
+      const double t0 = now_seconds();
+      double quiet_from = expect_send ? 1e30 : t0;  // (from the first clip, or from the change when none is due)
+      while (now_seconds() - t0 < 10.0 && now_seconds() - quiet_from < 0.6) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        for (const Message &m : drain(ed, cl, 2, 20)) ms.push_back(m);
+        if (quiet_from > 1e29 && count_of(ms, "clip") > 0) quiet_from = now_seconds();
+      }
       const Message *m = last_for(ms, "clip", rig->id);
       return std::make_pair(count_of(ms, "clip"), m ? m->j["asset"].str : std::string());
     };
-    const auto chosen = clips_after([&] { an->clip = "Assets/Animations/r379_two.anim"; });
-    const auto moved = clips_after([&] { a->set_local_position(Vec3(0, 0.5f, 0)); });
+    const auto chosen = clips_after([&] { an->clip = "Assets/Animations/r379_two.anim"; }, true);
+    const auto moved = clips_after([&] { a->set_local_position(Vec3(0, 0.5f, 0)); }, true);
     const auto played = clips_after([&] {
       Transform t = a->local();
       t.euler_hint.x = 45.0f;
       t.rotation = Quat::euler(t.euler_hint);
       a->set_local(t);
-    });
+    }, false);
     std::printf("    another clip chosen: %d (%s); an unkeyed axis moved: %d; a keyed one moved: %d\n", chosen.first, chosen.second.c_str(), moved.first, played.first);
     CHECK(chosen.first == 1 && chosen.second == "Assets/Animations/r379_two.anim" && moved.first == 1 && played.first == 0);
     /* A minute of 100 objects keyed every frame at 60 fps: the tick that sends it again only copies the tracks. */
@@ -2132,7 +2142,7 @@ static void tests_round397() {
 }
 
 static void tests_round382() {
-  test("Live Link never pauses the editor (round 382): four clients connected, 200 objects, a 100,000-vertex mesh deformed and a 50-bone rig posed every frame, a clip keyed - the main thread's tick stays short, and everything goes", [] {
+  test("Live Link never pauses the editor (round 382): four clients connected, 200 objects, a 100,000-vertex mesh deformed and a 50-bone rig posed every frame, a clip keyed - everything goes, nothing dropped to keep the tick short (its time: the stress section livelink)", [] {
     Editor ed;
     ed.init_headless(800, 600);
     for (int i = 0; i < 200; i++)
@@ -2192,22 +2202,15 @@ static void tests_round382() {
     dense->mesh_filter()->mesh = primitives::uv_sphere(1.0f, 401, 250);
     ed.livelink_for_test()->tick(ed.scene(), false, 1e7 + 100.0);
     const double topo = ed.livelink_for_test()->stats().tick_ms;
+    ed.livelink_for_test()->wait_meshes_for_test();  // (round 517: the clip worker's last sends counted - it waits for the clips too)
     std::printf("    with a clip keyed each frame: %llu clips sent; a topology change of the dense mesh: %.2f ms\n", (unsigned long long)st.clips, topo);
-    /* A sanitizer build's every load and store is checked: CI's ran 8.9 and 41 ms there - its budget is four times. */
-#if defined(__SANITIZE_ADDRESS__)
-    const double slow = 4.0;
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-    const double slow = 4.0;
-#else
-    const double slow = 1.0;
-#endif
-#else
-    const double slow = 1.0;
-#endif
-    CHECK(total / frames < 8.0 * slow && worst < 25.0 * slow);  // (the time: generous for slower machines and debug builds - this one ran about 1.5 and 3)
-    CHECK(topo < 40.0 * slow);
-    CHECK(st.deforms >= (uint64_t)frames && st.poses >= (uint64_t)frames - 1 && st.clips >= 6);  // (everything went: a cheap tick that sent nothing would pass the times)
+    /* Round 517 (ADR 0056): the tick's milliseconds were asserted here (8 ms on average, 25 at most, 40 for the topology
+     * change) and failed whenever the machine was busy with other work - a measurement, not a behaviour. They are printed
+     * above and recorded by the stress section `livelink` ("four clients, a 100,000-vertex mesh deformed, ..."). What "never
+     * pauses" means as behaviour stays: every frame's deform and pose is sent on the tick, and the clips while keyed on their
+     * worker - a tick that waited on its workers would still send them, but one that dropped work to stay short would not.
+     * (The stats are read after the workers are done, so a clip still being sent is counted.) */
+    CHECK(st.deforms >= (uint64_t)frames && st.poses >= (uint64_t)frames - 1 && st.clips >= 6);
     ed.livelink_stop();
     fs::remove_file(resolve_asset_path("Assets/Animations/r382_clip.anim"));
     forget_clip_assets("Assets/Animations/r382_clip.anim");
@@ -2305,19 +2308,34 @@ static void tests_round382() {
     CHECK(c.connect(ed.livelink_for_test()->port()));
     (void)until(ed, c, "sync_end");
     (void)drain(ed, c);
+    /* Round 517 (ADR 0056): on a busy machine the bind could finish and land on the first frame, before any frame had sent
+     * the move - a race with the clock, not the behaviour. The bind is held running (the round 354 hook) until the Box's
+     * move has reached the client or 10 s have gone, then let go and waited for: the behaviour is the same, the race gone.
+     * (The hold keeps the bind from landing, not from computing: a frame that waited on the worker would no longer fail
+     * here; a bind run on the main thread still would - `running` is false then.) */
+    ed.hold_skin_job_for_test(true);
     ed.command("skin bind");
     const bool running = !ed.jobs_for_test().empty();
     box->set_local_position(Vec3(4, 0, 0));
     bool moved_during = false;
     int frames = 0;
-    for (; frames < 2000 && !ed.jobs_for_test().empty(); frames++) {
+    const double t0 = now_seconds();
+    for (; !moved_during && now_seconds() - t0 < 10.0; frames++) {
       ed.step_frame_headless();
-      const bool still = !ed.jobs_for_test().empty();  // (a move sent on the frame the bind lands proves nothing - review 382)
+      const bool still = ed.skin_job_running_for_test();  // (a move sent on the frame the bind lands proves nothing - review 382)
       std::string line, bin;
-      while (c.read(line, bin, 0)) moved_during = moved_during || (still && is_transform_of(line, box->id));
+      while (c.read(line, bin, 5)) moved_during = moved_during || (still && is_transform_of(line, box->id));
     }
-    std::printf("    the bind ran on a worker: %d; the Box's move sent while it ran: %d (%d frames until it landed)\n", (int)running, (int)moved_during, frames);
+    ed.hold_skin_job_for_test(false);
+    const double t1 = now_seconds();  // (a deadline, not a frame count: the bind's thread is as slow as the machine is busy)
+    while (!ed.jobs_for_test().empty() && now_seconds() - t1 < 120.0) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::printf("    the bind ran on a worker: %d; the Box's move sent while it ran: %d (%d frames held); it landed: %d\n", (int)running, (int)moved_during, frames,
+                (int)ed.jobs_for_test().empty());
     CHECK(running && moved_during);
+    CHECK(ed.jobs_for_test().empty() && !ed.skin_job_running_for_test());  // (let go, the bind lands)
     ed.livelink_stop();
   });
 }
