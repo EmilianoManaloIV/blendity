@@ -194,7 +194,7 @@ void Editor::vr_paint_command(const std::vector<std::string> &t) {
   const bool on = setting ? vr_paint_ : arg.empty() ? !vr_paint_ : arg == "on";
   if (on && !paint_) {
     vr_paint_ = false;
-    return Log::warn("VR paint: turn Paint on for an object first (select it, then the Paint tab or `paint on`)");
+    return Log::warn("VR paint: turn Paint on for an object first (select it, then Paint in the Modeling Tools window's Paint section)");
   }
   if (!on) vr_paint_end();
   if (on && vr_sk_drawing_) vr_sketch_commit();  // (review 386: a sketch stroke under way is kept)

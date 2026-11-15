@@ -113,7 +113,7 @@ void Editor::budget_light_volume_rows(ui::Context &u, ui::Layout &lay, const Bud
  * ground plane, a prop) left whole, the cut spread over the rest; an existing Decimate's ratio multiplied, as the counts
  * are its result. */
 bool Editor::budget_fix_triangles(int rank) {
-  if (budget_target_ < 0) return Log::warn("Decimate to fit: choose a budget target first (budget pc|quest, or the Profiler's Budget)"), false;
+  if (budget_target_ < 0) return Log::warn("Decimate to fit: choose a budget target first (Profiler window > Budget)"), false;
   return budget_fix_triangles(rank, budget_objects(), budget_target_);
 }
 

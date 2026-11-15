@@ -103,7 +103,7 @@ void Editor::draw_fix_model_section(ui::Layout &lay, GameObject *root) {
   u.tooltip("In one Undo step, as the CATS plugin's Fix Model: bones renamed to Unity's Humanoid names (MMD's Japanese\n"
             "translated, Mixamo's prefix dropped), Hips > Spine > Chest > Neck > Head with nothing between, bones that move\n"
             "nothing removed (their weights to the parent), IK removed, empty vertex groups removed, the meshes joined into\n"
-            "Body, the same material one slot. Clips follow their bones. Console: avatar fixmodel.");
+            "Body, the same material one slot. Clips follow their bones.");
   const struct { const char *label, *tip; bool *on; } opts[] = {
       {"Keep Twist Bones", "Bones with \"twist\" in their name stay (they turn a forearm without candy-wrapping it).", &fix_model_options_.keep_twist},
       {"Remove Zero-Weight Bones", "Bones that move no vertex go, and vertex groups whose weights are all 0.", &fix_model_options_.remove_zero_weight},
@@ -136,7 +136,7 @@ void Editor::draw_avatar_section(ui::Layout &lay, GameObject *root) {
   if (u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Create Visemes (AA, OH, CH)", mesh, "Select the face's mesh"))
     visemes_command({"visemes"});
   u.tooltip("The 15 vrc.v_* shape keys VRChat's lip sync finds by name, mixed from three you sculpt - AA (open), OH (round),\n"
-            "CH (wide) - as CATS' Create Visemes mixes them. Console: visemes [AA OH CH].");
+            "CH (wide) - as CATS' Create Visemes mixes them.");
   if (!root || !root->get<Armature>()) {
     u.label(lay.row(), "Select the avatar (its mesh, root or a bone) for its checklist.", u.theme.text_dim);
     return;

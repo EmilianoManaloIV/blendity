@@ -331,12 +331,39 @@ bool Editor::seq_bar_under(const Sequence &s, const Recti &lanes, int lane_h, fl
   return hit;
 }
 
+/* Round 510: the toolbar wraps item by item onto the next row when a pane is too narrow for one (it ran past a 1024x640
+ * x1.5 side pane and was cut there). The rows needed come from the pane's width alone, so the window can reserve them
+ * before the toolbar is drawn and the body below starts under the last. */
+namespace {
+struct SeqBarFlow {
+  int left, right, x, y, step, rows = 1;
+  SeqBarFlow(ui::Context &u, const Recti &bar) : left(bar.x + u.px(4)), right(bar.right() - u.px(4)), x(left), y(bar.y + u.px(3)), step(u.row_h() + u.px(6)) {}
+  void need(int w) {  // (the next item's advance: on a new row unless it fits, or the row is empty)
+    if (x + w <= right || x == left) return;
+    x = left, y += step, rows++;
+  }
+};
+void seq_bar_items(ui::Context &u, SeqBarFlow &f) {  // (the advances the drawn toolbar takes, in order)
+  for (int w : {u.px(64) + u.px(3), u.px(26) + u.px(3), u.px(30) + u.px(3), u.px(60)}) f.need(w), f.x += w;
+  f.need(u.px(80) + u.px(4));  // (the sequence menu takes what is left of its row, up to 160 px)
+  f.x += std::max(1, std::min(u.px(160), f.right - f.x)) + u.px(4);
+  f.need(u.px(76) + u.px(3));
+}
+int seq_toolbar_height(ui::Context &u, int width) {
+  SeqBarFlow f(u, {0, 0, width, 0});
+  seq_bar_items(u, f);
+  return f.rows * f.step;
+}
+}  // namespace
+
 void Editor::draw_seq_toolbar(const Recti &bar, GameObject *root) {
   auto &u = ui_;
-  int x = bar.x + u.px(4);
-  const int bh = bar.h - u.px(6), y = bar.y + u.px(3);
+  SeqBarFlow flow(u, bar);
+  int &x = flow.x;
+  const int bh = flow.step - u.px(6);
   auto button = [&](int w, const char *label, bool on, const char *tip) {
-    const Recti b{x, y, w, bh};
+    flow.need(w + u.px(3));
+    const Recti b{x, flow.y, w, bh};
     x += w + u.px(3);
     const bool hit = u.button(b, label, on);
     u.tooltip(tip);
@@ -349,7 +376,8 @@ void Editor::draw_seq_toolbar(const Recti &bar, GameObject *root) {
     if (seqr_.playing) seq_set_preview(true), seqr_.play_from = seqr_.frame, seqr_.play_clock = now_seconds();
   }
   int fr = (int)seqr_.frame;
-  if (u.int_field(u.id("seq_frame"), {x, y, u.px(56), bh}, fr, 0, 1000000)) seq_set_frame((float)fr);
+  flow.need(u.px(60));
+  if (u.int_field(u.id("seq_frame"), {x, flow.y, u.px(56), bh}, fr, 0, 1000000)) seq_set_frame((float)fr);
   x += u.px(60);
   /* The sequence menu (the scene's sequence): the sequence assets, then Create New Sequence. */
   SequencePtr s = seq_sequence();
@@ -364,8 +392,9 @@ void Editor::draw_seq_toolbar(const Recti &bar, GameObject *root) {
   std::vector<const char *> cn;
   for (const std::string &n : names) cn.push_back(n.c_str());
   int pick = cur;
-  const int cw = std::max(u.px(80), std::min(u.px(160), bar.right() - x - u.px(4)));  // (task 0293: inside a narrow pane)
-  if (u.combo(u.id("seq_pick"), {x, y, cw, bh}, pick, cn.data(), (int)cn.size()) && pick != cur) {
+  flow.need(u.px(80) + u.px(4));
+  const int cw = std::max(1, std::min(u.px(160), flow.right - x));  // (task 0293: inside a narrow pane; round 510: a row of its own when it would be under 80 px)
+  if (u.combo(u.id("seq_pick"), {x, flow.y, cw, bh}, pick, cn.data(), (int)cn.size()) && pick != cur) {
     if (pick == (int)names.size() - 1) seq_new(root, "");
     else seq_pick(root, pick ? paths[(size_t)pick - 1] : "");
   }
@@ -691,7 +720,7 @@ void Editor::draw_sequencer_window(const Recti &r) {
   seq_hovered_ = u.hovered(r);  // (review 391: its keymap actions act here)
   if (seqr_.drag >= 2 && in.key_pressed[platform::KEY_ESCAPE]) seq_drag_cancel(), in.key_pressed[platform::KEY_ESCAPE] = false;  // (as Premiere: Esc drops a drag)
   GameObject *root = seq_root();
-  const int bh = u.row_h() + u.px(6);
+  const int bh = seq_toolbar_height(u, r.w);
   const Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.header);
   draw_seq_toolbar(bar, root);
@@ -736,10 +765,10 @@ void Editor::draw_sequencer_window(const Recti &r) {
       if (i->kind == (int)SeqKind::Clip && ui_.menu_item(strprintf("Speed %gx", sp), nullptr, std::fabs(i->speed - sp) < 1e-4f))
         seq_edit("Clip Speed", [&](Sequence &x) { x.find(name)->speed = sp; });
     ui_.menu_separator();
-    if (ui_.menu_item("Add Edit at the Playhead", "Alt+B")) seq_blade(seqr_.frame, -1);
+    if (ui_.menu_item("Add Edit at the Playhead", key("seq.add_edit").c_str())) seq_blade(seqr_.frame, -1);
     ui_.tooltip("Every bar under the playhead cut in two there (Premiere's Add Edit).");
     if (ui_.menu_item("Delete", "Del")) seq_delete_selected();
-    if (ui_.menu_item("Ripple Delete", "Shift+Del")) seq_ripple(name);
+    if (ui_.menu_item("Ripple Delete", key("seq.ripple").c_str())) seq_ripple(name);
     ui_.tooltip("Delete the bar and move the later bars on its track left to close the gap (Premiere's Ripple Delete).");
   });
   if (!u.hovered(r) || u.wants_keyboard()) return;

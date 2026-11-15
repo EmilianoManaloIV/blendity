@@ -85,7 +85,7 @@ void Editor::draw_optimize_section(ui::Layout &lay, GameObject *root) {
   const std::string line = strprintf("avatar decimate %s %d %s", kVerbs[std::clamp(avatar_decimate_mode_, 0, 3)], avatar_decimate_tris_, avatar_decimate_exclude_.c_str());
   const bool on = root != nullptr;
   auto run = [this](const std::string &l) { return [this, l] { command(l); }; };
-  button_grid(lay, {{"Decimate", "A Decimate modifier on each mesh the mode allows, one ratio so the avatar comes to the triangles (Undo takes it back). Console: " + line + ".", on && meshops::decimate_available(), run(line)}}, 1);
+  button_grid(lay, {{"Decimate", "A Decimate modifier on each mesh the mode allows, one ratio so the avatar comes to the triangles (Undo takes it back).", on && meshops::decimate_available(), run(line)}}, 1);
   lay.space(u.px(4));
   u.label(lay.row(), "Bone Root and Bone Merging", u.theme.text_bright);
   Recti pr = lay.row(u.row_h() + u.px(2));
@@ -93,8 +93,8 @@ void Editor::draw_optimize_section(ui::Layout &lay, GameObject *root) {
   std::string pc = std::to_string(avatar_merge_percent_);
   if (u.text_field(u.id("avatar_merge_pc"), {pr.x + pr.w / 3, pr.y, pr.w * 2 / 3 - u.px(4), pr.h}, pc)) avatar_merge_percent_ = std::clamp(std::atoi(pc.c_str()), 0, 100);
   u.tooltip("How many of each spring chain's bones Bone Merging merges into their parents.");
-  button_grid(lay, {{"Bone Root", "Spring chains with one parent and one name (Hair_L, Hair_R) put under a RootBone_ bone: one PhysBone component in VRChat for the group. Console: avatar boneroot.", on, run("avatar boneroot")},
-                    {"Merge Bones", "That share of each spring chain's bones merged into their parents, evenly along it (fewer PhysBone transforms). Console: avatar mergebones <percent>.", on, run(strprintf("avatar mergebones %d", avatar_merge_percent_))}},
+  button_grid(lay, {{"Bone Root", "Spring chains with one parent and one name (Hair_L, Hair_R) put under a RootBone_ bone: one PhysBone component in VRChat for the group.", on, run("avatar boneroot")},
+                    {"Merge Bones", "That share of each spring chain's bones merged into their parents, evenly along it (fewer PhysBone transforms).", on, run(strprintf("avatar mergebones %d", avatar_merge_percent_))}},
               2);
 }
 

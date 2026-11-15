@@ -3557,24 +3557,31 @@ static void tests_round166_to_round170() {
    * lower part until the rect is inside it. */
   auto r166_field = [](Editor &ed, const std::string &key, WindowKind win) {
     const Recti w = ed.window_rect_for_test(win);
+    Recti last;
+    int drawn = 0;
     for (int tries = 0; tries < 60; tries++) {
       Recti f;
-      if (!ed.button_rect_for_test(key, f)) {
-        ed.step_frame_headless();
-        continue;
-      }
-      if (f.y >= w.y && f.y + f.h <= w.bottom()) return f;
+      /* (Round 509: a field below the fold is not drawn, so not recorded - it is scrolled to as well; with macOS's font
+       * the Inspector's rows put Toon Bands there. Waiting a frame for it never brought it into view.) */
+      const bool seen = ed.button_rect_for_test(key, f);
+      if (seen) drawn++, last = f;
+      if (seen && f.y >= w.y && f.y + f.h <= w.bottom()) return f;
       platform::Event mv, wheel;
       mv.type = platform::EventType::MouseMove;
       wheel.type = platform::EventType::Wheel;
-      mv.x = wheel.x = f.x;
-      mv.y = wheel.y = w.bottom() - ed.ui_for_test().px(30);
-      wheel.wheel_y = f.y > w.bottom() ? -3.0f : 3.0f;
+      /* (Over the window's left margin: no list or field inside the window takes the wheel there before the window.) */
+      mv.x = wheel.x = w.x + ed.ui_for_test().px(3);
+      mv.y = wheel.y = w.y + w.h / 2;
+      /* Down while any of it is below the window, up only while it is above. (Round 509: judged by its top edge, a field
+       * straddling the bottom - its top inside, its bottom out - was wheeled up, then down again, for good: macOS's font
+       * put Toon Bands there; at 900-916 px tall windows Windows did the same.) */
+      wheel.wheel_y = !seen || f.bottom() > w.bottom() ? -3.0f : 3.0f;
       ed.step_frame_headless({mv});
       ed.step_frame_headless({wheel});
       ed.step_frame_headless();
     }
-    std::printf("    '%s' never came into view\n", key.c_str());
+    std::printf("    '%s' never came into view: the window %d..%d, drawn in %d of 60 tries, last at %d..%d\n", key.c_str(), w.y, w.bottom(), drawn,
+                last.y, last.bottom());
     return Recti{0, 0, 0, 0};
   };
   auto r166_click = [](Editor &ed, const std::string &key, int mods) {
