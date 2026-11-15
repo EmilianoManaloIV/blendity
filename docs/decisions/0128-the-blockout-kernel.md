@@ -323,6 +323,25 @@ faces then did not coincide to the bit: an L room's notch wall was two layers at
   counts only fell (rooms and Intersect pieces 51 -> 39; wedges, stairs, arches and outlines 165 -> 94; hostile meshes
   183 -> 177); problems 0 before and after. The grid path's rows did not move.
 
+## Amended in round 500 (task 0484): a convex solid given by its corners
+The roof, a tapered shaft and a spiral step are none of the shapes before (a hip roof's ends slope; a tapered square
+shaft is a frustum; a spiral step is a wedge of a ring). Rather than a shape for each, one more: **`Shape::Convex`**, a
+solid given by its corner points (`Piece::points`, 4 to 64, in the piece's space).
+- **The rule:** its faces are the convex hull's (`detail::convex_hull`): every plane through three corners with all the
+  others on one side of it, to 2e-6 of the corners' size (so the corners of a sloped quad that float rounding leaves a
+  hair off one plane are one face); planes alike are one face; corners within a millionth of the size are one; a
+  face's own outline is the 2D hull of its points, so a corner in the middle of an edge or of a face is no corner. It
+  refuses, with why, fewer than four corners, more than 64, a corner not finite, corners in one plane, and a result
+  that is not a closed solid (V - E + F = 2). Faces are sorted by the y of their normal, highest first, so the faces
+  that look up come first (`convex_up_faces` counts them: a roof's top faces take the Roof class by that count).
+- **Both paths** read the hull's planes like any other convex solid's: the exact path hands Manifold the faces; the grid
+  path samples the planes. Never a room (it is the presets' building block, not an air shape).
+- **What it costs:** the hull is O(n^4) in the corners (64 corners: about 2.6 million plane tests), so the last 512
+  answers are kept per thread, keyed by the corners' bytes: a selected piece's wire (`convex_edges`), its face count
+  and the build ask for the same hull. Measured: 20 tapered columns selected in interior 100, frame median 1.51 ms.
+- Tolerance and the table of planes are as before: a Convex face is one more plane of the table, and round 497's snap
+  holds for its corners.
+
 ## Not decided here
 - The Blockout object, its components and the live rebuild on a worker: ADR 0129 (round 477), with this round's
   numbers.
