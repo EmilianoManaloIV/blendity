@@ -1,6 +1,6 @@
 # 0499: Pass 25's docs, README and the two books (round 512)
 
-- **Status:** in progress
+- **Status:** done (round 512)
 - **Requirements:** Q-usability (U-01..), Q-06 (responsiveness), R-02 (modeling)
 - **Decisions:** ADR 0123 (changelog fragments, folded in the write-up), ADR 0104 (the books), ADR 0145 (keyboard focus)
   - none new

@@ -4350,3 +4350,10 @@ repeat of `editor_render` is the open item.
   rows Pass 25 fixed (the Scene view orbit, the image sliders, the picture open, the bake landing, `export unitypackage`,
   `budget pc`) are ok in round 511; the rows still over are listed above. Round 511 gives no split of the 51 by section,
   so none is given here.
+
+## Round 511: Pass 25's verify
+
+The whole suite again on a merge of every open round, and the survey's ranked list before / after:
+`docs/perf/verify-511.md`. The new `stress/results/baseline.md` is that run's. The rows still over budget are listed
+there with their cause and owner; three card rows while dragging (toon, glass in Solid, camera filters) give one of two
+levels from run to run on the same build and want a quiet repeat before anyone calls them a regression.

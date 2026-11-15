@@ -373,7 +373,7 @@ architectural pieces, snap and join between Blockouts, modifiers on the Blockout
 400-piece interiors (`blendity_stress --only blockout`) and taught by lessons.
 Rounds 484-488, Pass 24: SideRail's look - Unity's materials keep their maps and gloss, the bake's specks, Generate Lighting on every
 ticked graphics card.
-Rounds 504-515, Pass 25, speed and usability: every part of the program has a timed row (`image_edit`, `sculpt_paint`, `sequencer`,
+Rounds 504-517, Pass 25, speed and usability: every part of the program has a timed row (`image_edit`, `sculpt_paint`, `sequencer`,
 `importers`, `unity_export`, `asset_windows`, `cold_first_use`, `scene_views`) and the ranked list is `docs/perf/sweep-504.md`; the Scene
 view of 50,000 cubes went from 33 ms a frame to 10 by keeping what the scene holds, the image editor's heavy sliders from 30-51 ms to 10,
 a 4K picture opens in the Editing window on a worker, a 500k-face sculpt stroke and a bake's landing frame are shorter, and a Unity import,
@@ -381,7 +381,9 @@ a 4K picture opens in the Editing window on a worker, a 500k-face sculpt stroke 
 Light, UI scale 1 and 1.5; `docs/hci/sweep-505.md`) found what was wrong and rounds 509, 510 and 513 fixed it: **the keyboard reaches every
 control** (F6 into a window, F10 or Alt for the menus, then Tab, Space, Enter and the arrows; Tab stays Edit Mode until you ask), no control
 lies on another, 42 of 49 cut labels are whole (the 7 left are named in `docs/hci/sweep-509.md`), every button has a tooltip that ends a sentence, every target is a row at mouse density and
-7 mm at Tablet Mode's scale (`docs/hci/sweep-509.md`, `docs/requirements.md` U-01 to U-07).
+7 mm at Tablet Mode's scale (`docs/hci/sweep-509.md`, `docs/requirements.md` U-01 to U-07). Round 511 measured it all again on the joined
+tree (`docs/perf/verify-511.md`: what is still over budget, and why), round 512 brought these docs and both books up to
+date, and round 517 made the unit checks that failed only on a busy machine check behaviour, their times now stress rows.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -415,7 +417,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (62606 unit checks in 3144 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (62782 unit checks in 3162 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

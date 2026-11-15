@@ -2,6 +2,48 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-15 (round 517): four timing checks that failed under load, made behavioural (task 0500)
+
+**Asked** (the hub, from round 512's runs): the checks that failed only when the machine was busy - a different one each run -
+follow ADR 0056: a unit test pins a behaviour, a measurement is a stress row.
+
+**Changed (tests)**
+- **Live Link's clips as things change (review 379):** it waited a fixed 300 ms and read what had come; on a busy machine the
+  send came later. A send it expects is waited for (frames stepped, up to 10 s), then 0.6 s more - over twice the 0.25 s rate limit - to
+  catch a second; where none is expected, the same 0.6 s. The counts and the clip's asset are checked as before.
+- **Live Link never pauses the editor (round 382):** the tick's milliseconds (8 on average, 25 at most, 40 for a topology
+  change) are printed, not asserted; every frame's deform and pose, and the clips while keyed, are still checked as sent.
+  The time is a new row of the stress section `livelink`: four clients, a 100,000-vertex mesh deformed, a 50-bone rig posed
+  and a clip keyed every frame.
+- **VR's arc against a big mesh (round 384 review):** "the BVH 20 times faster than trying every triangle" is printed, not
+  asserted; the test walks the hierarchy as a search does and checks that a segment's box reaches a small part of its nodes
+  (the "few node visits" of its name), with the 40 hits agreeing as before.
+- **Live Link keeps going while a long job runs (round 382)** (found by this round's runs under load): the skin bind could
+  land on the first frame, before a frame had sent the Box's move. The bind is held running (round 354's hook) until the
+  move has reached the client, then let go and checked to land.
+
+**Checked:** `livelink` and `vr` three times each on Windows with Blender's libraries and on Linux, the two running at once
+(each the other's load), 0 failed every time (365 and 116 / 118 checks); before the fourth fix, its test had failed once in
+three on Windows under the same load. The BVH check: a segment's box reaches at most 75-76 of 131,071 nodes. The new
+stress row (`blendity_stress --only livelink --quick`, both builds): the tick 1.05 ms on average, 2.14 ms at most on Windows.
+One code review (approve; its hardening taken: the clip worker waited for before the counts, a time deadline for the
+bind's landing, the test's name and comments, the stress row's null clip and its own editor).
+
+Left for another round: "Live Link with a surface painted dab after dab (review 382)" still asserts its tick (8 / 40 ms).
+
+## 2026-11-15 (round 516): CLAUDE.md - nothing waits on a PR
+
+**Asked:** "I thought PR's shouldn't be wait upon in development?" then "Make it a common rule that operations should
+not wait on PRs." and, of how it reaches the repository, "a" (a small PR of its own).
+
+**Changed**
+- `CLAUDE.md`, workflow item 7: no round, fix, write-up or verification is held until a PR is merged or published;
+  work builds on the open PR's head and publishes stacked on it, and work that needs several open stacks builds on a
+  local merge of their tops and publishes as the single top of the joined stack. Only the user's merges wait on the
+  user.
+
+**Checked:** documentation only - no code, test or build file changed.
+
 ## 2026-11-15 (round 515): a door's leaf is its own object - it swings about its hinge without rebuilding the wall (task 0497, ADR 0136, ADR 0129 amended)
 
 **Asked** (the owner, 2026-11-14, Pass 23b through the hub): "Doors should also come in parts, so I can "swing" the door
@@ -175,6 +217,72 @@ faces) build, 0 problems. `--only blockout`: every count the same as round 500 r
 the test-engineer's eleven edge tests; two code reviews (changes needed, all made: the floor from Pass 23's
 `blockout_opening_feet`, a shape switch mid-drag dropped, the wall found at the press kept by id for that drag only) and an
 approval. Not run: stress (no geometry kernel changed - the opening is Pass 23's piece).
+
+## 2026-11-15 (round 512): Pass 25's docs, README and the two books (task 0499)
+
+**Asked** (the approved Pass 25 plan, round 512): the README's count, features, history and Blockout pictures; ARCHITECTURE
+after round 479 and Pass 22's posing; usability requirements; USABILITY and PERFORMANCE for this pass; CHANGELOG folded and
+in order. The owner added: "Also make sure to modify books too for the docs."
+
+**Changed**
+- **The fragments of rounds 480-517 folded**, and CHANGELOG's entries put in round order, newest first (parallel passes had
+  left 53 out of place).
+- **docs/ARCHITECTURE.md:** a map of Blockout as it stands after round 515, Pass 22's posing, Pass 25's surveys, keyboard
+  focus and kept work. **docs/requirements.md:** U-01..U-07 (targets, contrast, tooltips, keyboard reach, no cut labels,
+  nothing on anything, the sweep), B-01..B-06 (Blockout), Q-07 (posing frame rate), each naming its test or audit.
+  **USABILITY / PERFORMANCE:** Pass 25's sections. **README:** the features and history to round 517, Blockout pictures.
+- **The books** (`docs/Blendity-Architecture.pdf`, `docs/Blendity-User-Guide.pdf`): the Blockout in the scene and editor
+  chapters, the recorded controls and keyboard focus, the job tray and landing frames, Passes 16-25 in performance, parallel
+  passes and "nothing waits on a PR" in the SDLC chapter, CI's shards and jobs; the user guide's blocking out a level, the
+  keyboard alone, posing at speed, the new console verbs and lessons, Blockout refusals; twelve figures retaken, four new
+  ones of Blockout (framed by a camera line each); references regenerated (182, all cited).
+- **build.sh** rebuilds a test or stress object when a `tests/*.h` header or a `stress/*.inc` is newer (a test helper's change
+  left stale objects). **build.bat** compiles with `/bigobj` (the largest test files near MSVC's section limit) and warns
+  when Embree's DLL is deployed without dpcpp's SYCL runtime (sycl9.dll and the ur_ / xptifw DLLs): a fresh worktree's
+  programs had exited at once with an empty log.
+
+**Checked:** on the joined tree (main with #415, #411, #412, #413, #414, #416, #417, #418), every group in its own fresh folder. Windows with
+Blender's libraries: 62,782 checks in 3,162 tests (re-measured on the final joined tree, with rounds 503, 511 and 517 in), 0 failed but the three `gpu` card-picture tests that fail on main too.
+Dependency-free (Windows) and Linux: every group 0 failed but load-timed checks that passed on a quiet rerun (Linux `vr`'s
+BVH speed ratio, three runs green) or failed a different check each run (the dependency-free `livelink` group's clip-sync and
+tick-time checks under the machine's other load; checks that asserted a time, against ADR 0056 - round 517 makes them behavioural).
+`build.sh`: touching `tests/test_common.h` rebuilt the 23 test objects and nothing else. `make_books.py --check` (182
+references, all cited), both PDFs built; two code reviews (changes needed: two wrong facts, the user guide's PDF, figures
+that did not show what their captions said - all made) and an approval.
+
+## 2026-11-15 (round 511): Pass 25's verify - the whole perf suite and the HCI sweep again (task 0498)
+
+**Asked:** "Do an HCI and Performance sweep across the program to test, verify, and optimize components." Round 511 of
+the approved plan: the whole perf suite and the full HCI sweep again, one before / after table, a new baseline, what is
+still over budget and why. Run on a local merge of every open top (nothing waits on a PR): #412 (rounds 504-508) on
+main with #408 and #415, #411 (515), #413 (514), #414 (513).
+
+**Checked:**
+- `tools/perf_suite.py --ui --save-baseline` in a quiet window: every default section ran to its end. Against the old
+  baseline, 49 findings; each section with one was run again in two more quiet windows, on this tree, on main, on main +
+  #412 alone and with round 506's keeps off. None is a regression from the open rounds: save / open / export are the same
+  on main (merged rounds, all under 21 ms against 50); three card rows (toon, glass in Solid, camera filters while
+  dragging) move between two levels from run to run on the same build, main included.
+- The survey's ranked list, before / after: the Scene view of 50,000 cubes 33 -> 12 ms; the image sliders 42 - 51 ->
+  10 ms; a 4096 picture's open 181 -> 30 ms; a bake's landing frame 103 - 126 -> 34 ms at 4.19 M texels; `budget pc`
+  and `export unitypackage` 0.2 - 0.8 ms calls; sculpting 500k faces 6 - 8 ms on the card, at the budget's edge on the
+  CPU views.
+- HCI, the live sweep over 12 configurations: labels cut 49 -> 7; controls on another 18, overlaps 6, buttons without a
+  tooltip 11, keyboard gaps 328 -> none found; small handles 3 (the axis handles). Console references 13 -> 6; labels
+  with a shortcut the keymap doesn't produce 16 -> 1 (round 515's "(Ctrl+D)"). KLM: 28 tasks 185 -> 96 s.
+- Unit suites on the tree: Windows with libraries 62,616 checks, dependency-free 54,062, Linux 54,087; every failure
+  explained in `docs/perf/verify-511.md` (four card / machine tests that fail here on older builds too, one fixed by
+  #411's newer head, Live Link's timed assert under load).
+
+**Fixed:** two of round 507's tests that raced on a shared machine - the Unity re-import now imports into a project of
+its own (the tests' scratch project is one folder for every test run on the machine, and another session's tests
+wrote into its Assets between the two imports); the open the moment a bake lands steps until the open and the file
+moves are done instead of 20 frames.
+
+**Changed:** `stress/results/baseline.md` is this run's (the machine named). `tools/hci_sweep_baseline.json` stays: it
+is at the counts this run found.
+
+**Left, with the owner of each:** `docs/perf/verify-511.md`, "Still over budget, and why".
 
 ## 2026-11-14 (round 510): the survey's ranked findings that are fixes (task 0494)
 
@@ -721,6 +829,93 @@ Speed's first round: every part of the program gets a time on record before anyt
 libraries and dependency-free) and Linux, and at full size with the libraries; the `editor` test group - with Blender's
 libraries 2,333 checks; dependency-free 2,331 (Windows) and 2,330 (Linux); `py tools/test_perf_suite.py`,
 `py tools/test_coverage_map.py --check`. The whole suite is CI's.
+
+## 2026-11-15 (round 503): Pass 23b's write-up - the bench interior takes the pass's pieces, the lessons, the numbers in one table, what is left (task 0487)
+
+**Asked** (the owner, 2026-11-11, with Pass 23b through the hub): the pass's write-up - the bench interior, the Learn
+lesson, the numbers and the open decisions; on 2026-11-15, "development must not wait on PR merges": built on round
+511's #416 (which carries the pass's open PRs #411, #413, #414 and #402-#412) and published as its stack's top.
+
+**What Pass 23b built** (rounds 497-502 and 513-515; each round's fragment has its detail):
+- **497** an L-shaped outline room's wall is one face again on the exact path (#399).
+- **498** windows with a style - Single, Double, Arched, Fixed, Grid, Round: a frame, bars, a sill board, glass (#400).
+- **499** doors with a style - Single, Double, Sliding, Arched, Revolving; doors and windows added upright; each style
+  carries its size (#405).
+- **500** nine architectural pieces - Column, Pilaster, Beam, Railing, Roof, Stairs L / U, Spiral Stairs, Arcade - each
+  one piece with numbers, and a Convex kernel shape (#410).
+- **501** Blockouts snap to each other, and touching Blockouts join (#406).
+- **502** modifiers live on a Blockout (#403).
+- **513** Draw Piece draws a door or a window onto a wall (#414).
+- **514** modifiers on a Blockout piece (#413).
+- **515** a door's leaf is its own object that swings about its hinge without a rebuild (#411).
+
+**Changed in this round:**
+- **The bench interior** (`benchscene blockout [400]`) now holds the pass's kinds - six styled windows (every window
+  style), six styled doors (Single, Double, Sliding: their leaves are objects, not pieces), the nine architectural
+  pieces and a piece with a Bevel stack - in place of padding columns: still exactly 100 / 400 pieces, the same mesh on
+  two runs, sound on both paths. The 400-piece interior is 9 x 6 rooms (it was 10 x 6) so the ten new pieces keep it
+  at 400. Only the first six doors and windows have a style: every styled opening leaves unresolved places on the grid
+  path, which stop faces merging, and styling all 51 made the 100-piece tests 2.4 s -> 10.7 s. The Railing stands in
+  the row of new pieces beside the two stairs, not on the building's stair well (the spec asked for "a railing on the
+  stairs"): on the well it took the 400-piece mesh from 21,195 faces to 109,475. Round 497's notch wall is the bench's
+  L-shaped room. The 400-piece scene changed, so its bench rows are not comparable with earlier rounds' rows.
+- **`meshops::overlapping_faces` sweeps** over the triangles' boxes sorted by x instead of testing every pair: the
+  400-piece interior's soundness check took 432-780 s with the new pieces (1.96 s before them) - 1.2 s now (the
+  100-piece test 1.6 s, 2.4 s before; untimed, below-normal priority). The same
+  pairs as before, pinned against a copy of the old loop on box soups, near-tolerance faces, degenerate and NaN faces,
+  many triangles sharing one x and a Blockout interior; the stress counts that use it are unchanged (below).
+- **Adjust Last (F9) follows a console or Inspector edit:** after `blockout set style arched` on a window, `blockout set
+  open 0.5` on a door or a typed Open Amount in the Inspector, F9 showed the old number - and its next edit wrote that
+  old number back. It now shows the piece's numbers and keeps them (found by the HCI worker; three real-event tests).
+- **Learn:** "Building rooms with Blockout" gains a styled door (and its leaf swung), a styled window and a Column, and
+  points to "Doors with a style", "Windows with a style", "Architectural pieces" and "Modifiers on a piece". "Doors with
+  a style" is settled: round 515's leaf steps, then round 513's two Draw Piece steps, the text saying which door is
+  selected and where the drawn door lands; its Try-it runs twice from a new scene.
+- Every spec of the pass (0481-0487, 0495-0497) says done with its PR.
+
+**Numbers** (the timed window's reports, named in the PR): `blendity_stress --only blockout`, timed in the hub's window on 2026-11-15
+(14:24-14:49, nothing else running; reports `report_20261115_142320` without the libraries, `report_20261115_143426` with
+them). Frame median / 1 % slowest (or worst) / move-to-landing median, in ms; every row 0 main-thread builds:
+
+| Row | Without the libraries | With them |
+|---|---|---|
+| bench 100 pieces, a door slid along its wall (600 frames) | 5.96 / 55.30 / 93.35 | 6.25 / 19.62 / 54.05 |
+| bench 100 pieces, a room's face handle dragged | 1.59 / 26.90 / 64.80 | 1.77 / 18.63 / 49.29 |
+| bench 400 pieces, a door slid along its wall | 7.43 / 37.22 / 275.32 | 8.27 / 23.31 / 109.87 |
+| bench 400 pieces, a room's face handle dragged | 2.23 / 43.62 / 250.34 | 2.21 / 24.19 / 96.90 |
+| interior 100, a Grid window moved along its wall (round 498; worst) | 1.19 / 10.15 / 48.31 | 4.06 / 6.33 / 16.24 |
+| interior 100, a Single door moved along its wall (round 499; worst) | 3.16 / 12.19 / 50.10 | 4.16 / 6.26 / 4.27 |
+| the bench with one of each architectural piece, 109 pieces (round 500; worst) | 6.21 / 55.37 / 93.71 | 6.59 / 21.41 / 56.48 |
+| the snap call alone among 900 pieces (round 501): first / warm median | 0.50 / 0.025 | 0.50 / 0.024 |
+| a column with a Bevel stack dragged (round 514; worst) | 1.47 / 13.65 / 48.64 | 5.44 / 7.97 / 5.53 |
+
+- The bench rows still say OVER: a landing's frame (the 1 % slowest) is over 16.7 ms - round 483's open "landing frame"
+  (item 1 below). The bench scene changed in this round (the pass's pieces, 9 x 6 rooms for the 400), so these rows
+  are not comparable with round 483's.
+- The untimed counts (problems, faces on top of each other, unresolved places) of every sweep are the same as round
+  515's row for row on both builds (95 / 144 rows): the `overlapping_faces` sweep changed no count. The rows that
+  differ are the live rows' landing counts (timing) and the bench scene's own faces (17,409 -> 19,868 without the
+  libraries, 0 problems).
+
+**What is left, for the owner's decision** (carried from round 483's list, with what each would cost):
+1. **The landing frame:** build the new mesh's render data on the worker too - a round.
+2. **A partial rebuild inside a cluster** (ADR 0129) - one to two rounds; what the 400-piece numbers ask for.
+3. **The grid path's two outline-room problems** of round 497 (seed 534: turned thin rooms) - a grid-path round.
+4. **Styled openings leave unresolved places on the grid path** (804 in the 100-piece interior with its twelve styled openings; about 2,950 with all 51 styled), so their faces
+   do not merge: a round on the grid path's openings; it would let the bench style all its openings again.
+5. **The exact path's one styled-door problem** (round 515: seed 1927, a Sliding door, a coplanar contact) - small.
+6. **The Wireframe modifier's own overlapping struts** (round 514) and **an Array with a non-finite offset** (round
+   502) - a modifiers round.
+7. Round 483's others stand: a turned box beyond about 100 km stalls the kernel; Realtime GI on Automatic with a sun
+   redoes the realtime lightmap's layout on each landing; an exact boolean for the dependency-free build; per-face
+   materials of mesh pieces; round 496's leftovers.
+
+**Checked:** the groups blockout, editor, lighting, physics, hci, blockout_modifiers and blockout_join, 0 failed
+on each, on #416 (round 511, 99bd4751) merged in: Windows without the libraries 22,845 / 3,204 / 9,825 / 190 / 1,849 /
+1,023 / 505 checks, with them 30,095 / 3,227 / 9,881 / 208 / 1,849 / 1,029 / 506, Linux 22,848 / 3,205 / 9,827 / 190 /
+1,847 / 1,023 / 505. Coverage map clean. Two code reviews (the first found an F9 refresh before a multi-object edit
+reached its piece, F9 kept for another piece's edit, and a dropped exact-path check - fixed). A picture of the bench
+with the pass's pieces: `docs/images/blockout_23b_pieces.png`.
 
 ## 2026-11-13 (round 502): modifiers live on a Blockout (task 0486, ADR 0129 amended)
 
