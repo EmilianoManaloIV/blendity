@@ -156,9 +156,14 @@ void tidy(Mesh &m) {
   std::vector<uint32_t> remap(m.positions.size());
   std::vector<Vec3> kept;
   for (size_t i = 0; i < m.positions.size(); i++) {
-    const Vec3 v(m.positions[i].x + 0.0f, m.positions[i].y + 0.0f, m.positions[i].z + 0.0f);  // (+ 0: -0 and 0 are one point - a Mirror through a point at 0)
+    /* -0 and 0 are one point (a Mirror through a point at 0): the sign of a zero is cleared on its bits, which no float mode
+     * can fold away as it may `x + 0.0f` under /fp:fast. */
     PointBits key;
-    std::memcpy(key.b, &v, sizeof(key.b));
+    std::memcpy(key.b, &m.positions[i], sizeof(key.b));
+    for (uint32_t &b : key.b)
+      if ((b & 0x7FFFFFFFu) == 0) b = 0;
+    Vec3 v;
+    std::memcpy(&v, key.b, sizeof(key.b));
     const auto found = at.find(key);
     if (found != at.end()) {
       remap[i] = found->second;
@@ -390,9 +395,10 @@ void blockout_piece_stacks_cached(std::vector<blockout::Piece> &pieces, const Bl
   }
 }
 
-bool blockout_piece_stacked(const BlockoutSurface &surface, size_t index) {
+bool blockout_piece_stacked(const BlockoutSurface &surface, size_t index, const blockout::Piece &piece) {
+  if (piece.shape != blockout::Shape::Mesh) return false;
   for (const BlockoutSurface::Stack &st : surface.stacks)
-    if (st.index == index) return true;
+    if (st.index == index) return piece.mesh_key == st.key;  // (the stack's mesh landed; a refused stack leaves the piece's own key)
   return false;
 }
 

@@ -1984,7 +1984,7 @@ std::vector<std::string> blockout_finish_mesh(Mesh &mesh, const blockout::Faces 
     const auto at = index.find(faces.piece[f]);
     const bool flat = f < faces.flat.size() ? faces.flat[f] != 0 : true;
     mesh.face_smooth[f] = !flat || faces.side[f] == blockout::kSideBlend || (at != index.end() && curved_side(pieces[at->second], faces.side[f])) ||
-                          (at != index.end() && pieces[at->second].shape == blockout::Shape::Mesh && blockout_piece_stacked(surface, at->second));  // (round 514: a stacked piece shades by angle - not one whose stack was refused)
+                          (at != index.end() && blockout_piece_stacked(surface, at->second, pieces[at->second]));  // (round 514: a stacked piece shades by angle - not one whose stack was refused)
   }
   mesh.touch();
   return slots;

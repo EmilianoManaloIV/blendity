@@ -2004,16 +2004,17 @@ void Editor::draw_inspector(const Recti &r) {
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
       if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
         const std::string why = blockout_piece_stack_refusal(*mod_piece);
-        const bool live = blockout_piece_stack_live(*g);
+        const bool live = mods.empty() || blockout_piece_stack_live(*g);  // (no modifiers yet: nothing to warn of)
         Recti nr = lay.row();
         u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h},
                 !why.empty() ? "This piece takes no modifiers: " + why + "." : live ? std::string("Runs on this piece's own shape before it is added or cut.")
                                                                             : std::string("Its modifiers do nothing yet - the Blockout's status says why."),
                 why.empty() && live ? u.theme.text_dim : u.theme.warning);
-        u.tooltip(why.empty() ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
-                                "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
-                                "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
-                              : "Modifiers on a room, a door or window, or an Intersect piece are not built yet: a stack put on one stays on it and does nothing.");
+        u.tooltip(!why.empty() ? "Modifiers on a room, a door or window, a preset or an Intersect piece are not built yet: a stack put on one stays on it and does nothing."
+                  : live ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
+                           "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
+                           "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
+                         : "None of this piece's modifiers runs: each is off, or of a kind a piece does not take. The Blockout's status names each and why.");
       }
       if (on_blockout && !mod_piece && !mods.empty()) {
         Recti nr = lay.row();

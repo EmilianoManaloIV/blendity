@@ -86,10 +86,7 @@ bool r514_numbers_build(const GameObject &bo) {
 
 /* Whether Decimate does anything in this build: it is meshoptimizer's (BL_WITH_MESHOPT), and without Blender's libraries it leaves the mesh
  * as it was - so a stack can't be decimated to nothing there, and the tests of that refusal have nothing to see. */
-bool r514_decimate_here() {
-  Mesh probe = *primitives::cube(2.0f);
-  return meshops::decimate(probe, 0.3f);
-}
+bool r514_decimate_here() { return meshops::decimate_available(); }
 
 size_t r514_count(const GameObject &g, const char *type) {
   size_t n = 0;
@@ -1877,7 +1874,10 @@ void tests_round514_engineer() {
 
   /* ---- Round 514's code review ---- */
   test("blockout piece modifiers: a refusal follows the stack in use - undo back to a good stack shows it built as a mesh again, and a refused stack is not run again at every build", [] {
-    if (!r514_decimate_here()) return std::printf("    (no Decimate in this build - no meshoptimizer: the refusal it makes can't be made)\n"), void();
+    if (!r514_decimate_here()) {
+      std::printf("    (no Decimate in this build - no meshoptimizer: the refusal it makes can't be made)\n");
+      return;
+    }
     blockout_piece_stack_cache_clear();
     Editor ed;
     ed.init_headless(900, 600);
@@ -2067,6 +2067,35 @@ void tests_round514_engineer() {
     CHECK(bp->is_preset());
     CHECK(!blockout_piece_stack_refusal(*bp).empty());
     CHECK(!blockout_piece_stack_live(*box));
+  });
+
+  test("blockout piece modifiers: a mesh piece whose stack is refused (a Screw part way round leaves it open) stays flat - only a stack's mesh that landed shades smooth", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(900, 600);
+    r514e_empty(ed);
+    GameObject *src = ed.scene().create("Source");
+    src->add<MeshFilter>()->mesh = primitives::cube(1.8f);
+    src->set_local_position(Vec3(40.0f, 0.0f, 0.0f));
+    GameObject *bo = r514e_hand(ed);
+    GameObject *piece = r514e_piece(ed, *bo, "Piece", 0, 0, {0.0f, 1.5f, 0.0f});
+    BlockoutPiece *bp = piece->get<BlockoutPiece>();
+    bp->shape = (int)blockout::Shape::Mesh, bp->size = Vec3(1.0f), bp->mesh_object = "Source";
+    ed.select_for_test(piece->id, false);
+    ed.command("component ScrewModifier");
+    ScrewModifier *sc = piece->get<ScrewModifier>();
+    sc->angle = 90.0f, sc->steps = 4, sc->merge = false;
+    r514e_land(ed, *bo);
+    std::vector<std::pair<std::string, bool>> lines;
+    blockout_piece_stack_status(*bo, lines);
+    bool refused = false;
+    for (const auto &l : lines) refused = refused || l.first.find("built from its numbers") != std::string::npos;
+    const Mesh *m = r514_mesh(*bo);
+    size_t smooth = 0;
+    for (size_t f = 0; m && f < m->face_smooth.size(); f++) smooth += m->face_smooth[f] != 0;
+    std::printf("    refused %d; %zu of %zu faces smooth\n", (int)refused, smooth, m ? m->face_count() : 0);
+    CHECK(refused);
+    CHECK(m && m->face_count() > 0 && smooth == 0);  // (the source's cube, flat)
   });
 
   test("blockout piece modifiers: a bevelled cylinder column shades smooth by angle - every face of its stacked mesh is marked smooth, a plain box's are not", [] {
