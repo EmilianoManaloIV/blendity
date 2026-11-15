@@ -4281,7 +4281,7 @@ letter under 3 ms), the Materials window at 2,000 materials, texture, weight and
 
 ### What each round fixed, by the survey's ranked line
 
-| Line | What the user sees | Survey (round 504) | After the fixing round | Round 511 (joined tree, timed) | Budget |
+| Line | What the user sees | Before (the fixing round's own measurement) | After the fixing round | Round 511 (joined tree, timed) | Budget |
 |---|---|---|---|---|---|
 | 1 (round 506) | Scene view of 50,000 cubes on the card, camera orbiting, Shaded, windowed app | 32.6 - 39.8 ms a frame | 9.6 - 10.2 ms | TBD(511): the same row | 16.7 ms |
 | 1 (round 506) | The same, Solid shading | 53.6 ms | 18.0 ms (over by 1.3 ms) | TBD(511): the same row | 16.7 ms |

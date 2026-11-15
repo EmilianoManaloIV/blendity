@@ -380,7 +380,7 @@ a 4K picture opens in the Editing window on a worker, a 500k-face sculpt stroke 
 `budget pc` and an export's folder walk leave the main thread. A live sweep of every screen in 12 configurations (three sizes, Dark and
 Light, UI scale 1 and 1.5; `docs/hci/sweep-505.md`) found what was wrong and rounds 509, 510 and 513 fixed it: **the keyboard reaches every
 control** (F6 into a window, F10 or Alt for the menus, then Tab, Space, Enter and the arrows; Tab stays Edit Mode until you ask), no control
-lies on another, 47 of 49 cut labels are whole, every button has a tooltip that ends a sentence, every target is a row at mouse density and
+lies on another, 42 of 49 cut labels are whole (the 7 left are named in `docs/hci/sweep-509.md`), every button has a tooltip that ends a sentence, every target is a row at mouse density and
 7 mm at Tablet Mode's scale (`docs/hci/sweep-509.md`, `docs/requirements.md` U-01 to U-07).
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's

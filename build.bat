@@ -329,8 +329,9 @@ if defined VCToolsRedistDir (
 )
 rem Round 512: Embree's DLL needs dpcpp's SYCL runtime (sycl9.dll, ur_loader.dll, ur_win_proxy_loader.dll, xptifw.dll);
 rem without it every executable here exits at once, with no message. A library tree with no dpcpp folder is said so.
-if exist dist\windows\embree4.dll if not exist dist\windows\sycl9.dll (
-  echo [blendity] WARNING: embree4.dll needs dpcpp's SYCL runtime ^(sycl9.dll and the ur_ / xptifw DLLs^), and "%L%\dpcpp\bin" has none:
-  echo [blendity]          copy them into dist\windows or fetch Blender's dpcpp library, or the programs here exit without a word.
+if exist dist\windows\embree4.dll if not exist dist\windows\sycl*.dll (
+  echo [blendity] WARNING: embree4.dll needs dpcpp's SYCL runtime ^(sycl*.dll and the ur_ / xptifw DLLs^) and dist\windows has none.
+  if not exist "%L%\dpcpp\bin\sycl*.dll" echo [blendity]          "%L%\dpcpp\bin" has none either: fetch Blender's dpcpp library.
+  echo [blendity]          Without them the programs here exit at once, without a word.
 )
 exit /b 0

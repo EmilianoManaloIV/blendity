@@ -189,6 +189,8 @@ the smaller things the pictures showed are right, and what round 509 left.
   "Bake All Maps (Textures window, on the surface)"; VR paint says "Paint in the Modeling Tools window's Paint
   section"; the CPU-view tooltip says the Profiler window lists what the card can't draw. The baseline is 5: Blockout's
   three, Unbake's help, and the Lights Gamma warning (no control for Lights Gamma exists; the command is its only way).
+  (Round 512's note: the review of round 510 widened the audit to `button_grid` / `icon_button` tooltips and found one more
+  of another stream's - the camera-filters tooltip - so the baseline committed was 6, not 5.)
 - **Shortcut labels written into strings (finding 8), 16 to 0.** The Board's Paste text and tooltip, the Sequencer's Add
   Edit / Ripple Delete rows, the Draw window's Undo and Redo tooltips and More menu rows, the Profiler's "F12 stays
   exact", the Send to Blendity toast take the keymap's text, and read as a sentence with no key. The Sketch Pad's

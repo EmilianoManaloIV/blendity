@@ -45,14 +45,14 @@ suite and the tests; \code{MeshCounts} tallies the mesh caches' work process-wid
 or avatar against VRChat's PC and Quest performance ranks \cite{VRChatCreators2026}.
 
 \section{Since the books were first written: Passes 16 to 25}
-Rounds 413 to 515 kept the same rule and added the following (the numbers are in \code{docs/PERFORMANCE.md}, each naming its
+Rounds 411 to 515 kept the same rule and added the following (the numbers are in \code{docs/PERFORMANCE.md}, each naming its
 machine).
 \begin{itemize}
   \item \textbf{Never halt the editor} (rounds 411--415): a render, a bake, a geometry operation or a file import runs on a
     worker and the views keep their last picture; the Scene view of a Unity world stays on the card, and the CPU's own
     share of a card frame was itself measured and cut. \adr{0105} is the budget: 16.7~ms for a live drag, 50~ms for a frame
     while a job runs, 100~ms for the one frame an indivisible operation lands in.
-  \item \textbf{Baking} (Passes 17--21): an allocator (mimalloc) on Windows and Tracy for developers (\rnd{419}), a light
+  \item \textbf{Baking} (Passes 17--21): oneTBB's scalable allocator (\code{tbbmalloc\_proxy}) on Windows and Tracy for developers (\rnd{419}), a light
     tree that picks the emitters, Owen-scrambled Sobol samples and a denoiser driven by the noise the bake measured
     (\adr{0121}, \adr{0122}), the bake on every ticked graphics card in batches that keep a card working (\rnd{487}).
   \item \textbf{Pass 22: posing} (rounds 468--475, \adr{0124}--\adr{0127}). Posing an avatar cost what the avatar cost,

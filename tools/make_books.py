@@ -315,11 +315,13 @@ def libraries(bib):
     rows = []
     section = ""
     in_table = False  # (only the tables whose header starts with "| Library": the ported / read tables are credits, not libraries)
+    columns = {}  # (round 512: each table's columns by its header's names - the developers' table has a Version column too)
     for line in read(LICENSES).splitlines():
         if line.startswith("## "):
             section = line[3:].strip()
         if line.startswith("| Library"):
             in_table = True
+            columns = {c.strip().lower(): i for i, c in enumerate(line.strip().strip("|").split("|"))}
             continue
         if not line.startswith("|"):
             in_table = False
@@ -332,10 +334,10 @@ def libraries(bib):
         name_cell = cells[0]
         if re.match(r"^`[^`]+`", name_cell):  # a file named in code is its own title
             name_cell = re.sub(r"^`([^`]+)`", r"\1", name_cell)
-        if section.startswith("Blender's prebuilt"):
-            version, used, lic = cells[1], cells[2], cells[3]
-        else:
-            version, used, lic = "", cells[1], cells[2]
+        def col(name, fallback):
+            i = columns.get(name, fallback)
+            return cells[i] if i is not None and i < len(cells) else ""
+        version, used, lic = col("version", None), col("used for", 1), col("license", 2)
         urls = re.findall(r"\[([^\]]+)\]\(([^)]+)\)", name_cell)
         plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", name_cell)
         plain = re.sub(r"`[^`]*`", "", plain).strip()
@@ -552,6 +554,9 @@ def check(drift=True):
 
 # --- the figures ------------------------------------------------------------------------------------------------------
 
+# The starter scene's solids, removed before a Blockout figure (round 512).
+BLOCKOUT_CLEAR = ["select Cube", "delete", "select Sphere", "delete", "select Cylinder", "delete"]
+
 SHOTS = [
     ("editor-default", "Default", ["select Cube"]),
     ("layout-modeling", "Modeling & Topology", ["select Cube", "edit on"]),
@@ -561,26 +566,32 @@ SHOTS = [
     ("layout-animation", "Animation", ["select Cube", "anim new"]),
     ("layout-learning", "Learning", ["lesson 1"]),
     ("layout-drawing", "Drawing", []),
-    # The Blockout figures (round 512): each builds its Blockout from the console, as the Learn lessons' Try-it buttons do;
-    # "camera <yaw> <pitch> <distance> <target>" frames the Blockout (nothing frames the view by itself); "blockout wait" lands
-    # the worker's mesh before the picture is taken.
-    ("blockout-rooms", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout add window 1.2 2 0.9",
-                                       "blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door",
-                                       "camera 35 32 15 4.2 1.2 2", "blockout wait"]),
-    ("blockout-draw-piece", "Blocking Out", ["blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2",
-                                            "blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5",
-                                            "blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1",
-                                            "blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2",
-                                            "blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1",
-                                            "camera 40 28 8 1.5 1 1.5", "blockout wait"]),
-    ("blockout-door-leaf", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door single 1 2.1",
-                                           "blockout set open 0.5", "camera 60 22 9 2 1.2 2", "blockout wait"]),
-    # (The room centred on the Blockout's origin, where the pieces go; open at the top to see them.)
-    ("blockout-architecture", "Blocking Out", ["blockout draw room auto at -3 0 -2.5 normal 0 1 0 size 6 5 2.6", "blockout set opentop on",
-                                              "blockout add column 0.2 2.6",
-                                              "blockout add pilaster 0.2 2.6", "blockout add railing 5 1",
-                                              "blockout add stairs spiral 1 0.1 3 16 270",
-                                              "camera 35 50 12 0 1 0", "blockout wait"]),
+    # The Blockout figures (round 512): each builds its Blockout from the console, as the Learn lessons' Try-it buttons do.
+    # The starter scene's Cube, Sphere and Cylinder go first (they stood in front of the pieces); a room is open at the top
+    # where what is inside it is the point; "position" moves a piece added at the Blockout's origin to its place;
+    # "camera <yaw> <pitch> <distance> <target>" frames the Blockout (nothing frames the view by itself); "blockout wait"
+    # lands the worker's mesh before the picture is taken.
+    ("blockout-rooms", "Blocking Out", BLOCKOUT_CLEAR + [
+        "blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout set opentop on", "blockout add window 1.2 2 0.9",
+        "blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6", "blockout set opentop on", "blockout add door",
+        "camera 30 55 15 4.2 0.5 2", "blockout wait"]),
+    ("blockout-draw-piece", "Blocking Out", BLOCKOUT_CLEAR + [
+        "blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2",
+        "blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5",
+        "blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1",
+        "blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2",
+        "blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1",
+        "camera 40 28 8 1.5 1 1.5", "blockout wait"]),
+    ("blockout-door-leaf", "Blocking Out", BLOCKOUT_CLEAR + [
+        "blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout set opentop on",
+        "blockout add door single 1 2.1", "blockout set open 0.5", "camera 60 55 7 0.5 0.8 2", "blockout wait"]),
+    ("blockout-architecture", "Blocking Out", BLOCKOUT_CLEAR + [
+        "blockout draw room auto at -3 0 -2.5 normal 0 1 0 size 6 5 2.6", "blockout set opentop on",
+        "blockout add column 0.2 2.6", "position -1.8 0 -1.2",
+        "blockout add pilaster 0.2 2.6", "position -2.85 0 1",
+        "blockout add railing 4 1", "position 0 0 1.8",
+        "blockout add stairs spiral 1 0.1 3 16 270", "position 1.6 0 -1",
+        "camera 35 55 12 0 1 0", "blockout wait"]),
 ]
 
 
