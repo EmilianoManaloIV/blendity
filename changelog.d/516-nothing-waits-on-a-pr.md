@@ -1,4 +1,4 @@
-## 2026-11-15: CLAUDE.md - nothing waits on a PR
+## 2026-11-15 (round 516): CLAUDE.md - nothing waits on a PR
 
 **Asked:** "I thought PR's shouldn't be wait upon in development?" then "Make it a common rule that operations should
 not wait on PRs." and, of how it reaches the repository, "a" (a small PR of its own).
