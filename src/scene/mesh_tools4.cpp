@@ -1283,30 +1283,43 @@ size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<
     for (size_t i = 0; i < poly.size(); i++) a2 += poly[i].x * poly[(i + 1) % poly.size()].y - poly[(i + 1) % poly.size()].x * poly[i].y;
     return 0.5f * std::fabs(a2);
   };
+  /* Round 503: only triangles whose boxes overlap along x are compared (a sweep over the boxes sorted by their low x, as zfight_pairs does), not every pair: a mesh of
+   * a few hundred thousand triangles took minutes. The pair (i < j) is tested as it was. */
   std::set<std::pair<uint32_t, uint32_t>> pairs;
-  for (size_t i = 0; i < T; i++)
-    for (size_t j = i + 1; j < T; j++) {
-      const uint32_t fi = rm.tri_face[i], fj = rm.tri_face[j];
-      if (fi == fj || std::fabs(dot(n[i], n[j])) < 0.999f || length(n[i]) < 0.5f) continue;
-      if (box[i].max.x < box[j].min.x - eps_d || box[j].max.x < box[i].min.x - eps_d || box[i].max.y < box[j].min.y - eps_d ||
-          box[j].max.y < box[i].min.y - eps_d || box[i].max.z < box[j].min.z - eps_d || box[j].max.z < box[i].min.z - eps_d)
-        continue;
-      const Vec3 a0 = rm.positions[rm.indices[i * 3]];
-      /* Facing the same way within plane_dist: they z-fight. Facing opposite ways
-       * they are the two sides of a thin slab - only a problem when they coincide. */
-      const float within = dot(n[i], n[j]) > 0 ? eps_d : 1e-5f * scale;
-      bool coplanar = true;
-      for (int k = 0; k < 3; k++) coplanar = coplanar && std::fabs(dot(rm.positions[rm.indices[j * 3 + k]] - a0, n[i])) < within;
-      if (!coplanar) continue;
-      const Vec3 u = normalize(std::fabs(n[i].y) < 0.9f ? cross(Vec3(0, 1, 0), n[i]) : cross(Vec3(1, 0, 0), n[i])), v = cross(n[i], u);
-      auto flat = [&](size_t t, int k) {
-        const Vec3 p = rm.positions[rm.indices[t * 3 + k]];
-        return Vec2(dot(p, u), dot(p, v));
-      };
-      Vec2 ti[3] = {flat(i, 0), flat(i, 1), flat(i, 2)};
-      std::vector<Vec2> pj = {flat(j, 0), flat(j, 1), flat(j, 2)};
-      if ((ti[1].x - ti[0].x) * (ti[2].y - ti[0].y) - (ti[1].y - ti[0].y) * (ti[2].x - ti[0].x) < 0) std::swap(ti[1], ti[2]);
-      if (clip_area(pj, ti) > eps_a) pairs.insert({std::min(fi, fj), std::max(fi, fj)});
+  auto check = [&](size_t i, size_t j) {
+    const uint32_t fi = rm.tri_face[i], fj = rm.tri_face[j];
+    if (fi == fj || std::fabs(dot(n[i], n[j])) < 0.999f || length(n[i]) < 0.5f) return;
+    if (box[i].max.x < box[j].min.x - eps_d || box[j].max.x < box[i].min.x - eps_d || box[i].max.y < box[j].min.y - eps_d ||
+        box[j].max.y < box[i].min.y - eps_d || box[i].max.z < box[j].min.z - eps_d || box[j].max.z < box[i].min.z - eps_d)
+      return;
+    const Vec3 a0 = rm.positions[rm.indices[i * 3]];
+    /* Facing the same way within plane_dist: they z-fight. Facing opposite ways
+     * they are the two sides of a thin slab - only a problem when they coincide. */
+    const float within = dot(n[i], n[j]) > 0 ? eps_d : 1e-5f * scale;
+    bool coplanar = true;
+    for (int k = 0; k < 3; k++) coplanar = coplanar && std::fabs(dot(rm.positions[rm.indices[j * 3 + k]] - a0, n[i])) < within;
+    if (!coplanar) return;
+    const Vec3 u = normalize(std::fabs(n[i].y) < 0.9f ? cross(Vec3(0, 1, 0), n[i]) : cross(Vec3(1, 0, 0), n[i])), v = cross(n[i], u);
+    auto flat = [&](size_t t, int k) {
+      const Vec3 p = rm.positions[rm.indices[t * 3 + k]];
+      return Vec2(dot(p, u), dot(p, v));
+    };
+    Vec2 ti[3] = {flat(i, 0), flat(i, 1), flat(i, 2)};
+    std::vector<Vec2> pj = {flat(j, 0), flat(j, 1), flat(j, 2)};
+    if ((ti[1].x - ti[0].x) * (ti[2].y - ti[0].y) - (ti[1].y - ti[0].y) * (ti[2].x - ti[0].x) < 0) std::swap(ti[1], ti[2]);
+    if (clip_area(pj, ti) > eps_a) pairs.insert({std::min(fi, fj), std::max(fi, fj)});
+  };
+  /* A triangle with a corner that is not finite never made a pair: a NaN corner gives a zero normal, which the normal tests refuse, and an infinite one a normal with a NaN
+   * component, which the coplanar test refuses. It stays out of the sort, which NaN keys would break. */
+  std::vector<uint32_t> order;
+  for (uint32_t k = 0; k < T; k++)
+    if (std::isfinite(box[k].min.x) && std::isfinite(box[k].max.x)) order.push_back(k);
+  std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return box[a].min.x < box[b].min.x || (box[a].min.x == box[b].min.x && a < b); });
+  for (size_t oi = 0; oi < order.size(); oi++)
+    for (size_t oj = oi + 1; oj < order.size(); oj++) {
+      const uint32_t a = order[oi], b = order[oj];
+      if (box[a].max.x < box[b].min.x - eps_d) break;  // (the very test the pair gets in check: nothing later in the order can pass it either)
+      check(std::min(a, b), std::max(a, b));
     }
   if (out) out->assign(pairs.begin(), pairs.end());
   return pairs.size();

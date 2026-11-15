@@ -711,6 +711,41 @@ void Editor::record_blockout_last(GameObject *g) {
   obj_last_note_result();
 }
 
+/* The `blockout set` words that still end the F9 panel, as every `blockout set` did before round 503. Not because F9 cannot show them (a room's F9 has Wall, Floor and Ceiling
+ * rows): round 503 follows the words of an opening's and a preset's numbers, the ones the Inspector fix and the HCI report were about, and left the rest as they were. The test
+ * "blockout F9: a piece made by the Room tool can be adjusted, and anything else committed ends the panel" (test_blockout.cpp, round 479) pins `set wall` ending the panel. */
+static bool f9_keeps_ending_word(const std::string &key) {
+  for (const char *w : {"wall", "floor", "ceiling", "walls", "opentop", "blend", "material", "texscale", "cell", "method", "detail"})
+    if (key == w) return true;
+  return false;
+}
+
+/* Whether the open F9 record is a Blockout piece that is selected: the piece a `blockout set` acts on. It counts the step the piece was made in while that is still
+ * waiting to be committed (the same frame), as obj_last_valid does not. */
+bool Editor::f9_is_about_selection() {
+  if (obj_last_.kind != "blockout" || playing_) return false;
+  const bool newest = obj_last_valid() || (pending_change_ && obj_last_.serial == obj_last_serial_now());
+  if (!newest) return false;
+  for (GameObject *g : selected_objects(false))
+    if (g->id == obj_last_.obj) return true;
+  return false;
+}
+
+/* A `blockout set ...` changed the piece Adjust Last (F9) is about: its record takes the piece's numbers as they are now. The panel's rows are bound to the record, so
+ * without this a console edit left the old Style / Open Amount on show, and the next F9 edit wrote them back over the console's value. Re-running from `before` is
+ * unchanged (a piece's F9 re-run writes the record's numbers onto the piece): the record keeps the place the piece grows from, its turns and whether the panel is open,
+ * and stays the newest step's (`serial`), because the console's edit joins or follows the step the piece was made in. */
+void Editor::refresh_blockout_last() {
+  GameObject *g = scene_->find(obj_last_.obj);
+  if (!g || !g->get<BlockoutPiece>()) return;
+  const ObjLastOp keep = obj_last_;
+  const bool open = obj_last_open_;
+  record_blockout_last(g);
+  obj_last_.base_p = keep.base_p, obj_last_.base_up = keep.base_up;
+  obj_last_.turn = keep.turn, obj_last_.turn_done = keep.turn_done;
+  obj_last_open_ = open;
+}
+
 /* The entries every menu that creates objects shares (GameObject, the Hierarchy's +, the Tools window's grid is its own). */
 void Editor::blockout_menu_items(bool child) {
   (void)child;  // (a piece goes under the selected Blockout whatever the menu: there is nothing else to be a child of)
@@ -2354,6 +2389,22 @@ void Editor::blockout_outline_command(const std::vector<std::string> &t) {
 /* blockout new | add box|cylinder|sphere|wedge|stairs|arch|outline|mesh [subtract|intersect] [sizes] | add room | add door|window | outline <x z>... | set cell|method|wall|floor|ceiling|walls|opentop <value> | rebuild | wait | info */
 void Editor::blockout_command(const std::vector<std::string> &t) {
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "info";
+  /* Round 503: a `blockout set` that changes the piece F9 shows leaves F9 showing that piece's new numbers (refresh_blockout_last), whichever way the command returns. The
+   * piece's hash before and after says whether it was changed: a command that only changed another selected piece leaves F9 alone, and the panel ends as before. */
+  struct F9Follows {
+    Editor &ed;
+    uint64_t piece = 0, before = 0;  // (piece 0: F9 is not about a piece this command can change)
+    F9Follows(Editor &e, bool live) : ed(e) {
+      GameObject *g = live ? ed.scene_->find(ed.obj_last_.obj) : nullptr;
+      BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+      if (bp) piece = g->id, before = hash_component(*bp);
+    }
+    ~F9Follows() {
+      GameObject *g = piece ? ed.scene_->find(piece) : nullptr;
+      BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+      if (bp && hash_component(*bp) != before && ed.obj_last_.kind == "blockout" && ed.obj_last_.obj == piece) ed.refresh_blockout_last();
+    }
+  } f9(*this, sub == "set" && t.size() > 2 && !f9_keeps_ending_word(to_lower(t[2])) && f9_is_about_selection());
   auto usage = [] {
     Log::info("blockout new | add box|cylinder|sphere|wedge|stairs|arch|outline|mesh [subtract|intersect] [x y z | radius height | radius | stairs: x y z steps | "
               "arch: radius inner angle depth | outline: [height] x z x z ... | mesh <object>] | add room [box|cylinder|wedge|outline] [sizes] | "
@@ -2724,8 +2775,10 @@ void Editor::draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &, ui::Layout
   const Recti row = lay.row(u.row_h() + u.px(2));
   const std::string text = door ? "Made by Door '" + door->name + "' - its shape follows the door's numbers" : "Not under a door any more - an ordinary object from the next frame";
   u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, text, u.theme.text_dim);
+  const std::string duplicate_key = shortcut_text("edit.duplicate");  // (the keymap's label: it can be rebound)
   u.tooltip("This leaf is its own object under the door, with its pivot at the hinge. Open Amount (the door's) and the Rotate tool turn it; its size, thickness and material follow the door.\n"
-            "Delete it and the door's Leaf goes off. A copy of it (Ctrl+D), or it moved out of its door or under another, is an ordinary object: the door makes its own again. Bake to Mesh keeps it as a separate object.");
+            "Delete it and the door's Leaf goes off. A copy of it" + (duplicate_key.empty() ? std::string() : " (" + duplicate_key + ")") +
+                ", or it moved out of its door or under another, is an ordinary object: the door makes its own again. Bake to Mesh keeps it as a separate object.");
   if (u.record_buttons) u.button_rects["shown:" + text] = row;
 }
 

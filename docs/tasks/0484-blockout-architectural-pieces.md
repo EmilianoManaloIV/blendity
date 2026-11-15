@@ -1,6 +1,6 @@
 # 0484: Architectural pieces for a Blockout (round 500, Pass 23b R4)
 
-- **Status:** approved with Pass 23b (the owner, 2026-11-11, through the hub: "Yes, more architectural pieces is
+- **Status:** done (round 500, PR #410); approved with Pass 23b (the owner, 2026-11-11, through the hub: "Yes, more architectural pieces is
   good."; the hub's reading: the wider set of the proposal). **Done 2026-11-14 (round 500), with deviations:**
   - A new kernel shape was needed: `Shape::Convex` (corners, the convex hull's faces) - ADR 0128 amended.
   - Criterion 1 / 7 (no faces on top of each other): not 0 on every kind; the counts and their causes are in

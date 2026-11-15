@@ -1,6 +1,6 @@
 # 0485: Snapping between Blockouts, and a button that joins Blockouts that touch (round 501, Pass 23b R5)
 
-- **Status:** done (round 501, 2026-11-14, on top of round 502 - done in parallel with rounds 498-500; limits reported to the owner: the changelog fragment names them). Approved with Pass 23b (the owner, 2026-11-11, through the hub: "Touching blockouts should have a button
+- **Status:** (PR #406) done (round 501, 2026-11-14, on top of round 502 - done in parallel with rounds 498-500; limits reported to the owner: the changelog fragment names them). Approved with Pass 23b (the owner, 2026-11-11, through the hub: "Touching blockouts should have a button
   to combine them."; the hub's reading: snapping between Blockouts plus the join button).
 - **Requirements:** R-02 (modeling), U-01, C-02, R-09
 - **Decisions:** ADR 0129 (pieces are children of their Blockout; ADR 0135: a Blockout takes scale in its numbers)

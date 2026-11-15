@@ -1,6 +1,6 @@
 # 0486: Modifiers live on a Blockout (round 502, Pass 23b R1)
 
-- **Status:** approved with Pass 23b (the owner, 2026-11-11, through the hub: "Yes, modifiers should work on the
+- **Status:** done (round 502, PR #403, merged 2026-11-14). approved with Pass 23b (the owner, 2026-11-11, through the hub: "Yes, modifiers should work on the
   blockout."). **Done 2026-11-14** (round 502, by the Pass 23b Modifiers worker, in parallel with rounds 498-500 on
   main - its PR is on `main`, not on round 501's). Open: the stress rows' times (a timed window).
 - **Requirements:** R-02, R-03 (modeling, modifiers), Q-06 (responsiveness), C-02, R-09

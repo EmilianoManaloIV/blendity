@@ -6,6 +6,7 @@
 
 #include "../src/scene/blockout.h"
 #include "../src/scene/raycast.h"
+#include "../src/scene/blockout_piece_stack.h"
 
 #include <array>
 #include <limits>
@@ -15,6 +16,7 @@ using namespace bl;
 // Round 515's tests live in test_blockout_leaf.cpp (this file's object reached the MSVC section limit); run from run_blockout_tests below.
 void tests_round515();
 void tests_round515_te();
+void tests_round503();  // (test_blockout_writeup.cpp: the bench interior with the pass's pieces, the lesson's new steps)
 
 namespace {
 
@@ -1363,7 +1365,11 @@ const Mesh *r477_mesh(GameObject *g) {
 bool r477_scratch(const GameObject &g, Mesh &out) {
   std::vector<Piece> pieces;
   blockout::Settings st;
-  blockout_snapshot(g, pieces, st);
+  BlockoutSnapshotNotes notes;
+  blockout_snapshot(g, pieces, st, &notes);
+  /* Round 503: a piece with a modifier stack (the bench interior has one) is built from its evaluated mesh, which the snapshot alone does not hold; no stack: nothing changes. */
+  blockout_piece_stack_cache_clear();
+  blockout_piece_stacks_apply(pieces, notes.surface);
   return blockout::build(pieces, st, out);
 }
 bool r477_matches(Editor &ed, const char *name = "Blockout") {
@@ -17827,7 +17833,10 @@ static void tests_round483() {
       const Blockout *b = bo->get<Blockout>();
       CHECK(lamps == 2 && !b->material[kClassFloor].empty() && !b->material[kClassWalls].empty() && !b->material[kClassCeiling].empty() && !b->material[kClassOutside].empty());
       CHECK(bo->get<MeshRenderer>()->materials.size() >= 4);
-      CHECK(b->state.status.refusal.empty() && b->state.status.skipped.empty() && b->state.status.unresolved == 0);  // (no warning in the Inspector's status either)
+      /* Round 503: not `unresolved == 0` any more. The interior's windows and doors have styles, and on the field path a frame finer than the Field Cell is held at one cell (the status says so), which leaves unresolved places - the same the styled-window tests accept on the field path and demand zero of only for Exact. */
+      CHECK(b->state.status.refusal.empty() && b->state.status.skipped.empty());  // (no warning in the Inspector's status either)
+      if (run == 0) std::printf("    100 pieces: %zu unresolved places on the %s path\n", b->state.status.unresolved, b->state.status.path.c_str());
+      CHECK(b->state.status.unresolved == 0 || !blockout::crisp_available());  // (built exact it has none; the field path's are the styled frames' - see above)
     }
     CHECK(hash[0] == hash[1] && hash[0] != 0);
   });
@@ -17844,7 +17853,8 @@ static void tests_round483() {
       std::vector<Piece> pieces;
       blockout::Settings st;
       blockout_snapshot(*bo, pieces, st);
-      CHECK(pieces.size() == 400);
+      /* The kernel's pieces are more than the Blockout's since round 503: a styled window or door and a preset make several each. The 400 are the BlockoutPiece objects. */
+      CHECK(r477_all_pieces(*bo).size() == 400 && pieces.size() >= 400);
       hash[run] = blockout_snapshot_hash(pieces, st);
       /* The first frame asks for the build: a job is started, or - where jobs do not run on workers - the mesh is there at once. */
       ed.step_frame_headless();
@@ -17872,7 +17882,10 @@ static void tests_round483() {
     r483_sizes(*m, "400 pieces", ms);
     r483_status(*bo->get<Blockout>(), "400 pieces");
     const BlockoutStatus &st = bo->get<Blockout>()->state.status;
-    CHECK(st.refusal.empty() && st.skipped.empty() && st.unresolved == 0);
+    /* Round 503: not `unresolved == 0` any more. The interior's windows and doors have styles, and on the field path a frame finer than the Field Cell is held at one cell (the status says so), which leaves unresolved places - the same the styled-window tests accept on the field path and demand zero of only for Exact. */
+    CHECK(st.refusal.empty() && st.skipped.empty());
+    std::printf("    400 pieces: %zu unresolved places on the %s path\n", st.unresolved, st.path.c_str());
+    CHECK(st.unresolved == 0 || !blockout::crisp_available());
     CHECK(r476_sound(*m, "benchscene blockout 400"));
     CHECK(r477_matches(ed, "Interior"));
   });
@@ -17925,7 +17938,8 @@ static void tests_round483() {
     const Mesh *m = r477_mesh(bo);
     CHECK(bo && m);
     if (!bo || !m) return;
-    CHECK(bo->get<Blockout>()->state.status.unresolved == 0);
+    CHECK(bo->get<Blockout>()->state.status.refusal.empty());
+    CHECK(bo->get<Blockout>()->state.status.unresolved == 0 || !blockout::crisp_available());  // (as in the first test of the round)
     /* The Main Camera is in front of the whole mesh (the gate and the colonnade included) and looks at it. */
     GameObject *cam = ed.scene().find_by_name("Main Camera");
     CHECK(cam);
@@ -18198,10 +18212,12 @@ static void tests_round483_te() {
      * 2 x 2 x 4 (two of them arched) + the Keep Door; windows on the edge rooms of both storeys (front 4 + back 4 + 2 ends = 10 a storey, the
      * back middle room's of the ground floor left out for the Keep Room, the corner rooms' front windows kept: 19); the arches are the gate
      * and the two arch heads; 12 padding columns + the blended one up to 100. (Round 483's review moved the Keep Room behind the back
-     * room, gave the corner rooms their windows and added the Keep Door: before it these were 34, 17 and 16.) */
+     * room, gave the corner rooms their windows and added the Keep Door: before it these were 34, 17 and 16.) Round 503 turned ten of the 12 padding
+     * columns into the pass's pieces (nine architectural presets and a box with a Bevel; the windows and doors only took styles, their counts are the same), so
+     * the plain columns are 2 + the blended one: 3, not 13. */
     CHECK(box_rooms == 25 && cyl_rooms == 1 && outline_rooms == 1);
     CHECK(keep == 1 && merge == 26);
-    CHECK(doors == 35 && windows == 19 && stairs == 1 && arches == 3 && columns == 13 && blended == 1);
+    CHECK(doors == 35 && windows == 19 && stairs == 1 && arches == 3 && columns == 3 && blended == 1);
     CHECK(r483te_count(ed, false) == 1);
     /* The 400-piece one is the same plus columns: 400 under the one Blockout. */
     Editor big;
@@ -26810,4 +26826,5 @@ void run_blockout_tests() {
   tests_round500_te();
   tests_round515();
   tests_round515_te();
+  tests_round503();
 }

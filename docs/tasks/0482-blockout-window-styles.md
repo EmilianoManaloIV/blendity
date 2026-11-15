@@ -1,6 +1,6 @@
 # 0482: Window styles for a Blockout (round 498, Pass 23b R2)
 
-- **Status:** approved with Pass 23b (the owner, 2026-11-11, through the hub - the plan
+- **Status:** done (round 498, PR #400); approved with Pass 23b (the owner, 2026-11-11, through the hub - the plan
   `pass23b-plan-approved-2026-11-11.md`; their words on styles: "I want a preset of parameters. No, keep things like a
   blockout so I can texture and add materials later."). **Done (round 498)**; what differs from the text below:
   - No child objects: a styled window makes its kernel pieces at snapshot time (ADR 0129's round 498 amendment).

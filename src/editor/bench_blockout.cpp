@@ -3,7 +3,8 @@
 // Blockout, the size of real work - two storeys of box rooms that share their walls, with a round room, an L-shaped room and
 // a room that keeps its own walls built on; doors between the rooms and windows in the outer walls, a staircase with the well
 // above it, two arched openings, a gate arch, a colonnade and one blended column on a plinth; floor, wall, ceiling and outside
-// materials; two lamps. What it measures: dragging a piece of a Blockout this size (the mesh follows within 100 ms), baking,
+// materials; two lamps. Round 503 (task 0487): the windows and doors take the styles of rounds 498-499 in turn, a row of the nine architectural pieces
+// of round 500 stands in front of the gate and one box carries a Bevel of round 514 - they replace padding columns, so the count stays 100 / 400. What it measures: dragging a piece of a Blockout this size (the mesh follows within 100 ms), baking,
 // lighting and exporting it. Deterministic: no clock, no random number, no address - every run gives the same pieces in the
 // same order, so the same mesh bytes. The mesh is not built here: the Blockout walk asks for it through the normal background
 // job, so the scene appears first and the mesh lands.
@@ -29,6 +30,11 @@ struct Interior {
   int cols, rows;
   const int storeys = 2;
   const Quat turned = Quat::euler({0.0f, 90.0f, 0.0f});  // (an opening in a wall that faces along X)
+  int doors_styled = 0, windows_styled = 0;  // (how many of each are made: the next one takes the next style of the cycle)
+  /* How many of each get a style. On the field path a frame finer than one and a half cells leaves unresolved places, whose faces stop merging: every styled opening costs
+   * hundreds of faces, and the 400's 239 of them made a mesh of 228,000 faces that the soundness checks (quadratic) took minutes over. Both interiors style the first few, enough
+   * for every style once, the rest stay plain (the 100 with all 51 styled took 10 s in its tests, with 24,000 faces). */
+  int door_limit = 1 << 30, window_limit = 1 << 30;
 
   float cx(int i) const { return ((float)i - 0.5f * (float)(cols - 1)) * kPitch; }
   float cz(int j) const { return ((float)j - 0.5f * (float)(rows - 1)) * kPitch; }
@@ -61,6 +67,31 @@ struct Interior {
   }
   BlockoutPiece *door(const std::string &name, Vec3 at, bool along_x, float depth = 0.5f) { return opening(name, 1, at, along_x, 0.9f, 2.1f, 0.0f, depth); }
   BlockoutPiece *window(const std::string &name, Vec3 at, bool along_x) { return opening(name, 2, at, along_x, 1.2f, 2.0f, 0.9f); }
+  /* Round 503: a door or window of the next style of its cycle (windows: Single, Double, Arched, Fixed, Grid, Round; doors: Single, Double, Sliding), at the size that style
+   * is a preset of. A styled door has a leaf object under it; that object is no piece (the Blockout's pieces are its children). */
+  BlockoutPiece *styled_door(const std::string &name, Vec3 at, bool along_x) {
+    BlockoutPiece *bp = door(name, at, along_x);
+    if (doors_styled >= door_limit) return bp;
+    bp->style = kDoorSingle + doors_styled++ % 3;
+    blockout_opening_preset(1, bp->style, bp->width, bp->head);
+    return bp;
+  }
+  BlockoutPiece *styled_window(const std::string &name, Vec3 at, bool along_x) {
+    BlockoutPiece *bp = window(name, at, along_x);
+    if (windows_styled >= window_limit) return bp;
+    bp->style = kWindowSingle + windows_styled++ % 6;
+    blockout_opening_preset(2, bp->style, bp->width, bp->head);
+    if (bp->style == kWindowRound) bp->head = bp->sill + bp->width;  // (a porthole starts as a circle)
+    return bp;
+  }
+  /* A preset piece (round 500) with the numbers `blockout add <preset> n n ...` takes. */
+  BlockoutPiece *preset(const std::string &name, int kind, Vec3 at, const std::vector<float> &numbers, GameObject **made = nullptr) {
+    BlockoutPiece *bp = piece(name, 0, 0, at, made);
+    bp->preset = kind;
+    blockout_preset_defaults(*bp, kind);
+    blockout_preset_numbers(*bp, numbers);
+    return bp;
+  }
   /* The round head of an arched door: a half-disc Subtract piece over the opening. */
   void arch_head(const std::string &name, Vec3 at, bool along_x) {
     GameObject *g = nullptr;
@@ -78,6 +109,7 @@ struct Interior {
   void window_of(int s, int i, int j);
   void stairs();
   void gate();
+  void architecture();
   void colonnade(int target);
 };
 
@@ -94,6 +126,7 @@ void Interior::rooms() {
 void Interior::joined_rooms() {
   BlockoutPiece *round_room = room_at("Round Room", 1, Vec3(x_east() + 3.5f, kHeight * 0.5f, z_front()));
   round_room->radius = 2.0f, round_room->height = kHeight, round_room->segments = 32;
+  /* (The L room's outline has a notch: its wall folds round a re-entrant corner, the case round 497 fixed - the bench covers that wall.) */
   BlockoutPiece *l_room = room_at("L Room", 6, Vec3(x_west() - 3.5f, kHeight * 0.5f, z_front()));
   l_room->height = kHeight, l_room->outline = {Vec2(-2.0f, -2.0f), Vec2(2.0f, -2.0f), Vec2(2.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(0.0f, 2.0f), Vec2(-2.0f, 2.0f)};
   const float wall_outer = z_back() + kAir * 0.5f + kWall;  // the back room's outer face
@@ -106,7 +139,7 @@ void Interior::joined_rooms() {
 void Interior::arched_or_plain_door(int s, int i, int j, bool along_x, Vec3 at, int &arches) {
   const bool arched = s == 0 && (along_x ? (i == 1 && j == 1) : (i == 2 && j == 0));  // two of the ground floor's are arched instead
   const char axis = along_x ? 'X' : 'Z';
-  if (!arched) return (void)door(strprintf("Door %c %d.%d.%d", axis, s, i, j), at, along_x);
+  if (!arched) return (void)styled_door(strprintf("Door %c %d.%d.%d", axis, s, i, j), at, along_x);
   arches++;
   opening(strprintf("Arched Door %c %d", axis, arches), 1, at, along_x, 1.4f, 1.6f, 0.0f);
   arch_head(strprintf("Arch Head %c %d", axis, arches), at, along_x);
@@ -133,12 +166,12 @@ void Interior::window_of(int s, int i, int j) {
   const float floor_y = (float)s * kStorey;
   const std::string name = strprintf("Window %d.%d.%d", s, i, j);
   const bool keep_behind = s == 0 && i == cols / 2;
-  if (j == 0) window(name, Vec3(cx(i), floor_y, z_front() - 0.5f * kPitch), false);
+  if (j == 0) styled_window(name, Vec3(cx(i), floor_y, z_front() - 0.5f * kPitch), false);
   else if (j == rows - 1) {
-    if (!keep_behind) window(name, Vec3(cx(i), floor_y, z_back() + 0.5f * kPitch), false);
+    if (!keep_behind) styled_window(name, Vec3(cx(i), floor_y, z_back() + 0.5f * kPitch), false);
   }
-  else if (i == 0) window(name, Vec3(x_west() - 0.5f * kPitch, floor_y, cz(j)), true);
-  else if (i == cols - 1) window(name, Vec3(x_east() + 0.5f * kPitch, floor_y, cz(j)), true);
+  else if (i == 0) styled_window(name, Vec3(x_west() - 0.5f * kPitch, floor_y, cz(j)), true);
+  else if (i == cols - 1) styled_window(name, Vec3(x_east() + 0.5f * kPitch, floor_y, cz(j)), true);
 }
 
 void Interior::windows() {
@@ -167,6 +200,30 @@ void Interior::gate() {
   piece("Plinth", 0, 0, Vec3(cx(0) + 4.0f, 0.15f, z_gate()))->size = {1.2f, 0.3f, 1.2f};
   BlockoutPiece *blended = piece("Blended Column", 1, 0, Vec3(cx(0) + 4.0f, 0.3f + 1.2f, z_gate()));
   blended->radius = 0.3f, blended->height = 2.4f, blended->segments = 24, blended->blend = 0.12f;
+}
+
+/* Round 500's pieces and round 514's modifier stack, in a row in front of the gate: one of each architectural preset, and a box that carries a
+ * Bevel (built as a mesh, so nothing that is blended stands against it). The pieces replace padding columns: the count is the same. */
+void Interior::architecture() {
+  /* Three rows in front of the gate, inside the building's width (the camera looks at the whole of it): small pieces in the first, a roof and the stairs in the second, the
+   * tall spiral and the arcade in the third. */
+  const float z1 = z_gate() - 4.0f, z2 = z_gate() - 9.0f, z3 = z_gate() - 14.0f, x0 = cx(0);
+  GameObject *block = nullptr;
+  piece("Bevelled Block", 0, 0, Vec3(x0 - 2.5f, 0.6f, z1), &block)->size = {1.2f, 1.2f, 1.2f};
+  block->add<BevelModifier>()->width = 0.1f;
+  preset("Preset Column", kPresetColumn, Vec3(x0, 0.0f, z1), {0.2f, 2.6f});
+  preset("Preset Pilaster", kPresetPilaster, Vec3(x0 + 1.5f, 0.0f, z1), {0.2f, 2.6f});
+  preset("Preset Beam", kPresetBeam, Vec3(x0 + 12.0f, 0.0f, z1), {4.0f, 0.3f, 0.3f});
+  preset("Preset Roof", kPresetRoof, Vec3(x0 + 3.0f, 0.0f, z2), {6.0f, 4.0f, 35.0f});
+  preset("Preset Stairs L", kPresetStairsL, Vec3(x0 + 9.0f, 0.0f, z2), {1.0f, 3.0f, 2.0f, 8.0f});
+  /* The railing (round 500's) stands between the two flights, turned to run along Z like a flight's side. (Tried first along the building's own stair well: it made a mesh of
+   * 109,000 faces for the 400 and a test that took 6 s, three times the cost of everything else the round added.) */
+  GameObject *rail = nullptr;
+  preset("Preset Railing", kPresetRailing, Vec3(x0 + 11.7f, 0.0f, z2), {2.0f, 1.0f}, &rail);
+  rail->set_local_rotation(turned);
+  preset("Preset Stairs U", kPresetStairsU, Vec3(x0 + 14.0f, 0.0f, z2), {1.0f, 3.0f, 2.0f, 8.0f});
+  preset("Preset Spiral", kPresetSpiral, Vec3(x0 + 1.0f, 0.0f, z3), {1.0f, 0.1f, 3.0f, 16.0f, 270.0f});
+  preset("Preset Arcade", kPresetArcade, Vec3(x0 + 10.0f, 0.0f, z3), {4.0f, 2.5f, 3.0f});
 }
 
 /* Columns along the colonnade up to the piece count asked for (none when the interior already has that many). */
@@ -204,13 +261,16 @@ void Editor::build_blockout_bench(int pieces) {
   b->material[kClassCeiling] = bench_material("Ceiling", Vec3(0.95f, 0.95f, 0.95f), 0.9f);
   b->material[kClassOutside] = bench_material("Outside", Vec3(0.55f, 0.57f, 0.6f), 0.8f);
 
-  Interior in{*scene_, *bo, big ? 10 : 4, big ? 6 : 3};
+  /* The 400 is 9 x 6 rooms, not 10 x 6: the 10 x 6 grid alone is 394 pieces, and the 10 pieces round 503 added (nine presets and the Bevel box) would have gone past 400. */
+  Interior in{*scene_, *bo, big ? 9 : 4, big ? 6 : 3};
+  in.door_limit = in.window_limit = 6;  // (every style once, the rest plain: see Interior)
   in.rooms();
   in.joined_rooms();
   in.doors();
   in.windows();
   in.stairs();
   in.gate();
+  in.architecture();
   in.colonnade(pieces);
 
   /* Two lamps, Mixed so the scene is lit before any bake (a bake adds the indirect light): one in the stair room's ground storey, beside the
@@ -226,7 +286,7 @@ void Editor::build_blockout_bench(int pieces) {
   /* The starter scene's Main Camera stood at (0, 2, -5): inside the front rooms' shared wall. It stands outside, in front of the gate and
    * looking at the building, so the Game view, Play mode and F12 see the interior from outside. */
   if (GameObject *cam = scene_->find_by_name("Main Camera")) {
-    cam->set_local_position(Vec3(0.0f, 3.0f, in.z_gate() - 9.0f));
+    cam->set_local_position(Vec3(0.0f, 3.0f, in.z_gate() - 26.0f));
     cam->set_local_rotation(Quat::euler({8.0f, 0.0f, 0.0f}));
   }
 
