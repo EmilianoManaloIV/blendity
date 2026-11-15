@@ -69,9 +69,39 @@ build - all fixed) and a code review (the swing's cut, Hinge Left / Right mirror
 selections taking each other's styles - fixed or, for the swing, named and put to the owner). The full suite, macOS
 and the sanitizers are CI's.
 
+**Fixed after the owner tried it** (2026-11-14, through the hub: "I want all doors and windows to be vertical ... Or
+at least added, vertical by default." and "the double door width isn't the width of a double door"):
+- **A door or window added to a room that lies on its side or leans lay flat.** The one placement path took the room's
+  up as the opening's up; a room drawn onto a wall or a slope has another up. Now an opening is added upright by the
+  Blockout's up, whatever the room's turn, and only in a wall that is vertical within 2 degrees in the Blockout's frame:
+  a wall that leans more is refused with a status line saying how much it leans, and a face within 30 degrees of
+  horizontal (a floor, a ceiling) is no wall under the mouse. The feet stand on the floor under the opening (the higher
+  of the two jambs' floors; an upright room keeps its floor line, bytes unchanged). Turning it afterwards on purpose is
+  left alone.
+  The mouse test that picks the wall judged floors against the room's up too, and now against the Blockout's.
+  Reproduced before the fix with real mouse events and the console on rooms turned 90 and 30 degrees about X, 45 about
+  Z, a cylinder room on its side, in an upright, a turned and a turned-and-scaled Blockout: every one lay flat; rooms
+  turned about Y only were fine. Windows share the path and the fix.
+- **With the mouse on a floor, a ceiling or nothing** a door or window goes in the middle of the room's MOST UPRIGHT wall
+  (-X of an upright room as before; not -X of a room turned 90 degrees about Z, which is a floor), and the status says
+  the mouse was not on a wall and where it went; a room with no side within 2 degrees of vertical (a room leaning on two
+  axes; a cylinder on its side has its end caps) refuses with a status line. The feet's floor rays start on the room's side
+  of the wall (also for a click on the outer face), count only faces the room itself made and a hit inside its own air.
+- **Limits:** (1) the wall under the mouse and the floor rays read the mesh shown, which can be one build behind while a
+  newer build runs (a click at once after an edit can use the old mesh). (2) A sphere room is refused on every mouse click
+  (its wall is curved, no face is within 2 degrees of vertical) while the Door button's fallback still puts the opening
+  in its most upright side. (3) Switching away from a Round window keeps its size (its Head is its circle's); a Round
+  window is the one style that takes no preset on leaving.
+- **Each style carries its size:** a Double door is 1.8 x 2.1 m (two 0.9 m leaves, against a Single's 0.9 x 2.1), a
+  Revolving door's entries 1.2 m, a Double window 1.5 x 2.0 m (the others 1.2 x 2.0). A new opening takes its style's
+  size (a size typed in the console wins); switching style in the Inspector, F9 or `blockout set style` takes the new
+  style's size only while the size is still the old style's - a size the user typed is kept. Saved scenes load
+  unchanged.
+
 <!-- docs/USABILITY.md -->
 after: | A Blockout knew boxes, cylinders and spheres
 | A door in a Blockout was a bare hole, and the Blockout buttons of the Create section were cut ("New Block...", "Subtract Cy..."). (round 499) | A **Door Style** (Single, Double, Sliding, Arched, Revolving) with a leaf that opens by a number and a Leaf material of its own; short button labels that fit, the whole name in the tooltip. |
+| A Door or Window added to a room that lies on its side or leans lay flat, and a Double door was as wide as a Single (0.9 m). (round 499) | An opening is added upright by the Blockout's up in a wall vertical within 2 degrees (a leaning wall, a floor or a ceiling does not hold one, with a status line); each style carries its size - a Double door 1.8 m, a Double window 1.5 m. |
 
 <!-- docs/ARCHITECTURE.md -->
 append:

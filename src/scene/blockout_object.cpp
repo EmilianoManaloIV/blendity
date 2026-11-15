@@ -218,13 +218,14 @@ static void reflect_opening_style(Reflector &r, BlockoutPiece &p, bool all) {
     r.enumeration("Style", p.style, kBlockoutDoorStyleNames, kBlockoutDoorStyles);
     r.help("What the door adds to the wall besides the hole. Opening Only: nothing (a plain cut). Single: a frame and one leaf hinged at one jamb. Double: a leaf on each jamb. "
            "Sliding: a leaf on the wall's face that slides along it. Arched: a Single with a round head (its leaf stays closed). Revolving: only the blocked-out space - a round drum "
-           "cut through the wall and a ring round it (Width is the two entries through the ring, at most eight tenths of the drum's width). The frame and a Revolving door's ring take the Solid material, the leaf the Leaf material, the hole's reveal the Cut material.");
+           "cut through the wall and a ring round it (Width is the two entries through the ring, at most eight tenths of the drum's width). A style brings its own size when it is chosen "
+           "(Double 1.8 m wide: two 0.9 m leaves; Revolving 1.2 m) when the Width and Head are still the old style's; a size you set stays. The frame and a Revolving door's ring take the Solid material, the leaf the Leaf material, the hole's reveal the Cut material.");
     reflect_door_rows(r, p, false, std::min(kBlockoutDoorStyles - 1, std::max(0, p.style)));
     return;
   }
   r.enumeration("Style", p.style, kBlockoutWindowStyleNames, kBlockoutWindowStyles);
   r.help("What the window adds to the wall besides the hole. Opening Only: nothing (a plain cut). Single: a frame, a pane and a sill board. Double: two lights "
-         "with a mullion. Arched: a round head. Fixed: a frame and one pane, no sill board. Grid: Panes Across x Panes Up with glazing bars. Round: a porthole - a circle "
+         "with a mullion (1.5 m wide against the others' 1.2 m: choosing a style gives its size while the Width and Head are still the old style's, a size you set stays; a Round window keeps its size when you switch away). Arched: a round head. Fixed: a frame and one pane, no sill board. Grid: Panes Across x Panes Up with glazing bars. Round: a porthole - a circle "
          "when it is made (Head = Sill + Width); change Width or Head afterwards and it is an ellipse. "
          "The frame, bars and sill board take the Solid material, the pane the Glass material, the hole's reveal the Cut material.");
   reflect_window_rows(r, p, all, std::min(kBlockoutWindowStyles - 1, std::max(0, p.style)));
@@ -1138,11 +1139,31 @@ void blockout_opening_set_style(BlockoutPiece &p, int style) {
   blockout_piece_edited(p, before, p.opening);
 }
 
+void blockout_opening_preset(int opening, int style, float &width, float &head) {
+  if (opening == 1) {
+    width = style == kDoorDouble ? 1.8f : style == kDoorRevolving ? 1.2f : 0.9f;
+    head = 2.1f;
+    return;
+  }
+  width = style == kWindowDouble ? 1.5f : 1.2f;
+  head = 2.0f;
+}
+
 void blockout_piece_edited(BlockoutPiece &p, int style_before, int opening_before) {
   /* Style is shared by doors and windows (round 499): a piece that is no opening has none, and one switched between Door and Window starts at Opening Only - a window's
    * Grid is no door's Revolving. A door keeps its own. */
   if (p.opening == 0 || p.opening != opening_before) p.style = 0;
   p.style = std::min(p.opening == 1 ? kBlockoutDoorStyles - 1 : kBlockoutWindowStyles - 1, std::max(0, p.style));
+  /* A new style brings its preset size, but only over the old style's: a width or head somebody typed is theirs. The opening's centre does not move (Width grows about it). */
+  if (p.opening != 0 && p.opening == opening_before && p.style != style_before && style_before >= 0 && style_before < (p.opening == 1 ? kBlockoutDoorStyles : kBlockoutWindowStyles) &&
+      !(p.opening == 2 && style_before == kWindowRound)) {
+    float ow, oh, nw, nh;
+    blockout_opening_preset(p.opening, style_before, ow, oh);
+    blockout_opening_preset(p.opening, p.style, nw, nh);
+    /* By value: a size typed that equals the old style's preset counts as untouched. A Round window is the exception: its Head is its circle's (Sill + Width), which is no
+     * preset, so leaving Round keeps the numbers (round 498's rule, which its tests pin: Round to Single stays 1.2 x 2.1). */
+    if (p.width == ow && p.head == oh) p.width = nw, p.head = nh;
+  }
   /* A Round window starts as a circle: Head = Sill + Width. Width or Head may be changed afterwards (an ellipse). */
   if (p.opening == 2 && p.style == kWindowRound && style_before != kWindowRound && finite_bits(p.width) && finite_bits(p.sill) && p.width > 0.0f)
     p.head = std::min(kBlockoutMaxSize, p.sill + p.width);

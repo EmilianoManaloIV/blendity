@@ -13,6 +13,10 @@
     (`tools_window.cpp`); the buttons there are three to a row with short labels (the HCI survey of round 505 found
     them clipped).
   - A selected Arched or Revolving door is outlined as its box.
+  - **Fixed after the owner tried it:** a door or window added to a room turned onto its side lay flat (it took the
+    room's up) - it now stands upright in the Blockout, in a wall vertical within 2 degrees, else is refused with a
+    status line; the fallback is the room's most upright wall; each style carries a preset size (Double door 1.8 m,
+    Double window 1.5 m). ADR 0129's round 499 amendment has the rules.
 - **Requirements:** R-02 (modeling), U-01, C-02, R-09
 - **Decisions:** ADR 0129 as amended in round 498 (a styled opening is one piece that generates its solids)
 - **Model:** implementer, then test-engineer, then code-reviewer
@@ -48,7 +52,8 @@
    inside the drum.
 4. Open Amount swept 0 to 1 in twenty steps for Single, Double and Sliding at two hinge sides: every result sound; the
    leaf never leaves a sliver against the frame (no unresolved places in the test's cases).
-5. Style changes keep the shared numbers; one undo step; F9 re-runs from `before`; handles change Width / Head with
+5. Style changes keep the shared numbers - except the preset size rule (Width and Head follow the new style's preset
+   when they are still the old style's); one undo step; F9 re-runs from `before`; handles change Width / Head with
    real events and the frame and leaf follow.
 6. Leaf faces are in the Leaf class's slot; frame in Solid's; a Blockout's Leaf Material and a piece's override work;
    UVs follow round 482's rule.

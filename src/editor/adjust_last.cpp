@@ -317,6 +317,12 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     else if (row.i) changed |= u.int_field(id, fr, *row.i, row.imn, row.imx);
     else if (row.b) changed |= u.checkbox({fr.x, fr.y + u.px(2), rh - u.px(4), rh - u.px(4)}, *row.b);
   }
+  if (changed && o.kind == "blockout" && o.n == 3 && o.opening != 0 && style_was >= 0 && o.style >= 0 && o.style != style_was && !(o.opening == 2 && style_was == kWindowRound)) {  // (a new style's preset size, over the old style's only; a Round window keeps its size)
+    float ow, oh, nw, nh;
+    blockout_opening_preset(o.opening, style_was, ow, oh);
+    blockout_opening_preset(o.opening, o.style, nw, nh);
+    if (o.a == ow && o.b == oh) o.a = nw, o.b = nh;  // (a Round window keeps its size when switched away: its Head is its circle's, as the Inspector does)
+  }
   if (changed && o.kind == "blockout" && o.n == 3 && o.opening == 2 && o.style == kWindowRound && style_was != kWindowRound) o.b = o.c + o.a;  // (a Round window starts as a circle: Head = Sill + Width)
   if (changed) obj_last_rerun();
 }

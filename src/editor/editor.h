@@ -4186,8 +4186,8 @@ class Editor {
   uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y, const BlockoutOwners *owners = nullptr);  // (the piece that made the face under a view pixel; 0: none)
   bool blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out, const BlockoutOwners *owners = nullptr);  // (round 478: the face under a view pixel, with its piece, side, point and normal)
   bool blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out);  // (round 478: a room's wall under the mouse in the Scene view)
-  bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478: the middle of a room's first wall: -X of its air)
-  bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall);  // (round 478: a door or window turned to a wall, on its room's floor)
+  bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478; round 499: the middle of a room's most upright wall - -X of an upright room's air; false when none is within 2 degrees of vertical)
+  bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall, std::string *why = nullptr);  // (round 478; round 499: a door or window upright in a wall that is vertical within 2 degrees, its feet on the floor under it; `why` names a refusal)
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   void draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::Layout &lay);  // (round 496: Apply Scale to Size)
@@ -7335,6 +7335,10 @@ class Editor {
   bool blockout_baked_edited_for_test(const GameObject &g) const { return blockout_baked_edited(g); }
   void sculpt_mask_stroked_for_test() { sculpt_mask_version_++; }  // (what a mask stroke does besides writing the mask in place: the Inspector's cache must follow it)
   uint64_t blockout_started_for_test() const { return blockout_started_; }
+  bool blockout_wall_under_mouse_for_test(GameObject &bo) {
+    BlockoutHit h;
+    return blockout_wall_under_mouse(bo, h);
+  }
   uint64_t blockout_landed_for_test() const { return blockout_landed_; }
   uint64_t blockout_cancelled_for_test() const { return blockout_cancelled_; }
   bool blockout_jobs_running_for_test() const { return !blockout_jobs_.empty(); }
