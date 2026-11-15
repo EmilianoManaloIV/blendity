@@ -328,7 +328,7 @@ void Editor::draw_statusbar_hint(const Recti &r) {
   auto &u = ui_;
   int x = r.x;
   if (!undo_.empty() && r.w > u.px(140)) {
-    const Recti undo_r{x, r.y + u.px(1), u.px(50), r.h - u.px(2)};
+    const Recti undo_r{x, r.y, u.px(50), r.h};  // (round 509: the strip's whole height - a row, not 2 px less)
     /* The label before the button: a click undoes the last step, which can leave the stack empty (round 433's soak:
      * back() on the emptied vector - undefined; the debug build's assertion caught it). */
     const std::string label = undo_.back().label;
@@ -347,8 +347,8 @@ void Editor::draw_statusbar_hint(const Recti &r) {
   }
   /* Task 0270: ? beside the hint opens the Learn lesson for what is under way (the hint row's topic). */
   if (r.right() - x > u.px(80)) {
-    const int qs = r.h - u.px(2);
-    const Recti qr{x, r.y + u.px(1), qs, qs};
+    const int qs = r.h;
+    const Recti qr{x, r.y, qs, qs};
     if (u.record_buttons) u.button_rects["status:?"] = qr;
     if (u.button(qr, "?")) open_hint_lesson();
     u.tooltip("The Learn lesson for this: " + std::string(lesson(hint_lesson()).title) + " (" + key("window.learn") + " opens Learn).");

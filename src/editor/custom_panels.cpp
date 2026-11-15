@@ -654,7 +654,7 @@ void Editor::draw_ui_file_settings() {
                "a path for <name>.blendity-ui");
   if (u.button({pr.right() - u.px(160), pr.y + u.px(2), u.px(75), pr.h - u.px(4)}, "Save")) ui_file_command({"ui", "save"}, "ui save " + ui_file_path_);
   if (u.button({pr.right() - u.px(80), pr.y + u.px(2), u.px(75), pr.h - u.px(4)}, "Load")) ui_file_command({"ui", "load"}, "ui load " + ui_file_path_);
-  u.tooltip("One file with the layout, the windows, the feel, the keymap and your shortcuts, My Tools, the Wheel's sets, the\nfavorites, the theme and the scale - to keep, or to give to another machine. A file's shortcuts and panels can run\nany console line: the console lists what a loaded file brings.");
+  u.tooltip("One file with the layout, the windows, the feel, the keymap and your shortcuts, My Tools, the Wheel's sets, the\nfavorites, the theme and the scale - to keep, or to give to another machine. A file's shortcuts and panels can run\ncommands: Window > Console lists what a loaded file brings.");
   Recti br = row(u.row_h() + u.px(4));
   u.label({br.x, br.y, u.px(150), br.h}, "Built-in");
   if (u.button({br.x + u.px(150), br.y + u.px(2), u.px(120), br.h - u.px(4)}, "Blender-like")) ui_file_apply(kBlenderLikeUi);

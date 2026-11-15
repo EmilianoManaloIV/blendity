@@ -213,7 +213,7 @@ void Editor::draw_materials_window(const Recti &r) {
   list.erase(std::remove_if(list.begin(), list.end(), [&](const Entry &e) { return !f.empty() && to_lower(e.m->name).find(f) == std::string::npos; }),
              list.end());
   /* Toolbar */
-  const int bh = u.row_h() + u.px(6);
+  const int bh = u.row_h() + u.px(8);
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
   if (u.button({bar.x + u.px(6), bar.y + u.px(3), u.px(150), bh - u.px(6)}, "New Material Asset", false, Icon::Plus)) {

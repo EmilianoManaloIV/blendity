@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The live sweep's report (task 0293): the JSON the test `hci: the live sweep` writes (BLENDITY_SWEEP_OUT) as tables -
-counts by kind and by screen, then each finding once (the same control on many screens counted together).
+counts by kind, by configuration and by screen, then each finding once (the same control on many screens counted
+together). Kinds: clipped, elided, no-tooltip, overlap, popup-outside, disabled-no-reason and (round 505) small,
+no-key, tab-order, covered (one control lying on another, whatever its kind).
 
 Usage:
     python tools/hci_sweep.py sweep.json                 # the report (Markdown) on stdout
@@ -33,6 +35,12 @@ def main(argv):
     print("| kind | findings | distinct controls |\n|---|---|---|")
     for k in sorted(kinds):
         print("| %s | %d | %d |" % (k, kinds[k], ukinds[k]))
+    configs = sorted({r.get("config", "") for r in rows})
+    print("\n## By configuration (findings of each kind)\n")
+    print("| configuration | " + " | ".join(sorted(kinds)) + " | all |\n|---|" + "---|" * (len(kinds) + 1))
+    for c in configs:
+        per = collections.Counter(r["kind"] for r in rows if r.get("config", "") == c)
+        print("| %s | " % (c or "-") + " | ".join(str(per[k]) for k in sorted(kinds)) + " | %d |" % sum(per.values()))
     screens = collections.Counter(r["screen"] for r in rows)
     print("\n## The screens with the most\n\n| screen | findings |\n|---|---|")
     for s, n in screens.most_common(15):

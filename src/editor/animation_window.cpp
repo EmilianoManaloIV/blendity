@@ -700,24 +700,27 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     if (x + w <= right || x == left) return;
     x = left, y += step, rows++;
   };
-  auto button = [&](int w, const char *label, bool on, const char *tip) {
+  auto button = [&](int w, const char *label, bool on, const char *tip, const char *name = nullptr) {
     const Recti b{x, y, w, bh};
     x += w + u.px(3);
+    if (name && u.record_buttons) u.button_rects[name] = b;  // (round 510: two transport buttons were both ">" in the record)
     const bool hit = u.button(b, label, on);
     u.tooltip(tip);
     return hit;
   };
-  group(u.px(64 + 28 + 26 * 4 + 30 + 56 + 60) + u.px(3) * 7);  // (Preview, Record, the transport and the frame)
+  group(u.px(64 + 28 + 26 * 4 + 46 + 56 + 60) + u.px(3) * 7);  // (Preview, Record, the transport and the frame)
   if (button(u.px(64), "Preview", anim_.preview, "Shows the clip at the playhead on the scene; turning it off puts the scene back.")) anim_set_preview(!anim_.preview);
   const Recti rec{x, y, u.px(28), bh};
   if (button(u.px(28), "", anim_.record, "Record (Unity's red button): changes to the animated objects become keys at the playhead.")) anim_toggle_record();
   u.canvas.fill_circle((float)(rec.x + rec.w / 2), (float)(rec.y + rec.h / 2), (float)u.px(5), anim_.record ? Color::hex(0xFF3B3B) : Color::hex(0x884444));
-  if (button(u.px(26), "|<", false, "First frame")) anim_set_frame(0.0f);
-  if (button(u.px(26), "<", false, "Previous key")) anim_step_key(-1);
-  if (button(u.px(30), anim_.playing ? "||" : ">", anim_.playing, "Play the clip in the Scene view (Preview)")) anim_toggle_play();
-  if (button(u.px(26), ">", false, "Next key")) anim_step_key(1);
+  /* Round 510 (finding 13): Play was ">" and so was Next key. Play says its word (and Pause while it runs); the arrows
+   * stay the key steps, each with its own name in the record and a tooltip that ends a sentence. */
+  if (button(u.px(26), "|<", false, "Go to the first frame of the clip.", "anim:First Frame")) anim_set_frame(0.0f);
+  if (button(u.px(26), "<", false, "Go to the previous key of the animated objects.", "anim:Previous Key")) anim_step_key(-1);
+  if (button(u.px(46), anim_.playing ? "Pause" : "Play", anim_.playing, "Play the clip in the Scene view (Preview); again to pause it.", "anim:Play")) anim_toggle_play();
+  if (button(u.px(26), ">", false, "Go to the next key of the animated objects.", "anim:Next Key")) anim_step_key(1);
   AnimationClipPtr clip = anim_clip();
-  if (button(u.px(26), ">|", false, "Last frame") && clip) anim_set_frame(clip->end_frame());
+  if (button(u.px(26), ">|", false, "Go to the last frame of the clip.", "anim:Last Frame") && clip) anim_set_frame(clip->end_frame());
   int fr = (int)anim_.frame;
   if (u.int_field(u.id("anim_frame"), {x, y, u.px(56), bh}, fr, 0, 100000)) anim_set_frame((float)fr);
   draw_puppet_menu();
@@ -1444,7 +1447,9 @@ void Editor::draw_animation_window(const Recti &r) {
   if (!clip) {
     u.label({body.x + u.px(10), body.y + u.px(10), body.w - u.px(20), u.row_h()}, "To begin animating " + root->name + ", create an Animation Clip.",
             u.theme.text_dim);
-    if (u.button({body.x + u.px(10), body.y + u.px(16) + u.row_h(), u.px(110), u.row_h() + u.px(4)}, "Create")) anim_new_clip(root, "");
+    const bool create = u.button({body.x + u.px(10), body.y + u.px(16) + u.row_h(), u.px(110), u.row_h() + u.px(4)}, "Create");
+    u.tooltip("Make an empty Animation Clip on this object; the properties to key are added in the window afterwards.");  // (round 509)
+    if (create) anim_new_clip(root, "");
     return;
   }
   draw_anim_add_property(root);
