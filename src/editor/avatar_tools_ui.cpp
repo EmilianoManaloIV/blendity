@@ -187,17 +187,17 @@ void Editor::draw_model_options_section(ui::Layout &lay, GameObject *root) {
   u.label(lay.row(), "Model Options", u.theme.text_bright);
   const bool on = root != nullptr;
   auto run = [this](const char *line) { return [this, line] { command(line); }; };
-  button_grid(lay, {{"Merge Weights", "The selected bones merged into their parents, their weights with them (CATS' Merge Weights). Console: avatar mergeweights.", on, run("avatar mergeweights")},
-                    {"Delete Zero Weight Bones", "Bones that move no vertex, and empty vertex groups (as Fix Model). Console: avatar zeroweight.", on, run("avatar zeroweight")},
-                    {"Join Meshes", "The avatar's meshes into Body, every shape key kept. Console: avatar join.", on, run("avatar join")},
-                    {"Separate by Material", "The selected mesh, a part a material slot. Console: avatar separate material.", on, run("avatar separate material")},
-                    {"Separate Loose Parts", "The selected mesh, a part each connected piece. Console: avatar separate loose.", on, run("avatar separate loose")},
-                    {"Separate by Shape Keys", "The faces no shape key moves become a mesh of their own, with no keys; the keyed faces stay (their clips still drive them). Console: avatar separate shapekeys.", on, run("avatar separate shapekeys")},
-                    {"Remove Doubles", "Vertices closer than the merge distance merged - never one a shape key moves (a closed mouth's lips). Console: avatar removedoubles.", on, run("avatar removedoubles")},
-                    {"Apply Transforms", "The meshes' rotation and scale into their vertices (and keys). Console: avatar applytransforms.", on, run("avatar applytransforms")},
-                    {"Recalculate Normals", "Faces turned to point outward. Console: avatar normals.", on, run("avatar normals")},
-                    {"Flip Normals", "Every face turned over. Console: avatar normals flip.", on, run("avatar normals flip")},
-                    {"Connect Bones", "From the rest, each bone with one child pointed at it and as long as the gap (the skins unchanged; a bone a clip moves stays). Console: avatar connect.", on, run("avatar connect")}},
+  button_grid(lay, {{"Merge Weights", "The selected bones merged into their parents, their weights with them (CATS' Merge Weights).", on, run("avatar mergeweights")},
+                    {"Delete Zero Weight Bones", "Bones that move no vertex, and empty vertex groups (as Fix Model).", on, run("avatar zeroweight")},
+                    {"Join Meshes", "The avatar's meshes into Body, every shape key kept.", on, run("avatar join")},
+                    {"Separate by Material", "The selected mesh, a part a material slot.", on, run("avatar separate material")},
+                    {"Separate Loose Parts", "The selected mesh, a part each connected piece.", on, run("avatar separate loose")},
+                    {"Separate by Shape Keys", "The faces no shape key moves become a mesh of their own, with no keys; the keyed faces stay (their clips still drive them).", on, run("avatar separate shapekeys")},
+                    {"Remove Doubles", "Vertices closer than the merge distance merged - never one a shape key moves (a closed mouth's lips).", on, run("avatar removedoubles")},
+                    {"Apply Transforms", "The meshes' rotation and scale into their vertices (and keys).", on, run("avatar applytransforms")},
+                    {"Recalculate Normals", "Faces turned to point outward.", on, run("avatar normals")},
+                    {"Flip Normals", "Every face turned over.", on, run("avatar normals flip")},
+                    {"Connect Bones", "From the rest, each bone with one child pointed at it and as long as the gap (the skins unchanged; a bone a clip moves stays).", on, run("avatar connect")}},
               2);
 }
 
@@ -219,12 +219,12 @@ void Editor::draw_pose_shape_section(ui::Layout &lay, GameObject *root) {
       if (basis ? avatar_basis(*root, avatar_key_field_) : avatar_pose_key(*root, avatar_key_field_)) mark_changed(basis ? "Avatar: basis" : "Avatar: posekey");
     };
   };
-  button_grid(lay, {{"Pose to Shape Key", "The skinned pose as a shape key on the selected mesh (CATS'). Console: avatar posekey <name>.", on, keyed(false)},
-                    {"Apply as Rest Pose", "The pose made the rest, the meshes taking its shape and their keys carried through (CATS'). Console: avatar applyrest.", on, run("avatar applyrest")},
-                    {"Apply Shape Key as Basis", "The key added into the mesh, a '- Reverted' key to take it back (CATS'). Console: avatar basis <name>.", on, keyed(true)},
-                    {"Sort Shape Keys", "The visemes in VRChat's order, then the blinks, then the rest. Console: avatar sortkeys.", on, run("avatar sortkeys")},
-                    {"T-Pose", "From the rest, the arms level, applied as the rest. Console: avatar tpose.", on, run("avatar tpose")},
-                    {"A-Pose", "From the rest, the arms 45 degrees down, applied as the rest. Console: avatar apose.", on, run("avatar apose")}},
+  button_grid(lay, {{"Pose to Shape Key", "The skinned pose as a shape key on the selected mesh (CATS').", on, keyed(false)},
+                    {"Apply as Rest Pose", "The pose made the rest, the meshes taking its shape and their keys carried through (CATS').", on, run("avatar applyrest")},
+                    {"Apply Shape Key as Basis", "The key added into the mesh, a '- Reverted' key to take it back (CATS').", on, keyed(true)},
+                    {"Sort Shape Keys", "The visemes in VRChat's order, then the blinks, then the rest.", on, run("avatar sortkeys")},
+                    {"T-Pose", "From the rest, the arms level, applied as the rest.", on, run("avatar tpose")},
+                    {"A-Pose", "From the rest, the arms 45 degrees down, applied as the rest.", on, run("avatar apose")}},
               2);
 }
 

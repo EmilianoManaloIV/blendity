@@ -103,14 +103,14 @@ void Editor::draw_eyes_section(ui::Layout &lay, GameObject *root) {
   }
   const bool on = root != nullptr;
   auto run = [this](const char *l) { return [this, l] { command(l); }; };
-  button_grid(lay, {{"Set Up Eyes", "The eye bones and the blink keys, as the CATS plugin's Eye Tracking. Console: avatar eyes.", on, run("avatar eyes")},
-                    {"Test: Look Left", "The eyes turned 25 degrees (not kept: Reset puts them back). Console: avatar eyetest 25 0 0.", on, run("avatar eyetest 25 0 0")},
-                    {"Test: Blink", "The blinks shut. Console: avatar eyetest 0 0 1.", on, run("avatar eyetest 0 0 1")},
-                    {"Test: Reset", "The eyes and blinks back. Console: avatar eyetest reset.", on, run("avatar eyetest reset")}},
+  button_grid(lay, {{"Set Up Eyes", "The eye bones and the blink keys, as the CATS plugin's Eye Tracking.", on, run("avatar eyes")},
+                    {"Test: Look Left", "The eyes turned 25 degrees (not kept: Reset puts them back).", on, run("avatar eyetest 25 0 0")},
+                    {"Test: Blink", "The blinks shut.", on, run("avatar eyetest 0 0 1")},
+                    {"Test: Reset", "The eyes and blinks back.", on, run("avatar eyetest reset")}},
               2);
   lay.space(u.px(4));
   u.label(lay.row(), "Texture Atlas", u.theme.text_bright);
-  button_grid(lay, {{"Make Atlas (2048)", "Each of the avatar's meshes baked into one 2048 texture set and one material - a draw call each (CATS' Material Combiner; Unity imports at 2048). Console: avatar atlas [size].", on, run("avatar atlas 2048")}}, 1);
+  button_grid(lay, {{"Make Atlas (2048)", "Each of the avatar's meshes baked into one 2048 texture set and one material - a draw call each (CATS' Material Combiner; Unity imports at 2048).", on, run("avatar atlas 2048")}}, 1);
 }
 
 }  // namespace bl

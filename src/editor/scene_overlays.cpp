@@ -92,7 +92,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
     u.frame(cr, u.theme.strip, u.theme.warning, u.px(3));
     u.label(cr, "CPU", u.theme.text_bright, ui::Align::Center);
     u.mark_widget(cr);
-    u.tooltip(refused ? "This view draws on the CPU although the GPU is open: " + badge_reason + ". It works, more slowly; the Profiler lists what the card can't draw yet, and `viewport status` in the Console says the same."
+    u.tooltip(refused ? "This view draws on the CPU although the GPU is open: " + badge_reason + ". It works, more slowly; the Profiler lists what the card can't draw yet."
                       : "The views draw on the CPU: " + badge_reason + ". It works, more slowly; Edit > Preferences > Viewport Device chooses (Auto tries the GPU again at the next start).");
     if (u.record_buttons) u.button_rects["overlay:CPU"] = cr;
     x += cw + u.px(10);

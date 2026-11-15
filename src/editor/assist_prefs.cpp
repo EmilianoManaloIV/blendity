@@ -56,11 +56,15 @@ std::string Editor::assist_prefs_text() const {
 void Editor::draw_assist_settings() {
   auto &u = ui_;
   Recti r = u.popup_row(u.row_h() + u.px(4));
-  u.label({r.x + u.px(12), r.y, u.px(160), r.h}, "Animation Assistants");
+  u.label({r.x + u.px(12), r.y, u.px(144), r.h}, "Animation Assistants", u.theme.text_bright);
   u.tooltip("Tools that write animation for you. Each is optional: hand animation (keys, curves, posing) works the same with every one off.");
+  /* Round 510 (finding 13): the five switches start at one x, the 160 px the neighbouring Preferences rows use; the heading
+   * is the first one's label, as every Preferences row names itself in that column (a row of its own made the dialog a row
+   * taller, and with Linux's font its last row went past a 1000 px screen). */
   for (int i = 0; i < (int)Assist::Count; i++) {
     Recti row = i == 0 ? r : u.popup_row(u.row_h() + u.px(2));
-    const Recti box{row.x + u.px(180), row.y + u.px(2), row.h - u.px(4), row.h - u.px(4)};
+    const Recti box{row.x + u.px(160), row.y + u.px(2), row.h - u.px(4), row.h - u.px(4)};
+    if (u.record_buttons) u.button_rects[std::string("pref:assist ") + kAssists[i].key] = box;
     bool on = assist_[i];
     if (u.checkbox(box, on)) assist_set((Assist)i, on);
     u.label({box.right() + u.px(6), row.y, u.px(160), row.h}, kAssists[i].name);

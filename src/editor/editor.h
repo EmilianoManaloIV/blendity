@@ -5979,7 +5979,7 @@ class Editor {
   /* Puts the mesh and the selections back as they were before a commit the guard refused. */
   void draw_roll_back(MeshPtr &mp, const MeshPtr &before, const std::vector<uint8_t> &vsel, const std::vector<uint8_t> &fsel, const std::string &why);
  public:
-  std::string draw_project_hint() const;  // the hint line's "Project: View (Tab)" part (task 0437)
+  std::string draw_project_hint() const;  // the hint line's Project part (task 0437; its Tab is the drawing tool's own key)
   /* Task 0266: Adjust Last outside Edit Mode's operators (editor/adjust_last.cpp) - an added primitive, a UV operator, a
    * Draw shape - run again from before with the panel's numbers, amending the same undo step. */
   struct ObjLastOp {

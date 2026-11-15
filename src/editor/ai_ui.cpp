@@ -455,8 +455,10 @@ void Editor::draw_ai_dialog(const std::function<void()> &close) {
 void Editor::draw_ai_settings(const Recti &r) {
   auto &u = ui_;
   const std::string p = ai::install_problem();
-  u.label({r.x + u.px(372), r.y, std::max(0, r.w - u.px(510)), r.h}, p.empty() ? "installed" : p,
-          p.empty() ? u.theme.text : u.theme.text_dim);
+  /* (Round 510, finding 13: install_problem() says "not installed (Install...)" - the bracket named the button beside the
+   * state, so the row said it twice; the Console's `ai status` keeps the whole text.) */
+  const std::string state = p.empty() ? "installed" : p.substr(0, p.find(" ("));
+  u.label({r.x + u.px(352), r.y, std::max(0, r.w - u.px(490)), r.h}, state, p.empty() ? u.theme.text : u.theme.text_dim);
   u.tooltip("The network and ONNX Runtime, in " + ai::install_dir() + ".");
   const int bh = std::min(r.h, u.row_h());  // (round 509: a row high - it was 18 px in this 22 px row)
   const Recti btn{r.right() - u.px(130), r.y + (r.h - bh) / 2, u.px(118), bh};

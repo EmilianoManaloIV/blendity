@@ -4,7 +4,7 @@
 - **Requirements:** Q-usability (targets, tooltips, keyboard reach)
 - **Decisions:** ADR 0145 (keyboard focus, new); ADR 0085 (the HCI rules)
 - **Model:** implementer (Sonnet) part by part; main session for the toolkit's focus
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/404
 
 ## The owner's decisions (2026-11-14, "A & A", relayed by the hub, to the two questions of `docs/hci/sweep-505.md`)
 1. **Keyboard focus** as proposed - ADR 0145: Tab stays Edit Mode with nothing focused; in a dialog or popup Tab

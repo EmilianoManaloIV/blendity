@@ -25,7 +25,7 @@ struct Finding {
  * steps of the Tab order that go backwards. */
 struct KeyStats {
   std::map<std::string, int> by_kind;
-  int controls = 0, stops = 0, breaks = 0, small_menu_rows = 0;
+  int controls = 0, stops = 0, breaks = 0, small_menu_rows = 0, hand_no_key = 0;
 };
 
 struct Sweep {
@@ -122,8 +122,17 @@ void check_controls(const ui::Context &u, Sweep &sw, const std::string &config, 
      * name, so the distinct counts are of names, not of controls. */
     const bool own_label = !c.label.empty() && std::string(c.kind) != "combo";
     const std::string name = it != key_of_rect.end() ? it->second : own_label ? c.label : std::string(c.kind);
-    if (std::min(c.r.w, c.r.h) < limit) add("small", name, strprintf("%dx%d px", c.r.w, c.r.h));
-    if (!c.tab_stop) add("no-key", name, c.kind);
+    /* A scrub handle (the X, Y, Z letters of a vector field, 10 px wide) is the second way into a number field that is itself the
+     * full target beside it: reported as its own kind, "small-handle", and not asserted - widening it takes a field's room (round 510). */
+    if (std::min(c.r.w, c.r.h) < limit) add(std::string(c.kind) == "draglabel" ? "small-handle" : "small", name, strprintf("%dx%d px", c.r.w, c.r.h));
+    /* Round 510: the widgets drawn by hand (mark_widget, text_area, drag_label, curve_field, color_ramp) are in the record, judged
+     * for size and cover like the rest, and counted in the table; the keyboard cannot reach them yet, which is printed per
+     * configuration ("hand-drawn, no keyboard stop") and not a finding: each needs its own keys (the ramp's stops, the curve's
+     * points), a design of its own. */
+    const std::string kind = c.kind;
+    const bool hand = kind == "mark" || kind == "textarea" || kind == "draglabel" || kind == "curve" || kind == "ramp";
+    if (!c.tab_stop && hand) ks.hand_no_key++;
+    else if (!c.tab_stop) add("no-key", name, c.kind);
     drawn.push_back({name, clipped(c.r, c.clip), c.layer});
   }
   /* One control on another (the old overlap check sees labelled buttons only: an icon on a combo, a toggle on a field,
@@ -361,7 +370,7 @@ void run_hci_tests() {
       const KeyStats &ks = sw.keys[c];
       std::printf("    %-22s %5d / %4d / %2d ;", c.c_str(), ks.controls, ks.stops, ks.breaks);
       for (const auto &[k, n] : ks.by_kind) std::printf(" %s %d", k.c_str(), n);
-      std::printf("\n");
+      std::printf(" ; hand-drawn, no keyboard stop %d\n", ks.hand_no_key);
     }
     {
       std::map<std::string, std::set<std::string>> distinct_all;
@@ -775,7 +784,9 @@ void run_hci_tests() {
       number_text += field;
       /* Round 509 (ADR 0145): this said "only fields are Tab stops". Every kind the toolkit draws is one now (buttons, icons,
        * tick boxes, folds, dropdowns, sliders, colours, menu rows) - the Inspector has no disabled menu row or combo list. */
-      if (!c.tab_stop) bad_stop++, std::printf("    tab_stop %d on a %s at %s\n", (int)c.tab_stop, c.kind, rect_str(c.r).c_str());
+      /* Round 510: the hand-drawn widgets (the X, Y, Z drag labels here) are recorded now and are not stops: the sweep prints their count. */
+      const bool hand = kind == "mark" || kind == "textarea" || kind == "draglabel" || kind == "curve" || kind == "ramp";
+      if (!c.tab_stop && !hand) bad_stop++, std::printf("    tab_stop %d on a %s at %s\n", (int)c.tab_stop, c.kind, rect_str(c.r).c_str());
       if (kind == "checkbox" && !c.label.empty()) {
         toggles++;
         if (c.r.w <= 2 * c.r.h) narrow_toggles++, std::printf("    toggle row '%s' only %dx%d\n", c.label.c_str(), c.r.w, c.r.h);
@@ -966,7 +977,9 @@ void run_hci_tests() {
     for (const auto &c : ed.ui_for_test().controls) {
       if (c.r.w <= 0 || c.r.h <= 0) continue;
       kinds[c.kind]++;
-      if (!c.tab_stop) not_stop++, std::printf("    not a tab stop: %s '%s' at %s\n", c.kind, c.label.c_str(), rect_str(c.r).c_str());
+      const std::string k = c.kind;  // (round 510: the hand-drawn kinds are recorded and are not stops - the table prints their count)
+      const bool hand = k == "mark" || k == "textarea" || k == "draglabel" || k == "curve" || k == "ramp";
+      if (!c.tab_stop && !hand) not_stop++, std::printf("    not a tab stop: %s '%s' at %s\n", c.kind, c.label.c_str(), rect_str(c.r).c_str());
     }
     const std::vector<Recti> stops = Kb::stops(ed, content, 0);
     std::printf("    %zu stops in the Inspector's content %s; %d controls on screen that are not a stop; kinds:", stops.size(), rect_str(content).c_str(), not_stop);
@@ -2475,5 +2488,567 @@ void run_hci_tests() {
         CHECK(ctl.r.h >= u.row_h());
       }
     CHECK(header >= 3);
+  });
+
+  /* ---------------------------------------------------------------- round 510, task 0494 */
+
+  test("hci: the Board's Paste tooltip and the Draw window's Undo tooltip name the keymap's key, follow a rebinding, and still read right with no key (round 510, task 0494)", [] {
+    struct Case { const char *window, *button, *action, *old_key; int w, h; };
+    for (const Case &c : {Case{"Board", "board:Paste", "board.paste", "Ctrl+V", 1366, 768}, Case{"Draw", "draw:Undo", "edit.undo", "Ctrl+Z", 1920, 1080}}) {
+      Editor ed;
+      Fix::open(ed, c.w, c.h, 1.0f, "Drawing");
+      ed.command(std::string("window ") + c.window);
+      Kb::settle(ed);
+      const auto tip_of = [&]() {
+        Recti r;
+        if (!ed.button_rect_for_test(c.button, r)) return std::string("<not drawn>");
+        const auto it = ed.ui_for_test().tooltip_texts.find(rect_str(r));
+        return it == ed.ui_for_test().tooltip_texts.end() ? std::string("<no tooltip>") : it->second;
+      };
+      const std::string before = tip_of();
+      std::printf("    %s default: '%s'\n", c.button, before.c_str());
+      CHECK(before.find(std::string("(") + c.old_key) != std::string::npos);
+      ed.set_binding(c.action, {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}});  // (a chord no preset gives it)
+      Kb::settle(ed);
+      const std::string rebound = tip_of();
+      std::printf("    %s rebound: '%s'\n", c.button, rebound.c_str());
+      CHECK(rebound.find("Ctrl+Shift+U") != std::string::npos);
+      CHECK(rebound.find(c.old_key) == std::string::npos);
+      ed.set_binding(c.action, {});
+      Kb::settle(ed);
+      const std::string unbound = tip_of();
+      std::printf("    %s unbound: '%s'\n", c.button, unbound.c_str());
+      CHECK(unbound.find("Ctrl+") == std::string::npos && unbound.find("()") == std::string::npos && unbound.find("( ") == std::string::npos);
+      CHECK(!unbound.empty() && unbound[0] != '<');
+    }
+  });
+
+  test("hci: Preferences' five Animation Assistants switches start at one x, a row apart (round 510, task 0494)", [] {
+    Editor ed;
+    ed.init_headless(1366, 1000);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("preferences");
+    Kb::settle(ed);
+    for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    Kb::settle(ed);
+    std::set<int> xs;
+    int found = 0, last_y = -1000;
+    for (const char *k : {"physics", "walk", "footsteps", "locomotion", "ai"}) {
+      Recti r;
+      if (!ed.button_rect_for_test(std::string("pref:assist ") + k, r)) continue;
+      found++;
+      xs.insert(r.x);
+      if (last_y > -1000) CHECK(r.y - last_y >= ed.ui_for_test().row_h());  // (a row each: the switch itself is an 18 px box, so the step is what is checked)
+      last_y = r.y;
+      std::printf("    %s switch %s\n", k, rect_str(r).c_str());
+    }
+    CHECK(found == 5);
+    CHECK(xs.size() == 1);
+  });
+
+  test("hci: the Animation window's transport has Play and Next key under their own names, each with a tooltip that ends a sentence, and no two buttons labelled alike (round 510, task 0494)", [] {
+    Editor ed;
+    Fix::open(ed, 1366, 768, 1.0f, "Animation");
+    ed.command("window Animation");
+    Kb::settle(ed);
+    const char *names[] = {"anim:First Frame", "anim:Previous Key", "anim:Play", "anim:Next Key", "anim:Last Frame"};
+    std::set<std::string> rects;
+    for (const char *n : names) {
+      Recti r;
+      const bool drawn = ed.button_rect_for_test(n, r);
+      CHECK(drawn);
+      if (!drawn) continue;
+      rects.insert(rect_str(r));
+      const auto it = ed.ui_for_test().tooltip_texts.find(rect_str(r));
+      const std::string tip = it == ed.ui_for_test().tooltip_texts.end() ? std::string() : it->second;
+      std::printf("    %s %s: '%s'\n", n, rect_str(r).c_str(), tip.c_str());
+      CHECK(!tip.empty() && tip.back() == '.');
+    }
+    CHECK(rects.size() == 5);
+    Recti play, next;
+    CHECK(ed.button_rect_for_test("Play", play) || ed.button_rect_for_test("Pause", play));  // (Play says its word; ">" is the Next key button alone)
+    CHECK(ed.button_rect_for_test(">", next) && rect_str(next) != rect_str(play));
+  });
+
+  test("hci: the Sequencer window's toolbar wraps at 1024x640 at scale 1 and 1.5: every control inside its pane, none on another (round 510, task 0494)", [] {
+    int panes = 0, wrapped = 0;
+    for (float scale : {1.0f, 1.5f})
+      for (const char *layout : {"Default", "Stylized", "Drawing", "Animation", "UV Unwrapping", "Texturing & Materials"}) {
+        Editor ed;
+        Fix::open(ed, 1024, 640, scale, layout);
+        ed.command("seq new Edit");  // (the lanes are drawn only with a sequence)
+        ed.command("window Sequencer");
+        Kb::settle(ed);
+        const Recti win = ed.window_rect_for_test(WindowKind::Sequencer);
+        if (win.empty()) continue;
+        panes++;
+        std::vector<std::pair<std::string, Recti>> bar;
+        std::set<std::string> seen;
+        for (const auto &c : ed.ui_for_test().controls) {
+          if (c.layer != 0 || c.r.w <= 0 || !inside(c.clip, win) || !seen.insert(rect_str(c.r)).second) continue;
+          bar.push_back({std::string(c.kind) + " " + c.label, c.r});
+          if (bar.size() == 6) break;  // (the toolbar is drawn first: Preview, |<, Play, the frame, the sequence, Add Track)
+        }
+        std::set<int> rows;
+        for (const auto &b : bar) rows.insert(b.second.y);
+        std::printf("    %s x%g: pane %s, %zu controls in %zu row(s)\n", layout, scale, rect_str(win).c_str(), bar.size(), rows.size());
+        CHECK(bar.size() == 6);
+        if (rows.size() > 1) wrapped++;
+        for (const auto &b : bar) {
+          if (!inside(b.second, win)) std::printf("      '%s' %s is outside the pane\n", b.first.c_str(), rect_str(b.second).c_str());
+          CHECK(inside(b.second, win));
+        }
+        CHECK(Fix::apart(bar));
+        /* The toolbar's height is worked out in two places (the window's reserve and the drawn flow): the lanes start under the last row. */
+        int bar_bottom = 0;
+        for (const auto &b : bar) bar_bottom = std::max(bar_bottom, b.second.bottom());
+        Recti lanes;
+        const bool has_lanes = ed.button_rect_for_test("seq_lanes", lanes);
+        CHECK(has_lanes);
+        if (has_lanes) CHECK(lanes.y >= bar_bottom);
+      }
+    std::printf("    %d pane(s), %d with a wrapped toolbar\n", panes, wrapped);
+    CHECK(panes > 0);
+  });
+
+  test("hci: the Game view keeps its camera dropdown inside its pane in the layouts' headers (round 510, task 0494)", [] {
+    int panes = 0, narrow = 0;
+    for (float scale : {1.0f, 1.5f, 2.0f})
+      for (const char *layout : {"Default", "Stylized", "Drawing", "Animation", "UV Unwrapping", "Texturing & Materials"}) {
+        Editor ed;
+        Fix::open(ed, 1024, 640, scale, layout);
+        ed.command("window Game");
+        Kb::settle(ed);
+        const Recti win = ed.window_rect_for_test(WindowKind::Game);
+        if (win.empty()) continue;
+        panes++;
+        Recti combo;
+        for (const auto &c : ed.ui_for_test().controls)
+          if (std::string(c.kind) == "combo" && c.layer == 0 && inside(c.clip, win) && c.r.y < win.y + ed.ui_for_test().row_h() + ed.ui_for_test().px(8)) {
+            combo = c.r;
+            break;
+          }
+        std::printf("    %s x%g: Game pane %s, camera dropdown %s\n", layout, scale, rect_str(win).c_str(), rect_str(combo).c_str());
+        CHECK(!combo.empty());
+        CHECK(combo.w > 0 && inside(combo, win));
+        if (combo.w < ed.ui_for_test().px(60)) narrow++;
+      }
+    std::printf("    %d Game pane(s), %d with the dropdown under 60 px\n", panes, narrow);
+    CHECK(panes > 0);
+  });
+
+  test("hci: the Profiler lists \"Scene view on the CPU\" with the card's reason when the Scene view was refused, though no view is on the card - the row the CPU badge's tooltip sends you to (round 510, task 0494)", [] {
+    Editor ed;
+    Fix::open(ed, 1366, 768, 1.0f);
+    ed.command("window Profiler");
+    Kb::settle(ed);
+    Recti row;
+    CHECK(!ed.button_rect_for_test("Scene view on the CPU", row));  // (nothing refused: no row)
+    ed.refuse_scene_view_for_test("a Volume material");
+    Kb::settle(ed);
+    const bool shown = ed.button_rect_for_test("Scene view on the CPU", row);
+    std::printf("    Scene view on the CPU row: %s\n", shown ? rect_str(row).c_str() : "absent");
+    CHECK(shown);
+    CHECK(row.w > 0 && row.h > 0);  // (the row is far down the Profiler's list: scrolled to, not on the first screen)
+  });
+
+  test("hci: the Game view's camera dropdown shrinks with its pane: between a row and 60 px it shows \"Camera: <name>\" in its tooltip and still opens its list, under a row it is left out and nothing else is drawn in its place (round 510, task 0494)", [] {
+    bool found_narrow = false, found_absent = false;
+    for (int step = 3; step <= 80 && !(found_narrow && found_absent); step++) {
+      Editor ed;
+      Fix::open(ed, 1024, 640, 1.5f);
+      ed.dock_reset_for_test(strprintf("H(%.3f,L(1:0),L(0:0))", 0.01f * (float)step));  // (the Game pane on the left, a growing share of the screen)
+      Kb::settle(ed);
+      const Recti win = ed.window_rect_for_test(WindowKind::Game);
+      if (win.empty()) continue;
+      const ui::Context &u = ed.ui_for_test();
+      const int h = u.row_h();  // (the strip's controls)
+      Recti combo;
+      int others = 0;  // (controls in the header strip that are not the Guides / Stats buttons)
+      for (const auto &c : u.controls) {
+        if (c.layer != 0 || !inside(c.clip, win) || c.r.y >= win.y + u.row_h() + u.px(4)) continue;
+        if (std::string(c.kind) == "combo") combo = c.r;
+        else if (std::string(c.kind) != "button") others++;
+      }
+      if (!combo.empty() && combo.w < u.px(60) && !found_narrow) {
+        found_narrow = true;
+        std::printf("    pane %s: dropdown %s (%d px wide, a row is %d)\n", rect_str(win).c_str(), rect_str(combo).c_str(), combo.w, h);
+        CHECK(combo.w >= h && inside(combo, win));
+        const auto it = u.tooltip_texts.find(rect_str(combo));
+        CHECK(it != u.tooltip_texts.end() && it->second.rfind("Camera: ", 0) == 0);
+        ed.step_frame_headless({ev(platform::EventType::MouseMove, combo.x + combo.w / 2, combo.y + combo.h / 2)});
+        ed.step_frame_headless({ev(platform::EventType::MouseDown, combo.x + combo.w / 2, combo.y + combo.h / 2)});
+        ed.step_frame_headless({ev(platform::EventType::MouseUp, combo.x + combo.w / 2, combo.y + combo.h / 2)});
+        CHECK(ed.popup_count_for_test() > 0);
+      }
+      if (combo.empty() && !found_absent) {
+        found_absent = true;
+        std::printf("    pane %s: no dropdown, %d other control(s) in the strip\n", rect_str(win).c_str(), others);
+        CHECK(others == 0);
+      }
+    }
+    CHECK(found_narrow);
+    CHECK(found_absent);
+  });
+
+  test("hci: the toolkit records its hand-drawn widgets - text area, drag label, curve, colour ramp and mark - as controls with no Tab stop (round 510, task 0494)", [] {
+    ui::Context u;
+    u.record_buttons = true;
+    Image img;
+    img.resize(400, 300);
+    u.begin_frame(&img, 0.0);
+    std::string text = "words";
+    float v = 1.0f;
+    std::vector<Vec2> pts;
+    std::vector<RampStop> stops;
+    int sel_c = -1, sel_r = -1;
+    u.text_area(u.id("a"), {10, 10, 100, 40}, text, 0xFFFFFFFFu, 0xFF000000u);
+    u.drag_label(u.id("b"), {10, 60, 100, 20}, "Scrub", v, 0.1f, 0);
+    u.curve_field(u.id("c"), {10, 90, 80, 80}, pts, sel_c);
+    u.color_ramp(u.id("d"), {10, 180, 100, 30}, stops, 0, sel_r);
+    u.mark_widget({10, 220, 60, 20});
+    u.button({10, 250, 60, 20}, "Real");
+    u.end_frame();
+    std::map<std::string, int> kinds;
+    int hand_stops = 0;
+    for (const auto &c : u.controls) {
+      kinds[c.kind]++;
+      const std::string k = c.kind;
+      if (k != "button" && c.tab_stop) hand_stops++;
+    }
+    std::printf("    recorded:");
+    for (const auto &[k, n] : kinds) std::printf(" %s %d", k.c_str(), n);
+    std::printf("\n");
+    CHECK(kinds["textarea"] == 1 && kinds["draglabel"] == 1 && kinds["curve"] == 1 && kinds["ramp"] == 1 && kinds["mark"] == 1);
+    CHECK(kinds["button"] == 1);  // (a toolkit button is one record, not a button and a mark)
+    CHECK(hand_stops == 0);
+  });
+
+  /* ---------------------------------------------------------------- round 510, task 0494: the test engineer's independent checks */
+
+  test("hci: the Sequencer's bar menu shows the keymap's key for Add Edit and Ripple Delete in the Blender, Maya and 3ds Max presets, follows a rebinding, and reads as a plain row with the action unbound (round 510, task 0494)", [] {
+    using ET = platform::EventType;
+    for (const char *preset : {"Blender", "Maya", "3ds Max"}) {
+      Editor ed;
+      Fix::open(ed, 1366, 768, 1.0f, "Default");
+      ed.command(std::string("keymap ") + preset);
+      ed.command("seq new Edit");
+      const std::string dir = fs::join(test_dir(), "r510seq");
+      fs::make_dirs(dir);
+      const std::string png = fs::join(dir, "a.png");
+      std::vector<uint32_t> px(8, 0xFFFF0000u);
+      CHECK(write_png(png, px.data(), 4, 2, 4));
+      ed.command("seq image " + png + " 0 0 48");
+      ed.command("window Sequencer");
+      Kb::settle(ed);
+      Recti lanes;
+      CHECK(ed.button_rect_for_test("seq_lanes", lanes));
+      /* A real right-click on the card: scan the first lane until the bar menu opens. */
+      bool opened = false;
+      for (int y = lanes.y + 4; y < lanes.bottom() && !opened; y += 6)
+        for (int x = lanes.x + 8; x < lanes.right() && !opened; x += 24) {
+          Kb::move(ed, x, y);
+          platform::Event d = ev(ET::MouseDown, x, y);
+          d.button = 1;
+          ed.step_frame_headless({d});
+          platform::Event up = ev(ET::MouseUp, x, y);
+          up.button = 1;
+          ed.step_frame_headless({up});
+          ed.step_frame_headless();
+          opened = ed.popup_count_for_test() > 0;
+        }
+      std::printf("    %s: bar menu %s\n", preset, opened ? "open" : "NOT OPEN");
+      CHECK(opened);
+      if (!opened) continue;
+      const auto shown = [&](const char *row) {
+        const auto &m = ed.ui_for_test().menu_shortcuts;
+        const auto it = m.find(row);
+        return it == m.end() ? std::string("<row not drawn>") : it->second;
+      };
+      const char *rows[][2] = {{"Add Edit at the Playhead", "seq.add_edit"}, {"Ripple Delete", "seq.ripple"}};
+      for (const auto &row : rows) {
+        const std::string want = ed.shortcut_for_test(row[1]);
+        std::printf("    %s %s: '%s' (keymap says '%s')\n", preset, row[0], shown(row[0]).c_str(), want.c_str());
+        CHECK(shown(row[0]) == want);
+        ed.set_binding(row[1], {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}});
+        Kb::settle(ed);
+        CHECK(ed.popup_count_for_test() > 0);
+        std::printf("    %s %s rebound: '%s'\n", preset, row[0], shown(row[0]).c_str());
+        CHECK(shown(row[0]) == "Ctrl+Shift+U");
+        ed.set_binding(row[1], {});
+        Kb::settle(ed);
+        const std::string none = shown(row[0]);
+        std::printf("    %s %s unbound: '%s'\n", preset, row[0], none.c_str());
+        CHECK(none.find("()") == std::string::npos && none.find("  ") == std::string::npos && none.find("Alt+B") == std::string::npos &&
+              none.find("Shift+Del") == std::string::npos && none != "<row not drawn>");
+        CHECK(none.empty());  // (a plain row: no text in the shortcut column at all)
+      }
+    }
+  });
+
+  test("hci: the Animation window's transport does what its names say with real clicks - Next / Previous key step, Last / First frame jump, Play becomes Pause and back - at x1 and x1.5 in 1024x640 (round 510, task 0494)", [] {
+    using ET = platform::EventType;
+    for (float scale : {1.0f, 1.5f}) {
+      Editor ed;
+      Fix::open(ed, 1024, 640, scale, "Animation");
+      std::remove(resolve_asset_path("Assets/Animations/R510Box.anim").c_str());
+      GameObject *box = ed.scene().create("R510Box");
+      GameObject *lid = ed.scene().create("Lid", box);
+      lid->set_local_position({0, 2, 0});
+      ed.command("select R510Box");
+      ed.mark_changed_for_test("R510 box");
+      ed.step_frame_headless();
+      ed.command("anim new");
+      ed.command("anim key Lid Position 1 10 0");
+      ed.command("anim key Lid Position 1 30 1");
+      ed.command("window Animation");
+      Kb::settle(ed);
+      const Recti win = ed.window_rect_for_test(WindowKind::Animation);
+      CHECK(!win.empty());
+      const auto click = [&](const char *name) {
+        Recti r;
+        const bool drawn = ed.button_rect_for_test(name, r);
+        CHECK(drawn);
+        if (!drawn) return false;
+        CHECK(inside(r, win));  // (a button the pane cuts off cannot be clicked)
+        const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+        ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+        ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+        ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+        ed.step_frame_headless({ev(ET::MouseMove, 2, 2)});
+        return true;
+      };
+      std::set<std::string> rects;
+      for (const char *n : {"anim:First Frame", "anim:Previous Key", "anim:Play", "anim:Next Key", "anim:Last Frame"}) {
+        Recti r;
+        if (ed.button_rect_for_test(n, r)) rects.insert(rect_str(r));
+      }
+      CHECK(rects.size() == 5);
+      ed.command("anim frame 20");
+      Kb::settle(ed);
+      CHECK(ed.anim_frame_for_test() == 20.0f);
+      click("anim:Next Key");
+      std::printf("    x%g Next Key from 20: frame %g\n", scale, ed.anim_frame_for_test());
+      CHECK(ed.anim_frame_for_test() == 30.0f);
+      click("anim:Previous Key");
+      CHECK(ed.anim_frame_for_test() == 10.0f);
+      click("anim:Previous Key");  // (no key before the first: stays on it or goes no further back)
+      CHECK(ed.anim_frame_for_test() == 10.0f);
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      CHECK(clip != nullptr);
+      click("anim:Last Frame");
+      std::printf("    x%g Last Frame: frame %g (clip ends at %g)\n", scale, ed.anim_frame_for_test(), clip ? clip->end_frame() : -1.0f);
+      CHECK(clip && ed.anim_frame_for_test() == clip->end_frame());
+      click("anim:First Frame");
+      CHECK(ed.anim_frame_for_test() == 0.0f);
+      { Recti tmp_r; CHECK(ed.button_rect_for_test("Play", tmp_r) && !ed.button_rect_for_test("Pause", tmp_r)); }
+      click("anim:Play");
+      Kb::settle(ed, 2);
+      Recti pause;
+      const bool paused_word = ed.button_rect_for_test("Pause", pause);
+      std::printf("    x%g after Play: Pause button %s\n", scale, paused_word ? rect_str(pause).c_str() : "absent");
+      CHECK(paused_word);
+      Recti same;
+      CHECK(ed.button_rect_for_test("anim:Play", same) && rect_str(same) == rect_str(pause));  // (one name for both states)
+      const auto it = ed.ui_for_test().tooltip_texts.find(rect_str(pause));
+      CHECK(it != ed.ui_for_test().tooltip_texts.end() && !it->second.empty() && it->second.back() == '.');
+      click("anim:Play");
+      Kb::settle(ed, 2);
+      { Recti tmp_r; CHECK(ed.button_rect_for_test("Play", tmp_r) && !ed.button_rect_for_test("Pause", tmp_r)); }
+    }
+  });
+
+  test("hci: Preferences' Animation Assistants switches start at one x at 1024x640 at scale 1 and 1.5, each below the one before, none past the screen (round 510, task 0494)", [] {
+    for (float scale : {1.0f, 1.5f}) {
+      Editor ed;
+      ed.init_headless(1024, 640);
+      ed.set_guides_for_test(false);
+      ed.set_ui_scale_for_test(scale);
+      ed.record_buttons_for_test(true);
+      ed.command("preferences");
+      Kb::settle(ed);
+      for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      Kb::settle(ed);
+      std::set<int> xs;
+      int found = 0, last_y = -1000;
+      bool ordered = true;
+      for (const char *k : {"physics", "walk", "footsteps", "locomotion", "ai"}) {
+        Recti r;
+        if (!ed.button_rect_for_test(std::string("pref:assist ") + k, r)) {
+          std::printf("    x%g: '%s' switch not drawn\n", scale, k);
+          continue;
+        }
+        found++;
+        xs.insert(r.x);
+        CHECK(r.x >= 0 && r.y >= 0 && r.right() <= 1024 && r.bottom() <= 640);
+        ordered = ordered && r.y > last_y;
+        last_y = r.y;
+        std::printf("    x%g %s switch %s\n", scale, k, rect_str(r).c_str());
+      }
+      CHECK(found == 5);
+      CHECK(xs.size() == 1);
+      CHECK(ordered);
+    }
+  });
+
+  test("hci: the toolkit records each hand-drawn kind once with its real rectangle, a disabled button is one record and not a button plus a mark, and the sweep judges them for size and cover but never as no-key (round 510, task 0494)", [] {
+    ui::Context u;
+    u.record_buttons = true;
+    Image img;
+    img.resize(400, 300);
+    u.begin_frame(&img, 0.0);
+    std::string text = "words";
+    float v = 1.0f;
+    std::vector<Vec2> pts;
+    std::vector<RampStop> stops;
+    int sel_c = -1, sel_r = -1;
+    const Recti ta{10, 10, 12, 10}, dl{10, 60, 100, 20}, cf{10, 90, 80, 80}, rp{10, 180, 100, 30}, mk{50, 140, 60, 30}, dis{200, 10, 80, 24};
+    u.text_area(u.id("a"), ta, text, 0xFFFFFFFFu, 0xFF000000u);
+    u.drag_label(u.id("b"), dl, "Scrub", v, 0.1f, 0);
+    u.curve_field(u.id("c"), cf, pts, sel_c);
+    u.color_ramp(u.id("d"), rp, stops, 0, sel_r);
+    u.mark_widget(mk);  // (half on the curve and half off it: a cover finding - first drawn wholly inside it, which the sweep rightly takes for a row and its own button)
+    u.button_enabled(dis, "Off", false, "Because.");
+    u.end_frame();
+    std::map<std::string, std::vector<Recti>> by_kind;
+    for (const auto &c : u.controls) by_kind[c.kind].push_back(c.r);
+    const auto once_at = [&](const char *kind, const Recti &r) { return by_kind[kind].size() == 1 && rect_str(by_kind[kind][0]) == rect_str(r); };
+    CHECK(once_at("textarea", ta) && once_at("draglabel", dl) && once_at("curve", cf) && once_at("ramp", rp) && once_at("mark", mk));
+    std::printf("    disabled button: %zu button record(s), %zu mark record(s) (plus the hand-drawn mark above)\n", by_kind["button"].size(), by_kind["mark"].size());
+    CHECK(by_kind["button"].size() == 1 && by_kind["mark"].size() == 1);  // (the mark is the one called by hand)
+    Sweep sw;
+    std::vector<Finding> found;
+    check_controls(u, sw, "cfg", Recti{0, 0, 400, 300}, [&](const char *kind, const std::string &key, const std::string &detail) {
+      found.push_back({kind, "unit", key, detail, "cfg"});
+      std::printf("    finding %s '%s' %s\n", kind, key.c_str(), detail.c_str());
+    });
+    int small = 0, small_handle = 0, covered = 0, no_key_hand = 0;
+    for (const Finding &f : found) {
+      small += f.kind == "small" && f.key == "textarea";
+      small_handle += f.kind == "small-handle";
+      covered += f.kind == "covered" && (f.key.find("mark") != std::string::npos || f.key.find("curve") != std::string::npos);
+      no_key_hand += f.kind == "no-key" && (f.key == "textarea" || f.key == "draglabel" || f.key == "curve" || f.key == "ramp" || f.key == "mark");
+    }
+    CHECK(small == 1);  // (a 12x10 text area is a small target)
+    CHECK(small_handle == 0);  // (the 100x20 drag label is a full target)
+    CHECK(covered >= 1);  // (the mark lies a third or more on the curve)
+    CHECK(no_key_hand == 0);
+    CHECK(sw.keys["cfg"].hand_no_key == 5);  // (counted, not a finding)
+    /* A narrow drag label is a handle, reported as its own kind and not as "small". */
+    ui::Context w;
+    w.record_buttons = true;
+    w.begin_frame(&img, 0.0);
+    float v2 = 0;
+    w.drag_label(w.id("x"), {10, 10, 10, 20}, "X", v2, 0.1f, 0);
+    w.end_frame();
+    Sweep sw2;
+    int handles = 0, smalls = 0;
+    check_controls(w, sw2, "cfg", Recti{0, 0, 400, 300}, [&](const char *kind, const std::string &, const std::string &) {
+      handles += std::string(kind) == "small-handle";
+      smalls += std::string(kind) == "small";
+    });
+    CHECK(handles == 1 && smalls == 0);
+  });
+
+  test("hci: the Sequencer's toolbar at 1024x640 x1.5 in every layout that shows it - every button inside its pane and each reachable by a real click: |< moves the playhead home, Add Track adds a track (round 510, task 0494)", [] {
+    using ET = platform::EventType;
+    int panes = 0;
+    for (const char *layout : {"Default", "Stylized", "Drawing", "Animation", "UV Unwrapping", "Texturing & Materials"}) {
+      Editor ed;
+      Fix::open(ed, 1024, 640, 1.5f, layout);
+      ed.command("seq new Edit");
+      ed.command("window Sequencer");
+      Kb::settle(ed);
+      const Recti win = ed.window_rect_for_test(WindowKind::Sequencer);
+      if (win.empty()) continue;
+      panes++;
+      const auto find = [&](const char *label) {
+        for (const auto &c : ed.ui_for_test().controls)
+          if (c.layer == 0 && std::string(c.kind) == "button" && c.label == label && c.r.w > 0 && inside(c.clip, win)) return c.r;
+        return Recti{};
+      };
+      const auto click = [&](const Recti &r) {
+        const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+        ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+        ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+        ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+        ed.step_frame_headless({ev(ET::MouseMove, 2, 2)});
+      };
+      for (const char *label : {"Preview", "|<", "Add Track"}) {
+        const Recti r = find(label);
+        std::printf("    %s: '%s' %s in pane %s\n", layout, label, rect_str(r).c_str(), rect_str(win).c_str());
+        CHECK(!r.empty() && inside(r, win));
+      }
+      ed.command("seq frame 20");
+      Kb::settle(ed);
+      const Recti home = find("|<");
+      if (!home.empty()) click(home);
+      std::printf("    %s: after |<, frame %g\n", layout, ed.seq_for_test().frame);
+      CHECK(ed.seq_for_test().frame == 0.0f);
+      SequencePtr s = ed.seq_for_test_sequence();
+      CHECK(s != nullptr);
+      const size_t before = s ? s->tracks.size() : 0;
+      const Recti add = find("Add Track");
+      if (!add.empty()) click(add);
+      s = ed.seq_for_test_sequence();
+      std::printf("    %s: Add Track %zu -> %zu tracks\n", layout, before, s ? s->tracks.size() : 0);
+      CHECK(s && s->tracks.size() == before + 1);
+    }
+    CHECK(panes > 0);
+  });
+
+  test("hci: the Game view's camera dropdown opens its list when clicked in the narrowest header a layout gives, and a dropdown under 60 px names the camera in its tooltip (round 510, task 0494)", [] {
+    using ET = platform::EventType;
+    int panes = 0, narrow = 0;
+    struct Size { int w, h; float scale; };
+    for (const Size &sz : {Size{1024, 640, 1.5f}, Size{1024, 640, 2.0f}, Size{800, 600, 2.0f}})
+      for (const char *layout : {"Default", "Stylized", "Drawing", "Animation", "UV Unwrapping", "Texturing & Materials"}) {
+        Editor ed;
+        Fix::open(ed, sz.w, sz.h, sz.scale, layout);
+        ed.command("create Camera");
+        ed.command("window Game");
+        Kb::settle(ed);
+        const Recti win = ed.window_rect_for_test(WindowKind::Game);
+        if (win.empty()) continue;
+        panes++;
+        Recti combo;
+        for (const auto &c : ed.ui_for_test().controls)
+          if (std::string(c.kind) == "combo" && c.layer == 0 && inside(c.clip, win) && c.r.y < win.y + ed.ui_for_test().row_h() + ed.ui_for_test().px(8)) {
+            combo = c.r;
+            break;
+          }
+        if (combo.empty()) {
+          /* Since the review of round 510 the dropdown is left out where its room is under the strip's control height (no room for its arrow);
+           * the check that it is only then left out is the point. */
+          const ui::Context &u = ed.ui_for_test();
+          const int room = win.w - u.px(8) - (ed.text_width_for_test("Stats") + u.px(14)) - u.px(4) - (ed.text_width_for_test("Guides") + u.px(14)) - u.px(12);
+          std::printf("    %dx%d x%g %s: no dropdown, %d px of room (a control is %d)\n", sz.w, sz.h, sz.scale, layout, room, u.row_h());
+          CHECK(room < u.row_h());
+          continue;
+        }
+        const auto it = ed.ui_for_test().tooltip_texts.find(rect_str(combo));
+        const std::string tip = it == ed.ui_for_test().tooltip_texts.end() ? std::string("<no tooltip>") : it->second;
+        const bool is_narrow = combo.w < ed.ui_for_test().px(60);
+        narrow += is_narrow;
+        std::printf("    %dx%d x%g %s: combo %s%s, tooltip starts '%s'\n", sz.w, sz.h, sz.scale, layout, rect_str(combo).c_str(), is_narrow ? " (narrow)" : "", tip.substr(0, 24).c_str());
+        CHECK(tip.find("camera this view shows") != std::string::npos);
+        if (is_narrow) CHECK(tip.rfind("Camera: ", 0) == 0 && tip.find('\n') > 8);
+        const int x = combo.x + combo.w / 2, y = combo.y + combo.h / 2;
+        ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+        ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+        ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+        ed.step_frame_headless();
+        std::printf("      click: %zu popup(s)\n", ed.popup_count_for_test());
+        CHECK(ed.popup_count_for_test() > 0);
+      }
+    std::printf("    %d Game pane(s), %d with the dropdown under 60 px\n", panes, narrow);
+    CHECK(panes > 0);
   });
 }

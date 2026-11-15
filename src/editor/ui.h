@@ -158,7 +158,7 @@ class Context {
   std::string favorite_request;
   std::unordered_map<std::string, Recti> button_rects;
   /* Tests (round 505, the HCI survey): every button, field, checkbox, dropdown, slider, colour, foldout and menu row
-   * drawn this frame (not text_area, drag_label, curve_field or color_ramp: round 509), in drawing order - its kind, rectangle, layer
+   * drawn this frame (and, since round 510, the hand-drawn text_area, drag_label, curve_field, color_ramp and mark_widget: kinds textarea, draglabel, curve, ramp and mark, with no Tab stop), in drawing order - its kind, rectangle, layer
    * (0 the window, k inside popup k-1), label, and whether Tab can stop on it. Filled only while record_buttons is set. */
   struct ControlRec {
     const char *kind = "";
@@ -337,6 +337,11 @@ class Context {
   std::string tooltip_text_for_test() const { return tooltip_text_; }  // (the tooltip the last frame showed)
   /* A widget drawn by hand (frames and labels): the next tooltip() belongs to it. */
   void mark_widget(const Recti &r) {
+    note_widget(r);
+    record_control("mark", r);  // (round 510: a hand-drawn widget is in the sweep's record; not a Tab stop unless its caller makes it one)
+  }
+  /* The same without the record, for a widget that has recorded itself (a button the toolkit draws). */
+  void note_widget(const Recti &r) {
     last_widget_ = r;
     last_hovered_ = hovered(r);
   }

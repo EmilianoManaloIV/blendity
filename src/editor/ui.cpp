@@ -471,7 +471,7 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
   canvas.text(font, x, r.y + (r.h - font.line_height()) / 2, shown, theme.text_dim);
   canvas.pop_clip();
   if (shown != label) elided_key_ = rect_key(r), elided_label_ = label;  // (its whole label before its reason)
-  mark_widget(r);  // (the reason is this widget's tooltip; the caller's general tooltip waits until it is enabled)
+  note_widget(r);  // (the reason is this widget's tooltip; the caller's general tooltip waits until it is enabled)
   reason_key_ = rect_key(r), reason_text_ = why ? why : "";
   if (focus && !reason_text_.empty() && tooltip_text_.empty()) tooltip_text_ = reason_text_, tooltip_anchor_ = r;
   if (hovered(r)) {
@@ -865,6 +865,7 @@ std::vector<std::pair<size_t, size_t>> Context::wrap_lines(const std::string &s,
 }
 
 bool Context::text_area(Id i, const Recti &r, std::string &s, uint32_t paper, uint32_t ink) {
+  record_control("textarea", r);
   const bool hot = hovered(r);
   last_widget_ = r;
   last_hovered_ = hot;
@@ -1209,6 +1210,7 @@ bool Context::int_field(Id i, const Recti &r, int &v, int mn, int mx) {
 }
 
 bool Context::drag_label(Id i, const Recti &r, const std::string &text, float &v, float speed, uint32_t color) {
+  record_control("draglabel", r, text);
   bool changed = scrub(i, r, v, speed, -1e30f, 1e30f, nullptr);
   label(r, text, color ? color : theme.text);
   return changed;
@@ -1302,7 +1304,7 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   std::string cur = (v >= 0 && v < count) ? options[v] : "";
   label({r.x + px(5), r.y, r.w - r.h - px(5), r.h}, cur, theme.text_bright);
   int a = font.line_height() - px(6);
-  draw_icon(Icon::ArrowDown, {r.right() - a - px(5), r.y + (r.h - a) / 2, a, a}, theme.text);
+  if (r.w >= a + px(5)) draw_icon(Icon::ArrowDown, {r.right() - a - px(5), r.y + (r.h - a) / 2, a, a}, theme.text);  // (a combo narrower than its arrow and margin would draw it left of itself)
   if (keyed_open) {
     combo_open(i, r);
     combo_hi_[i] = std::max(0, std::min(count - 1, v));
@@ -1411,6 +1413,7 @@ constexpr size_t kWidgetPointsMax = 32;  // (as a ramp's or curve's text keeps)
 }  // namespace
 
 bool Context::color_ramp(Id i, const Recti &r, std::vector<RampStop> &st, int interp, int &sel) {
+  record_control("ramp", r);
   if (st.size() < 2) st = {{0.0f, Vec3(0.0f)}, {1.0f, Vec3(1.0f)}};
   const int hh = px(10);
   const Recti bar{r.x, r.y, std::max(8, r.w), std::max(6, r.h - hh)};
@@ -1482,6 +1485,7 @@ bool Context::ramp_add_stop(std::vector<RampStop> &st, float t, int interp, int 
 }
 
 bool Context::curve_field(Id i, const Recti &r, std::vector<Vec2> &pts, int &sel) {
+  record_control("curve", r);
   if (pts.size() < 2) pts = {{0.0f, 0.0f}, {1.0f, 1.0f}};
   canvas.fill_rect(r, theme.field);
   for (int k = 1; k < 4; k++) {

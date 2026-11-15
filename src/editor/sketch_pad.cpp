@@ -384,9 +384,9 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
   auto end_group = [&] { x += sep - gap; };
   if (show[0]) {
     if (u.button(put(W[0][0], "draw:Undo"), "Undo")) run_console_command(draw_source_ == 2 ? "paper undo" : "undo");  // (round 324: a paper's own)
-    u.tooltip("Undo the last stroke or change (Ctrl+Z).");
+    u.tooltip(with_key("Undo the last stroke or change", "edit.undo") + ".");
     if (u.button(put(W[0][1], "draw:Redo"), "Redo")) run_console_command(draw_source_ == 2 ? "paper redo" : "redo");
-    u.tooltip("Redo (Ctrl+Y).");
+    u.tooltip(with_key("Redo", "edit.redo") + ".");
     end_group();
   }
   if (show[1]) {  // (each rect placed in turn: a call's arguments are evaluated in no set order)
@@ -480,8 +480,8 @@ void Editor::draw_pad_brush_group(const Recti &brush, const Recti &color, const 
 /* More: what isn't drawing - the source and paper, the pen, the guides, Build, Place in 3D, the pad's view, the tools. */
 void Editor::draw_pad_more_menu() {
   auto &u = ui_;
-  if (u.menu_item("Undo", "Ctrl+Z")) run_console_command(draw_source_ == 2 ? "paper undo" : "undo");  // (the toolbar's groups, folded in a narrow tab, are here too)
-  if (u.menu_item("Redo", "Ctrl+Y")) run_console_command(draw_source_ == 2 ? "paper redo" : "redo");
+  if (u.menu_item("Undo", key("edit.undo").c_str())) run_console_command(draw_source_ == 2 ? "paper undo" : "undo");  // (the toolbar's groups, folded in a narrow tab, are here too)
+  if (u.menu_item("Redo", key("edit.redo").c_str())) run_console_command(draw_source_ == 2 ? "paper redo" : "redo");
   u.submenu("Predictive Stroke", u.px(200), [this] {
     const int correct = sketch_doc().layer_at(sketch_doc().active_layer).correct;
     for (int k = 0; k < 3; k++)

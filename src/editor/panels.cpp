@@ -2370,6 +2370,14 @@ void Editor::console_recall(int dir) {
  * the read-back is the CPU's timer around the copy. A card without timestamps shows "n/a" beside the wall time. */
 void Editor::draw_profiler_gpu(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat) {
   const bool views_on_card = fp.gpu_views > 0 || scene_on_gpu_;  // (a frame whose views were all reused still shows the block)
+  /* Task 0163: why a view drew on the CPU instead; a slot's last view keeps its reason until the device is chosen again.
+   * Listed ahead of the early return: a view the card refused adds nothing to gpu_views, and that is the case it is for. */
+  for (int k = 0; k < gpu::Raster::kSlots; k++) {
+    if (gpu_slot_reason_[k].empty()) continue;
+    const RenderTarget *rt = gpu_slot_rt_[k];
+    const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
+    stat(strprintf("%s on the CPU", view), gpu_slot_reason_[k]);
+  }
   if (!views_on_card && !rendering_ && !cam_preview_rendered_) return;
   if (views_on_card) draw_profiler_gpu_views(fp, stat);
   if (rendering_) draw_profiler_gpu_tracer(strprintf("%s render", key("render.image").c_str()).c_str(), render_stats(), render_time_ * 1000.0, "the render so far", stat);  // (round 412: the worker's published copy)
@@ -2388,19 +2396,13 @@ void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function
   stat("GPU views: instance arrays kept / gathered; meshes left waiting this frame / in the queue", strprintf("%llu / %llu; %llu / %zu", (unsigned long long)fp.instances_kept, (unsigned long long)fp.instances_built, (unsigned long long)fp.mesh_deferred, mesh_queue_));  // (round 458)
   stat("GPU views: corner blocks sent / held; lights left out of the views", strprintf("%llu / %.1f MB; %llu", (unsigned long long)fp.gpu_corner_uploads, (double)gpu_corner_floats_ * 4.0 / 1048576.0, (unsigned long long)fp.lights_culled));
   if (fp.filters_on_card) stat("GPU views: camera filters run on the card", strprintf("%llu view(s)", (unsigned long long)fp.filters_on_card));  // (round 416, ADR 0110)
-  for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (task 0163: why a view drew on the CPU instead; a slot's last view keeps its reason until the device is chosen again)
-    if (gpu_slot_reason_[k].empty()) continue;
-    const RenderTarget *rt = gpu_slot_rt_[k];
-    const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
-    stat(strprintf("%s on the CPU", view), gpu_slot_reason_[k]);
-  }
   for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (round 414, ADR 0108: what the card drew differently from the CPU, per view)
     if (gpu_slot_approx_[k].empty() || !gpu_view_) continue;
     const RenderTarget *rt = gpu_slot_rt_[k];
     const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
     stat(strprintf("%s approximated on the card", view), gpu_slot_approx_[k]);
   }
-  if (fp.gpu_approximated) stat("GPU views: instances approximated", strprintf("%llu (F12 stays exact)", (unsigned long long)fp.gpu_approximated));
+  if (fp.gpu_approximated) stat("GPU views: instances approximated", strprintf("%llu (%s stays exact)", (unsigned long long)fp.gpu_approximated, key("render.image").empty() ? "Render Image" : key("render.image").c_str()));
 }
 
 /* A path tracer's card time: busy and wait inside its submissions, and the busy share of `wall_ms` (the whole render
@@ -3735,7 +3737,8 @@ bool Editor::object_field(const char *name, const Recti &f, std::string &v, cons
     }
   });
   changed = object_field_box(id, box, v, v + " (" + label + ")", "None (" + label + ")", !held || !has_type(*held, type), type_icon(type)) || changed;
-  u.mark_widget(box);  // (the field's own help tooltip goes on the box)
+  if (u.editing(id)) u.note_widget(box);  // (the field's own help tooltip goes on the box; a text field being edited has recorded itself)
+  else u.mark_widget(box);
   const GameObject *g = hierarchy_drag_object();
   if (!g || !u.hovered(f)) return changed;
   const bool fits = has_type(*g, type);
@@ -3801,7 +3804,8 @@ bool Editor::asset_field(const char *name, const Recti &f, std::string &path, co
       if (ui_.menu_item(fs::stem(p))) field_pick_ = {id, p};
   });
   changed = object_field_box(id, box, path, fs::stem(path) + " (" + kind + ")", std::string("None (") + kind + ")", !there, Icon::File) || changed;
-  u.mark_widget(box);
+  if (u.editing(id)) u.note_widget(box);  // (as above: not recorded twice)
+  else u.mark_widget(box);
   AssetDrag &d = asset_drag_;
   if (!d.dragging || d.mat || !u.hovered(f)) return changed;
   const bool fits = to_lower(fs::extension(d.path)) == ext;

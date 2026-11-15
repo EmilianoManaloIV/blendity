@@ -2737,8 +2737,12 @@ void Editor::draw_game_view(const Recti &r) {
   const int stats_w = u.font.text_width("Stats") + u.px(14), guides_w = u.font.text_width("Guides") + u.px(14);
   const Recti sr{bar.right() - u.px(8) - stats_w, bar.y + u.px(2), stats_w, h};
   const Recti gr{sr.x - u.px(4) - guides_w, bar.y + u.px(2), guides_w, h};
-  const int cam_w = std::min(u.px(170), gr.x - u.px(6) - (bar.x + u.px(6)));
-  if (cam_w >= u.px(60)) {
+  /* Round 510: the dropdown is kept in a narrow strip - it shrinks to what is left (an icon wide at the least, its name then in
+   * the tooltip) instead of going, so a camera can be picked; under the strip's control height (no room for its arrow) it
+   * is left out and the Hierarchy picks the camera. */
+  const int room = gr.x - u.px(6) - (bar.x + u.px(6));
+  const int cam_w = room < h ? 0 : std::min(u.px(170), room);
+  if (cam_w > 0) {
     /* Which camera the view shows: the scene's Active Camera (Unity: the Display dropdown; Blender: the
      * scene camera). Choosing one here sets it. */
     std::vector<GameObject *> &cams = game_cam_objs_;
@@ -2764,7 +2768,8 @@ void Editor::draw_game_view(const Recti &r) {
     if (u.combo(u.id("game_camera"), {bar.x + u.px(6), bar.y + u.px(2), cam_w, h}, pick, opts.data(), (int)opts.size()) && !cams.empty() &&
         pick >= 0 && pick < (int)cams.size() && cams[(size_t)pick]->id != scene_->active_camera)
       set_active_camera(cams[(size_t)pick]);
-    u.tooltip("The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"
+    u.tooltip(std::string(cam_w < u.px(60) && cur >= 0 ? "Camera: " + cams[(size_t)cur]->name + "\n" : "") +
+              "The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"
               "Without one, \"Main Camera\" by name, else the first camera.");
   }
   const int aspect_x = bar.x + u.px(12) + std::max(0, cam_w), aspect_w = u.font.text_width("Free Aspect");
