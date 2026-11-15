@@ -15935,6 +15935,28 @@ static void tests_round507_te() {
     CHECK(!reused && !ia5->count("cccccccccccccccccccccccccccccccc"));
     for (const std::string &p : {A, B}) r507te::clean(p);
   });
+  test("round 511: a .meta rewritten with another GUID of the same size inside one tick of the file clock is still found - the kept GUID index is walked again", [] {
+    /* (CI's Windows runner wrote, read, rewrote and read within one tick: the size and the write time were the same and the
+     * stale index answered. The write time is put back here, so the case happens on every machine.) */
+    const std::string A = fs::join(test_dir(), "r511_racy");
+    r507te::clean(A), fs::make_dirs(fs::join(A, "Assets"));
+    const std::string meta = fs::join(fs::join(A, "Assets"), "A.mat.meta");
+    fs::write_file(fs::join(fs::join(A, "Assets"), "A.mat"), "x");
+    fs::write_file(meta, "fileFormatVersion: 2\nguid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+    bool reused = true;
+    auto first = unity_guid_index_checked(fs::join(A, "Assets"), A, &reused);
+    CHECK(first && first->count("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    auto again = unity_guid_index_checked(fs::join(A, "Assets"), A, &reused);
+    CHECK(reused && again == first);  // (untouched, even while the file is new: its contents are the same)
+    std::error_code ec;
+    const auto when = std::filesystem::last_write_time(std::filesystem::u8path(meta), ec);
+    fs::write_file(meta, "fileFormatVersion: 2\nguid: dddddddddddddddddddddddddddddddd\n");
+    std::filesystem::last_write_time(std::filesystem::u8path(meta), when, ec);  // (the same tick)
+    CHECK(!ec);
+    auto after = unity_guid_index_checked(fs::join(A, "Assets"), A, &reused);
+    CHECK(!reused && after && after->count("dddddddddddddddddddddddddddddddd") && !after->count("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    r507te::clean(A);
+  });
 }
 
 void run_assets_tests() {

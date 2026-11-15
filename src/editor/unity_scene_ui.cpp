@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #include <filesystem>
 #include <set>
 #ifndef _WIN32
@@ -89,11 +90,16 @@ KeptGuidIndex &kept_guid_index() {
 
 /* Round 507: a fingerprint of everything unity_guid_index reads - every entry under Assets, the hidden .unity-guids / .unity-stats /
  * .unity-meta ones too, by name, size and write time (a sum of per-entry hashes: the walk's order doesn't matter). Listing the folders
- * costs a few ms where reading each .meta costs seconds in a project of tens of thousands of files; any difference rebuilds the index. */
+ * costs a few ms where reading each .meta costs seconds in a project of tens of thousands of files; any difference rebuilds the index.
+ * (Round 511: a file written in the last two seconds is fingerprinted by its contents too - git's "racy" rule. Its write time can't
+ * tell two edits apart within one tick of the file clock, and the same size with another GUID in it kept a stale index: CI's quick
+ * Windows runner wrote a .meta, read the index, rewrote it and read it again inside one tick. Such files are only the ones just
+ * written, so reading them costs nothing.) */
 uint64_t assets_signature(const std::string &assets_dir) {
   namespace sfs = std::filesystem;
   uint64_t sum = 0;
   std::error_code ec;
+  const sfs::file_time_type racy_after = sfs::file_time_type::clock::now() - std::chrono::seconds(2);
   sfs::recursive_directory_iterator it(sfs::u8path(assets_dir), sfs::directory_options::skip_permission_denied, ec), end;
   for (; !ec && it != end; it.increment(ec)) {
     if (it.depth() > 16) {
@@ -113,6 +119,9 @@ uint64_t assets_signature(const std::string &assets_dir) {
       if (::stat(it->path().c_str(), &st) == 0) changed = (uint64_t)st.st_ctime;
 #endif
       for (uint64_t v : {size, when, changed}) h = (h ^ v) * 1099511628211ull, h ^= h >> 29;
+      std::string bytes;
+      if (it->last_write_time(e2) >= racy_after && size <= (1u << 20) && fs::read_file(it->path().u8string(), bytes))
+        for (char c : bytes) h = (h ^ (unsigned char)c) * 1099511628211ull;
     }
     sum += h;
   }

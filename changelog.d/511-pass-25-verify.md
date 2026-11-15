@@ -26,6 +26,11 @@ main with #408 and #415, #411 (515), #413 (514), #414 (513).
 its own (the tests' scratch project is one folder for every test run on the machine, and another session's tests
 wrote into its Assets between the two imports); the open the moment a bake lands steps until the open and the file
 moves are done instead of 20 frames.
+- **A Unity import could use a stale GUID index** (round 507's kept index): a `.meta` rewritten with another GUID of the
+  same size within one tick of the file clock left Assets' fingerprint (name, size, write time) unchanged, and the kept
+  index answered with the old GUID - CI's fast Windows runner hit it (#418). A file written in the last two seconds is
+  now fingerprinted by its contents too (git's "racy" rule); a test puts the write time back so the case happens on
+  every machine.
 
 **Changed:** `stress/results/baseline.md` is this run's (the machine named). `tools/hci_sweep_baseline.json` stays: it
 is at the counts this run found.
