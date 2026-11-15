@@ -985,34 +985,62 @@ static void tests_round515_review() {
     if (!s.door) return;
     const GameObject *l0 = r515_leaves(*s.door)[0];
     CHECK(l0->get<Rigidbody>() && l0->get<Rigidbody>()->is_kinematic && !l0->get<Rigidbody>()->use_gravity);
-    const uint64_t door_id = s.door->id;
+    const uint64_t door_id = s.door->id, leaf_id = l0->id;
+    /* The script's pose: the leaf laid flat about its own X (its width) and its hinge lifted 5 m - well clear of the room,
+     * whose ceiling is under 3.1 m - so a dropped box can only rest on the slab or fall to the floor. (The first version set
+     * the LOCAL pose, which left the slab by the ceiling, and read another object named Box: it passed or failed by the
+     * frame times - the sanitizer build's CI run.) */
+    const Vec3 hinge = l0->world_position();
+    const Quat flat = l0->world_rotation() * Quat::euler(Vec3(90.0f, 0.0f, 0.0f));
+    const ColliderComponent *col0 = l0->get<ColliderComponent>();
+    const Vec3 centre = Mat4::trs(hinge + Vec3(0.0f, 5.0f, 0.0f), flat, Vec3(1.0f)).point(col0 ? col0->center : Vec3(0.0f));
+    /* The box is made before Play: Play's physics world takes the scene as it starts. */
+    GameObject *box = ed.scene().create("Dropped Box (515)");
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->add<MeshRenderer>();
+    box->set_local_scale(Vec3(0.2f));
+    box->set_world_position(centre + Vec3(0.0f, 2.5f, 0.0f));  // (above even the fallback physics' sphere, below: it falls first)
+    box->add<Rigidbody>()->bounciness = 0.0f;
+    const uint64_t box_id = box->id;
+    const float start_y = box->world_position().y;
     ed.command("play");
     CHECK(ed.playing_for_test());
-    GameObject *pd = ed.scene().find(door_id);
-    if (!pd || r515_leaves(*pd).size() != 1) {
+    GameObject *leaf = ed.scene().find(leaf_id);
+    if (!leaf || !ed.scene().find(door_id) || !ed.scene().find(box_id)) {
       CHECK(false);
       ed.command("stop");
       return;
     }
-    GameObject *leaf = r515_leaves(*pd)[0];
-    /* Laid flat and lifted 3 m by a script: a slab 0.78 m by 2 m, 4 cm thick. The body must follow, or the box falls past where the slab was made. */
-    leaf->set_local_euler(Vec3(90.0f, 0.0f, 0.0f));
-    leaf->set_local_position(leaf->local().position + Vec3(0.0f, 3.0f, 0.0f));
-    ed.step_frame_headless();  // (the body takes the new pose; the world matrices are read after it)
+    leaf->set_world_rotation(flat);
+    leaf->set_world_position(hinge + Vec3(0.0f, 5.0f, 0.0f));
     const ColliderComponent *col = leaf->get<ColliderComponent>();
-    const Vec3 centre = leaf->world_matrix().point(col ? col->center : Vec3(0.0f));
-    std::printf("    the slab's middle in Play: y %.3f\n", centre.y);
-    GameObject *box = ed.scene().create("Box");
-    box->add<MeshFilter>()->mesh = primitives::cube();
-    box->add<MeshRenderer>();
-    box->set_local_scale(Vec3(0.2f));
-    box->set_world_position(centre + Vec3(0.0f, 2.0f, 0.0f));
-    box->add<Rigidbody>()->bounciness = 0.0f;
-    for (int i = 0; i < 300; i++) ed.step_frame_headless();
-    const GameObject *landed = ed.scene().find_by_name("Box");
-    std::printf("    the box ends at y %.3f, the slab's middle was at y %.3f\n", landed ? landed->world_position().y : -99.0f, centre.y);
-    /* The slab was made standing, its top at about 2 m: a body left where it was made would hold the box below that. Lifted 3 m and laid flat, it holds it above 3 m. */
-    CHECK(landed && landed->world_position().y > 3.0f && landed->world_position().y < 4.0f);
+    const Vec3 now = leaf->world_matrix().point(col ? col->center : Vec3(0.0f));
+    std::printf("    the hinge at y %.3f, lifted 5 m; the slab's middle in Play (%.3f, %.3f, %.3f), the box from y %.3f\n", hinge.y, now.x, now.y, now.z, start_y);
+    CHECK(length(now - centre) < 1e-3f);
+    /* Play paused and stepped a frame at a time: each step is 1/60 s of simulated time. Play's own clock is the wall clock,
+     * so a fast headless frame moved the box a hair and a sanitizer build's slow one far - the first version's result
+     * hung on the build. Step until the box rests (after falling, under 0.1 mm a step for 10 steps), capped at 900. */
+    ed.run_action("play.pause");
+    int still = 0, frames = 0;
+    bool fell = false;
+    float last_y = 1e30f;
+    for (; frames < 900 && still < 10; frames++) {
+      ed.run_action("play.step");
+      ed.step_frame_headless();
+      const GameObject *bx = ed.scene().find(box_id);
+      const float y = bx ? bx->world_position().y : 0.0f;
+      fell = fell || y < start_y - 0.05f;
+      still = fell && std::fabs(y - last_y) < 1e-4f ? still + 1 : 0;  // (moved under 0.1 mm a frame)
+      last_y = y;
+    }
+    const GameObject *landed = ed.scene().find(box_id);
+    std::printf("    the box ends at y %.3f after %d frames, the slab's middle at y %.3f\n", landed ? landed->world_position().y : -99.0f, frames, centre.y);
+    /* A body left standing where the leaf was made is nowhere under the box: it would fall past the slab's height, down
+     * by the hinge's old place. The slab's body moved with the leaf holds it above the slab's middle - with Jolt just on the
+     * slab, with the physics of a build without Jolt (CI's sanitizer build: every body a sphere as wide as its largest
+     * half-size, about 1.05 m for this leaf) on that sphere's top. Either way under the leaf's half height and the box. */
+    const float reach = (col ? 0.5f * std::max(col->size.x, std::max(col->size.y, col->size.z)) : 1.1f) + 0.25f;
+    CHECK(fell && landed && landed->world_position().y > centre.y && landed->world_position().y < centre.y + reach);
     ed.command("stop");
   });
 
