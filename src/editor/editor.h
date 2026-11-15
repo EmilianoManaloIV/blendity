@@ -7315,6 +7315,8 @@ class Editor {
   uint64_t eval_adopted_for_test() const { return eval_adopted_; }
   uint64_t eval_dropped_for_test() const { return eval_dropped_; }
   void set_eval_delay_ms_for_test(int ms) { eval_delay_ms_for_test_ = ms; }
+  int blockout_delay_ms_for_test_ = 0;                           // (each Blockout build on a worker waits this long first: a slow build in a test)
+  void set_blockout_delay_ms_for_test(int ms) { blockout_delay_ms_for_test_ = ms; }
   void set_async_jobs_for_test(bool on) { async_jobs_ = on; }  // (round 412: a headless editor's renders and bakes on workers, as the windowed one's)
   void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
   bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }

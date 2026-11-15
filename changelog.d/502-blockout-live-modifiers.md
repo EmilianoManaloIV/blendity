@@ -46,6 +46,16 @@ and Apply was refused without a way on.
 was a modifier crashed - the stack was applied while the modifier rows were still being drawn from the old list. It
 now runs after the rows.
 
+**Also fixed (older than this round, round 477's - found by CI's sanitizer shard through this round's counters):** a
+Blockout's mesh could freeze for a whole drag. When the pieces came back to exactly the state the shown mesh was built
+from - an undo, or a snapped drag passing over the piece's own start - the running build was cancelled, and the next move
+started a new one from scratch; when one build took longer than the time between two passes (a big Blockout, a slow
+machine, ASan) every build was stopped before it finished: 667 started and 0 landed in the sanitizer run. Now the
+running build always finishes and lands unless the pieces are still back at the shown mesh when it returns (round 477's
+rule: "a running build finishes and lands"), then the newest starts (`Editor::blockout_unwant`, one line of
+`blockout_editor.cpp`, cleared by the hub). Test: "blockout builds: dragging back over the piece's start while builds
+are slow still shows the new mesh" - with each build slowed to 0.6 s, 7 started and 0 landed before the fix.
+
 **Not changed, seen by the tests:** an Array with a NaN or infinite offset gives a structurally valid mesh with
 non-finite points, on any object (a follow-up for the modifiers, not this round's).
 
