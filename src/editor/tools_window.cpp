@@ -91,18 +91,26 @@ void Editor::draw_tools_window(const Recti &r) {
     grid(shapes, 4);
     u.label(lay.row(), "Blockout (pieces that build one mesh)", u.theme.text_dim);
     std::vector<GridButton> blockout;
-    struct BlockoutKind { const char *label, *kind; };
-    for (const BlockoutKind &k : {BlockoutKind{"New Blockout", "Blockout"}, {"Add Box", "Blockout Piece: Box"}, {"Add Cylinder", "Blockout Piece: Cylinder"},
-                                  {"Add Sphere", "Blockout Piece: Sphere"}, {"Subtract Box", "Blockout Piece: Subtract Box"},
-                                  {"Subtract Cylinder", "Blockout Piece: Subtract Cylinder"}, {"Subtract Sphere", "Blockout Piece: Subtract Sphere"},
-                                  {"Room (Box)", "Blockout Piece: Room Box"}, {"Room (Cylinder)", "Blockout Piece: Room Cylinder"}, {"Door", "Blockout Piece: Door"},
-                                  {"Window", "Blockout Piece: Window"}}) {
-      const std::string kind = k.kind;
-      blockout.push_back({k.label, kind == "Blockout" ? "A Blockout with one box: add and subtract pieces under it and its mesh follows (GameObject > Blockout)."
-                                                      : "A piece under the selected Blockout (a new Blockout when none is selected): GameObject > Blockout.",
-                          true, [this, kind] { create_object(kind); }});
+    /* Round 499: three to a row with short labels (four clipped "New Blockout", "Subtract Cylinder" and the rest at 1366 x 768); the tooltip says the whole name. */
+    struct BlockoutKind { const char *label, *kind, *full; };
+    for (const BlockoutKind &k : {BlockoutKind{"Blockout", "Blockout", "New Blockout"}, {"Door", "Blockout Piece: Door", "Door"}, {"Window", "Blockout Piece: Window", "Window"},
+                                  {"Add Box", "Blockout Piece: Box", "Add Box"}, {"Add Cyl", "Blockout Piece: Cylinder", "Add Cylinder"},
+                                  {"Add Sph", "Blockout Piece: Sphere", "Add Sphere"}, {"Cut Box", "Blockout Piece: Subtract Box", "Subtract Box"},
+                                  {"Cut Cyl", "Blockout Piece: Subtract Cylinder", "Subtract Cylinder"}, {"Cut Sph", "Blockout Piece: Subtract Sphere", "Subtract Sphere"},
+                                  {"Room Box", "Blockout Piece: Room Box", "Room (Box)"}, {"Room Cyl", "Blockout Piece: Room Cylinder", "Room (Cylinder)"}}) {
+      const std::string kind = k.kind, tip = std::string(k.full) + (kind == "Blockout" ? ": a Blockout with one box: add and subtract pieces under it and its mesh follows (GameObject > Blockout)."
+                                                                       : ": a piece under the selected Blockout (a new Blockout when none is selected): GameObject > Blockout.");
+      blockout.push_back({k.label, tip, true, [this, kind] { create_object(blockout_ui_kind(kind)); }});  // (round 499: a Door or Window has the style the dropdowns below show)
     }
-    grid(blockout, 4);
+    /* Three to a row where the widest label fits a button, else two, else one: a wider font (Linux's) or a narrow pane at UI scale 1.5 cut "Room Box" at three. */
+    auto fits = [&](int per) {
+      const int room = (lay.area.w - lay.indent - u.px(4) * (per + 1)) / per - u.px(8);  // (button_grid's button, less a button's own padding)
+      return std::all_of(blockout.begin(), blockout.end(), [&](const GridButton &b) { return u.font.text_width(b.label) <= room; });
+    };
+    int per_row = 3;
+    while (per_row > 1 && !fits(per_row)) per_row--;
+    grid(blockout, per_row);
+    draw_blockout_style_rows(lay);  // (round 499: Door Style and Window Style)
     draw_room_tools(lay);  // (round 479: the Room tool and its options)
   }
   if (section("Draw", FocusDraw)) {

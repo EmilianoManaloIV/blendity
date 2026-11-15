@@ -19,7 +19,10 @@ namespace bl::blockout {
  * to +Z; stairs climb towards +Z; an arch stands in the XY plane, centred on its top, and is `height` deep along Z; an
  * outline is a closed figure in the piece's XZ plane pulled up along Y. Stairs, an arch and a concave outline are
  * several convex solids of one piece. */
-enum class Shape : uint8_t { Box, Cylinder, Sphere, Wedge, Stairs, Arch, Outline, Mesh };
+/* Round 500 (task 0484): Convex - one convex solid given by its corner points (4 to 64, in the piece's space; the faces are the hull's, coplanar
+ * corners one face). It is what a tapered column, a hip roof and a spiral step are made of, by blockout_object's presets; never a room. Its sides are
+ * the hull's faces in convex_hull's order (the ones that look up first). */
+enum class Shape : uint8_t { Box, Cylinder, Sphere, Wedge, Stairs, Arch, Outline, Mesh, Convex };
 /* Intersect: what is inside the piece is kept, of the whole Blockout (two of them: what is inside both). */
 enum class Op : uint8_t { Add, Subtract, Intersect };
 /* Auto: the crisp path where the build has it and no piece of the cluster has a Blend radius, else the field path.
@@ -66,7 +69,8 @@ struct Piece {
    * asked for); a closed one that is inside out is turned round. */
   std::shared_ptr<const Mesh> mesh;
   uint64_t mesh_key = 0;
-  float blend = 0.0f;      // the Blend radius, in the Blockout's units: the join with what the piece touches is rounded by it (ADR 0130)
+  std::vector<Vec3> points;  // convex: its corners (4 to 64, finite, with volume; not a room; Blend is not read)
+  float blend = 0.0f;     // the Blend radius, in the Blockout's units: the join with what the piece touches is rounded by it (ADR 0130)
   Mat4 to_blockout;        // piece space -> the Blockout's space
   /* A room (task 0454): the shape is its air; `op` and `blend` are not read. The thicknesses are metres in the
    * Blockout's space, measured square to the piece's own sides (0 to 1000; a negative or non-finite one is 0).
@@ -78,6 +82,12 @@ struct Piece {
   bool keep_walls = false;  // false: Merge with neighbours - every room's air clears this room's walls; true: only its own air does
   bool open_top = false;    // no ceiling: the walls end flat at the air's top
 };
+
+/* How many faces of the convex solid made of `points` look up (the y of their outward normal above `min_ny`): they are the first sides of a Shape::Convex piece
+ * (the hull sorts its faces by normal y, highest first, and its sides number them so). -1: the points make no solid. */
+int convex_up_faces(const std::vector<Vec3> &points, float min_ny = 0.05f);
+/* The edges of that solid as pairs of corners (for the Scene view's wire of a piece made of them); empty when the points make no solid. */
+std::vector<Vec3> convex_edges(const std::vector<Vec3> &points);
 
 /* What a face is, for materials (round 482): by the piece and the side the face names. */
 enum class SideClass : uint8_t { Outside, Floor, Ceiling, Wall, Cut };
