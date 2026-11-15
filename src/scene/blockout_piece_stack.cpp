@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -69,6 +70,32 @@ StackCache &cache() {
   return c;
 }
 std::atomic<uint64_t> g_evaluations{0};
+
+/* The pieces whose stack gave no shape the kernel can build (by piece id: why), written on the build's worker, read by the status on
+ * the main thread - under the cache's lock. A piece that evaluates well again is taken off. */
+std::unordered_map<uint64_t, std::string> g_refused;
+
+void refused(uint64_t piece, const std::string &why) {
+  StackCache &c = cache();
+  std::lock_guard<std::mutex> hold(c.lock);
+  if (why.empty()) g_refused.erase(piece);
+  else g_refused[piece] = why;
+}
+
+/* Why a stack's result is no shape to build ("" when it is one): too few faces, or flat (Decimate to a sliver, a Displace of zero
+ * size), or a point that is not a number. */
+std::string unusable(const Mesh &m) {
+  if (m.face_count() < 4) return strprintf("its modifiers leave %zu face%s - no solid", m.face_count(), m.face_count() == 1 ? "" : "s");
+  AABB b;
+  for (const Vec3 &v : m.positions) {
+    if (!finite_bits(v.x) || !finite_bits(v.y) || !finite_bits(v.z)) return "a modifier's number is not finite";
+    b.add(v);
+  }
+  const Vec3 e = b.max - b.min;
+  const float big = std::max(e.x, std::max(e.y, e.z));
+  if (!(std::min(e.x, std::min(e.y, e.z)) > 1e-6f * std::max(1.0f, big))) return "its modifiers flatten it - no solid";
+  return "";
+}
 constexpr size_t kCacheLimit = 512;                     // entries
 constexpr size_t kCacheBytes = (size_t)64 * 1024 * 1024;  // 64 MB of points and corners
 
@@ -106,7 +133,8 @@ void keep(uint64_t key, std::shared_ptr<const Mesh> m) {
   c.bytes += add;
 }
 
-/* A noted piece's mesh: from the cache, else its shape and its stack (false: no mesh to give - the piece stays as its numbers). */
+/* A noted piece's mesh: from the cache, else its shape and its stack (false: no mesh to give - the piece stays as its numbers, and the
+ * status says why: round 514's test engineer found a Decimate that left two flat faces and the piece gone without a word). */
 bool evaluate(const blockout::Piece &numbers, const BlockoutSurface::Stack &st, std::shared_ptr<const Mesh> &out) {
   out = cached(st.key);
   if (out) return true;
@@ -116,9 +144,9 @@ bool evaluate(const blockout::Piece &numbers, const BlockoutSurface::Stack &st, 
   for (const auto &c : st.modifiers) stack.push_back(c.get());
   blockout_piece_stack_run(stack, *m);
   g_evaluations.fetch_add(1, std::memory_order_relaxed);
-  if (m->face_count() == 0) return false;
-  for (const Vec3 &v : m->positions)
-    if (!finite_bits(v.x) || !finite_bits(v.y) || !finite_bits(v.z)) return false;  // (a modifier's number that is not finite: the piece stays as its numbers)
+  const std::string why = unusable(*m);
+  refused(numbers.id, why);
+  if (!why.empty()) return false;
   out = m;
   keep(st.key, out);
   return true;
@@ -224,6 +252,15 @@ void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pa
   blockout_piece_objects(blockout, pieces);
   size_t stacked = 0;
   std::string first;
+  std::unordered_map<uint64_t, std::string> bad;
+  {
+    StackCache &c = cache();
+    std::lock_guard<std::mutex> hold(c.lock);
+    bad = g_refused;
+  }
+  const Blockout *b = blockout.get<Blockout>();
+  const blockout::Settings st = b ? b->settings() : blockout::Settings();
+  const bool grid = st.path == blockout::Path::Field || (st.path == blockout::Path::Auto && !blockout::crisp_available());
   for (const GameObject *g : pieces) {
     const BlockoutPiece *bp = g->get<BlockoutPiece>();
     bool carries = false;
@@ -235,6 +272,19 @@ void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pa
       continue;
     }
     if (!blockout_piece_stack_live(*g)) continue;
+    const auto no = bad.find(g->id);
+    if (no != bad.end()) {
+      lines.push_back({"'" + g->name + "': " + no->second + " - it is built from its numbers", true});
+      continue;  // (not also "built as a mesh")
+    }
+    if (grid)  // (ADR 0138: on the grid a piece is as coarse as the cell - a wire or shell thinner than it can go)
+      for (const auto &c : g->components) {
+        const auto *w = c->enabled ? dynamic_cast<const WireframeModifier *>(c.get()) : nullptr;
+        const auto *sh = c->enabled ? dynamic_cast<const SolidifyModifier *>(c.get()) : nullptr;
+        const float thin = w ? std::fabs(w->thickness) : sh ? std::fabs(sh->thickness) : 1e30f;
+        if (thin < st.cell)
+          lines.push_back({strprintf("'%s': its %s (%.3g m) is thinner than the Field Cell (%.3g m) - the grid may lose it", g->name.c_str(), w ? "Wireframe" : "Solidify", thin, st.cell), true});
+      }
     if (stacked++ == 0) first = "'" + g->name + "' (" + modifier_names(*g) + ")";
   }
   if (stacked == 1) lines.push_back({first + " is built as a mesh: slower and less exact than its numbers", false});

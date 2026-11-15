@@ -7330,6 +7330,7 @@ static void test_blender_parity(Report &rep, const Options &o) {
 #include "stress_blockout.inc"  // (round 476: test_blockout)
 #include "stress_blockout_modifiers.inc"  // (round 502: test_blockout_modifiers)
 #include "stress_blockout_join.inc"  // (round 501: test_blockout_join)
+#include "stress_blockout_piece_modifiers.inc"  // (round 514: test_blockout_piece_modifiers)
 
 int main(int argc, char **argv) {
   install_crash_handler();
@@ -7410,7 +7411,7 @@ int main(int argc, char **argv) {
                {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
                {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}, {"posing", test_posing},
                {"lightmap_quality", test_lightmap_quality}, {"blockout", test_blockout}, {"blockout_modifiers", test_blockout_modifiers},
-               {"blockout_join", test_blockout_join}};
+               {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
