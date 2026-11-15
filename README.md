@@ -13,6 +13,8 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 | ![Rendered](docs/images/rendered.png) | ![UV editor](docs/images/uv.png) |
 | **Edit Mode: loop cuts** | **Learn tab** |
 | ![Edit mode](docs/images/editmode.png) | ![Learn tab](docs/images/learn.png) |
+| **Blockout: a whole interior from rooms and openings** | **Blockout: a grid and an arched window drawn on a wall** |
+| ![Inside a blocked-out interior: rooms joined by an arched doorway](docs/images/blockout_inside.png) | ![A Blockout room with a grid window and an arched window drawn on its wall with Draw Piece](docs/images/blockout_openings.png) |
 
 **→ The [manual](docs/MANUAL.md)** walks through the work stage by stage, with examples.
 
