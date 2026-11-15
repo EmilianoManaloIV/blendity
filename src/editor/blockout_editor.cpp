@@ -352,11 +352,13 @@ static GameObject *add_piece(Scene &scene, GameObject &parent, const std::string
   if (w.opening) {
     bp->opening = w.opening;
     bp->width = w.opening == 1 ? 0.9f : 1.2f, bp->head = w.opening == 1 ? 2.1f : 2.0f, bp->sill = w.opening == 1 ? 0.0f : 0.9f;
+    /* The style comes first so that its preset size is what the typed numbers then replace (an explicit size wins, even one that equals another style's preset). */
+    if (w.style != 0) blockout_opening_set_style(*bp, w.style);
     if (n.size() >= 1) bp->width = n[0];
     if (n.size() >= 3) bp->sill = n[2];
     /* (Round 498: the numbers a style reads keep the component's defaults; a Round window is a circle - Head = Sill + Width - unless the numbers say a Head.) A Revolving door
      * (round 499): its Width is the two entries through its ring, 1.2 m unless the numbers say - the drum is 1 m in radius, or wide enough for them. */
-    if (w.style != 0) blockout_opening_set_style(*bp, w.style);
+    if (w.opening == 2 && bp->style == kWindowRound && n.size() < 2 && finite_bits(bp->width) && finite_bits(bp->sill) && bp->width > 0.0f) bp->head = std::min(kBlockoutMaxSize, bp->sill + bp->width);
     if (w.opening == 1 && bp->style == kDoorRevolving) bp->width = n.size() >= 1 ? n[0] : 1.2f, bp->drum_radius = std::max(1.0f, 0.625f * bp->width);  // (Width is the two entries: 1.2 m by default in a drum of 1 m; a wider one grows the drum so that the entries stay within 1.6 of its radii)
     if (n.size() >= 2) bp->head = n[1];
     if (n.size() == 2 && bp->head <= bp->sill) bp->sill = 0.5f * bp->head;  // (a low window: its sill under its head)
@@ -845,7 +847,9 @@ GameObject *Editor::create_opening(GameObject &bo, int opening, const std::vecto
     if (!b->state.hash_valid) blockout_jobs_wait(bo.id);
   BlockoutHit wall;
   const GameObject *room = nullptr;
-  bool found = scene_hovered_ && !ui_.any_popup_open() && blockout_wall_under_mouse(bo, wall);
+  const bool pointing = scene_hovered_ && !ui_.any_popup_open();
+  bool found = pointing && blockout_wall_under_mouse(bo, wall);
+  const bool off_wall = pointing && !found;  // (the mouse is on a floor, a ceiling or nothing: said below, where the opening goes instead)
   if (!found) {
     std::vector<const GameObject *> pieces;
     blockout_piece_objects(bo, pieces);
@@ -855,16 +859,22 @@ GameObject *Editor::create_opening(GameObject &bo, int opening, const std::vecto
       if (!room && is_room(p)) room = p;
     found = room && blockout_first_wall(bo, *room, wall);
   }
+  if (!found && room) {
+    Log::warn("Blockout piece: room '%s' has no upright wall (every side leans more than 2 degrees from vertical, or it is flat) - turn it upright, or point at an upright wall, to put a %s in", room->name.c_str(), base.c_str());
+    return nullptr;
+  }
   if (!found) {
     Log::warn("Blockout piece: no room to put a %s in - point at a room's wall in the Scene view, or add a room (Room (Box)) first", base.c_str());
     return nullptr;
   }
   GameObject *piece = add_piece(*scene_, bo, unique_object_name(base), w, nullptr, 0.2f);
-  if (!blockout_stand_opening(bo, *piece, wall)) {
+  std::string why;
+  if (!blockout_stand_opening(bo, *piece, wall, &why)) {
     scene_->destroy(std::vector<GameObject *>{piece});
-    Log::warn("Blockout piece: that wall can't hold a %s (the room is flat or not finite)", base.c_str());
+    Log::warn("Blockout piece: %s can't be put there - %s", base.c_str(), why.empty() ? "the room is flat or its numbers are not finite" : why.c_str());
     return nullptr;
   }
+  if (off_wall && room) Log::warn("Blockout piece: the mouse is not on a wall (a floor, a ceiling or nothing) - the %s went in the middle of '%s''s first wall; point at a wall to place it there", base.c_str(), room->name.c_str());
   expanded_.insert(bo.id);
   select(piece->id);
   update_blockouts(true);
@@ -1400,8 +1410,9 @@ bool Editor::blockout_box_select(GameObject &g, const Recti &view, const Recti &
 /* Doors and windows on walls                                             */
 /* ===================================================================== */
 
-/* A room's wall under the mouse: the face under the pointer names a room (not an opening, not a plain piece) and stands upright
- * in it - a floor or a ceiling is not a wall. The mouse is read where the last frame left it. */
+/* A room's wall under the mouse: the face under the pointer names a room (not an opening, not a plain piece) and is a wall in the Blockout's frame - a face within 30
+ * degrees of horizontal (a floor, a ceiling, a gentle slope) is not. A steeper face that still leans more than 2 degrees is returned and then refused by
+ * blockout_stand_opening, which says how much it leans. The mouse is read where the last frame left it. */
 bool Editor::blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out) {
   if (!scene_rect_.contains(ui_.in.mx, ui_.in.my)) return false;
   BlockoutHit hit;
@@ -1409,52 +1420,72 @@ bool Editor::blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out) {
   const GameObject *room = scene_->find(hit.piece);
   const BlockoutPiece *bp = room ? room->get<BlockoutPiece>() : nullptr;
   if (!bp || !bp->is_room() || blockout_of_piece(*room) != &bo) return false;
-  const Vec3 up = normalize(blockout_piece_matrix(*room, bo).dir({0, 1, 0}));
-  if (std::fabs(dot(hit.normal, up)) > 0.5f) return false;
+  /* (The Blockout's up, not the room's: a room drawn onto a wall lies on its side, and its own floor would be the wall.) */
+  if (std::fabs(hit.normal.y) > 0.5f) return false;
   out = hit;
   return true;
 }
 
-/* An outline room's first wall: the middle of its first side, with the normal pointing into the air (the side's left when the corners run
- * anticlockwise as (x, z), its right otherwise). */
-static bool blockout_outline_first_wall(const Mat4 &m, const BlockoutPiece &bp, BlockoutHit &out, uint64_t piece) {
-  const size_t n = bp.outline.size();
-  if (n < 3) return false;
-  double area = 0.0;
-  for (size_t i = 0; i < n; i++) area += (double)bp.outline[i].x * bp.outline[(i + 1) % n].y - (double)bp.outline[(i + 1) % n].x * bp.outline[i].y;
-  const Vec2 a = bp.outline[0], b = bp.outline[1];
-  const float dx = b.x - a.x, dz = b.y - a.y, l = std::hypot(dx, dz);
-  if (!(l > 1e-6f) || !finite_bits(l) || !finite_bits(area)) return false;
-  const float turn = area >= 0.0 ? 1.0f : -1.0f;
-  out.piece = piece, out.side = 2;  // (the first segment's wall: side 2 + its index)
-  out.point = m.point(Vec3(0.5f * (a.x + b.x), 0.0f, 0.5f * (a.y + b.y)));
-  out.normal = normalize(m.dir(Vec3(-turn * dz / l, 0.0f, turn * dx / l)));
-  return finite3_bits(out.point) && finite3_bits(out.normal) && length(out.normal) > 0.5f;
-}
+/* How far from vertical a wall may lean for a door or window to stand in it: 2 degrees (sin 2 deg). */
+static constexpr float kOpeningWallLean = 0.0348995f;
 
-/* The middle of a room's first wall: the air's side 0 of a box (-X), a cylinder's facet nearest -X, a sphere's -X. The point and normal are as a hit
- * on it from inside would give them. */
+/* A room's most upright wall, where an opening goes when the mouse is on no wall: the middle of the air's side, with the point and the normal as a hit on it from
+ * inside would give them (the normal into the air). The sides are tried in a fixed order - a box's -X, +X, -Z, +Z, then its caps (a room lying on its side has walls
+ * there), a cylinder's facets from the one nearest -X, then its caps, an outline's segments in order - and the one whose normal, in the Blockout's frame, is nearest to
+ * horizontal wins; a tie keeps the first, so an upright room gets what it always got (-X). False when no side is within 2 degrees of vertical (the caller says so). */
 bool Editor::blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out) {
   const BlockoutPiece *bp = room.get<BlockoutPiece>();
   if (!bp) return false;
   const Mat4 m = blockout_piece_matrix(room, bo);
-  const bool boxy = bp->shape == 0 || bp->shape == 3;  // (a wedge's tall end is its -Z side; its -X side is a wall like a box's)
-  const float reach = boxy ? std::fabs(bp->size.x) * 0.5f : std::fabs(bp->radius);
-  if (bp->shape == 6) return blockout_outline_first_wall(m, *bp, out, room.id);
-  if (!finite_bits(reach)) return false;
-  out.piece = room.id, out.side = 0;
-  Vec3 at(-reach, 0.0f, 0.0f), in(1.0f, 0.0f, 0.0f);
-  if (bp->shape == 1) {
-    /* A cylinder is faceted: the middle of the facet nearest -X, which lies nearer the axis than the radius (with 5
-     * segments by a fifth of it - a door at the radius would stand outside the wall). */
-    const int seg = std::max(3, std::min(256, bp->segments));
-    const float pi = 3.14159265358979f, mid = 2.0f * pi * ((float)((seg - 1) / 2) + 0.5f) / (float)seg;
-    in = {-std::cos(mid), 0.0f, -std::sin(mid)};
-    at = in * (-reach * std::cos(pi / (float)seg));
+  bool have = false;
+  float best = 1e30f;
+  auto consider = [&](Vec3 at, Vec3 in, uint32_t side) {
+    const Vec3 p = m.point(at), n = normalize(m.dir(in));
+    if (!finite3_bits(p) || !finite3_bits(n) || !(length(n) > 0.5f)) return;
+    const float lean = std::fabs(n.y);
+    if (have && !(lean < best - 1e-6f)) return;
+    have = true, best = lean;
+    out.piece = room.id, out.side = side, out.point = p, out.normal = n;
+  };
+  if (bp->shape == 6) {  // an outline: the middle of each side, the normal into the air (the side's left when the corners run anticlockwise as (x, z), its right otherwise)
+    const size_t n = bp->outline.size();
+    double area = 0.0;
+    for (size_t i = 0; i < n; i++) area += (double)bp->outline[i].x * bp->outline[(i + 1) % n].y - (double)bp->outline[(i + 1) % n].x * bp->outline[i].y;
+    if (n < 3 || !finite_bits(area)) return false;
+    const float turn = area >= 0.0 ? 1.0f : -1.0f;
+    for (size_t i = 0; i < n; i++) {
+      const Vec2 a = bp->outline[i], b = bp->outline[(i + 1) % n];
+      const float dx = b.x - a.x, dz = b.y - a.y, l = std::hypot(dx, dz);
+      if (!(l > 1e-6f) || !finite_bits(l)) continue;
+      consider(Vec3(0.5f * (a.x + b.x), 0.0f, 0.5f * (a.y + b.y)), Vec3(-turn * dz / l, 0.0f, turn * dx / l), (uint32_t)(2 + i));
+    }
   }
-  out.point = m.point(at);
-  out.normal = normalize(m.dir(in));  // (into the air)
-  return finite3_bits(out.point) && finite3_bits(out.normal) && length(out.normal) > 0.5f;
+  else if (bp->shape == 1) {
+    /* A cylinder is faceted: the middle of a facet lies nearer the axis than the radius (with 5 segments by a fifth of it - a door at the radius would stand outside the
+     * wall). The facet nearest -X is the first. */
+    const float reach = std::fabs(bp->radius), half = std::fabs(bp->height) * 0.5f;
+    if (!finite_bits(reach) || !finite_bits(half)) return false;
+    const int seg = std::max(3, std::min(256, bp->segments));
+    const float pi = 3.14159265358979f, first = (float)((seg - 1) / 2);
+    for (int j = 0; j < seg; j++) {
+      const float mid = 2.0f * pi * ((float)((((int)first + j) % seg)) + 0.5f) / (float)seg;
+      const Vec3 in(-std::cos(mid), 0.0f, -std::sin(mid));
+      consider(in * (-reach * std::cos(pi / (float)seg)), in, (uint32_t)j);
+    }
+    consider(Vec3(0.0f, -half, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 0);
+    consider(Vec3(0.0f, half, 0.0f), Vec3(0.0f, -1.0f, 0.0f), 0);
+  }
+  else {
+    const bool boxy = bp->shape == 0 || bp->shape == 3;  // (a wedge's tall end is its -Z side; its +Z end and its top are no walls)
+    const Vec3 h = boxy ? Vec3(std::fabs(bp->size.x), std::fabs(bp->size.y), std::fabs(bp->size.z)) * 0.5f : Vec3(std::fabs(bp->radius));
+    if (!finite3_bits(h)) return false;
+    consider(Vec3(-h.x, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), 0);
+    consider(Vec3(h.x, 0.0f, 0.0f), Vec3(-1.0f, 0.0f, 0.0f), 1);
+    consider(Vec3(0.0f, 0.0f, -h.z), Vec3(0.0f, 0.0f, 1.0f), 2);
+    if (bp->shape != 3) consider(Vec3(0.0f, 0.0f, h.z), Vec3(0.0f, 0.0f, -1.0f), 3);
+    if (bp->shape != 3) consider(Vec3(0.0f, -h.y, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 4), consider(Vec3(0.0f, h.y, 0.0f), Vec3(0.0f, -1.0f, 0.0f), 5);
+  }
+  return have && best <= kOpeningWallLean;
 }
 
 /* How thick the Blockout's matter is behind a point of its surface, measured against `out_of` (which points out of the matter):
@@ -1474,25 +1505,84 @@ static float blockout_matter_behind(const GameObject &bo, Vec3 point, Vec3 out_o
   return best < 100.0f ? best + 1e-3f : fallback;
 }
 
-/* Turns `opening` to the wall and stands it on its room's floor: through the wall along the wall's normal, up along the room's
- * up, centred in the wall's thickness at the spot. Its depth is the wall's thickness there plus 0.1 m either side. The opening's origin is
- * the floor line - its sill and head are measured from it - and it is a child of the Blockout, so its local transform is the
- * Blockout-space one. False when the room is flat or the numbers are not finite. */
-bool Editor::blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall) {
+/* The height of the room's floor under `point` (down is -Y in the Blockout's frame): the first face of the Blockout's mesh below it that the ROOM made (an Add box, stairs or
+ * furniture standing in the room is no floor; when the mesh's faces do not name their pieces - a newer build is running - any face counts) and whose hit lies inside the
+ * room's own air (`inv_room` takes it into the room's space, `lo` .. `hi` its box there): another room's floor just outside is not used. */
+static bool blockout_floor_under(const GameObject &bo, uint64_t room_id, const Mat4 &inv_room, Vec3 lo, Vec3 hi, Vec3 point, float &y) {
+  const MeshFilter *mf = bo.get<MeshFilter>();
+  const Blockout *b = bo.get<Blockout>();
+  if (!mf || !mf->mesh || !b || mf->mesh->face_count() == 0 || !finite3_bits(point)) return false;
+  const Mesh &mesh = *mf->mesh;
+  const BlockoutState &s = b->state;
+  const bool named = s.faces_mesh == &mesh && s.faces_version == mesh.version && s.faces.piece.size() == mesh.face_count();
+  const RenderMesh &rm = mesh.render_mesh();
+  const Ray ray{point, Vec3(0.0f, -1.0f, 0.0f)};
+  float best = 1e30f;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    if (named && (t >= rm.tri_face.size() || rm.tri_face[t] >= s.faces.piece.size() || s.faces.piece[rm.tri_face[t]] != room_id)) continue;
+    const float d = ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    if (d > 0.0f && d < best) best = d;
+  }
+  if (!(best < 100.0f)) return false;
+  y = point.y - best;
+  const Vec3 in = inv_room.point(Vec3(point.x, y, point.z));
+  const float e = 1e-3f;
+  return finite3_bits(in) && in.x >= lo.x - e && in.x <= hi.x + e && in.y >= lo.y - e && in.y <= hi.y + e && in.z >= lo.z - e && in.z <= hi.z + e;
+}
+
+/* Turns `opening` to the wall and stands it upright in it: through the wall along the wall's normal (its horizontal part), up along the Blockout's up whatever the room's
+ * own turn (round 499 fix: a room on its side gave its up to the door, and the door lay flat), centred in the wall's thickness at the spot. Its depth is the wall's thickness
+ * there plus 0.1 m either side. The opening's origin is the floor line - its sill and head are measured from it - and it is a child of the Blockout, so its local transform
+ * is the Blockout-space one.
+ * The wall must be vertical within 2 degrees in the Blockout's frame. The feet: an upright room keeps its own floor line; a room turned about another axis has none, so the
+ * feet stand on the floor under the opening - a ray down from each jamb, on the room's side of the wall (a click on the outer face too), to the first face the room made inside
+ * its own air (not furniture, not another room's floor) - and on the HIGHER of the two (on a sloped
+ * floor that leaves a small step of wall at the low jamb rather than a cut through the floor slab); with no floor found, on the room's lowest point.
+ * False when the wall leans (`why` says by how much), or the room is flat or the numbers are not finite. */
+bool Editor::blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall, std::string *why) {
   const GameObject *room = scene_->find(wall.piece);
   const BlockoutPiece *rp = room ? room->get<BlockoutPiece>() : nullptr;
   BlockoutPiece *op = opening.get<BlockoutPiece>();
   if (!rp || !op || !finite3_bits(wall.point) || !finite3_bits(wall.normal)) return false;
   const Mat4 m = blockout_piece_matrix(*room, bo);
-  const Vec3 up = normalize(m.dir({0, 1, 0}));
+  for (const Vec3 axis : {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)})  // (a room flattened to nothing in an axis has no wall to stand in)
+    if (!(length(m.dir(axis)) > 1e-6f)) return false;
+  const Vec3 up(0.0f, 1.0f, 0.0f);
+  if (std::fabs(wall.normal.y) > kOpeningWallLean) {
+    if (why) *why = strprintf("that wall leans %.0f degrees - a door or window stands in an upright wall", (double)(std::asin(std::min(1.0f, std::fabs(wall.normal.y))) * 57.29578f));
+    return false;
+  }
   Vec3 through = wall.normal - up * dot(wall.normal, up);
-  if (!(length(through) > 1e-4f) || !(length(up) > 0.5f)) return false;
+  if (!(length(through) > 1e-4f)) return false;
   through = normalize(through);
   const float own = finite_bits(rp->wall) ? std::max(0.0f, std::min(100.0f, rp->wall)) : 0.0f;
   const float thick = blockout_matter_behind(bo, wall.point, through, own);
   const Vec3 centre = wall.point - through * (0.5f * thick);  // (the wall's middle: the matter lies behind the face)
   const float hy = blockout_floor_below_origin(*rp);
-  const Vec3 floor_point = m.point({0.0f, -hy, 0.0f});
+  Vec3 floor_point = m.point({0.0f, -hy, 0.0f});
+  if (dot(normalize(m.dir({0, 1, 0})), up) < 0.9999f) {  // (not upright: no floor line of its own)
+    Vec3 lo, hi;
+    blockout_piece_bounds(*rp, lo, hi);
+    float low = 1e30f;  // (the room's lowest point: the feet when no floor is found)
+    for (int k = 0; k < 8; k++) low = std::min(low, m.point({k & 1 ? hi.x : lo.x, k & 2 ? hi.y : lo.y, k & 4 ? hi.z : lo.z}).y);
+    /* The rays start on the room's side of the wall (a click on the OUTER face gives a normal that points out of the room): 5 cm clear of the wall's inner face. */
+    const Vec3 across = cross(up, through), room_centre = m.point(Vec3(0.0f));
+    const float side = dot(room_centre - centre, through) > 0.0f ? 1.0f : -1.0f;
+    const Vec3 air = centre + through * (side * (0.5f * thick + 0.05f));
+    const float half = 0.5f * (finite_bits(op->width) ? std::max(0.0f, op->width) : 0.0f);
+    const Mat4 inv_room = m.inverse();
+    float ya = 0.0f, yb = 0.0f, feet = low;
+    const Vec3 a = air + across * half, b = air - across * half;
+    /* A start at the click's height, else at the room's middle (a click at the wall's foot starts inside the floor slab). */
+    for (const float start_y : {wall.point.y, room_centre.y}) {
+      const bool fa = blockout_floor_under(bo, wall.piece, inv_room, lo, hi, Vec3(a.x, start_y, a.z), ya), fb = blockout_floor_under(bo, wall.piece, inv_room, lo, hi, Vec3(b.x, start_y, b.z), yb);
+      if (!fa && !fb) continue;
+      feet = fa && fb ? std::max(ya, yb) : fa ? ya : yb;
+      break;
+    }
+    if (!finite_bits(feet)) return false;
+    floor_point.y = feet;
+  }
   const Vec3 origin = centre + up * (dot(floor_point, up) - dot(centre, up));
   if (!finite3_bits(origin)) return false;
   op->depth = thick + 0.2f;

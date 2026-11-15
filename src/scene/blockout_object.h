@@ -343,6 +343,10 @@ bool blockout_window_pieces(const BlockoutPiece &bp, uint64_t owner, const Mat4 
 void blockout_window_set_style(BlockoutPiece &p, int style);
 /* The same for a door or a window (round 499): the style held to the words that opening has. */
 void blockout_opening_set_style(BlockoutPiece &p, int style);
+/* The opening size a style is a preset of (round 499 fix): a door's Width and Head (Double 1.8 x 2.1: two 0.9 m leaves; Revolving 1.2 wide, its two entries; the rest 0.9 x 2.1)
+ * and a window's (Double 1.5 wide, the rest 1.2; Head 2.0). `opening` 1 door, 2 window. A new opening takes them; switching style takes the new style's only when the
+ * Width and Head are still the old style's (a size somebody typed stays). */
+void blockout_opening_preset(int opening, int style, float &width, float &head);
 /* After an edit of a piece's Style or Opening (the Inspector's, whichever way): the rules that tie its numbers together - a Round window made from another style
  * becomes a circle; a piece that is no opening has no style, and one whose Opening changed between Door and Window starts at Opening Only (the style numbers mean
  * something else). `style_before`, `opening_before`: what the piece had before the edit (every caller knows). A file keeps Style as the number: a door's Revolving (5) is a 5 and loads as a door's whatever the window names say; a file of round 498 has windows' numbers only (a door's was always 0) and loads as it did. */

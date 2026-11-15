@@ -23716,6 +23716,559 @@ static void tests_round499_te() {
 }
 // r499te-end
 
+// r499f-begin
+/* ===================================================================== */
+/* Round 499 fix (task 0483): a door or a window is upright when it is added. A room drawn onto a wall or a slope is turned onto its side, and its own up used to be  */
+/* the opening's: the door lay flat. The opening's up is now the Blockout's, whatever the room's turn.                                                              */
+/* ===================================================================== */
+
+namespace {
+
+struct R499fRoom {
+  const char *what;
+  const char *line;
+  Vec3 euler;
+  bool wall;     // a side within 2 degrees of vertical exists: an opening must be made
+  int segments;  // a cylinder's (0: as the command made it)
+};
+
+/* The opening made by `cmd`, or nullptr when it made none (a refusal); the Blockout's children before are the ones to tell it from. */
+GameObject *r499f_added(Editor &ed, GameObject &bo, const char *cmd) {
+  std::vector<const GameObject *> before(bo.children.begin(), bo.children.end());
+  ed.command(cmd);
+  r477_settle(ed, 2);
+  for (GameObject *c : bo.children)
+    if (std::find(before.begin(), before.end(), c) == before.end() && c->get<BlockoutPiece>() && c->get<BlockoutPiece>()->opening) return c;
+  return nullptr;
+}
+
+/* Whether `g` (a child of the Blockout, so its local frame is the Blockout's) stands upright: its Y is the Blockout's up and its Z (the way it faces) is horizontal. */
+bool r499f_upright(const GameObject &g) {
+  const Quat q = g.local().rotation;
+  const Vec3 up = q.rotate({0.0f, 1.0f, 0.0f}), fwd = q.rotate({0.0f, 0.0f, 1.0f});
+  return up.y > 0.9999f && std::fabs(fwd.y) < 1e-3f;
+}
+
+void r499f_remove(Editor &ed, GameObject *g) {
+  ed.scene().destroy(std::vector<GameObject *>{g});
+  r477_settle(ed, 2);
+}
+
+}  // namespace
+
+static void tests_round499_upright() {
+  /* Which rooms have an upright wall: a box turned about one axis keeps four sides, two of them (or, rolled about Z, the caps) vertical; a cylinder on its side has its two end caps
+   * for walls (its facets lean 7.5 degrees or more; a 5-sided one has a vertical facet as well); a room leaning on two axes has none. */
+  const R499fRoom rooms[] = {{"a room turned 0", "blockout add room box 4 3 4", {0, 0, 0}, true, 0},
+                             {"a room turned 30 about Y", "blockout add room box 4 3 4", {0, 30, 0}, true, 0},
+                             {"a room turned 90 about Y", "blockout add room box 4 3 4", {0, 90, 0}, true, 0},
+                             {"a room on its side (90 about X)", "blockout add room box 4 3 4", {90, 0, 0}, true, 0},
+                             {"a room on its side (90 about Z)", "blockout add room box 4 3 4", {0, 0, 90}, true, 0},
+                             {"a room upside down (180 about X)", "blockout add room box 4 3 4", {180, 0, 0}, true, 0},
+                             {"a room leaning 30 about X", "blockout add room box 4 3 4", {30, 0, 0}, true, 0},
+                             {"a room leaning 45 about Z and turned 20", "blockout add room box 4 3 4", {0, 20, 45}, true, 0},
+                             {"a room leaning 30 about X and 30 about Z", "blockout add room box 4 3 4", {30, 0, 30}, false, 0},
+                             {"a cylinder room on its side", "blockout add room cylinder 2 3", {90, 0, 0}, true, 0},
+                             {"a 5-sided cylinder room on its side", "blockout add room cylinder 2 3", {90, 0, 0}, true, 5},
+                             {"a cylinder room", "blockout add room cylinder 2 3", {0, 0, 0}, true, 0}};
+  struct Holder {
+    const char *what;
+    Vec3 euler, scale;
+  };
+  const Holder holders[] = {{"upright Blockout", {0, 0, 0}, {1, 1, 1}}, {"Blockout turned 40", {0, 40, 0}, {1, 1, 1}}, {"Blockout turned and scaled", {0, 40, 0}, {2, 1, 0.5f}}};
+
+  /* With the room selected and the mouse away from the view (the Door and Window buttons, the menu, the console): the first wall, or a refusal - never a door lying down. */
+  for (int opening = 1; opening <= 2; opening++) {
+    const char *word = opening == 1 ? "door" : "window";
+    test((std::string("blockout ") + word + "s added to a selected room stand upright in its first wall, however the room is turned, in an upright, a turned or a scaled Blockout").c_str(), [=] {
+      for (const Holder &h : holders)
+        for (const R499fRoom &r : rooms) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->set_world_position({0.0f, 0.0f, 0.0f});
+          bo->set_local_rotation(Quat::euler(h.euler));
+          bo->set_local_scale(h.scale);
+          GameObject *room = r478_room_by_command(ed, *bo, r.line);
+          CHECK(room != nullptr);
+          if (!room) continue;
+          room->set_local_rotation(Quat::euler(r.euler));
+          if (r.segments) room->get<BlockoutPiece>()->segments = r.segments;
+          r477_settle(ed, 2);
+          ed.select_for_test(room->id, false);
+          const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, hier.x + hier.w / 2, hier.y + hier.h - 10)});
+          ed.step_frame_headless();
+          const size_t mark = r477_mark();
+          GameObject *op = r499f_added(ed, *bo, opening == 1 ? "blockout add door" : "blockout add window");
+          if (!op) {  // (only a room with no upright wall may be refused, and it says so)
+            std::printf("    %s, %s: refused\n", h.what, r.what);
+            CHECK(!r.wall);
+            CHECK(r477_log_since(mark).find("no upright wall") != std::string::npos);
+            continue;
+          }
+          CHECK(r.wall);
+          const Vec3 fwd = op->local().rotation.rotate({0, 0, 1}), up = op->local().rotation.rotate({0, 1, 0});
+          std::printf("    %s, %s: up (%.2f %.2f %.2f) facing (%.2f %.2f %.2f)\n", h.what, r.what, (double)up.x, (double)up.y, (double)up.z, (double)fwd.x, (double)fwd.y, (double)fwd.z);
+          CHECK(r499f_upright(*op));
+          CHECK(op->get<BlockoutPiece>()->opening == opening && op->local().scale == Vec3(1.0f));
+        }
+    });
+
+    /* A sample of the clicks (a third of the 9 spots - a wall, a ceiling, a corner at the ceiling's edge - of every room in every Blockout; the whole 3 x 9 x 9 sweep took
+     * minutes): a wall gets an upright opening, a floor, a ceiling or a leaning face gets the room's most upright wall or a refusal - never a lying opening. */
+    test((std::string("blockout ") + word + "s added with the mouse over the room's faces (walls, floor, ceiling, corners) stand upright in a wall").c_str(), [=] {
+      for (const Holder &h : holders)
+        for (const R499fRoom &r : rooms) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->set_world_position({0.0f, 0.0f, 0.0f});
+          bo->set_local_rotation(Quat::euler(h.euler));
+          bo->set_local_scale(h.scale);
+          GameObject *room = r478_room_by_command(ed, *bo, r.line);
+          if (!room) continue;
+          room->set_local_rotation(Quat::euler(r.euler));
+          if (r.segments) room->get<BlockoutPiece>()->segments = r.segments;
+          r477_settle(ed, 3);
+          const Mat4 rm = blockout_piece_matrix(*room, *bo), world = bo->world_matrix();
+          const Vec3 spots[] = {{-2.2f, 0.3f, 0.4f}, {0.5f, 1.7f, 0.5f}, {-2.2f, 1.6f, -2.1f}};  // (a wall; the ceiling; near a corner and the ceiling's edge)
+          for (const Vec3 &s : spots) {
+            int px = 0, py = 0;
+            if (!ed.project_to_window(world.point(rm.point(s)), px, py)) continue;
+            ed.select_for_test(bo->id, false);
+            ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+            ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+            const bool on_wall = ed.blockout_wall_under_mouse_for_test(*bo);  // (the pick itself says whether the pixel is a room's wall)
+            const size_t mark = r477_mark();
+            GameObject *op = r499f_added(ed, *bo, opening == 1 ? "blockout add door" : "blockout add window");
+            if (!op) {  // (a refusal is for a wall that leans, or a room with no upright wall to fall back on - and it says so)
+              const std::string said = r477_log_since(mark);
+              if (on_wall) CHECK(said.find("leans") != std::string::npos);
+              else CHECK(!r.wall && said.find("no upright wall") != std::string::npos);
+              continue;
+            }
+            CHECK(r.wall);
+            if (!r499f_upright(*op)) std::printf("    LYING: %s, %s, spot (%.1f %.1f %.1f): up (%.2f %.2f %.2f)\n", h.what, r.what, (double)s.x, (double)s.y, (double)s.z,
+                                                 (double)op->local().rotation.rotate({0, 1, 0}).x, (double)op->local().rotation.rotate({0, 1, 0}).y, (double)op->local().rotation.rotate({0, 1, 0}).z);
+            CHECK(r499f_upright(*op));
+            r499f_remove(ed, op);
+          }
+        }
+    });
+  }
+  test("blockout doors and windows added with the mouse over a floor or ceiling go in the room's first wall, upright, and the status says the mouse was not on a wall and where they went; over a wall nothing is said", [] {
+    for (const char *line : {"blockout add door", "blockout add window"}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+      CHECK(room != nullptr);
+      if (!room) return;
+      r477_settle(ed, 3);
+      /* Two pixels of the Scene view found by the wall pick itself (which face the camera sees at a point depends on the view): one where the mouse is on a
+       * room's wall, one over the Blockout where it is not (the roof, a floor, nothing). */
+      int at[2][2] = {{-1, -1}, {-1, -1}};
+      ed.select_for_test(bo->id, false);
+      const Recti view = ed.scene_view_rect();  // (the pixels are the window's: only the Scene view itself counts as pointing at the scene)
+      for (int py = view.y + 20; py < view.bottom() - 20 && (at[0][0] < 0 || at[1][0] < 0); py += 20)
+        for (int px = view.x + 20; px < view.right() - 20 && (at[0][0] < 0 || at[1][0] < 0); px += 20) {
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+          const int k = ed.blockout_wall_under_mouse_for_test(*bo) ? 1 : 0;
+          if (at[k][0] < 0) at[k][0] = px, at[k][1] = py;
+        }
+      CHECK(at[0][0] >= 0 && at[1][0] >= 0);
+      for (int k = 0; k < 2; k++) {
+        if (at[k][0] < 0) continue;
+        const int px = at[k][0], py = at[k][1];
+        ed.select_for_test(bo->id, false);
+        ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+        ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+        const size_t mark = r477_mark();
+        GameObject *op = r499f_added(ed, *bo, line);
+        CHECK(op != nullptr && r499f_upright(*op));
+        const bool said = r477_log_since(mark).find("the mouse is not on a wall") != std::string::npos;
+        if (said != (k == 0)) std::printf("    %s over the %s: said %d\n", line, k == 0 ? "floor" : "wall", (int)said);
+        CHECK(said == (k == 0));
+        if (op) r499f_remove(ed, op);
+      }
+    }
+  });
+
+  /* Where the opening goes, measured on the built mesh: open at the middle of the doorway, solid beside it, the feet on the floor under it. */
+  test("blockout doors and windows: in a turned Blockout, in rooms turned 30 about Y, 90 about Z and 180 about X, the doorway is open through the wall at its middle and solid beside it, and the feet stand within 1 cm of the floor under it", [] {
+    struct Case {
+      Vec3 holder, room;
+    };
+    for (const Case &c : {Case{{0, 0, 0}, {0, 30, 0}}, Case{{0, 40, 0}, {0, 30, 0}}, Case{{0, 40, 0}, {0, 0, 90}}, Case{{0, 0, 0}, {0, 0, 90}}, Case{{0, 40, 0}, {180, 0, 0}}, Case{{0, 40, 0}, {90, 0, 0}}})
+      for (int opening = 1; opening <= 2; opening++) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->set_world_position({0.0f, 0.0f, 0.0f});
+        bo->set_local_rotation(Quat::euler(c.holder));
+        GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+        CHECK(room != nullptr);
+        if (!room) continue;
+        room->set_local_rotation(Quat::euler(c.room));
+        r477_settle(ed, 2);
+        ed.select_for_test(room->id, false);
+        const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+        ed.step_frame_headless({r477_ev(R477ET::MouseMove, hier.x + hier.w / 2, hier.y + hier.h - 10)});
+        ed.step_frame_headless();
+        GameObject *op = r499f_added(ed, *bo, opening == 1 ? "blockout add door" : "blockout add window");
+        CHECK(op != nullptr);
+        if (!op) continue;
+        r477_settle(ed, 3);
+        const BlockoutPiece &bp = *op->get<BlockoutPiece>();
+        const float half = 0.5f * (bp.depth - 0.2f) + 0.05f, mid = bp.sill + 0.5f * (bp.head - bp.sill), beside = 0.5f * bp.width + 0.4f;
+        const int through = t499_walk(*bo, *op, {0.0f, mid, -half}, {0.0f, mid, half}), solid = t499_walk(*bo, *op, {beside, mid, -half}, {beside, mid, half});
+        const Mesh *mesh = r495_mesh(*bo);
+        float floor_y = -1e30f;
+        if (mesh) {
+          const Vec3 fwd = op->local().rotation.rotate({0, 0, 1}), start = op->local().position + fwd * 0.5f + Vec3(0.0f, 1.0f, 0.0f);
+          const Ray down{start, Vec3(0.0f, -1.0f, 0.0f)};
+          const RenderMesh &rm = mesh->render_mesh();
+          float best = 1e30f;
+          for (size_t t = 0; t < rm.tri_count(); t++) {
+            const float d = ray_triangle(down, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+            if (d > 0.0f && d < best) best = d;
+          }
+          floor_y = start.y - best;
+        }
+        const float off = std::fabs(floor_y - op->local().position.y);
+        if (through != 0 || solid < 2 || off > 0.01f) std::printf("    %s, holder (%.0f %.0f %.0f), room (%.0f %.0f %.0f): through %d, beside %d, feet off the floor by %.3f m\n", opening == 1 ? "door" : "window",
+                                                                  (double)c.holder.x, (double)c.holder.y, (double)c.holder.z, (double)c.room.x, (double)c.room.y, (double)c.room.z, through, solid, (double)off);
+        CHECK(through == 0);  // (nothing of the mesh across the doorway: the hole goes through the wall)
+        CHECK(solid >= 2);    // (beside it the wall is there: its two faces)
+        CHECK(off <= 0.01f);
+      }
+  });
+
+  /* A room leaning 30 about X keeps one pair of upright walls but its floor slopes along them: the feet stand on the HIGHER jamb's floor (a small step of wall at the low
+   * one), whether the mouse is on the wall's outer face (the click's normal points out of the room: the floor rays must start on the room's side) or the fallback chose it. */
+  test("blockout doors and windows: in a room leaning 30 about X the feet stand on the higher jamb's floor within 1 cm, with the mouse on the upright wall's OUTER face and through the fallback, and the doorway's middle is air on both faces", [] {
+    for (int opening = 1; opening <= 2; opening++)
+      for (int mode = 0; mode < 2; mode++) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->set_world_position({0.0f, 0.0f, 0.0f});
+        GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+        CHECK(room != nullptr);
+        if (!room) return;
+        room->set_local_rotation(Quat::euler({30, 180, 0}));  // (its -X wall is the world's +X side, which the default camera sees from outside)
+        r477_settle(ed, 3);
+        const Mat4 rm = blockout_piece_matrix(*room, *bo);
+        const char *line = opening == 1 ? "blockout add door" : "blockout add window";
+        if (mode == 0) {
+          int px = 0, py = 0;
+          CHECK(ed.project_to_window(bo->world_matrix().point(rm.point(Vec3(-2.2f, 0.3f, 0.4f))), px, py));
+          ed.select_for_test(bo->id, false);
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+          CHECK(ed.blockout_wall_under_mouse_for_test(*bo));  // (the click is on the wall's outer face)
+        }
+        else {
+          ed.select_for_test(room->id, false);
+          const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, hier.x + hier.w / 2, hier.y + hier.h - 10)});
+          ed.step_frame_headless();
+        }
+        GameObject *op = r499f_added(ed, *bo, line);
+        CHECK(op != nullptr);
+        if (!op) continue;
+        r477_settle(ed, 3);
+        CHECK(r499f_upright(*op));
+        const BlockoutPiece &bp = *op->get<BlockoutPiece>();
+        const Mesh *mesh = r495_mesh(*bo);
+        CHECK(mesh != nullptr);
+        if (!mesh) continue;
+        /* The floor under each jamb, found here on the room's side of the wall from the room's middle height. */
+        const Vec3 fwd = op->local().rotation.rotate({0, 0, 1}), at = op->local().position, centre = rm.point(Vec3(0.0f));
+        const float thick = bp.depth - 0.2f, s = dot(centre - at, fwd) > 0.0f ? 1.0f : -1.0f;
+        const Mat4 om = op->local_matrix();
+        const RenderMesh &mr = mesh->render_mesh();
+        float floors[2] = {-1e30f, -1e30f};
+        for (int k = 0; k < 2; k++) {
+          const Vec3 jamb = om.point(Vec3((k ? -0.5f : 0.5f) * bp.width, 0.0f, s * (0.5f * thick + 0.05f)));
+          const Ray down{Vec3(jamb.x, centre.y, jamb.z), Vec3(0.0f, -1.0f, 0.0f)};
+          float best = 1e30f;
+          for (size_t t = 0; t < mr.tri_count(); t++) {
+            const float d = ray_triangle(down, mr.positions[mr.indices[t * 3]], mr.positions[mr.indices[t * 3 + 1]], mr.positions[mr.indices[t * 3 + 2]]);
+            if (d > 0.0f && d < best) best = d;
+          }
+          floors[k] = centre.y - best;
+        }
+        const float higher = std::max(floors[0], floors[1]), off = std::fabs(higher - at.y);
+        const float half = 0.5f * thick + 0.05f, mid = bp.sill + 0.5f * (bp.head - bp.sill);
+        const int through = t499_walk(*bo, *op, {0.0f, mid, -half}, {0.0f, mid, half});
+        if (off > 0.01f || through != 0) std::printf("    %s, %s: floors %.3f / %.3f, feet %.3f, through %d\n", opening == 1 ? "door" : "window", mode == 0 ? "outer face" : "fallback", (double)floors[0], (double)floors[1], (double)at.y, through);
+        CHECK(std::fabs(floors[0] - floors[1]) > 0.1f);  // (the floor does slope across the doorway: the rule is tested)
+        CHECK(off <= 0.01f);
+        CHECK(through == 0);
+        r499f_remove(ed, op);
+      }
+  });
+
+  test("blockout windows: a Round window with Sill 0.8 and Width 1.2 (Head exactly 2.0) switched to Double keeps its 1.2 m, by the console and by the piece rule; Single to Double still takes 1.5", [] {
+    BlockoutPiece p;
+    p.opening = 2, p.style = kWindowRound, p.width = 1.2f, p.sill = 0.8f, p.head = 2.0f;
+    p.style = kWindowDouble;
+    blockout_piece_edited(p, kWindowRound, 2);
+    CHECK(p.width == 1.2f && p.head == 2.0f);
+    BlockoutPiece q;
+    q.opening = 2, q.style = kWindowSingle, q.width = 1.2f, q.sill = 0.9f, q.head = 2.0f;
+    q.style = kWindowDouble;
+    blockout_piece_edited(q, kWindowSingle, 2);
+    CHECK(q.width == 1.5f);
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window round 1.2 2.0 0.8");
+    GameObject *win = ed.active_object_for_test();
+    const BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->style == kWindowRound && bp->width == 1.2f && bp->head == 2.0f && bp->sill == 0.8f);
+    ed.command("blockout set style double");
+    CHECK(bp && bp->style == kWindowDouble && bp->width == 1.2f);
+  });
+
+  test("blockout doors and windows: the mouse on a wall that leans (a room turned 20 about Z: two sides lean 20 degrees) is refused and the status says how much it leans; a click that lands elsewhere gets an upright opening", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_rotation(Quat::euler({0, 0, 20}));
+    r477_settle(ed, 3);
+    const Mat4 rm = blockout_piece_matrix(*room, *bo), world = bo->world_matrix();
+    int said = 0;
+    for (const Vec3 spot : {Vec3(-2.2f, 0.3f, 0.4f), Vec3(2.2f, 0.3f, 0.4f)}) {
+      int px = 0, py = 0;
+      if (!ed.project_to_window(world.point(rm.point(spot)), px, py)) continue;
+      ed.select_for_test(bo->id, false);
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+      const size_t mark = r477_mark();
+      GameObject *op = r499f_added(ed, *bo, "blockout add door");
+      const bool lean = r477_log_since(mark).find("leans 20 degrees") != std::string::npos;
+      said += lean;
+      CHECK(lean == (op == nullptr));  // (a refusal says why; whatever was made is upright)
+      if (op) {
+        CHECK(r499f_upright(*op));
+        r499f_remove(ed, op);
+      }
+    }
+    CHECK(said >= 1);
+  });
+
+  test("blockout doors and windows: a room flattened to nothing in an axis refuses a door and a window with a status line and makes nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_scale({1.0f, 0.0f, 1.0f});
+    r477_settle(ed, 2);
+    ed.select_for_test(room->id, false);
+    for (const char *line : {"blockout add door", "blockout add window"}) {
+      const size_t mark = r477_mark();
+      CHECK(r499f_added(ed, *bo, line) == nullptr);
+      CHECK(!r477_log_since(mark).empty());
+    }
+  });
+}
+
+/* The size a style is a preset of: a new Double door is 1.8 m wide (two 0.9 m leaves) against a Single's 0.9; a typed size wins; switching takes the preset only over the old one. */
+static void tests_round499_presets() {
+  test("blockout door styles: a new Double door is twice a Single's width (1.8 m against 0.9) by the Door button, the GameObject menu and the console; a size typed in the console wins", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    r496_panel(ed);
+    float widths[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:door_style", k == 0 ? "Single" : "Double"));
+      CHECK(r496_click_key(ed, "Door"));
+      const BlockoutPiece *bp = r477_active_piece(ed);
+      CHECK(bp && bp->opening == 1 && bp->style == (k == 0 ? kDoorSingle : kDoorDouble));
+      if (bp) widths[k] = bp->width;
+      CHECK(bp && bp->head == 2.1f);
+    }
+    CHECK(widths[0] == 0.9f && widths[1] == 1.8f);
+    ed.select_for_test(s.room->id, false);
+    r477_settle(ed, 2);
+    CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "menu:Door"}));
+    const BlockoutPiece *menu = r477_active_piece(ed);
+    CHECK(menu && menu->style == kDoorDouble && menu->width == 1.8f);
+    for (const char *word : {"single", "sliding", "arched"}) {
+      ed.select_for_test(s.room->id, false);
+      ed.command(std::string("blockout add door ") + word);
+      const BlockoutPiece *p = r477_active_piece(ed);
+      CHECK(p && p->width == 0.9f && p->head == 2.1f);
+    }
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door revolving");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.2f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door double");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.8f && r477_active_piece(ed)->head == 2.1f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door double 1.4 2.2");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.4f && r477_active_piece(ed)->head == 2.2f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door double 0.9 2.1");  // (a size that is another style's preset is still the typed one)
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 0.9f);
+  });
+
+  test("blockout door styles: switching a default Single to Double (the Inspector's row, `blockout set style`, F9) makes it 1.8 m wide about the same centre, and back; a typed width stays; one undo step each", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const Vec3 at = s.door->local().position;
+    const size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout set style double");
+    const BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+    CHECK(bp->style == kDoorDouble && bp->width == 1.8f && bp->head == 2.1f && s.door->local().position == at);
+    r477_settle(ed, 2);  // (the undo step is recorded at the end of the frame)
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    ed.command("blockout set style single");
+    CHECK(bp->style == kDoorSingle && bp->width == 0.9f);
+    ed.command("blockout set style revolving");
+    CHECK(bp->style == kDoorRevolving && bp->width == 1.2f);
+    ed.command("blockout set style opening");
+    CHECK(bp->style == kDoorOpeningOnly && bp->width == 0.9f);
+    /* A width of the user's own is theirs. */
+    s.door->get<BlockoutPiece>()->width = 1.1f;
+    ed.command("blockout set style double");
+    CHECK(bp->style == kDoorDouble && bp->width == 1.1f);
+    s.door->get<BlockoutPiece>()->head = 2.4f;
+    s.door->get<BlockoutPiece>()->width = 1.8f;
+    ed.command("blockout set style single");  // (a typed head keeps the pair: the size is no longer the old style's preset)
+    CHECK(bp->width == 1.8f && bp->head == 2.4f);
+    /* The Inspector's own edit path (round 499's rule for any edit of Style). */
+    BlockoutPiece p;
+    p.opening = 1, p.style = kDoorSingle, p.width = 0.9f, p.head = 2.1f;
+    p.style = kDoorDouble;
+    blockout_piece_edited(p, kDoorSingle, 1);
+    CHECK(p.width == 1.8f);
+    p.width = 1.0f, p.style = kDoorSliding;
+    blockout_piece_edited(p, kDoorDouble, 1);
+    CHECK(p.width == 1.0f);
+  });
+
+  test("blockout door styles: F9 right after a Single door is made - the Style row set to Double - makes it 1.8 m wide", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    r477_settle(ed, 2);
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Double"));
+    r495_built(ed);
+    const BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+    CHECK(bp && bp->style == kDoorDouble && bp->width == 1.8f);
+  });
+
+  test("blockout window styles: a new Double window is wider than a Single one (1.5 m against 1.2) by the Window button and the console; a typed size wins; switching takes the preset only over the old one", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    r496_panel(ed);
+    float widths[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:window_style", k == 0 ? "Single" : "Double"));
+      CHECK(r496_click_key(ed, "Window"));
+      const BlockoutPiece *bp = r477_active_piece(ed);
+      CHECK(bp && bp->opening == 2);
+      if (bp) widths[k] = bp->width;
+    }
+    CHECK(widths[0] == 1.2f && widths[1] == 1.5f && widths[1] > widths[0]);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window double");
+    GameObject *win = ed.active_object_for_test();
+    const BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->width == 1.5f && bp->head == 2.0f && bp->sill == 0.9f);
+    if (!bp) return;
+    ed.command("blockout set style single");
+    CHECK(bp->width == 1.2f);
+    ed.command("blockout set style double");
+    CHECK(bp->width == 1.5f);
+    win->get<BlockoutPiece>()->width = 1.0f;
+    ed.command("blockout set style grid");
+    CHECK(bp->width == 1.0f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window double 1.2 1.6 0.8");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.2f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window round");  // (a circle: Head = Sill + Width, as before)
+    const BlockoutPiece *round = r477_active_piece(ed);
+    CHECK(round && round->width == 1.2f && std::fabs(round->head - (round->sill + round->width)) < 1e-5f);
+  });
+
+  test("blockout door styles: a scene saved with a Double door 0.9 m wide (before the presets) loads to the same door and the same mesh - a load changes no number", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "double 0.9 2.1");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const Mesh before = *r495_mesh(*s.bo);
+    const std::string path = te_scene_path(ed, "r499_old_double.scene");
+    CHECK(fs::write_file(path, save_scene_text(ed.scene())));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *bo = r477_find(ed);
+    GameObject *door = ed.scene().find_by_name("Door");
+    const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(bo && bp && bp->style == kDoorDouble && bp->width == 0.9f && bp->head == 2.1f && bp->hinge_side == 0);
+    CHECK(bo && r495_mesh(*bo) && r477_same(before, *r495_mesh(*bo)));
+    fs::remove_file(path);
+  });
+}
+
+/* The Door and Window buttons, the menu and the console put an opening upright even in a room drawn onto a slope or a wall. */
+static void tests_round499_upright_console() {
+  test("blockout doors and windows: `create Blockout Piece: Door|Window` and the GameObject menu on a room lying on its side stand upright or are refused with a status line", [] {
+    for (const char *kind : {"Door", "Window"})
+      for (const Vec3 turn : {Vec3(0, 0, 90), Vec3(90, 0, 0), Vec3(0, 0, 45), Vec3(0, 30, 0)}) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        GameObject *room = r478_room_by_command(ed, *bo);
+        if (!room) continue;
+        room->set_local_rotation(Quat::euler(turn));
+        r477_settle(ed, 2);
+        ed.select_for_test(room->id, false);
+        const size_t mark = r477_mark();
+        GameObject *op = r499f_added(ed, *bo, (std::string("create Blockout Piece: ") + kind).c_str());
+        if (op) CHECK(r499f_upright(*op));
+        else CHECK(r477_log_since(mark).find("upright wall") != std::string::npos);  // (nothing made: the status line says why)
+        if (turn.x == 0 && turn.z == 0) CHECK(op != nullptr);  // (a room that only turns about Y always has a wall)
+      }
+  });
+}
+// r499f-end
+
 /* ===================================================================== */
 /* Round 500 (task 0484): architectural pieces                            */
 /* ===================================================================== */
@@ -26260,6 +26813,9 @@ void run_blockout_tests() {
   tests_round498_fix();
   tests_round499();
   tests_round499_te();
+  tests_round499_upright();
+  tests_round499_presets();
+  tests_round499_upright_console();
   tests_round500();
   tests_round500_te();
 }

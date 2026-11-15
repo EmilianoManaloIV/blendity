@@ -167,6 +167,27 @@ work on the spot.
   per piece) - not decided here.
 - **Limits before the kernel:** a styled door over 100 m in any size is left out and named in the status; a swung
   leaf is no thicker than the frame is wide (its outer face would lie in the reveal's plane).
+- **An added opening stands upright (found when the owner tried it: doors lay flat in rooms drawn onto a wall).** A door
+  or window gets the Blockout's up (+Y in its frame), not its room's: `blockout_stand_opening` used the room's own up,
+  and a room turned onto its side or leaning gave it to the opening. A wall is accepted only when it is vertical within
+  2 degrees in the Blockout's frame (`|normal.y| <= sin 2 deg`); a leaning wall is refused with a status line that says
+  how much it leans, and a click on a face within 30 degrees of horizontal (a floor, a ceiling) is no wall, so the
+  opening goes in the room's fallback wall and the status says so. The fallback (the mouse on no wall, the Door button)
+  is the room's MOST UPRIGHT wall - every side of a box and its caps, a cylinder's facets and caps, an outline's
+  segments, the one whose normal in the Blockout's frame has the smallest |y|, a tie keeping the first so an upright room
+  still gets -X - not always the room's -X, which is a floor in a room turned 90 degrees about Z; with none within 2
+  degrees of vertical it refuses. The feet: an upright room keeps its floor line (bytes unchanged); another room has none,
+  so the feet stand on the floor under the opening - a ray down from each jamb's foot to the first face of the mesh in
+  the room - on the higher of the two (a sloped floor leaves a small step of wall at the low jamb instead of a cut
+  through the floor slab), else on the room's lowest point. Only the adding paths do this: a turn the user makes after
+  is theirs.
+- **Each style carries a preset size** (`blockout_opening_preset`): doors 0.9 x 2.1 m, Double 1.8 x 2.1 (two 0.9 m
+  leaves), Revolving 1.2 wide (its two entries); windows 1.2 x 2.0, Double 1.5. A new opening takes its style's size
+  (the typed numbers replace it, even one that equals another style's preset); switching style on an existing opening
+  takes the new style's only when Width and Head still equal the old style's by value - so a size typed that happens to equal the old
+  preset counts as untouched. A Round window is the exception: its Head is its circle's (Sill + Width), no preset, so
+  leaving Round keeps the numbers (round 498's rule, pinned by its tests). Nothing runs on
+  load: a saved number never changes. Before this, every door style was 0.9 x 2.1 and every window 1.2 x 2.0.
 
 ## Amended in round 500 (task 0484): architectural pieces, the same way
 - **A piece's `preset`** (Column, Pilaster, Beam, Railing, Roof, Stairs L, Stairs U, Spiral Stairs, Arcade; None is the
