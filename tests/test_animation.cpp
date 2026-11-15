@@ -2082,7 +2082,7 @@ static void round69_tests() {
     auto drag_onto = [&](const std::string &object, const std::string &field) {
       int hx = 0, hy = 0;
       Recti f;
-      if (!ed.hierarchy_row_for_test(object, hx, hy) || !ed.button_rect_for_test("field:" + field, f)) {
+      if (!ed.hierarchy_row_for_test(object, hx, hy) || !r509_scroll_to(ed, WindowKind::Inspector, "field:" + field, f)) {  // (scrolled to: round 509)
         std::printf("    no row '%s' or field '%s'\n", object.c_str(), field.c_str());
         return false;
       }

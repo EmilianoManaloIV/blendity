@@ -185,7 +185,7 @@ void Editor::poll_snapshot_inbox(bool now) {
     for (int n = 2; fs::exists(to) && n < 1000; n++) to = fs::join(done, fs::stem(e.name) + strprintf(" %d", n) + ".blendity-snapshot");
     if (!fs::move(folder, to)) Log::warn("Send to Blendity: couldn't move %s to Done (left in Incoming, not imported again)", e.name.c_str());
     else inbox_tried_.erase(folder);
-    if (ok) toast(LogLevel::Info, "Sent to Blendity: " + fs::stem(e.name) + " (Ctrl+Z takes it away)");
+    if (ok) toast(LogLevel::Info, "Sent to Blendity: " + fs::stem(e.name) + " (" + (key("edit.undo").empty() ? std::string("Edit > Undo") : key("edit.undo")) + " takes it away)");
   }
 }
 

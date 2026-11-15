@@ -218,7 +218,7 @@ void Editor::draw_sketch_shape_items() {
   if (u.menu_item("Sides: 5", nullptr, sketch_vec_sides_ == 5)) sketch_vec_sides_ = 5;
   if (u.menu_item("Sides: 6", nullptr, sketch_vec_sides_ == 6)) sketch_vec_sides_ = 6;
   if (u.menu_item("Sides: 8", nullptr, sketch_vec_sides_ == 8)) sketch_vec_sides_ = 8;
-  u.tooltip("A polygon's sides, a star's points (the console's `sketch shape polygon <n>` takes any from 3).");
+  u.tooltip("A polygon's sides, a star's points: the menu offers 5, 6 or 8.");
   u.menu_separator();
   if (u.menu_item("Fill: Pen Color", nullptr, sketch_fill_ != 0 && (sketch_fill_ & 0xFFFFFF) == (sketch_.color & 0xFFFFFF))) sketch_fill_ = sketch_.color | 0xFF000000u;
   u.tooltip("What the shapes and the Pen make is filled with the pen's color (Illustrator's Fill).");

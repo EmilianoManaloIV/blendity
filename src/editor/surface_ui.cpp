@@ -230,7 +230,7 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
       apply_material_id_mask(*pt->layers[(size_t)layer], slot);
       pt->touch();
       mark_changed("Material ID Mask");
-      if (!pt->maps || pt->maps->id.empty()) Log::warn("Surface %s: no ID map loaded - Bake All Maps (`surface bakeall`) bakes one; until then the mask is empty", pt->name.c_str());
+      if (!pt->maps || pt->maps->id.empty()) Log::warn("Surface %s: no ID map loaded - Bake All Maps (Textures window, on the surface) bakes one; until then the mask is empty", pt->name.c_str());
       return;
     }
     if (what == "clear") {

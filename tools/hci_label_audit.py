@@ -14,10 +14,16 @@ import os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "src", "editor")
 SHORTCUT = re.compile(r'"((?:[^"\\]|\\.)*?(?:\b(?:Ctrl|Shift|Alt|Cmd)\+[A-Za-z0-9+]+|\bF(?:[1-9]|1[0-2])\b|\([A-Z]\)|\((?:Tab|Esc|Del|Space|Enter)\))(?:[^"\\]|\\.)*)"')
+# The Sketch Pad's selection keys are read by the pad itself (its key handler; Ctrl+T in sketch_transform.cpp, the menu rows that
+# say them in sketch_select.cpp), and the Draw tool's Tab by its own, not bound in the keymap, so
+# no preset changes them: fixed gestures of a modal tool (round 510, task 0494). Matched by file, so a menu row elsewhere
+# that writes Ctrl+D still counts.
+FIXED_IN = {"sketch_select.cpp": ("Alt+Backspace", "Ctrl+D", "Ctrl+T"),
+            "draw_tool.cpp": (" (Tab)",)}  # (the Draw tool flips Project in its own key handler: no keymap action, so no preset moves it)
 SKIP_FILES = {"keymap.cpp", "lessons.cpp"}  # the keymap defines them; the lessons teach them in prose
 OTHER_TOOLS = re.compile(r"(?:\b|\\n)(?:Blender|Unity|Unreal|Maya|3ds Max|SketchUp|ProBuilder|UModeler|Substance|ZBrush|Photoshop|Krita|Procreate|Lightroom)\b")  # (after an escaped newline too)
 FIXED = re.compile(r"\(Esc\)|\bAlt\+F4\b|Shift\+X/Y/Z|Shift\+arrows|hold V\b|Ctrl\+Shift to drop|Ctrl with any brush|Ctrl snap|\bEsc: |Arrows / A D")  # (the same in every preset, or a modal's own letters: not labels the keymap owns)
-GESTURE = re.compile(r"\b(?:Ctrl|Shift|Alt|Cmd)\+(?:LMB|MMB|RMB|click|drag|wheel|tap|hold|Shift while|Alt while)|\bwhile dragging\b|\+click\b|\+drag\b|\+wheel\b", re.I)
+GESTURE = re.compile(r"\b(?:Ctrl|Shift|Alt|Cmd)\+(?:LMB|MMB|RMB|click|drag|wheel|tap|hold|corner|edge|Shift while|Alt while)|\bwhile dragging\b|\+click\b|\+drag\b|\+wheel\b", re.I)
 
 
 def main():
@@ -32,6 +38,7 @@ def main():
                 for m in SHORTCUT.finditer(line):
                     lit = m.group(1)
                     if OTHER_TOOLS.search(lit): continue  # ("Blender: Ctrl+T": another tool's key, said on purpose)
+                    if lit in FIXED_IN.get(name, ()): continue  # (the pad's own keys)
                     if FIXED.search(lit): continue  # (Esc, the OS's Alt+F4, a modal's own letters)
                     if GESTURE.search(lit) and not re.search(r"\((?:[A-Z]|F\d+)\)", lit): continue  # (a mouse gesture the keymap does not bind)
                     rows.append((name, n, lit))
