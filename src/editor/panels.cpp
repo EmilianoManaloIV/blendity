@@ -1898,6 +1898,7 @@ void Editor::draw_inspector(const Recti &r) {
       if (auto *bj = dynamic_cast<Blockout *>(c)) draw_blockout_join_row(*g, *bj, lay);  // (round 501: "touches 'Name'" and Join Blockouts)
       if (auto *bk = dynamic_cast<BlockoutBaked *>(c)) draw_blockout_baked_extras(*g, *bk, lay);  // (round 482: Unbake)
       if (auto *bpc = dynamic_cast<BlockoutPiece *>(c)) draw_blockout_piece_extras(*g, *bpc, lay);  // (round 496: Apply Scale to Size)
+      if (auto *bl = dynamic_cast<BlockoutLeaf *>(c)) draw_blockout_leaf_extras(*g, *bl, lay);  // (round 515: "Made by Door ...")
       if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
         const Recti row = lay.row(u.row_h() + u.px(2));
         const int bw = (row.w - u.px(16)) / 3;

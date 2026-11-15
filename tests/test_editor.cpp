@@ -13,6 +13,7 @@
 #include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
 #include <cstring>
+#include <limits>
 #include "../src/render/texture_bake.h"
 
 #include <chrono>
@@ -8435,6 +8436,36 @@ static void tests_round436() {
   });
 }
 
+/* ---------------------------------------------------------------- round 515: a collider wire with a negative centre */
+static void tests_round515_collider_wire() {
+  test("collider wires (515): a collider with a negative centre, a NaN or a huge size is drawn without an undefined conversion, and its wire follows a change of a negative centre (a door leaf's collider sits off its hinge: UBSan stopped on (uint64_t)(-3900.0f))", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.command("component Collider");
+    GameObject *g = ed.active_object_for_test();
+    ColliderComponent *c = g ? g->get<ColliderComponent>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->fit = false;
+    c->center = {-0.39f, -1.0f, -2.5f};
+    ed.step_frame_headless();  // (the Scene view draws the wire: the conversion UBSan named)
+    const Mesh *a = ed.collider_wire_for_test(*g);
+    CHECK(a != nullptr);
+    c->center.x = -0.40f;  // (a change that only a negative centre's key sees)
+    const Mesh *b = ed.collider_wire_for_test(*g);
+    CHECK(b != nullptr && b != a);
+    CHECK(ed.collider_wire_for_test(*g) == b);  // (and kept while nothing changes)
+    for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -1e30f, 1e30f}) {
+      c->size = {bad, 1.0f, 1.0f};
+      c->radius = bad, c->height = bad;
+      ed.step_frame_headless();
+      ed.collider_wire_for_test(*g);
+    }
+    CHECK(true);  // (reached: no conversion fault; the sanitizer build is the judge of the undefined case)
+  });
+}
+
 /* ---------------------------------------------------------------- round 445: the soak's memory (task 0421) */
 static void tests_round445() {
   test("memory accounts (round 445): every subsystem named, the bytes added up, `perf memory` says them", [] {
@@ -14776,5 +14807,6 @@ void run_editor_tests() {
   tests_round508();
   tests_round508_te();
   tests_round508_te_open();
+  tests_round515_collider_wire();
   coverage_tests();
 }

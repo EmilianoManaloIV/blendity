@@ -134,7 +134,7 @@ struct BlockoutState {
   std::string logged_why;       // the refusal already written to the log
   std::vector<std::pair<uint64_t, std::string>> refused;  // mesh pieces the last snapshot left out (round 480), for the status
   std::vector<BlockoutWindowFit> window_fits;              // styled windows held coarse on the grid (round 498), for the status
-  std::vector<std::string> swing_cuts;                     // (round 499: "Door 'X': its open leaf cuts 'Y'", for the status)
+  std::vector<std::string> swing_cuts;                     // (a preset's notes about the grid, for the status; round 499's swing cuts are gone: ADR 0136)
   std::unique_ptr<blockout::Cache> cache;
   BlockoutState() = default;
   BlockoutState(const BlockoutState &o)
@@ -250,6 +250,11 @@ struct BlockoutPiece : ComponentBase<BlockoutPiece> {
   float drum_radius = 1.0f;      // Revolving: the drum's radius, metres
   bool is_styled_door() const { return opening == 1 && style > 0 && style < kBlockoutDoorStyles; }
   bool is_styled_opening() const { return is_styled_window() || is_styled_door(); }
+  /* Round 515 (task 0497, ADR 0136): the leaf is an object of its own, made and kept by the editor under the door (BlockoutLeaf). A Revolving door's leaf is its wings: `wings`, off by
+   * default, so the drum stays the blocked-out space round 499 made (a file of round 499 has no Wings and loads without them; the Inspector's and the console's Leaf is this one for a
+   * Revolving door). */
+  bool wings = false;
+  bool leaf_on() const { return style == kDoorRevolving ? wings : leaf; }
   /* Round 500 (task 0484): an architectural preset (BlockoutPreset; 0: none - the fields below are not read and a scene from before the round has none). The piece's origin
    * is the middle of its footprint at its bottom (a Pilaster's: its back, on the wall), +Y up. Shared with the shapes: Radius (a column's shaft half-width, a spiral's outer radius),
    * Height (a column's, an arcade's columns'), Segments, Steps (a flight's, a spiral's), Fill Under, Inner Radius (a spiral's post), Depth (an arcade's), Size (a beam's:
@@ -328,10 +333,50 @@ Mat4 blockout_piece_matrix(const GameObject &piece, const GameObject &blockout);
 struct BlockoutSnapshotNotes {
   std::vector<std::pair<uint64_t, std::string>> refused;
   std::vector<BlockoutWindowFit> window_fits;  // (round 498: the styled windows that were held coarse or fell back on the grid)
-  std::vector<std::string> swing_cuts;         // (round 499: a swung leaf's cut reaches past the door's Depth over these pieces: "Door 'X': its open leaf cuts 'Y'")
+  std::vector<std::string> swing_cuts;         // (round 515: no swing cut any more; what is left here is a preset's notes about the grid - the name stays for the status line that shows them)
   std::vector<uint64_t> sources;
   BlockoutSurface surface;  // (round 482: the materials, the scale, each piece's own - in the order of the pieces)
 };
+
+/* ---- A door's leaf as an object (round 515, task 0497, ADR 0136) ---- */
+
+/* On an object the editor made under a styled door (its `made_by`): it is the door's leaf (Single, Arched, Sliding), one of its two (Double: index 0 is "Leaf L" on the +X jamb, 1 "Leaf R") or its
+ * wings (Revolving). It has a mesh, a renderer and a Box collider and no BlockoutPiece, so the kernel never sees it. The editor keeps it in step with the door (blockout_editor.cpp). */
+struct BlockoutLeaf : ComponentBase<BlockoutLeaf> {
+  static constexpr const char *kName = "BlockoutLeaf";
+  int index = 0;
+  std::string made_from;  // a key of the numbers the mesh and place were made from, as text (files hold no 64-bit numbers): another key means the leaf is made again
+  float open_seen = 0.0f; // the door's Open Amount this leaf last matched: a different one on the door turns the leaf, a leaf turned by hand writes it to the door
+  std::string door;       // while the Blockout is baked: the door's object id as text (the leaf stands under the baked object then; Unbake puts it back)
+  std::string made_by;    // the door that made it: its object id as text. A leaf is the door's only while its parent is that door; under another parent it is an ordinary object
+  void reflect(Reflector &r) override;
+};
+
+/* What a leaf is, worked out from the door's numbers (no mesh, no scene): where it hangs and how it turns or slides. In the door's own space (x across, y up from its floor line, z
+ * through the wall; the door faces +Z). A hinged leaf's origin is on its hinge line, a Sliding leaf's its closed place, the Wings' the drum's axis. */
+struct BlockoutLeafPlan {
+  enum Kind { Swing, Slide, Wings };
+  Kind kind = Swing;
+  int index = 0;
+  const char *name = "Leaf";
+  Vec3 origin;
+  float sign = 1.0f;     // Swing: +1 when hinged on the +X jamb (it turns Open x 90 degrees about Y, into +Z); Slide: +1 slides toward +X
+  float travel = 0.0f;   // Slide: how far Open 1 moves it, metres
+  std::vector<std::pair<Vec3, Vec3>> boxes;  // the slab(s) in the leaf's own space: low and high corners (the Wings: a post and four vanes)
+};
+/* The leaves a door has now: none for a door with no style, with Leaf off, or whose numbers make none. Hinged leaves stand from the floor line to the frame's head (an Arched door's
+ * to the line its round head springs from: the head above stays open). */
+void blockout_leaf_plans(const BlockoutPiece &door, std::vector<BlockoutLeafPlan> &out);
+/* The door's Open Amount held to 0..1 (NaN: 0). */
+float blockout_door_open(const BlockoutPiece &door);
+/* The leaf's local place at `open`: its position, and its turn about Y in degrees (a sliding leaf moves and does not turn). */
+void blockout_leaf_pose(const BlockoutLeafPlan &plan, float open, Vec3 &position, float &yaw_degrees);
+/* The Open Amount a leaf's local transform stands for (not held to 0..1): false for a Sliding leaf and for a leaf that is turned about anything but Y. */
+bool blockout_leaf_open_of(const BlockoutLeafPlan &plan, const Transform &local, float &open);
+/* The leaf's mesh: its boxes with round 482's UVs at `texture_scale` metres a tile, one slot. */
+MeshPtr blockout_leaf_mesh(const BlockoutLeafPlan &plan, float texture_scale);
+/* A key of what the mesh and the place are made from (the plan, the texture scale and the material path): equal keys, same leaf. */
+uint64_t blockout_leaf_key(const BlockoutLeafPlan &plan, float texture_scale, const std::string &material);
 
 /* The kernel pieces a styled window makes (round 498): the hole (Subtract) with what stays in it, Add solids and the faces' parts. Appended to `out`;
  * false (nothing appended) when the piece is no styled window or its numbers are not finite or too small to build from: the caller then uses the plain
