@@ -6312,7 +6312,7 @@ class Editor {
     std::map<uint64_t, ReflectionProbeBake> probe_bakes;
     std::map<uint64_t, TexturePtr> probe_maps;  // (round 428: each bake's map with its prefiltered levels, made on the worker)
     /* What the tray and the Lighting window read while it runs. */
-    std::atomic<int> phase{0};  // 0 the lightmaps, 1 the probe volume, 2 the volumes, 3 the reflection probes, 4 done
+    std::atomic<int> phase{0};  // 0 the lightmaps, 1 the probe volume, 2 the volumes, 3 the reflection probes, 4 done, 5 the pages going to the card (round 508)
     double phase_ms[5] = {-1, -1, -1, -1, -1};  // (round 421: the lightmaps, the probes, the Light Volumes, the reflection probes, saving; -1 not reached)
     double lightmap_finish_ms = 0;         // (the lightmaps' filter and dilation, inside phase 0)
     size_t lightmap_texels = 0;

@@ -104,10 +104,16 @@ void Doc::open_file_async(const std::string &path) {
   Read *raw = read.get();
   raw->thread = std::thread([raw] {
     JobSystem::global().run_background([raw] {
-      Bitmap b;
-      raw->ok = load_image(raw->path, b, raw->error);
-      if (raw->ok && (b.width <= 0 || b.height <= 0)) raw->ok = false, raw->error = "empty image";
-      if (raw->ok) raw->img = image_from_bitmap(b);
+      /* (An exception out of a thread ends the program: a read that throws - out of memory on a huge picture - fails the
+       * read instead.) */
+      try {
+        Bitmap b;
+        raw->ok = load_image(raw->path, b, raw->error);
+        if (raw->ok && (b.width <= 0 || b.height <= 0)) raw->ok = false, raw->error = "empty image";
+        if (raw->ok) raw->img = image_from_bitmap(b);
+      } catch (const std::exception &e) {
+        raw->ok = false, raw->error = e.what(), raw->img = Image();
+      }
     });
     raw->done.store(true, std::memory_order_release);
   });

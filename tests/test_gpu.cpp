@@ -6161,6 +6161,7 @@ static void tests_round508_gpu() {
     ed.command("bake start");
     std::vector<uint32_t> before_pages, last_before;
     size_t frames_sending = 0, mixed = 0, unsteady = 0;  // (unsteady: frames before any page went up that differ from the one before)
+    size_t tray_said = 0;  // (frames sending pages whose job tray named that step)
     bool still = false;  // (the last two frames before the first page are the same picture: the view is still, so `mixed` means a frame showed something new)
     uint64_t sent_in_landing = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
@@ -6175,6 +6176,7 @@ static void tests_round508_gpu() {
       ed.step_frame_headless();
       if (view_perf::counters.lightmap_pages_before_landing != ahead) {
         frames_sending++;
+        for (const Editor::JobView &jv : ed.jobs_for_test()) tray_said += jv.label == "Sending the bake to the card";
         if (!before_pages.empty() && r458_differ(before_pages, r34_crop(ed, ed.scene_view_rect())) != 0) mixed++;
       }
       if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
@@ -6189,6 +6191,7 @@ static void tests_round508_gpu() {
     CHECK(still);
     CHECK(mixed == 0);
     CHECK(sent_in_landing == 0);
+    CHECK(tray_said == frames_sending);  // (the job tray says what the bake is doing while its pages go up)
     r34_steps(ed, 6);
     CHECK(pages == one_frame.size());
     for (size_t k = 0; k < pages && k < one_frame.size(); k++) {

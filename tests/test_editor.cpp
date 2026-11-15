@@ -13828,7 +13828,7 @@ edit::Image picture(int w, int h) {
       p[2] = 0.3f + 0.2f * std::sin(x * 0.05f) * std::cos(y * 0.09f) + 0.1f * n;
       p[3] = 0.8f;
     }
-  img.at(5, 5)[0] = 3.0f;  // (above white)
+  if (w > 5 && h > 5) img.at(5, 5)[0] = 3.0f;  // (above white; a picture smaller than 6 x 6 has no such pixel - ASan found the write past its end)
   return img;
 }
 

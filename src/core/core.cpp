@@ -252,6 +252,10 @@ std::vector<DirEntry> list(const std::string &dir) {
 }
 
 bool read_file(const std::string &path, std::string &out) {
+  /* (Round 508: on Linux a folder opens as a stream whose end is at the largest offset there is - the string was sized to
+   * it and threw std::length_error, on a picture's read worker the end of the program. A folder is not a file.) */
+  std::error_code ec;
+  if (std::filesystem::is_directory(P(path), ec)) return false;
   std::ifstream f(P(path), std::ios::binary);
   if (!f) return false;
   /* Task 0210: the size first, then one read into the string (through a stream buffer and a copy it was most of opening
@@ -259,7 +263,7 @@ bool read_file(const std::string &path, std::string &out) {
    * through the stream as before. */
   f.seekg(0, std::ios::end);
   const std::streamoff size = f ? (std::streamoff)f.tellg() : -1;
-  if (size > 0) {
+  if (size > 0 && (unsigned long long)size < (unsigned long long)out.max_size()) {
     f.seekg(0);
     out.resize((size_t)size);
     f.read(&out[0], (std::streamsize)size);

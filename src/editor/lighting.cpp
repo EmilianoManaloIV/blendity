@@ -781,8 +781,22 @@ bool Editor::bake_pages_ready(BakeJob &j) {
   send(j.lighting.pages);
   if (scene_->lighting.directional_mode != 0) send(j.lighting.dir_pages);
   send(j.lighting.mask_pages);
-  if (sent) ui_.redraw = true;  // (the landing comes in the next frame: keep frames coming)
-  return !sent;
+  if (!sent) return true;
+  /* (The tray says what the bake is doing meanwhile: phase 5, its progress the share of the pages on the card.) */
+  size_t total = j.lighting.pages.size() + j.lighting.mask_pages.size() + (scene_->lighting.directional_mode != 0 ? j.lighting.dir_pages.size() : 0), up = 0;
+  auto count_up = [&](const std::vector<Lightmap> &set) {
+    for (const Lightmap &p : set) {
+      const auto found = gpu_lightmaps_.find(&p);
+      up += found != gpu_lightmaps_.end() && found->second.first == p.serial;
+    }
+  };
+  count_up(j.lighting.pages);
+  if (scene_->lighting.directional_mode != 0) count_up(j.lighting.dir_pages);
+  count_up(j.lighting.mask_pages);
+  j.phase.store(5);
+  j.progress.store(total ? (float)up / (float)total : 1.0f);
+  ui_.redraw = true;  // (the landing comes in the next frame: keep frames coming)
+  return false;
 }
 
 /* The worker's files (in `tmp`, the bake's own folder) moved over the scene's lighting folder, older ones replaced; `tmp` taken
