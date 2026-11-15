@@ -1,6 +1,6 @@
 # 0497: A door's leaf as a part that swings (round 515, Pass 23b)
 
-- **Status:** done 2026-11-15, with deviations: export writes each leaf as its own node beside the Blockout's (the
+- **Status:** (PR #411) done 2026-11-15, with deviations: export writes each leaf as its own node beside the Blockout's (the
   exporters keep no parents; ADR 0136 decision 8 rewritten); the Unity bridge has no test; a leaf's collider is kinematic
   through a Rigidbody (decision 7); round 513 is the HCI worker's, so this PR is a stack of its own on `main`; the tests
   are in `tests/test_blockout_leaf.cpp` (test_blockout.cpp reached MSVC's object-section limit). (Implemented 2026-11-14; approved 2026-11-14 with ADR 0136 - the owner, through the hub: "Approve 514 and 515"; asked as "Doors

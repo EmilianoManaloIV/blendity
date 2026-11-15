@@ -1,6 +1,6 @@
 # 0483: Door styles for a Blockout (round 499, Pass 23b R3)
 
-- **Status:** approved with Pass 23b (the owner, 2026-11-11, through the hub - `pass23b-plan-approved-2026-11-11.md`;
+- **Status:** done (round 499, PR #405); approved with Pass 23b (the owner, 2026-11-11, through the hub - `pass23b-plan-approved-2026-11-11.md`;
   their words: "No, just the blockout of space for a rotating door. I want a preset of parameters. No, keep things like
   a blockout so I can texture and add materials later."). **Done (round 499)**; what differs from the text below:
   - An open hinged leaf (Open Amount > 0) cuts whatever stands in its swing in front of the wall; the Blockout's

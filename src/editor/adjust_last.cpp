@@ -4,7 +4,9 @@
 // (a circle's or an arc's segments, a polygon's sides, a rectangle's fillet) get Blender's redo panel. Changing a field
 // runs the operation again from the state before it and amends the same undo step: the step holds the scene before,
 // so only the editor's after-snapshot is taken again - no new step, Ctrl+Z still goes back to before the operation.
-// The panel lasts while that step is the newest; anything else committed ends it, as Blender's does.
+// The panel lasts while that step is the newest; anything else committed ends it, as Blender's does. One exception (round 503): a console `blockout set` or an Inspector
+// edit of the numbers of F9's own Blockout piece keeps the panel, refreshed from the piece and tied to that step (refresh_blockout_last), so the rows show what the piece has
+// and the next F9 edit does not write the old numbers back; an edit that reaches only another piece, or a `blockout set` of a room's wall, a blend or a material, ends it.
 #include "editor.h"
 #include "../scene/uv.h"
 

@@ -1,6 +1,6 @@
 # 0481: An L-shaped outline room's notch wall on the exact path (round 497)
 
-- **Status:** done (round 497, 2026-11-13) - see "Done: deviations". Approved - the owner's decision, 2026-11-13,
+- **Status:** (PR #399) done (round 497, 2026-11-13) - see "Done: deviations". Approved - the owner's decision, 2026-11-13,
   through the hub: "Fix L-shaped room fault."
 - **Requirements:** Q-01 (robust geometry), R-02 (modeling)
 - **Decisions:** ADR 0128 (the Blockout kernel: the plane table, the two paths, the face maker); no new decision expected -

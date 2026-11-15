@@ -4308,6 +4308,8 @@ class Editor {
   void room_options_command(const std::vector<std::string> &t);
   void draw_room_tools(ui::Layout &lay);
   void record_blockout_last(GameObject *piece);
+  bool f9_is_about_selection();
+  void refresh_blockout_last();  // (round 503: after a `blockout set` of the piece F9 is about, F9's record takes the piece's numbers)
   void join_selected();
   GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)

@@ -1836,6 +1836,13 @@ void Editor::draw_inspector(const Recti &r) {
       ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
       ir.owner = g;
       BlockoutPiece *edited_piece = dynamic_cast<BlockoutPiece *>(c);
+      /* Round 503: the piece Adjust Last (F9) is about, when it is selected and F9 is the newest step - and its hash now, before the edit: F9 follows the edit only if the piece
+       * changed (below). Asked before the edit and before mark_changed, after which the step is not the one F9 was made in. */
+      const uint64_t f9_piece = edited_piece && f9_is_about_selection() ? obj_last_.obj : 0;
+      uint64_t f9_before = 0;
+      if (f9_piece)
+        if (GameObject *fg = scene_->find(f9_piece))
+          if (BlockoutPiece *fp = fg->get<BlockoutPiece>()) f9_before = hash_component(*fp);
       const int style_before = edited_piece ? edited_piece->style : 0, opening_before = edited_piece ? edited_piece->opening : 2;
       c->reflect(ir);
       if (edited_piece && ir.changed) blockout_piece_edited(*edited_piece, style_before, opening_before);  // (round 498: a Round window is a circle; round 499: a door keeps its style, Door <-> Window starts at Opening Only; the same undo step)
@@ -1864,6 +1871,14 @@ void Editor::draw_inspector(const Recti &r) {
             if (!oc) continue;
             apply_edit_to(oc, fe, (int)i, (int)multi.size(), self, edited_piece ? edited_piece->opening : -1);
           }
+      }
+      /* An Inspector edit that changed the piece F9 is about leaves F9 showing its new numbers, as `blockout set` does. The refresh comes after the edit has gone to every
+       * selected piece and any expression has been applied, or F9 would copy the old value and write it back at its next edit. A piece the edit did not change (a Style edited
+       * on a door while F9 is on a window, a field the other kind has not) leaves F9 alone, and its step is no longer the newest, so the panel closes as before round 503. */
+      if (f9_piece && ir.changed) {
+        GameObject *fg = scene_->find(f9_piece);
+        BlockoutPiece *fp = fg ? fg->get<BlockoutPiece>() : nullptr;
+        if (fp && hash_component(*fp) != f9_before) refresh_blockout_last();
       }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
       if (auto *pg = dynamic_cast<LightProbeGroupComponent *>(c)) draw_probe_group_extras(*g, *pg, lay);  // (round 455)
