@@ -327,4 +327,10 @@ if exist "%L%\opencolorio" if exist "%OCIO_CFG%\config.ocio" xcopy /e /i /y /q "
 if defined VCToolsRedistDir (
   for /d %%c in ("%VCToolsRedistDir%x64\Microsoft.VC*.CRT") do copy /y "%%c\*.dll" dist\windows\ >nul
 )
+rem Round 512: Embree's DLL needs dpcpp's SYCL runtime (sycl9.dll, ur_loader.dll, ur_win_proxy_loader.dll, xptifw.dll);
+rem without it every executable here exits at once, with no message. A library tree with no dpcpp folder is said so.
+if exist dist\windows\embree4.dll if not exist dist\windows\sycl9.dll (
+  echo [blendity] WARNING: embree4.dll needs dpcpp's SYCL runtime ^(sycl9.dll and the ur_ / xptifw DLLs^), and "%L%\dpcpp\bin" has none:
+  echo [blendity]          copy them into dist\windows or fetch Blender's dpcpp library, or the programs here exit without a word.
+)
 exit /b 0
