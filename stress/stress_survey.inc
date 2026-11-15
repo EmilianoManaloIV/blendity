@@ -673,15 +673,44 @@ static void test_sequencer(Report &rep, const Options &o) {
     const char *proj = std::getenv("BLENDITY_PROJECT");
     std::set<std::string> renders_before;
     for (const DirEntry &de : fs::list(fs::join(proj ? proj : ".", "Renders"))) renders_before.insert(de.name);
-    const StallRun r = run_stall(*ed, [&] { ed->command(strprintf("renderanim 1 %d 24", n)); }, [&] { return ed->rendering_for_test(); }, 600000.0);
+    /* Round 507: the old row waited on rendering_for_test(), which falls after each frame's picture lands - so it timed the
+     * start frame alone. The animation's own flag stays up till the last frame is finished; the frames are kept apart:
+     * the start (folder, preview, snapshot, first composite), the steady ones, and the end (the PNG waits, the WAV mix). */
+    double start_ms = 0, end_ms = 0;
+    Frames steady;
+    std::string slow;  // (the steady frames over the job budget: which, and how far the render had got)
+    size_t rendered = 0;
+    ScopedTimer whole;
+    {
+      ScopedTimer f;
+      ed->command(strprintf("renderanim 1 %d 24", n));
+      ed->step_frame_headless();
+      start_ms = f.ms();
+    }
+    while (ed->render_animation_for_test().active && whole.ms() < 600000.0) {
+      rendered = ed->render_animation_for_test().written.size();
+      ScopedTimer f;
+      ed->step_frame_headless();
+      const double ms = f.ms();
+      if (ed->render_animation_for_test().active) {
+        steady.add(ms);
+        if (ms > kJob) slow += strprintf("%s#%zu %.0f ms (frame %zu rendered)", slow.empty() ? "" : ", ", steady.ms.size(), ms, rendered);
+      }
+      else end_ms = ms;  // (the frame the animation finished in)
+    }
+    const double total_s = whole.ms() / 1000.0;
+    rendered = std::max(rendered, ed->render_animation_for_test().written.size());
     for (const DirEntry &de : fs::list(fs::join(proj ? proj : ".", "Renders")))
       if (!renders_before.count(de.name) && de.is_dir) {
         std::error_code ec;
         std::filesystem::remove_all(fs::join(fs::join(proj ? proj : ".", "Renders"), de.name), ec);
       }
-    rep.table({"render to video", "total s", "longest frame ms", "frames", "in the tray", "budget"});
-    rep.row({strprintf("renderanim of an 8-strip sequence at 640 x 360 (%s)", video::available() ? "an MP4" : "PNG frames"), f2(r.total / 1000.0), f1(r.longest), std::to_string(n), r.tray ? r.label : "-",
-             once_verdict(r.longest, kJob)});
+    rep.table({"render to video", "total s", "frames rendered", "median ms", "longest ms", "frames", "budget"});
+    const std::string what = strprintf("renderanim of an 8-strip sequence at 640 x 360 (%s)", video::available() ? "an MP4" : "PNG frames");
+    rep.row({what + ": the start frame", f2(total_s), std::to_string(rendered), f1(start_ms), f1(start_ms), "1", once_verdict(start_ms, kOnce)});
+    rep.row({what + ": the steady frames", "-", "-", f1(steady.median()), f1(steady.longest()), std::to_string(steady.ms.size()), steady.ms.empty() ? "-" : once_verdict(steady.longest(), kJob)});
+    if (!slow.empty()) rep.note("Steady frames over " + f1(kJob) + " ms: " + slow + ".");
+    rep.row({what + ": the end frame", "-", "-", f1(end_ms), f1(end_ms), "1", once_verdict(end_ms, kOnce)});
   }
 }
 
@@ -930,9 +959,8 @@ static std::string hex_guid(uint32_t a, uint32_t b) { return strprintf("%08x%08x
 /* An unpacked Unity package in a folder of the project: a scene of `objects` cubes (a GameObject, its Transform, a MeshFilter and a MeshRenderer each),
  * materials with a texture each, and the .meta files that give every asset its GUID. */
 static void write_unity_package(const std::string &folder, int objects, int materials, int textures, size_t &bytes) {
-  /* One flat folder: export unitypackage's folder walk keeps a reference to the parent item's path while it adds the children
-   * (Editor::export_unity_package's `walk`), which a vector growing under it leaves dangling - a package with sub-folders of more than a few
-   * files made it throw bad_alloc here (round 504's sweep lists it). Flat, the walk is safe. */
+  /* Round 507: with nested folders (Extras/A/B, 40 files each) - the walk once kept a reference into the vector it grew, and a package with
+   * sub-folders of more than a few files threw bad_alloc here (round 504's sweep listed it). */
   fs::make_dirs(folder);
   auto put = [&](const std::string &path, const std::string &text) {
     fs::write_file(path, text);
@@ -942,6 +970,10 @@ static void write_unity_package(const std::string &folder, int objects, int mate
     put(path + ".meta", strprintf("fileFormatVersion: 2\nguid: %s\n%s", guid.c_str(), folder_meta ? "folderAsset: yes\n" : ""));
   };
   std::vector<std::string> tex_guid, mat_guid;
+  for (const char *sub : {"Extras", "Extras/A", "Extras/A/B"}) {
+    fs::make_dirs(fs::join(folder, sub));
+    for (int i = 0; i < 40; i++) put(fs::join(fs::join(folder, sub), strprintf("note%d.txt", i)), "extra\n");
+  }
   for (int i = 0; i < textures; i++) {
     const std::string p = fs::join(folder, strprintf("T%d.png", i));
     write_test_png(p, 64, 64, (uint32_t)i + 5);
@@ -1007,17 +1039,50 @@ static void test_unity_export(Report &rep, const Options &o) {
     rep.row({imp.made == 0 ? "import the package's scene (nothing imported)" : "import the package's scene", std::to_string(objects), f2(imp.total / 1000.0), f1(imp.landing), size_text(bytes),
              imp.made == 0 ? "OVER" : once_verdict(imp.landing)});
     problems += imp.made == 0;
+    if (objects >= 1000 || objects == 100) {  /* Round 507: the import's parts - what the one call is made of (steps of the importer, then the passes of the build, indented). */
+      rep.table({"import part", "objects", "ms"});
+      double sum = 0;
+      for (const auto &[part, ms] : ed->unity_import_parts_for_test()) {
+        rep.row({part, std::to_string(objects), f1(ms)});
+        sum += part.rfind("  ", 0) == 0 ? 0.0 : ms;
+      }
+      rep.row({"the steps' sum", std::to_string(objects), f1(sum)});
+      /* The same scene imported again in a fresh editor: Assets is as it was, so the GUID index is the kept one. */
+      auto again_ed = fresh(1280, 720, true);
+      const ImportTrace again_imp = one_frame_import(*again_ed, "import " + scene_file);
+      for (const auto &[part, ms] : again_ed->unity_import_parts_for_test())
+        if (part == "guid index" || part == "read + parse" || part == "build (all passes)") rep.row({"2nd import: " + part, std::to_string(objects), f1(ms)});
+      rep.row({std::string("2nd import: the whole call") + (again_ed->unity_import_index_reused_for_test() ? " (index kept)" : " (index walked again)"), std::to_string(objects), f1(again_imp.landing)});
+      rep.table({"step", "objects", "total s", "longest frame ms", "bytes", "budget"});
+    }
+    {  /* Round 507: `budget pc` over the imported scene - the whole count in one call (a headless editor, what a window waited for before), then the window's
+        * way: the call that takes the snapshot and starts the job, and the longest frame while it counts. */
+      ScopedTimer whole_t;
+      double sync_call = 0;
+      cmd_frame(*ed, "budget pc", &sync_call);
+      ed->set_budget_windowed_for_test(true);
+      double call = 0, longest = 0;
+      ScopedTimer job_t;
+      cmd_frame(*ed, "budget pc", &call);
+      while (ed->budget_counting_for_test() && job_t.ms() < 120000.0) longest = std::max(longest, frame(*ed));
+      ed->set_budget_windowed_for_test(false);
+      rep.row({"budget pc (the whole count in the call: before round 507's job)", std::to_string(objects), f2(whole_t.ms() / 1000.0), f1(sync_call), "-", once_verdict(sync_call)});
+      rep.row({"budget pc in a window (the call: the snapshot and the job's start)", std::to_string(objects), f2(job_t.ms() / 1000.0), f1(call), "-", once_verdict(call)});
+      rep.row({"budget pc in a window (the longest frame while it counts)", std::to_string(objects), f2(job_t.ms() / 1000.0), f1(longest), "-", once_verdict(longest, kJob)});
+    }
     const std::string out = fs::join(fs::join(proj ? proj : ".", "Exports"), name + ".unitypackage");
     ScopedTimer t;
     std::string threw;
     const double first = cmd_frame_guarded(*ed, "export unitypackage " + rel, threw);
     const size_t pkg = file_bytes(out);
-    /* A headless editor runs the whole export inside the call; in the app only the scan blocks and the writing is on a worker. Nothing of the app's
-     * blocking part can be timed without a product change, so a package that came out has no verdict (-); one that did not, or that threw, is OVER. */
+    /* A headless editor runs the whole export inside the call; in the app only what reads the scene blocks (round 507: the folder walk is the worker's
+     * now) and the rest is on a worker. The job keeps the time of its own call (`call_ms`), beside the whole job. */
     const bool failed = !threw.empty() || pkg == 0;
     rep.row({!threw.empty() ? "export unitypackage (threw)" : pkg == 0 ? "export unitypackage (no package written)" : "export unitypackage (the whole job, inline)", std::to_string(objects), f2(t.ms() / 1000.0), f1(first),
              size_text(pkg), failed ? "OVER" : "-"});
     problems += failed;
+    if (const auto *job = ed->last_export_for_test(); job && !failed)
+      rep.row({"export unitypackage (the call itself: what blocks before the worker starts)", std::to_string(objects), f2(job->call_ms / 1000.0), f1(job->call_ms), size_text(pkg), once_verdict(job->call_ms)});
     if (!threw.empty()) rep.note("export unitypackage threw: " + threw + " (a fault in the program, listed in the sweep)");
     ScopedTimer tm;
     const std::string report_file = fs::join(folder, "materials.txt");
@@ -1039,8 +1104,7 @@ static void test_unity_export(Report &rep, const Options &o) {
     }
   }
   rep.note(strprintf("Unity export problems (nothing imported, no package, a throw, a re-import that differs): %zu.", problems));
-  rep.note("The package is one flat folder: with sub-folders of a few files each, export unitypackage threw 'bad allocation' while this section was written "
-           "(Editor::export_unity_package's walk passes the parent item's pathname by reference while it pushes children into the same vector: a likely use after a reallocation). Listed in the sweep, not fixed here.");
+  rep.note("The package has nested folders (Extras/A/B, 40 files each): with the old walk, export unitypackage threw 'bad allocation' on a package like it (round 504's sweep); round 507 fixed it.");
   rep.note("The other Unity exporter, export anim, needs a clip made in the editor: not driven here (a clip is an Animation window's work; export tscn is the Godot scene's).");
 }
 

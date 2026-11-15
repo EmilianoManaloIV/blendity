@@ -13554,6 +13554,262 @@ static void tests_round506_engineer3() {
   });
 }
 
+/* Round 507 (task 0491): `budget pc` in a window counts on a job and posts the report the one-call count gives. */
+static std::vector<std::string> budget_lines_since(size_t at) {
+  std::vector<LogEntry> said;
+  Log::fetch(at, said);
+  std::vector<std::string> out;
+  for (const LogEntry &e : said)
+    if (e.text.rfind("  ", 0) == 0 || e.text.rfind("Budget (", 0) == 0) out.push_back(e.text);  // (the rows and the report: not "counting", not what a delete says)
+  return out;
+}
+
+static void budget_scene_507(Editor &ed, const std::string &png) {
+  for (int i = 0; i < 5; i++) {
+    GameObject *g = ed.scene().create("Part" + std::to_string(i));
+    g->add<MeshFilter>()->mesh = i % 2 ? primitives::uv_sphere(0.5f, 12 + i, 8) : primitives::cube();
+    MaterialPtr m = make_material("Mat" + std::to_string(i), Vec3(1.0f));
+    m->base_map = TextureRef{png, false};
+    g->add<MeshRenderer>()->materials = {m, m};
+  }
+}
+
+static void tests_round507() {
+  test("budget pc in a window (round 507): the command returns at once with 'counting', and the report that follows is the one-call count's, line for line", [] {
+    const std::string dir = fs::join(test_dir(), "r507_budget");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(64 * 32, 0xFF4080C0u);
+    const std::string png = fs::join(dir, "map.png");
+    CHECK(write_png(png, px.data(), 64, 32, 64, false));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    budget_scene_507(ed, png);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");  // (headless: the whole count in the call)
+    const std::vector<std::string> one_call = budget_lines_since(at);
+    CHECK(one_call.size() >= 10);  // (nine rows and the one-line report)
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());  // (returned with the count still on its worker or just done: not yet reported)
+    std::vector<LogEntry> early;
+    Log::fetch(at, early);
+    bool said_counting = false;  // (the console echoes the command first: look through what was said so far)
+    for (const LogEntry &e : early) said_counting = said_counting || e.text.rfind("Budget: counting ", 0) == 0;
+    CHECK(said_counting);
+    for (const LogEntry &e : early) CHECK(e.text.rfind("  ", 0) != 0 && e.text.rfind("Budget (", 0) != 0);  // (no rows yet: the report waits for the count)
+    for (int i = 0; i < 2000 && ed.budget_counting_for_test(); i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(!ed.budget_counting_for_test());
+    const std::vector<std::string> windowed = budget_lines_since(at);
+    std::printf("    the one-call report %zu line(s), the window's %zu\n", one_call.size(), windowed.size());
+    CHECK(windowed == one_call);
+    ed.command("budget pc");  // (a second count after the first: a new job, the same report)
+    for (int i = 0; i < 2000 && ed.budget_counting_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.budget_counting_for_test());
+  });
+  test("budget pc in a window (round 507): an object deleted while it counts - no fault, and the report is of the scene as the command found it", [] {
+    const std::string dir = fs::join(test_dir(), "r507_budget2");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(64 * 32, 0xFF4080C0u);
+    const std::string png = fs::join(dir, "map.png");
+    CHECK(write_png(png, px.data(), 64, 32, 64, false));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    budget_scene_507(ed, png);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> before = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());
+    GameObject *gone = ed.scene().find_by_name("Part1");
+    CHECK(gone != nullptr);
+    if (!gone) return;
+    ed.select_object(gone->id);
+    ed.command("delete");
+    CHECK(ed.scene().find_by_name("Part1") == nullptr);
+    for (int i = 0; i < 2000 && ed.budget_counting_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.budget_counting_for_test());
+    CHECK(budget_lines_since(at) == before);
+  });
+}
+
+/* Round 507, test engineer (task 0491): `budget pc` on a job, hunted at its edges. */
+namespace r507te {
+static void rich_scene(Editor &ed, const std::string &dir) {
+  const std::string png = fs::join(dir, "map.png");
+  std::vector<uint32_t> px(64 * 32, 0xFF4080C0u);
+  write_png(png, px.data(), 64, 32, 64, false);
+  for (int i = 0; i < 4; i++) {
+    GameObject *g = ed.scene().create("Mod" + std::to_string(i));
+    g->add<MeshFilter>()->mesh = i % 2 ? primitives::uv_sphere(0.5f, 14, 9) : primitives::cube();
+    MaterialPtr m = make_material("RichMat" + std::to_string(i), Vec3(1.0f));
+    m->base_map = TextureRef{png, false};
+    m->normal_map = TextureRef{fs::join(dir, "no_such_normal.png"), false};  // (missing on disk)
+    m->emission_map = TextureRef{fs::join(dir, "no_such_emission.png"), false};
+    g->add<MeshRenderer>()->materials = {m, nullptr, m};
+    if (i < 2) g->add<MirrorModifier>();
+    if (i == 1) g->add<ArrayModifier>()->count = 5;
+    if (i == 3) g->active = false;
+  }
+  GameObject *rig = ed.scene().create("Rig");
+  rig->add<Armature>();
+  for (int b = 0; b < 3; b++) {
+    GameObject *bone = ed.scene().create("Bone" + std::to_string(b));
+    bone->add<Bone>();
+    ed.scene().set_parent(bone, rig, -1, false);
+  }
+  GameObject *skin = ed.scene().create("Skinned");
+  skin->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 16, 10);
+  skin->add<MeshRenderer>();
+  skin->add<SkinModifier>()->object = "Rig";
+  GameObject *lamp = ed.scene().create("Lamp");
+  lamp->add<Light>();
+  ed.mark_changed_for_test("rich");
+}
+static void settle(Editor &ed) {
+  for (int i = 0; i < 4000 && ed.budget_counting_for_test(); i++) {
+    ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+}  // namespace r507te
+
+static void tests_round507_te() {
+  test("round 507 (test engineer): budget pc in a window reports exactly what the one-call count says for a scene with textures, modifiers, a skin and missing maps", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    CHECK(one.size() >= 10);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    r507te::settle(ed);
+    const std::vector<std::string> win = budget_lines_since(at);
+    for (size_t i = 0; i < std::max(one.size(), win.size()); i++) std::printf("    %-60s | %s\n", i < one.size() ? one[i].c_str() : "-", i < win.size() ? win[i].c_str() : "-");
+    CHECK(win == one);
+    ed.command("budget quest");  // (the other target: same again)
+    r507te::settle(ed);
+    CHECK(!ed.budget_counting_for_test());
+  });
+  test("round 507 (review): New Scene while budget pc counts - the old scene's count is dropped with a word, never reported or kept, and the next count sees the empty scene", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget2");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());
+    ed.command("newscene");
+    r507te::settle(ed);
+    CHECK(!ed.budget_counting_for_test());
+    CHECK(budget_lines_since(at).empty());  // (was `== one`: the old scene's report; a count of a scene that is gone is not reported)
+    std::vector<LogEntry> said;
+    Log::fetch(at, said);
+    bool told = false;
+    for (const LogEntry &e : said) told = told || e.text.find("the scene changed while counting") != std::string::npos;
+    CHECK(told);
+    CHECK(!ed.budget_cache_kept_for_test());  // (the Profiler's cache is not the old scene's)
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    r507te::settle(ed);
+    const std::vector<std::string> empty = budget_lines_since(at);
+    CHECK(!empty.empty() && empty != one);
+  });
+  test("round 507 (test engineer): a mesh replaced and edited while budget pc counts leaves the report as the command found it", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget3");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());
+    for (const char *n : {"Mod0", "Skinned"}) {
+      GameObject *g = ed.scene().find_by_name(n);
+      MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+      CHECK(mf != nullptr);
+      if (!mf) return;
+      mf->mesh = primitives::uv_sphere(0.5f, 64, 48);  // (a far bigger mesh in its place)
+      g->add<ArrayModifier>()->count = 9;
+    }
+    ed.mark_changed_for_test("edited while counting");
+    r507te::settle(ed);
+    CHECK(budget_lines_since(at) == one);
+  });
+  test("round 507 (test engineer): a budget pc typed while the Profiler's own recount runs is reported once, when that count lands", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget4");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    ed.open_window_for_test(WindowKind::Profiler, 700, 600);
+    ed.command("budget pc");  // (target set; the count over)
+    r507te::settle(ed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));  // (the half second the Profiler's cache is kept)
+    ed.step_frame_headless();  // (its draw starts a recount)
+    if (!ed.budget_counting_for_test()) {
+      std::printf("    the Profiler did not start a recount in a headless frame - nothing to type over\n");
+      CHECK(false);
+      return;
+    }
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    r507te::settle(ed);
+    const std::vector<std::string> got = budget_lines_since(at);
+    std::printf("    reported %zu line(s), one-call %zu\n", got.size(), one.size());
+    CHECK(got == one);
+  });
+  test("round 507 (test engineer): budget quest typed while budget pc counts - the pc report still says PC", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget5");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    ed.set_budget_windowed_for_test(true);
+    std::vector<LogEntry> tmp;
+    const size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    ed.command("budget quest");  // (refused: still counting)
+    r507te::settle(ed);
+    std::vector<LogEntry> said;
+    Log::fetch(at, said);
+    std::string header;
+    for (const LogEntry &e : said)
+      if (e.text.rfind("Budget (", 0) == 0) header = e.text.substr(0, 20);
+    std::printf("    the report began: '%s'\n", header.c_str());
+    CHECK(header.find("PC") != std::string::npos);  // (asked for PC first; the refused command moved the target before it was refused)
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -13655,5 +13911,7 @@ void run_editor_tests() {
   tests_round506_engineer();
   tests_round506_engineer2();
   tests_round506_engineer3();
+  tests_round507();
+  tests_round507_te();
   coverage_tests();
 }

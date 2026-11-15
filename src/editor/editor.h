@@ -1672,6 +1672,9 @@ class Editor {
   bool unity_ids_auto_reopen_ = false;       // (e2e 407: the import started the numbering itself - open the scene again when it's done)
   uint64_t unity_ids_reopen_serial_ = 0;     // (the undo serial when it started: the scene must be as it was, else only the toast)
   std::string unity_ids_last_import_;
+  /* Round 507: the last Unity import's parts in ms (read + parse, guid index, model reads, each pass of the build, the walks after) - the stress table's. */
+  std::vector<std::pair<std::string, double>> unity_import_parts_;
+  bool unity_import_index_reused_ = false;  // (round 507: the last import found the GUID index as it was and didn't walk Assets again)
   bool unity_ids_last_opened_ = false;  // (review 395: an opened scene is opened again, not imported on top of itself)
   std::string unity_editor_program() const;
   std::string unity_model_ids_path() const;
@@ -1784,7 +1787,9 @@ class Editor {
   };
   struct ExportJob {
     std::vector<UnityExportItem> items;
-    std::string out, folder, why;
+    std::string out, folder, why, empty_message;
+    std::function<void()> walk_folder;  // (round 507: the folder walk, run first on the worker; owns copies of what it reads)
+    double call_ms = 0.0;  // (round 507: what the call that made the job blocked for, before the worker started)
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel{false}, done{false};
     int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0, converted = 0, dropped_tracks = 0, zeroed_axes = 0;  // (converted, dropped_tracks, zeroed_axes: round 407's clips)
@@ -1793,6 +1798,8 @@ class Editor {
     void finish(const std::string &failure);
   };
   const ExportJob *last_export_for_test() const { return export_last_.get(); }
+  const std::vector<std::pair<std::string, double>> &unity_import_parts_for_test() const { return unity_import_parts_; }  // (round 507)
+  bool unity_import_index_reused_for_test() const { return unity_import_index_reused_; }
   void import_package_dialog();
   const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
   /* Round 485: a package "still unpacking" for a test, which has no worker to wait on (a headless import runs to its
@@ -3868,6 +3875,24 @@ class Editor {
     BudgetCounts counts;
     double at = -1.0;
   } budget_cache_;
+  /* Round 507 (budget_ui.cpp): a window's count runs on a job over a snapshot; headless counts in the call. */
+  struct BudgetJob {
+    std::future<BudgetCounts> counts;
+    std::string what;  // (the report's words; empty: only the Profiler's counts are kept)
+    size_t objects = 0;
+    uint64_t scene_ident = 0;  // (the scene counted: a New Scene or Open meanwhile drops the result)
+  };
+  std::unique_ptr<BudgetJob> budget_job_;
+  bool budget_windowed_for_test_ = false;
+  bool budget_windowed() const { return !headless_ || budget_windowed_for_test_; }
+  void budget_start_count(const std::string &what);
+  void poll_budget_job();
+  void budget_print(const BudgetCounts &c, const char *what);
+ public:
+  void set_budget_windowed_for_test(bool on) { budget_windowed_for_test_ = on; }
+  bool budget_counting_for_test() const { return budget_job_ != nullptr; }
+  bool budget_cache_kept_for_test() const { return budget_cache_.at >= 0.0; }
+ private:
   std::vector<GameObject *> budget_objects();
   void draw_budget(ui::Layout &lay);
   void budget_command(const std::vector<std::string> &t);
@@ -6293,12 +6318,26 @@ class Editor {
    * probes, saving, and the frame that landed it; the lightmaps' texels, rays and GPU share. */
   struct BakeTimes {
     double phase_ms[5] = {0, 0, 0, 0, 0}, finish_ms = 0, land_ms = 0, total_ms = 0;
+    double land_move_ms = 0, land_save_ms = 0;  // (round 507: the landing frame's file moves, and save_lighting_data's)
     size_t texels = 0, gpu_texels = 0;
     uint64_t rays = 0;
     std::string gpu_cards;  // (round 487: the cards that gathered, with their shares)
     uint64_t pick_texels = 0, chance_kept = 0, chance_dropped = 0;  // (round 484: light picking, counted - Lightmapper::pick_texels)
   };
   BakeTimes last_bake_times_;
+  double land_move_ms_ = 0, land_save_ms_ = 0;  // (round 507: this landing's parts, read by its timer)
+  /* Round 507 (lighting.cpp): a windowed bake's files moved into the scene's lighting folder on a job of their own. */
+  struct LightingMove {
+    std::future<bool> moved;
+    std::string dir;
+  };
+  std::unique_ptr<LightingMove> lighting_move_;
+  static bool move_baked_files(const std::string &save_dir, const std::string &tmp, bool drop_probes);
+  void land_baked_files(const std::string &save_dir, bool moved);
+  void lighting_move_poll(bool wait);
+ public:
+  bool lighting_moving_for_test() const { return lighting_move_ != nullptr; }
+ private:
   double last_bake_start_ms_ = 0;  // (round 422: the frame that starts Generate Lighting)
  public:
   const BakeTimes &last_bake_times_for_test() const { return last_bake_times_; }

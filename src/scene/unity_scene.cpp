@@ -1831,24 +1831,42 @@ std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> 
   if (!ctx.building) ctx.building = std::make_shared<std::set<std::string>>();
   if (!ctx.total) ctx.total = std::make_shared<int>(0);
   Build b;
+  /* Round 507: a lap per pass for the stress table (only the top-level build is timed: a nested prefab's passes are inside "instantiate"). */
+  std::vector<std::pair<std::string, double>> *laps = ctx.depth == 0 ? ctx.pass_ms : nullptr;
+  double lap_at = now_seconds();
+  auto lap = [&](const char *name) {
+    if (!laps) return;
+    const double t = now_seconds();
+    laps->push_back({name, (t - lap_at) * 1000.0});
+    lap_at = t;
+  };
   make_objects(docs, scene, ctx, b);
+  lap("make_objects");
   place_objects(docs, b);
+  lap("place_objects");
   for (const UnityDoc &d : docs)
     if (d.class_id == 1001 && !d.stripped) instantiate(d, scene, ctx, b);
+  lap("instantiate");
   map_stripped(docs, b);
+  lap("map_stripped");
   parent_objects(scene, parent, b);
+  lap("parent_objects");
   order_children(docs, scene, b);
+  lap("order_children");
   for (const UnityDoc &d : docs) {  // (meshes first: renderers take their model's materials)
     GameObject *g = (d.class_id == 33 || d.class_id == 137) && !d.stripped ? object_at(b.by_fid, d.body.file_id("m_GameObject")) : nullptr;
     if (g) add_mesh(d, g, ctx, b);
   }
+  lap("add_mesh");
   for (const UnityDoc &d : docs) {
     if (structural(d)) continue;
     GameObject *g = object_at(b.by_fid, d.body.file_id("m_GameObject"));
     if (g) add_component(d, g, ctx, b), b.targets[d.file_id] = {g, d.class_id};
     else ctx.dropped++;  // (review 370: never silently - counted, said)
   }
+  lap("add_component");
   resolve_avatar_refs(b);  // (round 402: the descriptor's, PhysBones', contacts' and constraints' references, now that every object is made)
+  lap("resolve_avatar_refs");
   for (const UnityDoc &d : docs) {  // (round 397: a Point Light Volume - after the components: its light may come later in the file)
     GameObject *g = is_script(d, kPointLightVolumeGuid) ? object_at(b.by_fid, d.body.file_id("m_GameObject")) : nullptr;
     if (g) mark_light_volume(d, *g), ctx.light_volumes++;
@@ -1857,6 +1875,7 @@ std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> 
     GameObject *g = d.class_id == 1 && !d.stripped ? object_at(b.by_fid, d.file_id) : nullptr;
     if (g && d.body.get("m_StaticEditorFlags")) set_static_flags(g, d.body.num("m_StaticEditorFlags"));
   }
+  lap("volumes_and_static");
   /* Round 399: an object inside a nested prefab as a file around this one names it - Unity's id for it there is its id
    * in the nested prefab XOR the PrefabInstance's, the top bit cleared - so a scene's override or parent on a part of a
    * variant reaches it (SideRail's LowTable, a variant of a model: its name, place and parent had been lost). */

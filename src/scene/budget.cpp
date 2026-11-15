@@ -17,6 +17,7 @@
 #include <fstream>
 #include <future>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
@@ -278,72 +279,147 @@ void add_skeleton(const GameObject &arm, std::unordered_set<const GameObject *> 
   }
 }
 
+/* What the count needs of one drawn or engine-only map, taken on the main thread (round 507): a drawn map's texture is
+ * looked at there (the texture cache is the views'), a file's facts are read where the count runs. */
+struct BudgetMap {
+  TextureRef ref;
+  bool normal = false, resolved = false;  // (resolved: w, h, alpha are the loaded texture's)
+  TextureFacts facts;
+};
+
+/* One object as the count reads it. Nothing in it points into the live scene: the pointers are only names (compared,
+ * never followed), the meshes are held (copy-on-write: an edit meanwhile writes through a copy). */
+struct BudgetObject {
+  bool light = false, own_light = false, light_volume = false;
+  size_t extra_volume_lights = 0;
+  bool spring = false, grouped = false;
+  const void *spring_root = nullptr;
+  int physbones = 1;
+  double spring_bones = 0.0;
+  bool counted_mesh = false, outline = false, skinned = false;
+  std::shared_ptr<const Mesh> mesh;  // (null: `triangles` was counted at once)
+  double triangles = 0.0, slots = 0.0;
+  size_t shape_keys = 0;
+  std::vector<BudgetMap> maps;
+  std::vector<const void *> joints;
+};
+
+/* A drawn map or an engine-only one, for the count: nothing for a map already seen (the count reads each file once). */
+void snapshot_map(const TextureRef &t, bool normal_map, bool engine_only, std::unordered_set<std::string> &seen, BudgetObject &out) {
+  if (t.empty() || !seen.insert(t.path).second) return;
+  BudgetMap m;
+  m.ref = t, m.normal = normal_map;
+  const bool file = !texture_ref_is_procedural(t) && t.path.rfind("generated:", 0) != 0;
+  if (engine_only || (file && !texture_cached(resolve_asset_path(t.path), !t.non_color))) return out.maps.push_back(m);
+  const TexturePtr tex = resolve_texture_ref(t);
+  if (!tex || tex->width <= 0 || tex->height <= 0) return;
+  m.resolved = true, m.facts = TextureFacts{tex->width, tex->height, tex->has_alpha};
+  out.maps.push_back(m);
+}
+
+/* A map's megabytes: a file's facts read here (a worker), or the loaded texture's. */
+double map_mb(const BudgetMap &m, bool wait) {
+  if (!m.resolved) return file_texture_mb(m.ref, m.normal, wait);
+  const double unity = unity_mb_cached(m.ref.path, m.facts);  // (Unity's own settings for it)
+  return unity >= 0.0 ? unity : texture_bytes_mb(m.facts, m.normal);
+}
+
 /* What one object adds: its mesh (and an Outline's shell, a mesh and a material slot more in an engine), its spring
- * chain and the bones under it, its light, its materials' textures (its skin's bones: budget_count, as a set). */
-void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string> &textures, std::unordered_set<const GameObject *> &roots) {
-  double *v = c.value;
-  if (const Light *l = g.get<Light>(); l && l->enabled) v[(int)BudgetRow::Lights] += 1;
-  const Light *lit = g.get<Light>();
-  const bool own_light = lit && lit->enabled && lit->light_volume && lit->type != 0;
-  if (own_light) c.light_volume_lights++;  // (round 397)
+ * chain and the bones under it, its light, its materials' textures (its skin's bones: budget_count, as a set). Taken
+ * on the main thread, from the live object. */
+void snapshot_object(GameObject &g, std::unordered_set<std::string> &seen, BudgetObject &o) {
+  const Light *l = g.get<Light>();
+  o.light = l && l->enabled;
+  o.own_light = l && l->enabled && l->light_volume && l->type != 0;
   for (const auto &comp : g.components) {  // (review 397: the package's own lights from Unity - a Point Light Volume with no Unity light)
     const auto *e = dynamic_cast<const EngineComponent *>(comp.get());
-    if (!own_light && e && e->enabled && e->type == "PointLightVolumeInstance" && e->data.find("m_Enabled: 0") == std::string::npos) c.light_volume_lights++;
+    if (!o.own_light && e && e->enabled && e->type == "PointLightVolumeInstance" && e->data.find("m_Enabled: 0") == std::string::npos) o.extra_volume_lights++;
   }
-  if (const LightVolumeComponent *lv = g.get<LightVolumeComponent>(); lv && lv->enabled) c.light_volumes++;
+  const LightVolumeComponent *lv = g.get<LightVolumeComponent>();
+  o.light_volume = lv && lv->enabled;
   if (const SpringBone *sb = g.get<SpringBone>(); sb && sb->enabled) {
     /* (Round 359: chains under one RootBone_ are one PhysBone component - Bone Root's point.) */
-    const bool grouped = g.parent && spring::is_bone_root(*g.parent);
-    v[(int)BudgetRow::SpringChains] += !grouped || roots.insert(g.parent).second ? std::max(1, sb->physbones) : 0;  // (round 399: Unity's several on one root)
+    o.spring = true;
+    o.grouped = g.parent && spring::is_bone_root(*g.parent);
+    o.spring_root = g.parent;
+    o.physbones = std::max(1, sb->physbones);  // (round 399: Unity's several on one root)
     std::vector<GameObject *> under{&g};
     while (!under.empty()) {
       GameObject *b = under.back();
       under.pop_back();
-      if (b->get<Bone>()) v[(int)BudgetRow::SpringBones] += 1;
+      if (b->get<Bone>()) o.spring_bones += 1;
       for (GameObject *k : b->children) under.push_back(k);
     }
   }
   const MeshRenderer *mr = g.get<MeshRenderer>();
+  if (const GameObject *arm = mr ? skin_armature(g) : nullptr) {  // (review 396: what the skins name, not every armature present)
+    std::unordered_set<const GameObject *> joints;
+    add_skeleton(*arm, joints);
+    o.joints.assign(joints.begin(), joints.end());
+  }
   const Mesh *m = mr ? g.evaluated_mesh() : nullptr;  // (round 399: a renderer switched off counts - VRChat counts it, an avatar toggles it on)
   if (!m || !m->face_count()) return;
+  o.counted_mesh = true;
+  o.mesh = g.evaluated_mesh_shared();
+  if (!o.mesh || o.mesh.get() != m) o.mesh = nullptr, o.triangles = triangles_of(*m);
   const Component *ol = g.find_role(Component::RenderRole::Outline);
-  const bool outline = ol && ol->enabled;
+  o.outline = ol && ol->enabled;
   const SkinModifier *skin = g.get<SkinModifier>();
   const MeshFilter *kf = g.get<MeshFilter>();
   /* A mesh with shape keys is skinned to Unity (a SkinnedMeshRenderer), so to VRChat's count too (review 355). */
-  const bool skinned = (skin && skin->enabled) || (kf && kf->mesh && !kf->mesh->shape_keys.empty());
-  v[(int)(skinned ? BudgetRow::SkinnedMeshes : BudgetRow::Meshes)] += outline ? 2 : 1;
-  v[(int)BudgetRow::Triangles] += triangles_of(*m) * (outline ? 2.0 : 1.0);
-  v[(int)BudgetRow::MaterialSlots] += (double)std::max<size_t>(1, mr->materials.size()) + (outline ? 1.0 : 0.0);
-  const MeshFilter *mf = g.get<MeshFilter>();
-  c.shape_keys += mf && mf->mesh ? mf->mesh->shape_keys.size() : 0;
+  o.skinned = (skin && skin->enabled) || (kf && kf->mesh && !kf->mesh->shape_keys.empty());
+  o.slots = (double)std::max<size_t>(1, mr->materials.size()) + (o.outline ? 1.0 : 0.0);
+  o.shape_keys = kf && kf->mesh ? kf->mesh->shape_keys.size() : 0;
   for (const MaterialPtr &mp : mr->materials) {
     if (!mp) continue;
-    for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map})
-      v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map, false, budget_wait_for_textures());
-    for (const TextureRef &t : mp->engine_maps) v[(int)BudgetRow::TextureMB] += texture_mb(t, textures, false, true, budget_wait_for_textures());
+    for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map}) snapshot_map(*t, t == &mp->normal_map, false, seen, o);
+    for (const TextureRef &t : mp->engine_maps) snapshot_map(t, false, true, seen, o);
   }
 }
 
 }  // namespace
 
-BudgetCounts budget_count(const std::vector<GameObject *> &objects) {
-  BudgetCounts c;
-  t_textures_unread = 0;
+struct BudgetSnapshot {
+  std::vector<BudgetObject> objects;
+};
+
+std::shared_ptr<const BudgetSnapshot> budget_snapshot(const std::vector<GameObject *> &objects) {
+  auto snap = std::make_shared<BudgetSnapshot>();
   std::unordered_set<const GameObject *> once;
-  std::unordered_set<std::string> textures;
-  std::unordered_set<const GameObject *> roots, joints;
+  std::unordered_set<std::string> seen;
   for (GameObject *g : objects) {
     if (!g || !once.insert(g).second) continue;  // (round 399: inactive objects count too - VRChat's SDK counts a hidden outfit)
-    count_object(*g, c, textures, roots);
-    const MeshRenderer *mr = g->get<MeshRenderer>();
-    const GameObject *arm = mr ? skin_armature(*g) : nullptr;
-    if (arm) add_skeleton(*arm, joints);  // (review 396: what the skins name, not every armature present)
+    snap->objects.emplace_back();
+    snapshot_object(*g, seen, snap->objects.back());
   }
-  c.value[(int)BudgetRow::Bones] = (double)joints.size();
+  return snap;
+}
+
+BudgetCounts budget_count_snapshot(const BudgetSnapshot &snap) {
+  BudgetCounts c;
+  t_textures_unread = 0;
+  double *v = c.value;
+  std::unordered_set<const void *> roots, joints;
+  for (const BudgetObject &o : snap.objects) {
+    v[(int)BudgetRow::Lights] += o.light;
+    c.light_volume_lights += o.own_light + o.extra_volume_lights;  // (round 397)
+    c.light_volumes += o.light_volume;
+    if (o.spring) v[(int)BudgetRow::SpringChains] += !o.grouped || roots.insert(o.spring_root).second ? o.physbones : 0;
+    if (o.spring) v[(int)BudgetRow::SpringBones] += o.spring_bones;
+    joints.insert(o.joints.begin(), o.joints.end());
+    if (!o.counted_mesh) continue;
+    v[(int)(o.skinned ? BudgetRow::SkinnedMeshes : BudgetRow::Meshes)] += o.outline ? 2 : 1;
+    v[(int)BudgetRow::Triangles] += (o.mesh ? triangles_of(*o.mesh) : o.triangles) * (o.outline ? 2.0 : 1.0);
+    v[(int)BudgetRow::MaterialSlots] += o.slots;
+    c.shape_keys += o.shape_keys;
+    for (const BudgetMap &m : o.maps) v[(int)BudgetRow::TextureMB] += map_mb(m, budget_wait_for_textures());
+  }
+  v[(int)BudgetRow::Bones] = (double)joints.size();
   c.textures_reading = t_textures_unread;
   return c;
 }
+
+BudgetCounts budget_count(const std::vector<GameObject *> &objects) { return budget_count_snapshot(*budget_snapshot(objects)); }
 
 BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
   BudgetCounts c;
