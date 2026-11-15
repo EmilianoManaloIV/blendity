@@ -71,6 +71,10 @@ Unity and Blender both split one window into panels. Unity calls them windows an
 Press Ctrl+K (or F3, Blender's key) and type what you want: "hair", "unwrap", "bake", "camera", "editing". Every keymap action, window, layout, object you can create and many console commands answer, each with its shortcut beside it, so the palette also teaches the keys. The recent ones come first; Enter runs the top one, the arrows choose another. It reaches tools the current layout hides. It is VS Code's palette and Blender's F3 search; Unity's search box does the same for assets.
 # Quick Favorites
 Right-click a command in the palette, or a row in a menu, and it goes into Quick Favorites: Shift+Q opens them where the mouse is. Each layout keeps its own (modeling favorites in Modeling & Topology, lighting ones in Lighting & Rendering). Blender's Q menu works the same way.
+# Keys for the controls
+Every button, tick box, dropdown, slider, colour and fold arrow can be reached without the mouse. F6 puts a blue ring on the first control of the window under the pointer; Tab and Shift+Tab walk the controls in the order they are drawn, Space or Enter presses one, Left and Right move a slider, Esc lets go. F6 again goes on to the next window (Shift+F6 to the previous one). F10 - or Alt pressed and let go on its own - focuses the menu bar: Left and Right change menu, Down opens it, the arrows walk its rows, Enter runs one. In a dialog or a menu, Tab alone starts the walk. With nothing focused Tab is still Edit Mode; any click puts the ring away.
+! cmd:palette run focus the menu bar | Focus the menu bar, then press Down
+? How do I reach a button in the Inspector with the keyboard? | Point at the Inspector and press F6: the first control gets a ring. Tab goes down the panel, Space presses what the ring is on. Shift+Tab goes back, Esc lets the ring go - and with it Tab is Edit Mode again.
 ? You can't find Separate Loose Parts in the Animation layout's menus. What's the quickest way? | Ctrl+K, type "separate", Enter: the palette reaches tools a layout hides.
 ! cmd:palette hair | List what the palette finds for "hair" (in the Console)
 # Essentials first

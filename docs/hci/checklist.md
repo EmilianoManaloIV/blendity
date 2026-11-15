@@ -123,6 +123,12 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 | I7 | Develop a render (exposure, curve) | Editing window > Render; adjust Exposure | The picture brightens; Save keeps an .edit | 8 s | [ ] | |
 | I8 | Point Blendity at your own ffmpeg | Preferences > FFmpeg; type the path, Enter | Render Animation uses it | 8 s | [ ] | |
 | I9 | MoonRay: check it works (needs MoonRay) | Preferences > Renderers > Check | A test render's result and time | 4 s | [ ] | |
+| I10 | Put light probes where you want them | GameObject > Light > Light Probe Group; move it; Lighting > Generate Lighting | The bake uses the group's probes instead of the automatic grid | 6 s | [ ] | |
+| I11 | Bake a Mixed light as Shadowmask | Lighting > Lighting Mode > Shadowmask; a Point Light's Mode > Mixed; Generate Lighting | Baked shadows from the still meshes, live shadows from the moving ones | 8 s | [ ] | |
+| I12 | Soften a baked light's shadow | Select a Baked light; Inspector > Baked Shadow Radius 0.3; Generate Lighting | The shadow's edge widens with distance from what casts it | 6 s | [ ] | |
+| I13 | Take the ringing out of the probes | Lighting > Probe Remove Ringing > Hanning | No dark halo opposite a bright light on a probe-lit object | 4 s | [ ] | |
+| I14 | Choose the bake's denoiser | Lighting > Denoiser | The lightmap's grain changes; the corners stay sharp | 4 s | [ ] | |
+| I15 | Match a Unity project's light intensity | Open a Unity project's scene; read the toast; Lighting > Lights Gamma | The lights as bright as in Unity; the toast names the setting | 6 s | [ ] | |
 
 ## J. Rigging, skinning and hair
 
@@ -152,6 +158,8 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 | K11 | AI: a span by frame numbers | AI ... options > From / To > Make This Span | Only that span made | 8 s | [ ] | |
 | K12 | Ragdoll a fall (needs Blender's libraries) | Puppet > Ragdoll Events > Go Limp Here; Ragdoll | The body falls and settles | 6 s | [ ] | |
 | K13 | Generate a walk cycle and keep the style | Rigging > Walk Cycle > Generate into the Clip; Save Style | A walking clip; Assets/Gaits/<name>.gait | 8.1 s | [ ] | |
+| K14 | Record keys while you pose | Animation > Record (the red button); move a hand; move the playhead; move it again | A key at each playhead position; the Scene view says Record is on | 6 s | [ ] | |
+| K15 | Scrub a posed humanoid | Drag the playhead across a clip of a skinned humanoid | The body follows the playhead without a stall | 3 s | [ ] | |
 
 ## L. Sequencer and Play
 
@@ -209,3 +217,20 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 | Q2 | Edit Mode on a 200k-face mesh | Tab on a big mesh; select and move a face | No pause over a fraction of a second | 5 s | [ ] | |
 | Q3 | First render after start | Start Blendity; F12 | The first render as fast as the second (no long cold start) | 5 s | [ ] | |
 | Q4 | Resize a window to 1024 x 640 | Shrink the window | Nothing overlaps; long labels end in ... | 3 s | [ ] | |
+
+## R. Blockout
+
+| # | Task | Steps | Expected | Target | Done | Time |
+|---|---|---|---|---|---|---|
+| R1 | Start a Blockout | GameObject > Blockout > New Blockout | A Blockout with one 2 m box, selected; six handles on its faces | 3 s | [ ] | |
+| R2 | Cut a hole with a cylinder | GameObject > Blockout > Subtract Cylinder | The box with a round hole through it; the piece drawn yellow | 5 s | [ ] | |
+| R3 | Draw a room with the Draw Piece tool | Shift+R (Draw Piece); drag a rectangle on the ground; click for the height | A room with walls, floor and ceiling; Esc leaves the tool | 6 s | [ ] | |
+| R4 | Stretch a piece by a face handle | Select the piece; drag the square on a face | That face moves, the opposite one stays; one Undo step | 3 s | [ ] | |
+| R5 | Join two rooms | Draw a second room overlapping the first | The wall between is gone where the air is shared | 6 s | [ ] | |
+| R6 | Add a door and a window | Point at a wall; GameObject > Blockout > Door; then Window | Openings cut in that wall | 6 s | [ ] | |
+| R7 | Add stairs and turn them | GameObject > Blockout > Add Stairs; Inspector > Turn 90 | A flight of steps, turned a quarter round; Fill Under makes it solid | 6 s | [ ] | |
+| R8 | Draw an L-shaped room | Draw Piece > Outline Room; click the corners; Enter; pull the height | One room whose wall is as thick at the inner corner as elsewhere | 10 s | [ ] | |
+| R9 | Round the joins | Select a piece; Inspector > Blend Radius 0.2 | The piece meets its neighbours with a fillet | 4 s | [ ] | |
+| R10 | Scale a Blockout without shear | Scale the Blockout 2 along X; read its Scale; Apply Scale to Pieces on an old scene | Scale reads 1 1 1; turned pieces grow along their own axes | 6 s | [ ] | |
+| R11 | Bake to a mesh and back | Inspector > Bake to Mesh; then Unbake | An ordinary mesh that Edit Mode takes; Unbake brings the pieces back | 6 s | [ ] | |
+| R12 | Try Edit Mode on a Blockout | Select the Blockout; Tab | Refused, with the reason and what to do instead | 2 s | [ ] | |

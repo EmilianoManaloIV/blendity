@@ -262,8 +262,11 @@ void Editor::draw_rigging_window(const Recti &r) {
       }
   }
   if (assist_on(Assist::Physics) && section("Spring Bones")) draw_spring_section(lay, root, a);
-  if (section("Avatar (VRChat)") && u.button(lay.row(u.row_h() + u.px(2)), "Open the Avatar Window"))
-    command("window Avatar");  // (round 356: visemes, the checklist and CATS' tools have a window of their own)
+  if (section("Avatar (VRChat)")) {
+    const bool open_avatar = u.button(lay.row(u.row_h() + u.px(2)), "Open the Avatar Window");
+    u.tooltip("The Avatar window: visemes, the VRChat checklist and the CATS tools for the selected character.");
+    if (open_avatar) command("window Avatar");  // (round 356: visemes, the checklist and CATS' tools have a window of their own)
+  }
   if (assist_on(Assist::Walk) && section("Walk Cycle")) draw_walk_section(lay);
   if (assist_on(Assist::Footsteps) && section("Footsteps")) draw_steps_section(lay);
   u.pop_id();

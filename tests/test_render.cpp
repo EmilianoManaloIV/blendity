@@ -11514,7 +11514,8 @@ static void tests_round338() {
     CHECK(cube->get<CameraFlatten>()->pivot == 0);
     int hx = 0, hy = 0;
     Recti f;
-    const bool row = ed.hierarchy_row_for_test("Head", hx, hy), field = ed.button_rect_for_test("field:Pivot Object", f);
+    const bool field = r509_scroll_to(ed, WindowKind::Inspector, "field:Pivot Object", f);  // (scrolled to first: round 509)
+    const bool row = ed.hierarchy_row_for_test("Head", hx, hy);
     CHECK(row && field);
     if (!row || !field) return;
     const int fx = f.x + f.w / 3, fy = f.y + f.h / 2;
@@ -11539,7 +11540,7 @@ static void tests_round338() {
     CHECK(cube && cube->get<CameraFlatten>());
     if (!cube || !cube->get<CameraFlatten>()) return;
     Recti f;
-    CHECK(ed.button_rect_for_test("field:Pivot Object", f));
+    CHECK(r509_scroll_to(ed, WindowKind::Inspector, "field:Pivot Object", f));  // (scrolled to: round 509)
     const int px = f.x + f.w - f.h / 2, py = f.y + f.h / 2;  // (the picker at the field's right)
     ed.step_frame_headless({at(ET::MouseMove, px, py)});
     ed.step_frame_headless({at(ET::MouseDown, px, py)});

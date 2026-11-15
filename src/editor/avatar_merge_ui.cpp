@@ -110,10 +110,10 @@ void Editor::draw_merge_section(ui::Layout &lay, GameObject *root) {
   u.tooltip("The armature Merge Armatures takes in, or the bone Attach Mesh gives the selected mesh to.");
   const bool on = root != nullptr;
   auto run = [this](const std::string &l) { return [this, l] { command(l); }; };
-  button_grid(lay, {{"Merge Armatures", "That armature (hair, an outfit) into the avatar's: its bones by name, its meshes skinned to the avatar (CATS'). Console: avatar mergearmature <name>.", on, run("avatar mergearmature " + avatar_merge_field_)},
-                    {"Attach Mesh", "The selected mesh given wholly to that bone (a ring, a hat; CATS'). Console: avatar attach <bone>.", on, run("avatar attach " + avatar_merge_field_)},
-                    {"Translate Names", "Japanese shape key and material names from the dictionary (まばたき Blink, 肌 Skin). Console: avatar translate.", on, run("avatar translate")},
-                    {"Export for VRChat", "FBX for Unity: Y up, metres, the skeleton, skin and shape keys, the checklist and PC rank said first. Console: avatar export [path].", on, run("avatar export")}},
+  button_grid(lay, {{"Merge Armatures", "That armature (hair, an outfit) into the avatar's: its bones by name, its meshes skinned to the avatar (CATS').", on, run("avatar mergearmature " + avatar_merge_field_)},
+                    {"Attach Mesh", "The selected mesh given wholly to that bone (a ring, a hat; CATS').", on, run("avatar attach " + avatar_merge_field_)},
+                    {"Translate Names", "Japanese shape key and material names from the dictionary (まばたき Blink, 肌 Skin).", on, run("avatar translate")},
+                    {"Export for VRChat", "FBX for Unity: Y up, metres, the skeleton, skin and shape keys, the checklist and PC rank said first.", on, run("avatar export")}},
               2);
 }
 

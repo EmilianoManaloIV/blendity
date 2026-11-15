@@ -619,6 +619,27 @@ inline void r34_steps(Editor &ed, int n) {
 }
 
 /* A click with real events (moved there first, then down, then up on later frames). */
+/* Round 509: a control below its window's fold is scrolled to with the wheel over the window, as an artist would, before
+ * a test clicks or drops on it (a narrow Inspector puts X / Y / Z on rows of their own where four digits do not fit beside
+ * the label - Unity's narrow Inspector - so what lies under them can be below the fold, more often with Linux's wider
+ * font). True when `key`'s rectangle, re-read, is inside the window. */
+inline bool r509_scroll_to(Editor &ed, WindowKind w, const std::string &key, Recti &r) {
+  for (int i = 0; i < 40; i++) {
+    const Recti win = ed.window_rect_for_test(w);
+    /* (A control the panel did not draw - below the fold, clipped away - is not recorded: down until it is.) */
+    const bool seen = ed.button_rect_for_test(key, r);
+    if (seen && r.y >= win.y && r.bottom() <= win.bottom()) return true;
+    platform::Event m, e;  // (the pointer over the window first: a wheel event does not move it)
+    m.type = platform::EventType::MouseMove, m.x = win.x + win.w / 2, m.y = win.y + win.h / 2;
+    e.type = platform::EventType::Wheel, e.x = m.x, e.y = m.y, e.wheel_y = !seen || r.bottom() > win.bottom() ? -1.0f : 1.0f;
+    ed.step_frame_headless({m});
+    ed.step_frame_headless({e});
+    ed.step_frame_headless();
+  }
+  std::printf("    r509_scroll_to: '%s' still at %d..%d, the window %d..%d\n", key.c_str(), r.y, r.bottom(), ed.window_rect_for_test(w).y, ed.window_rect_for_test(w).bottom());
+  return false;
+}
+
 inline void r34_click(Editor &ed, int x, int y) {
   ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
@@ -626,12 +647,22 @@ inline void r34_click(Editor &ed, int x, int y) {
 }
 
 /* The Scene view's toolbar buttons after the draw-mode combo: 0 scene lighting, 1 grid, 2 gizmos, 3 statistics. */
+/* Round 509: found by their tooltips among the controls the toolkit records, not computed from a 176 px draw-mode
+ * dropdown - since round 509 the header narrows that dropdown with the view, and a computed point opened Overlays. */
 inline void r34_toolbar_click(Editor &ed, int index) {
-  const ui::Context &u = ed.ui_for_test();
-  const Recti v = ed.scene_view_rect();
-  const int bh = u.row_h() + u.px(4), h = bh - u.px(6);
-  const int x = v.x + u.px(6) + u.px(176) + index * (h + u.px(2)) + h / 2, y = v.y - bh + u.px(3) + h / 2;
-  r34_click(ed, x, y);
+  static const char *const kTips[4] = {"Scene lighting on/off.", "Toggle grid", "Toggle Gizmos", "Statistics overlay"};
+  const bool recording = ed.ui_for_test().record_buttons;
+  ed.record_buttons_for_test(true);
+  ed.step_frame_headless();
+  Recti b;
+  for (const auto &c : ed.ui_for_test().controls)
+    if (std::string(c.kind) == "icon" && c.layer == 0 && c.label.rfind(kTips[index], 0) == 0) b = c.r;
+  if (!recording) ed.record_buttons_for_test(false);
+  if (b.empty()) {
+    std::printf("    r34_toolbar_click: the Scene view's header shows no '%s' (too narrow for its quick toggles)\n", kTips[index]);
+    return;
+  }
+  r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
 }
 
 /* The mouse rests over the Hierarchy: nothing under it draws in a 3D view. */
