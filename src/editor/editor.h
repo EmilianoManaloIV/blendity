@@ -251,6 +251,7 @@ struct FrameProfile {
   double ms_gpu_instances = 0, ms_gpu_corners = 0, ms_gpu_see = 0, ms_gpu_render = 0;  // (ms_gpu_render: the render call whole - and, when the picture is copied back this frame, the fence wait inside it, which ms_gpu_readback also holds; ms_gpu_corners holds the lightmap pages' uploads too)
   uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
   uint64_t gpu_cage_vert_builds = 0;                      // task 0205: frames whose cage vertices (and Face mode's dots) were worked out again
+  double ms_sculpt = 0;  // round 508 (part D): the Sculpt brush's own dabs (gather, brush, moves, delta), inside ms_ui
   double ms_gpu = 0;
   /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
    * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
@@ -293,8 +294,8 @@ struct FrameProfile {
     gpu_texture_uploads += o.gpu_texture_uploads;
     gpu_overlay_frames += o.gpu_overlay_frames, gpu_face_dot_frames += o.gpu_face_dot_frames;
     gpu_cage_vert_builds += o.gpu_cage_vert_builds;
-    ms_gpu += o.ms_gpu;
-    ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
+    ms_gpu += o.ms_gpu, ms_sculpt += o.ms_sculpt;
+    ms_gpu_shadow +=o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
 };
 /* Adds the time to the end of its scope to a FrameProfile field. */
@@ -2949,6 +2950,8 @@ class Editor {
   void draw_livelink_window(const Recti &r);
   /* ---- Editing (task 0181, ADR 0058: editing_window.cpp) ---- */
   bool edit_open_file(const std::string &path);  // an image or an .edit
+  bool edit_open_poll();                          // round 508: the finished background read opens, once a frame the window draws (and the console's commands ask)
+  void edit_opened(const std::string &path, bool is_edit);
   bool edit_open_render();
   void edit_open_dialog();
   std::string edit_default_export_path() const;
@@ -6314,6 +6317,7 @@ class Editor {
   std::unique_ptr<BakeJob> bake_job_;
   void bake_job_run(BakeJob &j);   // (the worker)
   void bake_job_land(BakeJob &j);  // (the main thread: the results into the scene, saved)
+  bool bake_pages_ready(BakeJob &j);  // (round 508, ADR 0140: a finished bake's pages sent to the card before it lands)
   /* Round 421: the last Generate Lighting's phases (ms): the lightmaps, the probes, the Light Volumes, the reflection
    * probes, saving, and the frame that landed it; the lightmaps' texels, rays and GPU share. */
   struct BakeTimes {
@@ -7425,7 +7429,7 @@ class Editor {
   bool open_job_running_for_test() const { return open_job_ && !open_job_->done.load(); }
   bool import_job_running_for_test() const { return import_job_ && !import_job_->done.load(); }
   bool file_export_running_for_test() const { return file_export_job_ && !file_export_job_->done.load(); }
-  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_ || shot_job_; }  // (the headless runner waits for these between its lines)
+  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_ || shot_job_ || edit_doc_.loading(); }  // (the headless runner waits for these between its lines; round 508: the Editing window's picture read)
   int render_job_phase_for_test() const { return render_job_ ? render_job_->phase.load() : -1; }
   int render_shadow_size_for_test() const { return render_shadow_res_; }  // (round 412: the F12's map is the job's, not the views' cache's)
   void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }

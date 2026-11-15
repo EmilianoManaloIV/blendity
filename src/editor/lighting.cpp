@@ -6,6 +6,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../core/view_perf.h"
 #include "../render/gpu_device.h"
 #include "../render/pathtracer.h"
 
@@ -739,9 +740,49 @@ void Editor::step_bake() {
   }
   if (!j->done.load(std::memory_order_acquire)) return;
   if (render_job_holds_lighting()) return;  // (lands next frame: an F12 render on a worker reads the lightmaps it would replace)
+  if (!bake_pages_ready(*j)) return;  // (round 508: its pages still going up to the card - the old set is drawn meanwhile)
   std::unique_ptr<BakeJob> job = std::move(bake_job_);
   if (job->thread.joinable()) job->thread.join();
   bake_job_land(*job);
+}
+
+/* Round 508 (ADR 0140): a finished bake's lightmap pages go to the card before the bake lands - at least one a frame, more
+ * while the frame's upload budget (the meshes' `mesh_budget_ms_`) lasts - so the landing frame no longer converts and sends
+ * every page at once (4 pages of 1024 x 1024: about 100 ms of a 146 ms frame). The views draw the old lighting whole until
+ * the new set is up and then switch in one frame: no frame mixes new UVs with old texels. The card keys its copy by the
+ * page's address and serial, and moving the LightingData into lighting_data_ keeps both, so the landing finds every page
+ * there. Only while the Scene view draws on the card (scene_full_size: the card open is not enough - it stays open after
+ * choosing CPU views, and pages sent there would never be read nor let go) and the jobs run on workers: a headless editor
+ * and the CPU views land at once, as before. A page the card refuses lands anyway (the draw reports it as it did). */
+bool Editor::bake_pages_ready(BakeJob &j) {
+  if (!view_perf::pages_ahead || !jobs_async() || !gpu_view_ || !scene_full_size() || j.cancel.load() || j.discard || j.scene_ident != scene_ident_) return true;
+  ScopedTimer t;
+  bool sent = false, more = false;
+  /* Every page the draw sends through gpu_lightmap (attach_lightmap): the colour pages, the direction pages in Directional
+   * mode (round 426), the shadowmask pages (round 444). */
+  auto send = [&](const std::vector<Lightmap> &set) {
+    for (const Lightmap &p : set) {
+      if (more) return;
+      const auto found = gpu_lightmaps_.find(&p);
+      if (found != gpu_lightmaps_.end() && found->second.first == p.serial && gpu_textures_.count(found->second.second.get())) {
+        gpu_textures_[found->second.second.get()].used = gpu_calls_;  // (kept while the others go up: the views' unused-texture ageing would let it go)
+        continue;
+      }
+      if (sent && t.ms() >= mesh_budget_ms_) {
+        more = true;
+        return;
+      }
+      std::string err;
+      gpu_lightmap(p, err);
+      view_perf::counters.lightmap_pages_before_landing++;
+      sent = true;
+    }
+  };
+  send(j.lighting.pages);
+  if (scene_->lighting.directional_mode != 0) send(j.lighting.dir_pages);
+  send(j.lighting.mask_pages);
+  if (sent) ui_.redraw = true;  // (the landing comes in the next frame: keep frames coming)
+  return !sent;
 }
 
 /* The worker's files (in `tmp`, the bake's own folder) moved over the scene's lighting folder, older ones replaced; `tmp` taken

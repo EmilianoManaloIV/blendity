@@ -996,7 +996,7 @@ void Editor::run_console_command(const std::string &line) {
        * the whole step with its frames (the --cmd lines run back to back, with no frame between them). */
       if (!headless_) { Log::info("perf wait: headless scripts only"); return; }
       int n = 0;
-      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty() || texture_stream_busy()); n++) step_frame_headless();  // (round 447: the views' textures streaming in too)
+      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty() || texture_stream_busy() || edit_doc_.loading()); n++) step_frame_headless();  // (round 447: the views' textures streaming in too)
       Log::info("perf wait: %d frame(s)", n);
     }
     else if (sub == "frames") {  // perf frames N (a script's, headless): N frames, whatever runs

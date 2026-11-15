@@ -516,13 +516,14 @@ void Editor::sculpt_restore_delta() {
   }
   for (size_t i = 0; i < d.ids.size(); i++)
     if (d.ids[i] < m->vert_count()) m->positions[d.ids[i]] = d.before[i];
-  if (!d.ids.empty()) m->deform_version++, edit_epoch::bump();
+  if (!d.ids.empty()) m->deform_version++, m->note_moved(d.ids), edit_epoch::bump();
 }
 
 /* One dab at (x, y) in the Scene view's pixels with the pen's pressure: the instances symmetry asks for are gathered
  * and worked out against the positions before the dab, then their moves are added up (Blender's proxies), so a vertex
  * two instances share - on a mirror plane, at the radial axis - moves by the sum and the seam stays a seam. */
 void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
+  ProfileScope dab_scope{prof_.ms_sculpt, {}};
   Mesh *mp = sculpt_mesh();
   GameObject *g = mp ? scene_->find(sculpt_obj_) : nullptr;
   if (!mp || !g || mp != sculpt_stroke_mesh_ || sculpt_touched_.size() != mp->vert_count()) {
@@ -617,7 +618,15 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
     m.positions[mv.first] += mv.second;
     sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(m.positions[mv.first] - sculpt_delta_->before[sculpt_touched_index(mv.first)]));
   }
-  if (!moves.empty()) m.deform_version++, edit_epoch::bump();  // (after a Dyntopo tessellation the version was bumped already: the render mesh is rebuilt either way)
+  if (!moves.empty()) {  // (after a Dyntopo tessellation the version was bumped already: the render mesh is rebuilt either way)
+    m.deform_version++, edit_epoch::bump();
+    if (!sculpt_dyn_) {  // (round 508: the render mesh looks at these vertices alone; a Dyntopo stroke also moves what its tessellation touched)
+      std::vector<uint32_t> ids;
+      ids.reserve(moves.size());
+      for (const auto &mv : moves) ids.push_back(mv.first);
+      m.note_moved(ids);
+    }
+  }
   sculpt_dabbed_ = true;
   ui_.redraw = true;
 }
@@ -682,6 +691,10 @@ void Editor::sculpt_grab_follow(Mesh &m, const Mat4 &inv, Vec2 px) {
     sculpt_stroke_move_ = std::max(sculpt_stroke_move_, length(kv.second.second));
   }
   m.deform_version++;
+  std::vector<uint32_t> noted;  // (round 508: the render mesh looks at these vertices alone)
+  noted.reserve(at.size());
+  for (const auto &kv : at) noted.push_back(kv.first);
+  m.note_moved(noted);
   edit_epoch::bump();
   sculpt_dabbed_ = true;
   ui_.redraw = true;
@@ -1590,6 +1603,7 @@ void Editor::apply_sculpt_delta(UndoState s, std::vector<UndoState> &into, const
     const std::vector<Vec3> &src = undo ? s.delta->before : s.delta->after;
     for (size_t i = 0; i < s.delta->ids.size(); i++) m.positions[s.delta->ids[i]] = src[i];
     m.deform_version++;
+    m.note_moved(s.delta->ids);
     edit_epoch::bump();
     sculpt_cache_mesh_ = nullptr;  // (the grid is stale)
     settle_meshes();

@@ -1358,6 +1358,7 @@ int Editor::gpu_lightmap(const Lightmap &lm, std::string &err) {
     found = gpu_lightmaps_.find(&lm);
     const int id = gpu_texture(found->second.second, err);
     mesh_ms_frame_ += page_timer.ms();
+    view_perf::counters.lightmap_page_ms += page_timer.ms(), view_perf::counters.lightmap_pages_sent++;
     return id;
   }
   return gpu_texture(found->second.second, err);

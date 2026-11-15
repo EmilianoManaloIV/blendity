@@ -242,10 +242,15 @@ static void image_edit_window(Report &rep, int n, const std::vector<std::pair<st
   ed->step_frame_headless();
   {
     double call = 0;
-    const double first = cmd_frame(*ed, "develop open " + png, &call);  // (the command takes the rest of its line as the path: a space in it is fine)
-    const double next = frame(*ed);
+    double longest = cmd_frame(*ed, "develop open " + png, &call);  // (the command takes the rest of its line as the path: a space in it is fine)
+    /* Round 508: the picture is read on a worker; the frames while it reads (a 'Loading' state) and the one it lands in are each a frame the user feels. */
+    for (int i = 0; i < 20000 && ed->edit_doc_for_test().loading(); i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      longest = std::max(longest, frame(*ed));
+    }
+    longest = std::max(longest, frame(*ed));
     rep.table({"open", "size", "call ms", "longest frame ms", "budget"});
-    rep.row({"develop open (decode, first preview)", size, f1(call), f1(std::max(first, next)), once_verdict(std::max(first, next))});
+    rep.row({"develop open (decode, first preview)", size, f1(call), f1(longest), once_verdict(longest)});
   }
   rep.table({"adjustment", "size", "apply ms (full size)", "add step: longest frame ms", "slider: longest frame ms", "budget"});
   for (const edit::AdjustmentInfo &info : edit::adjustment_infos()) {
@@ -448,10 +453,35 @@ static bool sculpt_setup(Report &rep, Rig &r, int faces, const std::string &size
   return true;
 }
 
-static void sculpt_rows(Report &rep, int faces, int moves, size_t &problems) {
+/* Round 508 (part D): where a working frame of a stroke goes - the frame's mean, and the mean of each part (the dabs' own work, the
+ * mesh's in-place follow and its steps, the card upload, the scene hashes, the draw items, the views, the overlays). Parts are nested
+ * (the dabs and the uploads sit inside the UI's and the views' times); they are not meant to add up. */
+static const std::vector<std::string> &parts_header() {
+  static const std::vector<std::string> h = {"row", "size", "frame (mean)", "dabs", "in place", "scan", "normals", "retriangulate", "bounds", "uploads", "hashes", "draw items", "overlays", "scene 3D", "UI", "full builds", "partial / in place", "card whole / partial / views"};
+  return h;
+}
+static std::vector<std::string> parts_row(const std::string &name, const std::string &size, const StrokeFrames &f, const FrameProfile &p0, const FrameProfile &p1, const MeshCounts &m0, const MeshCounts &m1) {
+  const double n = std::max(1.0, (double)f.all.ms.size());
+  const MeshCounts m = m1 - m0;
+  double mean = 0;
+  for (double ms : f.all.ms) mean += ms / n;
+  return {name, size, f1(mean), f1((p1.ms_sculpt - p0.ms_sculpt) / n), f1(m.ms_in_place / n), f1(m.ms_in_place_scan / n), f1(m.ms_in_place_normals / n), f1(m.ms_in_place_retri / n),
+          f1(m.ms_in_place_bounds / n), f1((p1.ms_mesh_uploads - p0.ms_mesh_uploads) / n), f1((p1.ms_hash - p0.ms_hash) / n), f1((p1.ms_collect - p0.ms_collect) / n),
+          f1((p1.ms_overlays - p0.ms_overlays) / n), f1((p1.ms_scene3d - p0.ms_scene3d) / n), f1((p1.ms_ui - p0.ms_ui) / n), std::to_string(m.full_builds),
+          std::to_string(m.partial_normals) + " / " + std::to_string(m.in_place),
+          std::to_string(p1.gpu_mesh_uploads - p0.gpu_mesh_uploads) + " / " + std::to_string(p1.gpu_mesh_partial - p0.gpu_mesh_partial) + " / " + std::to_string(p1.gpu_views - p0.gpu_views)};
+}
+
+/* card: the views on the card (round 508: the app's default; the first runs were CPU views only). */
+static void sculpt_rows(Report &rep, int faces, int moves, size_t &problems, std::vector<std::vector<std::string>> &parts, bool card = false) {
   Rig r;
-  const std::string size = size_text((size_t)faces) + " faces";
-  if (!sculpt_setup(rep, r, faces, size)) return;
+  const std::string size = size_text((size_t)faces) + (card ? " faces, card views" : " faces");
+  auto setup = [&] {
+    if (!sculpt_setup(rep, r, faces, size)) return false;
+    if (card) r.ed->viewport_device_for_test(2);
+    return true;
+  };
+  if (!setup()) return;
   rep.note(strprintf("The %s sphere (%zu faces)'s centre is at %d, %d in the window, its radius %d px; the Scene view is %d x %d at %d, %d.", size.c_str(), r.faces, r.cx, r.cy, r.radius_px, r.view.w, r.view.h,
                      r.view.x, r.view.y));
   for (int b = 0; b < (int)(sizeof(kSculptBrushes) / sizeof(kSculptBrushes[0])); b++) {
@@ -459,7 +489,10 @@ static void sculpt_rows(Report &rep, int faces, int moves, size_t &problems) {
     ed.command("sculpt brush " + to_lower(kSculptBrushes[b]));
     const size_t steps = ed.undo_steps_for_test();
     const std::vector<Vec3> before = r.g->mesh_filter()->mesh->positions;
+    const FrameProfile fp0 = ed.frame_profile_totals();
+    const MeshCounts mc0 = mesh_counts();
     const StrokeFrames f = stroke_frames(ed, r, std::max(10, r.radius_px / 3), moves, [&] { return (double)ed.sculpt_dabs_for_test(); });
+    parts.push_back(parts_row(std::string("Sculpt, ") + kSculptBrushes[b], size, f, fp0, ed.frame_profile_totals(), mc0, mesh_counts()));
     const std::vector<Vec3> &after = r.g->mesh_filter()->mesh->positions;
     size_t moved = 0;
     for (size_t v = 0; v < before.size() && v < after.size(); v++) moved += std::memcmp(&before[v], &after[v], sizeof(Vec3)) != 0;
@@ -472,7 +505,7 @@ static void sculpt_rows(Report &rep, int faces, int moves, size_t &problems) {
     if (now.size() == before.size() && std::memcmp(now.data(), before.data(), before.size() * sizeof(Vec3)) == 0) continue;
     rep.note("sculpt_paint: the undo did not bring the sphere back (the stack's cap); a new sphere for the next brush");
     const int next = b + 1;
-    if (next >= (int)(sizeof(kSculptBrushes) / sizeof(kSculptBrushes[0])) || !sculpt_setup(rep, r, faces, size)) break;
+    if (next >= (int)(sizeof(kSculptBrushes) / sizeof(kSculptBrushes[0])) || !setup()) break;
   }
 }
 
@@ -547,9 +580,14 @@ static void test_sculpt_paint(Report &rep, const Options &o) {
   const int moves = o.quick ? 12 : 40;
   size_t problems = 0;
   const std::vector<int> sizes = o.quick ? std::vector<int>{20000} : std::vector<int>{100000, 500000};
-  for (int faces : sizes) sculpt_rows(rep, faces, moves, problems);
+  std::vector<std::vector<std::string>> parts;
+  for (int faces : sizes) sculpt_rows(rep, faces, moves, problems, parts);
+  if (gpu::available()) sculpt_rows(rep, sizes.back(), moves, problems, parts, true);
   texture_paint_rows(rep, sizes[0], moves);
   weight_paint_rows(rep, sizes[0], moves);
+  rep.note("Where a Sculpt stroke's frame goes (round 508, part D): the mean over the stroke's frames, in ms; the dabs and the uploads are inside the UI's and the views' times.");
+  rep.table(parts_header());
+  for (const std::vector<std::string> &row : parts) rep.row(row);
   rep.note(strprintf("Structural problems in the sculpted meshes: %zu.", problems));
 }
 
@@ -1456,6 +1494,85 @@ static void scene_views_rows(Report &rep, const std::string &bench, const std::s
   view_perf::keeps = true;
 }
 
+/* Round 508 (task 0492 part C): the frames after a bake lands, with the views on the card. The landing frame takes the new
+ * lighting; the frame after draws it, and the card's copy of every page is converted and uploaded there at once
+ * (gpu_lightmap). The worldlike stand-in at 4, 16 and 32 texels a metre: one page up to a SideRail-sized set. Judged against one
+ * landing frame of 100 ms (ADR 0105): under it the upload stays as it is, as the spec says. */
+static void bake_landing_on_card(Report &rep, const Options &o) {
+  rep.table({"bake landing, views on the card", "pages sent ahead (ADR 0140)", "pages", "texels (M)", "bake s", "landing frame ms", "frames sending pages: longest ms",
+             "next 4 frames: longest ms", "budget"});
+  std::vector<std::vector<std::string>> parts;
+  /* One bake first and thrown away: the first bake of a process pays the card's first uses, which would land on whichever
+   * row came first. Then each size off, on, off again, so a warming machine can't flatter either. */
+  struct Run {
+    int texels;
+    bool ahead;
+    bool shown;
+  };
+  std::vector<Run> runs = {{4, false, false}};
+  for (int texels : {4, 16, 32})
+    for (bool ahead : {false, true, false}) runs.push_back({texels, ahead, true});
+  for (const Run &r : runs) {
+    view_perf::pages_ahead = r.ahead;
+    auto ed = std::make_unique<Editor>();
+    ed->init_headless(1600, 900);
+    ed->viewport_device_for_test(2);
+    ed->set_async_jobs_for_test(true);
+    ed->command("benchscene worldlikequick");
+    ed->command("shading shaded");
+    for (int k = 0; k < 4; k++) ed->step_frame_headless();
+    ed->scene().lighting.texels_per_unit = (float)r.texels, ed->scene().lighting.indirect_samples = o.quick ? 4 : 16;
+    ScopedTimer whole;
+    ed->command("bake start");
+    double landing = 0, land_page_ms = 0, longest_wait = 0;
+    FrameProfile land_fp;
+    const uint64_t before0 = view_perf::counters.lightmap_pages_before_landing;
+    while (whole.ms() < 900000.0) {
+      const FrameProfile fp0 = ed->frame_profile_totals();
+      const double page0 = view_perf::counters.lightmap_page_ms;
+      const uint64_t sent0 = view_perf::counters.lightmap_pages_before_landing;
+      ScopedTimer f;
+      ed->step_frame_headless();
+      const double ms = f.ms();
+      if (view_perf::counters.lightmap_pages_before_landing != sent0) longest_wait = std::max(longest_wait, ms);
+      if (!ed->baking_for_test()) {
+        landing = ms;
+        land_page_ms = view_perf::counters.lightmap_page_ms - page0;
+        land_fp = ed->frame_profile_totals();
+        land_fp.ms_gpu_corners -= fp0.ms_gpu_corners, land_fp.ms_gpu_render -= fp0.ms_gpu_render, land_fp.ms_gpu -= fp0.ms_gpu;
+        land_fp.ms_gpu_instances -= fp0.ms_gpu_instances, land_fp.ms_mesh_uploads -= fp0.ms_mesh_uploads;
+        break;
+      }
+    }
+    const double bake_s = whole.ms() / 1000.0;
+    double after = 0;
+    for (int k = 0; k < 4; k++) {
+      ScopedTimer f;
+      ed->step_frame_headless();
+      after = std::max(after, f.ms());
+    }
+    if (!r.shown) continue;
+    const LightingData &ld = ed->lighting_data_for_test();
+    size_t tx = 0;
+    for (const Lightmap &p : ld.pages) tx += (size_t)p.width * (size_t)p.height;
+    const std::string what = strprintf("worldlike at %d texels/m", r.texels);
+    const std::string ahead = r.ahead ? "on" : "off";
+    const uint64_t sent_ahead = view_perf::counters.lightmap_pages_before_landing - before0;
+    /* (ADR 0105: the landing frame and the frames after it 100 ms; the frames sending pages while the job runs 50 ms.) */
+    rep.row({what, ahead, std::to_string(ld.pages.size()), strprintf("%.2f", (double)tx / 1e6), f1(bake_s), f1(landing), r.ahead ? f1(longest_wait) : std::string("-"), f1(after),
+             ld.pages.empty() ? "OVER (no pages)" : std::max(landing, after) > 100.0 || longest_wait > 50.0 ? "OVER" : "ok"});
+    const auto &bt = ed->last_bake_times_for_test();
+    parts.push_back({what, ahead, f1(landing), std::to_string(sent_ahead), f1(land_page_ms), f1(bt.land_ms), f1(land_fp.ms_gpu), f1(land_fp.ms_gpu_corners),
+                     f1(land_fp.ms_gpu_corners - land_page_ms), f1(land_fp.ms_gpu_instances), f1(land_fp.ms_gpu_render), f1(landing - land_fp.ms_gpu - bt.land_ms)});
+  }
+  view_perf::pages_ahead = true;
+  /* Where the landing frame went (round 508): bake_job_land, then the views' card work in the same frame - "corners + pages"
+   * holds the baked corners and the pages' conversion and upload, the pages' share apart; the rest is the frame's CPU work. */
+  rep.table({"the landing frame's parts", "pages sent ahead", "landing frame ms", "pages sent before it", "pages sent in it ms", "bake_job_land ms", "card total ms",
+             "card: corners + pages ms", "of it: corners alone ms", "card: instances ms", "card: render ms", "the rest of the frame ms"});
+  for (const std::vector<std::string> &row : parts) rep.row(row);
+}
+
 static void test_scene_views(Report &rep, const Options &o) {
   Quiet quiet;
   rep.title("Scene view: the per-frame work kept while the scene holds (round 506)",
@@ -1486,6 +1603,7 @@ static void test_scene_views(Report &rep, const Options &o) {
              i % (view_perf::KeepCount + 1) == 0 ? "-" : f1(r.f.median() - reference)});
   }
   rep.note("Untimed runs on a shared machine are indicative only: the A / B is read from the timed window (round 506's main session).");
+  bake_landing_on_card(rep, o);
 }
 
 }  // namespace survey

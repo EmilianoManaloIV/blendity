@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the lighting tests (task 0177: one file a subsystem; the groups keep their rounds' order).
+#include "../src/core/view_perf.h"
 #include "test_common.h"
 #include "../src/render/reflection_probe.h"
 #include "../src/scene/unity_material.h"
@@ -12188,6 +12189,51 @@ static void tests_round507_te() {
   });
 }
 
+static void tests_round508() {
+  test("Generate Lighting with the views on the CPU (round 508, ADR 0140): the bake lands in the frame after its worker ends, as before - no page is sent ahead, and the lightmaps are the one-frame landing's", [] {
+    std::vector<std::vector<Vec3>> inline_pages, cpu_pages;
+    {
+      Editor ed;
+      ed.init_headless(640, 400);
+      r507_scene(ed);
+      ed.command("bake start");
+      for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+      inline_pages = r507_pages(ed);
+    }
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.viewport_device_for_test(1);  // (1: the CPU)
+    r507_scene(ed);
+    ed.set_async_jobs_for_test(true);
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test());
+    CHECK(view_perf::counters.lightmap_pages_before_landing == ahead0);
+    cpu_pages = r507_pages(ed);
+    CHECK(!cpu_pages.empty() && cpu_pages.size() == inline_pages.size());
+    for (size_t k = 0; k < cpu_pages.size() && k < inline_pages.size(); k++)
+      CHECK(cpu_pages[k].size() == inline_pages[k].size() && std::memcmp(cpu_pages[k].data(), inline_pages[k].data(), cpu_pages[k].size() * sizeof(Vec3)) == 0);
+  });
+  test("Generate Lighting with the card open but the views on the CPU (round 508's review): nothing is sent to the card ahead - it would never be read nor let go - and the bake lands at once", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.viewport_device_for_test(2);  // (the card opened first, where there is one)
+    r507_scene(ed);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    ed.viewport_device_for_test(1);  // (then CPU views: the card stays open, drawing nothing)
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    ed.set_async_jobs_for_test(true);
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    CHECK(view_perf::counters.lightmap_pages_before_landing == ahead0);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -12233,4 +12279,5 @@ void run_lighting_tests() {
   tests_round482();
   tests_round507();
   tests_round507_te();
+  tests_round508();
 }

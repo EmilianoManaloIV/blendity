@@ -6113,6 +6113,94 @@ static void tests_round506_engineer_gpu() {
   });
 }
 
+static void tests_round508_gpu() {
+  test("Generate Lighting with the views on the card (round 508, ADR 0140): the pages go up before the bake lands, a few a frame; the view shows the old lighting whole until then; the landing frame sends none; the lightmaps and the landed picture are the one-frame landing's (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto make = [](Editor &ed, bool workers) {
+      ed.init_headless(800, 450);
+      if (workers) ed.set_async_jobs_for_test(true);
+      ed.viewport_device_for_test(2);
+      /* A still scene (worldlike's view changes every frame while it bakes, so no picture there can be compared): a floor and
+       * 120 cubes at 48 texels a metre - more than one page. */
+      GameObject *floor = ed.scene().create("Floor");
+      floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+      floor->add<MeshRenderer>()->contribute_gi = true;
+      for (int i = 0; i < 120; i++) {
+        GameObject *box = ed.scene().create("Box" + std::to_string(i));
+        box->add<MeshFilter>()->mesh = primitives::cube();
+        box->set_local_position({(float)(i % 12) - 5.5f, 0.5f, (float)(i / 12) - 4.5f});
+        box->set_local_scale({0.5f, 0.5f, 0.5f});
+        box->add<MeshRenderer>()->contribute_gi = true;
+      }
+      ed.command("create Directional Light");
+      ed.commit_change("r508 scene");
+      ed.command("camera 30 35 16 0 0 0");
+      ed.command("shading shaded");
+      r34_steps(ed, 3);
+      r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+      r34_steps(ed, 3);
+      ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
+    };
+    std::vector<std::vector<Vec3>> one_frame;
+    std::vector<uint32_t> one_frame_pic;
+    {
+      Editor ed;
+      make(ed, false);  // (no workers: the bake lands in the frame that started it, pages and all - the old behaviour)
+      ed.command("bake start");
+      for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+      r34_steps(ed, 6);
+      for (const Lightmap &p : ed.lighting_data_for_test().pages) one_frame.push_back(p.texels);
+      one_frame_pic = r34_crop(ed, ed.scene_view_rect());
+    }
+    Editor ed;
+    make(ed, true);
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    ed.command("bake start");
+    std::vector<uint32_t> before_pages, last_before;
+    size_t frames_sending = 0, mixed = 0, unsteady = 0;  // (unsteady: frames before any page went up that differ from the one before)
+    bool still = false;  // (the last two frames before the first page are the same picture: the view is still, so `mixed` means a frame showed something new)
+    uint64_t sent_in_landing = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
+      const uint64_t ahead = view_perf::counters.lightmap_pages_before_landing, sent = view_perf::counters.lightmap_pages_sent;
+      if (ahead == ahead0) {  // (the last picture before any page went up)
+        before_pages = r34_crop(ed, ed.scene_view_rect());
+        still = !last_before.empty() && r458_differ(last_before, before_pages) == 0;
+        if (!last_before.empty() && !still) unsteady++;  // (said, not checked: the first frames after `bake start` settle - the toolbar's state, the status line)
+        last_before = before_pages;
+      }
+      ed.step_frame_headless();
+      if (view_perf::counters.lightmap_pages_before_landing != ahead) {
+        frames_sending++;
+        if (!before_pages.empty() && r458_differ(before_pages, r34_crop(ed, ed.scene_view_rect())) != 0) mixed++;
+      }
+      if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
+    }
+    CHECK(!ed.baking_for_test());
+    const size_t pages = ed.lighting_data_for_test().pages.size();
+    std::printf("    %zu page(s): %llu sent before the landing over %zu frame(s); %llu in the landing frame; %zu of those frames drew anything but the old lighting (%zu frames before them were not still)\n", pages,
+                (unsigned long long)(view_perf::counters.lightmap_pages_before_landing - ahead0), frames_sending, (unsigned long long)sent_in_landing, mixed, unsteady);
+    CHECK(pages > 1);
+    CHECK(view_perf::counters.lightmap_pages_before_landing - ahead0 >= pages);  // (the direction pages in Directional mode too)
+    CHECK(frames_sending >= 1);
+    CHECK(still);
+    CHECK(mixed == 0);
+    CHECK(sent_in_landing == 0);
+    r34_steps(ed, 6);
+    CHECK(pages == one_frame.size());
+    for (size_t k = 0; k < pages && k < one_frame.size(); k++) {
+      const std::vector<Vec3> &t = ed.lighting_data_for_test().pages[k].texels;
+      CHECK(t.size() == one_frame[k].size() && std::memcmp(t.data(), one_frame[k].data(), t.size() * sizeof(Vec3)) == 0);
+    }
+    const size_t differ = r458_differ(one_frame_pic, r34_crop(ed, ed.scene_view_rect()));
+    std::printf("    the landed picture against the one-frame landing's: %zu pixels differ\n", differ);
+    CHECK(differ == 0);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -6154,4 +6242,5 @@ void run_gpu_tests() {
   tests_round506_more_gpu();
   tests_round506_third_gpu();
   tests_round506_engineer_gpu();
+  tests_round508_gpu();
 }

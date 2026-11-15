@@ -13810,6 +13810,866 @@ static void tests_round507_te() {
   });
 }
 
+/* ---------------------------------------------------------------- round 508: the image editor's heavy sliders and the picture's read (task 0492) */
+
+namespace r508 {
+
+edit::Image picture(int w, int h) {
+  edit::Image img;
+  img.resize(w, h);
+  uint32_t s = 12345u;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      s = s * 1664525u + 1013904223u;
+      const float n = ((s >> 9) & 0xffff) / 65535.0f - 0.5f;
+      float *p = img.at(x, y);
+      p[0] = 0.5f + 0.4f * std::sin(x * 0.3f + y * 0.1f) + 0.1f * n;
+      p[1] = 0.4f + 0.3f * std::cos(x * 0.07f - y * 0.2f) + 0.1f * n;
+      p[2] = 0.3f + 0.2f * std::sin(x * 0.05f) * std::cos(y * 0.09f) + 0.1f * n;
+      p[3] = 0.8f;
+    }
+  img.at(5, 5)[0] = 3.0f;  // (above white)
+  return img;
+}
+
+float lum(const float *c) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; }
+float hermite(float a, float b, float x) {
+  const float t = std::max(0.0f, std::min(1.0f, (x - a) / (b - a)));
+  return t * t * (3.0f - 2.0f * t);
+}
+float enc_exact(float x) { return x <= 0.0031308f ? 12.92f * x : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f; }
+
+/* Three box blurs each way, summed straight (no running sum) - the filters' blur written the slow, plain way. */
+std::vector<float> blurred(std::vector<float> p, int w, int h, int r) {
+  for (int pass = 0; pass < 3; pass++) {
+    std::vector<float> t(p.size());
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        double s = 0;
+        for (int d = -r; d <= r; d++) s += p[(size_t)y * w + std::max(0, std::min(w - 1, x + d))];
+        t[(size_t)y * w + x] = (float)(s / (2 * r + 1));
+      }
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        double s = 0;
+        for (int d = -r; d <= r; d++) s += t[(size_t)std::max(0, std::min(h - 1, y + d)) * w + x];
+        p[(size_t)y * w + x] = (float)(s / (2 * r + 1));
+      }
+  }
+  return p;
+}
+
+std::vector<float> lum_plane(const edit::Image &in) {
+  std::vector<float> y((size_t)in.w * in.h);
+  for (size_t i = 0; i < y.size(); i++) y[i] = std::max(0.0f, lum(&in.px[i * 4]));
+  return y;
+}
+
+void scale_to(float *c, float y, float y2) {
+  for (int k = 0; k < 3; k++) c[k] = y > 1e-8f ? c[k] * (y2 / y) : y2;
+}
+
+edit::Image ref_clarity(const edit::Image &in, float amount) {
+  edit::Image out = in;
+  const float k = amount / 100.0f * 0.8f;
+  const std::vector<float> y = lum_plane(in), b = blurred(y, in.w, in.h, std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h))));
+  for (size_t i = 0; i < y.size(); i++) {
+    const float p = std::min(1.0f, enc_exact(y[i])), w = 4.0f * p * (1.0f - p);
+    scale_to(&out.px[i * 4], y[i], std::max(0.0f, y[i] + k * (y[i] - b[i]) * w));
+  }
+  return out;
+}
+
+edit::Image ref_sharpen(const edit::Image &in, float amount, float radius, float masking) {
+  edit::Image out = in;
+  const std::vector<float> y = lum_plane(in), b = blurred(y, in.w, in.h, std::max(1, (int)std::lround(radius)));
+  for (size_t i = 0; i < y.size(); i++) {
+    const float detail = y[i] - b[i], m = masking > 0.0f ? hermite(0.0f, masking / 100.0f * 0.1f, std::fabs(detail)) : 1.0f;
+    scale_to(&out.px[i * 4], y[i], std::max(0.0f, y[i] + amount / 100.0f * detail * m));
+  }
+  return out;
+}
+
+edit::Image ref_dehaze(const edit::Image &in, float amount100) {
+  edit::Image out = in;
+  const float amount = amount100 / 100.0f;
+  std::vector<float> dark((size_t)in.w * in.h);
+  for (size_t i = 0; i < dark.size(); i++) dark[i] = std::max(0.0f, std::min(in.px[i * 4], std::min(in.px[i * 4 + 1], in.px[i * 4 + 2])));
+  dark = blurred(dark, in.w, in.h, std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h))));
+  std::vector<float> sorted = dark;
+  std::sort(sorted.begin(), sorted.end());  // (the whole sort: the filter's histogram search must land on the same value)
+  const float A = std::max(0.05f, sorted[sorted.size() - 1 - sorted.size() / 1000]);
+  for (size_t i = 0; i < dark.size(); i++)
+    for (int k = 0; k < 3; k++) {
+      float &c = out.px[i * 4 + k];
+      if (amount < 0.0f) c = c + (A - c) * (-amount * 0.5f);
+      else c = std::max(0.0f, (c - A) / std::max(0.1f, 1.0f - 0.95f * amount * dark[i] / A) + A);
+    }
+  return out;
+}
+
+float max_diff(const edit::Image &a, const edit::Image &b) {
+  if (a.w != b.w || a.h != b.h) return 1e9f;
+  float m = 0;
+  for (size_t i = 0; i < a.px.size(); i++) m = std::max(m, std::fabs(a.px[i] - b.px[i]));
+  return m;
+}
+
+/* One filter with its fields set, applied the one-call way (no kept parts). */
+edit::Image fresh(const edit::Image &in, const std::string &type, const std::vector<std::pair<const char *, float>> &fields) {
+  edit::Adjustment a = edit::make_adjustment(type);
+  for (const auto &f : fields) a.set(f.first, f.second);
+  edit::Image out;
+  edit::apply(a, in, out);
+  return out;
+}
+
+/* A document on `img` with one step of `type`, its first field dragged through `values` (a result() after each), the last result returned. */
+edit::Image dragged(const edit::Image &img, const std::string &type, const std::vector<float> &values, const std::vector<std::pair<const char *, float>> &others = {}) {
+  edit::Doc doc;
+  doc.open_pixels(img, "r508");
+  doc.add(type);
+  for (const auto &f : others) doc.set(0, f.first, f.second);
+  const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+  for (float v : values) {
+    doc.set(0, field, v, false);
+    doc.result();
+  }
+  return doc.result();
+}
+
+bool wait_landed(edit::Doc &doc, std::string &err, edit::Doc::Landed &how) {
+  for (int i = 0; i < 5000; i++) {
+    how = doc.poll_open(err);
+    if (how != edit::Doc::Landed::Nothing) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return false;
+}
+
+}  // namespace r508
+
+static void tests_round508() {
+  test("round 508: Clarity, Sharpen and Dehaze after a drag of the amount give the picture of the plain formula (a slow straight-summed blur) at two radii each", [] {
+    for (const std::pair<int, int> &size : {std::pair<int, int>{160, 120}, std::pair<int, int>{330, 250}}) {  // (Clarity's and Dehaze's radius follows the size: 2 and 4)
+      const edit::Image img = r508::picture(size.first, size.second);
+      CHECK(r508::max_diff(r508::dragged(img, "Clarity", {20, 45, 70}), r508::ref_clarity(img, 70)) < 2e-4f);
+      CHECK(r508::max_diff(r508::dragged(img, "Dehaze", {20, 45, 70}), r508::ref_dehaze(img, 70)) < 2e-4f);
+      CHECK(r508::max_diff(r508::dragged(img, "Dehaze", {-20, -60}), r508::ref_dehaze(img, -60)) < 2e-4f);
+    }
+    const edit::Image img = r508::picture(160, 120);
+    for (float radius : {1.0f, 3.0f})
+      CHECK(r508::max_diff(r508::dragged(img, "Sharpen", {30, 80, 120}, {{"Radius", radius}, {"Masking", 30}}), r508::ref_sharpen(img, 120, radius, 30)) < 2e-4f);
+  });
+
+  test("round 508: Noise Reduction after a drag of either strength is the one-call picture, at two colour radii; the same for the others through the preview", [] {
+    const edit::Image img = r508::picture(160, 120);
+    for (float color : {30.0f, 100.0f}) {
+      const edit::Image want = r508::fresh(img, "Noise Reduction", {{"Luminance", 70}, {"Color", color}});
+      CHECK(r508::max_diff(r508::dragged(img, "Noise Reduction", {10, 40, 70}, {{"Color", color}}), want) == 0.0f);
+    }
+    edit::Doc doc;  // (the colour strength dragged with the luminance's kept)
+    doc.open_pixels(img, "r508");
+    doc.add("Noise Reduction");
+    doc.set(0, "Luminance", 60);
+    for (float c : {10.0f, 50.0f, 90.0f}) {
+      doc.set(0, "Color", c, false);
+      doc.result();
+    }
+    CHECK(r508::max_diff(doc.result(), r508::fresh(img, "Noise Reduction", {{"Luminance", 60}, {"Color", 90}})) == 0.0f);
+    /* The preview (a smaller picture, the radii scaled): the same through the kept parts and through none. */
+    const edit::Image big = r508::picture(300, 200);
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc d;
+      d.open_pixels(big, "r508");
+      d.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      for (float v : {15.0f, 35.0f, 55.0f}) {
+        d.set(0, field, v, false);
+        d.preview(100);
+      }
+      edit::Image want;
+      edit::apply(d.stack()[0], d.preview_source(100), want, d.preview_scale());
+      CHECK(r508::max_diff(d.preview(100), want) == 0.0f);
+    }
+  });
+
+  test("round 508: a drag of the amount filters the source once - the parts are made again only for another radius, another input (an earlier step edited, its mask changed, undo) or another picture", [] {
+    const edit::Image img = r508::picture(160, 120);
+    edit::Doc doc;
+    doc.open_pixels(img, "r508");
+    doc.add("Exposure");
+    doc.set(0, "Exposure", 0.5f);
+    doc.add("Clarity");
+    doc.set(1, "Clarity", 30);
+    doc.result();
+    const uint64_t first = edit::filter_parts_made();
+    for (float v : {40.0f, 55.0f, 70.0f, -20.0f}) {
+      doc.set(1, "Clarity", v, false);
+      doc.result();
+    }
+    CHECK(edit::filter_parts_made() == first);  // (five amounts, one luminance and one blur)
+    auto chain = [&](const edit::Image &in, float exposure, float clarity) {
+      edit::Image a, b;
+      edit::apply([&] { edit::Adjustment e = edit::make_adjustment("Exposure"); e.set("Exposure", exposure); return e; }(), in, a);
+      edit::apply([&] { edit::Adjustment c = edit::make_adjustment("Clarity"); c.set("Clarity", clarity); return c; }(), a, b);
+      return b;
+    };
+    CHECK(r508::max_diff(doc.result(), chain(img, 0.5f, -20)) == 0.0f);
+    doc.set(0, "Exposure", 1.5f, false);  // (the step before it: its input is another picture)
+    CHECK(r508::max_diff(doc.result(), chain(img, 1.5f, -20)) == 0.0f);
+    CHECK(edit::filter_parts_made() > first);
+    const uint64_t second = edit::filter_parts_made();
+    doc.set(1, "Clarity", 10, false);
+    doc.result();
+    CHECK(edit::filter_parts_made() == second);
+    edit::MaskPart radial = edit::make_mask_part(edit::MaskKind::Radial, img.w, img.h);  // (a mask on the earlier step changes what the later one reads)
+    doc.set_mask(0, {radial});
+    doc.result();
+    CHECK(edit::filter_parts_made() > second);
+    const edit::Image masked = doc.result();
+    doc.undo();  // (the mask undone: the earlier step's output is the unmasked one again)
+    CHECK(r508::max_diff(doc.result(), chain(img, 1.5f, 10)) == 0.0f);
+    CHECK(r508::max_diff(masked, chain(img, 1.5f, 10)) > 1e-4f);
+    doc.set(1, "Clarity", 30, false);  // (another picture: the parts are not the old one's)
+    doc.result();
+    const edit::Image other = r508::picture(160, 120);
+    edit::Image changed = other;
+    for (size_t i = 0; i < changed.px.size(); i += 4) changed.px[i] *= 0.5f;
+    doc.open_pixels(changed, "r508b");
+    doc.add("Clarity");
+    doc.set(0, "Clarity", 30);
+    CHECK(r508::max_diff(doc.result(), r508::fresh(changed, "Clarity", {{"Clarity", 30}})) == 0.0f);
+    /* Sharpen: the radius is part of the key; Noise Reduction: the luminance and the colour each have theirs. */
+    edit::Doc sh;
+    sh.open_pixels(img, "r508");
+    sh.add("Sharpen");
+    sh.set(0, "Amount", 50);
+    sh.result();
+    const uint64_t s0 = edit::filter_parts_made();
+    sh.set(0, "Amount", 90, false);
+    sh.set(0, "Masking", 40, false);
+    sh.result();
+    CHECK(edit::filter_parts_made() == s0);
+    sh.set(0, "Radius", 2, false);
+    sh.result();
+    CHECK(edit::filter_parts_made() == s0 + 1);
+    edit::Doc nr;
+    nr.open_pixels(img, "r508");
+    nr.add("Noise Reduction");
+    nr.set(0, "Luminance", 40);
+    nr.set(0, "Color", 40, false);
+    nr.result();
+    const uint64_t n0 = edit::filter_parts_made();
+    nr.set(0, "Luminance", 60, false);
+    nr.result();
+    CHECK(edit::filter_parts_made() == n0 + 1);  // (the smoothed luminance only)
+    nr.set(0, "Color", 80, false);
+    nr.result();
+    CHECK(edit::filter_parts_made() == n0 + 2);  // (the chroma only)
+  });
+
+  test("round 508: a picture opened on a worker has the pixels the one-call open gives; A then B opened at once shows B; opening something else while it reads drops the read", [] {
+    const std::string dir = fs::join(test_dir(), "r508_open");
+    fs::make_dirs(dir);
+    auto write = [&](const char *name, int w, int h, uint32_t colour) {
+      std::vector<uint32_t> px((size_t)w * h);
+      for (size_t i = 0; i < px.size(); i++) px[i] = colour ^ (uint32_t)(i % 251) << 8;
+      const std::string path = fs::join(dir, name);
+      CHECK(write_png(path, px.data(), w, h, w));
+      return path;
+    };
+    const std::string a = write("a.png", 512, 384, 0xFF2040C0u), b = write("b.png", 300, 200, 0xFFC08020u);
+    edit::Doc sync;
+    std::string err;
+    CHECK(sync.open_file(b, err));
+    edit::Doc doc;
+    doc.open_file_async(a);
+    CHECK(doc.loading() && doc.loading_path() == a && !doc.is_open());
+    doc.open_file_async(b);  // (A's read is dropped: B's result is the one kept)
+    edit::Doc::Landed how = edit::Doc::Landed::Nothing;
+    CHECK(r508::wait_landed(doc, err, how) && how == edit::Doc::Landed::Opened);
+    CHECK(!doc.loading() && doc.source_path() == b && doc.source().w == 300 && doc.source().px == sync.source().px);
+    doc.open_file_async(a);  // (the document opened another way while the read is out: the read is dropped)
+    doc.open_pixels(r508::picture(20, 10), "px");
+    CHECK(!doc.loading());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(doc.poll_open(err) == edit::Doc::Landed::Nothing && doc.source().w == 20);
+    doc.open_file_async(fs::join(dir, "missing.png"));  // (a file that is not there: a failure, the document untouched)
+    CHECK(r508::wait_landed(doc, err, how) && how == edit::Doc::Landed::Failed && !err.empty() && doc.source().w == 20);
+    doc.open_file_async(a);
+    doc.cancel_open();
+    CHECK(!doc.loading());
+  });
+
+  test("round 508: the Editing window shows Loading while a picture is read on a worker, opens it in a later frame with the same pixels, takes the newer of two opened at once, and an editor closed mid-read ends cleanly", [] {
+    const std::string dir = fs::join(test_dir(), "r508_window");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)1500 * 1500);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    const std::string big = fs::join(dir, "big.png"), small = fs::join(dir, "small.png");
+    CHECK(write_png(big, px.data(), 1500, 1500, 1500));
+    std::vector<uint32_t> sm(40 * 30, 0xFF4060A0u);
+    CHECK(write_png(small, sm.data(), 40, 30, 40));
+    edit::Doc want;
+    std::string err;
+    CHECK(want.open_file(small, err));
+    {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.set_async_jobs_for_test(true);
+      ed.command("window Editing");
+      ed.command("develop open " + big);
+      CHECK(ed.edit_doc_for_test().loading() && !ed.edit_doc_for_test().is_open());
+      ed.command("develop open " + small);  // (the second one, at once: the first read is dropped)
+      for (int i = 0; i < 2000 && ed.edit_doc_for_test().loading(); i++) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      edit::Doc &doc = ed.edit_doc_for_test();
+      CHECK(!doc.loading() && doc.source_path() == small && doc.source().px == want.source().px);
+      ed.step_frame_headless();
+      ed.command("develop open " + big);  // (a picture open already stays up while the next is read, then is replaced)
+      CHECK(doc.loading() && doc.is_open() && doc.source_path() == small);
+      ed.step_frame_headless();
+      ed.command("develop add Exposure");  // (a command meanwhile is refused, not applied to the old picture)
+      CHECK(doc.stack().empty() || doc.source_path() == big);
+      ed.command("develop open " + big);  // (and the editor goes out of scope with this one still being read)
+    }
+    CHECK(true);
+  });
+}
+
+/* ---------------------------------------------------------------- round 508 (test engineer): kept parts and the async open, against fresh applies */
+
+namespace r508te {
+
+bool same_bits(const edit::Image &a, const edit::Image &b) {
+  return a.w == b.w && a.h == b.h && a.px.size() == b.px.size() && std::memcmp(a.px.data(), b.px.data(), a.px.size() * sizeof(float)) == 0;
+}
+
+/* The stack applied step by step with no kept parts (the one-call path), on `src` at `scale`. */
+edit::Image chain(const edit::Doc &doc, const edit::Image &src, float scale) {
+  edit::Image cur = src;
+  for (const edit::Adjustment &a : doc.stack()) {
+    edit::Image out;
+    edit::apply(a, cur, out, scale);
+    cur = std::move(out);
+  }
+  return cur;
+}
+
+/* What the document shows at `side` (0: the full result) and what a keep-free chain gives for the same input. */
+bool shows_fresh(edit::Doc &doc, int side) {
+  const edit::Image shown = side > 0 ? doc.preview(side) : doc.result();
+  if (side > 0) {
+    const edit::Image &src = doc.preview_source(side);
+    const float scale = &src == &doc.source() ? 1.0f : doc.preview_scale();
+    return same_bits(shown, chain(doc, src, scale));
+  }
+  return same_bits(shown, chain(doc, doc.source(), 1.0f));
+}
+
+const char *const kTypes[] = {"Exposure", "Clarity", "Sharpen", "Dehaze", "Noise Reduction", "Clarity", "Flip / Rotate", "Crop / Straighten"};
+
+/* One random edit of the stack (a slider drag, a toggle, a move, a remove, an add, a mask, an undo or redo). */
+void random_edit(edit::Doc &doc, uint32_t &s, int w, int h, std::string &what) {
+  auto next = [&](uint32_t n) {
+    s = s * 1664525u + 1013904223u;
+    return (s >> 8) % n;
+  };
+  const int n = (int)doc.stack().size();
+  const int op = (int)next(12);
+  const int i = n ? (int)next((uint32_t)n) : 0;
+  if (n == 0 || op == 0) {
+    const char *t = kTypes[next(8)];
+    doc.add(t);
+    what = std::string("add ") + t;
+    return;
+  }
+  const edit::Adjustment &a = doc.stack()[(size_t)i];
+  switch (op) {
+    case 1: case 2: case 3: case 4: {  // (a drag: no undo step)
+      const auto &fields = a.info()->fields;
+      if (fields.empty()) return;
+      const auto &f = fields[next((uint32_t)fields.size())];
+      const float v = f.mn + (f.mx - f.mn) * (float)next(1000) / 1000.0f;
+      doc.set(i, f.name, f.mx > 1000 ? std::min(v, 40.0f) : v, op == 1);
+      what = strprintf("set %d %s", i, f.name);
+      return;
+    }
+    case 5:
+      doc.set_enabled(i, !a.enabled);
+      what = strprintf("toggle %d", i);
+      return;
+    case 6:
+      doc.move(i, (int)next((uint32_t)n));
+      what = strprintf("move %d", i);
+      return;
+    case 7:
+      if (n > 1) doc.remove(i);
+      what = strprintf("remove %d", i);
+      return;
+    case 8: {
+      std::vector<edit::MaskPart> mask;
+      const uint32_t kind = next(4);
+      if (kind == 0) mask.clear();
+      else {
+        edit::MaskPart m = edit::make_mask_part(kind == 1 ? edit::MaskKind::Radial : kind == 2 ? edit::MaskKind::Linear : edit::MaskKind::Painted, w, h);
+        m.invert = next(2) == 1;
+        if (kind != 3) m.p[4] = (float)next(100) / 100.0f;
+        else edit::paint_dab(m, 0.3f + 0.1f * next(5), 0.5f, 0.3f, 1.0f, 0.5f, false);
+        mask.push_back(m);
+      }
+      doc.set_mask(i, mask, next(2) == 0);
+      what = strprintf("mask %d kind %u", i, kind);
+      return;
+    }
+    case 9: doc.undo(), what = "undo"; return;
+    case 10: doc.redo(), what = "redo"; return;
+    default: what = "nothing"; return;
+  }
+}
+
+}  // namespace r508te
+
+static void tests_round508_te() {
+  test("round 508 (test engineer): whatever is done to a stack of filters - sliders, toggles, moves, removes, masks, undo, redo, two Clarities, a crop or a turn before one - the full result and two preview sizes equal a keep-free chain", [] {
+    int checked = 0;
+    for (uint32_t seed : {1u, 7u, 99u, 2024u}) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(90, 70), "r508te");
+      uint32_t s = seed;
+      doc.add("Clarity");
+      doc.add("Sharpen");
+      doc.add("Dehaze");
+      doc.add("Noise Reduction");
+      doc.add("Clarity");
+      std::string what = "start";
+      for (int step = 0; step < 70; step++) {
+        r508te::random_edit(doc, s, 90, 70, what);
+        const int side = step % 3 == 0 ? 0 : step % 3 == 1 ? 48 : 64;  // (the preview size changes too)
+        const bool ok = r508te::shows_fresh(doc, side);
+        checked++;
+        if (!ok) std::printf("    seed %u step %d (%s) side %d: the shown picture is not the keep-free chain's\n", seed, step, what.c_str(), side);
+        CHECK(ok);
+        if (!ok) return;
+      }
+      /* The other sizes again after the run (a kept part of the old size must not be used). */
+      CHECK(r508te::shows_fresh(doc, 48) && r508te::shows_fresh(doc, 64) && r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 200));
+    }
+    std::printf("    %d states checked\n", checked);
+  });
+
+  test("round 508 (test engineer): dragging a slider back and forth with the preview size changing between frames (window resized, zoomed) shows the keep-free picture at every size", [] {
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(200, 150), "r508te");
+      doc.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      int bad = 0;
+      const int sides[] = {64, 100, 64, 150, 0, 100, 40, 64};
+      for (int i = 0; i < 16; i++) {
+        doc.set(0, field, (float)(10 + 8 * (i % 5)), false);
+        if (!r508te::shows_fresh(doc, sides[i % 8])) bad++;
+      }
+      std::printf("    %s: %d frames off\n", type, bad);
+      CHECK(bad == 0);
+    }
+  });
+
+  test("round 508 (test engineer): two filters of one kind in a stack each keep their own parts: dragging the first, then the second, matches the chain", [] {
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(120, 90), "r508te");
+      doc.add(type);
+      doc.add("Exposure");
+      doc.set(1, "Exposure", 0.7f);
+      doc.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      for (int i = 0; i < 6; i++) {
+        doc.set(i % 2 ? 2 : 0, field, (float)(20 + 9 * i), false);
+        CHECK(r508te::shows_fresh(doc, i % 3 == 0 ? 0 : 64));
+      }
+      /* Swapping the two: each now has the other's input. */
+      doc.move(0, 2);
+      CHECK(r508te::shows_fresh(doc, 0));
+      CHECK(r508te::shows_fresh(doc, 64));
+      doc.undo();
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+  });
+
+  test("round 508 (test engineer): a mask painted, inverted and feathered on an earlier step, then undone and redone, never leaves a later filter on the old input", [] {
+    edit::Doc doc;
+    doc.open_pixels(r508::picture(120, 90), "r508te");
+    doc.add("Exposure");
+    doc.set(0, "Exposure", 1.0f);
+    doc.add("Clarity");
+    doc.set(1, "Clarity", 60);
+    doc.add("Dehaze");
+    doc.set(2, "Dehaze", 50);
+    CHECK(r508te::shows_fresh(doc, 64));
+    edit::MaskPart paint = edit::make_mask_part(edit::MaskKind::Painted, 120, 90);
+    for (int i = 0; i < 6; i++) edit::paint_dab(paint, 0.2f + 0.1f * i, 0.5f, 0.15f, 1.0f, 0.5f, false);
+    doc.set_mask(0, {paint});
+    CHECK(r508te::shows_fresh(doc, 64) && r508te::shows_fresh(doc, 0));
+    paint.invert = true;
+    doc.set_mask(0, {paint});
+    CHECK(r508te::shows_fresh(doc, 64));
+    edit::MaskPart radial = edit::make_mask_part(edit::MaskKind::Radial, 120, 90);
+    for (float feather : {0.0f, 0.3f, 1.0f}) {
+      radial.p[4] = feather;
+      doc.set_mask(0, {radial}, false);
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+    for (int i = 0; i < 4; i++) {
+      doc.undo();
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+    for (int i = 0; i < 4; i++) {
+      doc.redo();
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+    /* A mask on the filter itself (its input unchanged: its parts may stay, the picture blends). */
+    doc.set_mask(1, {radial});
+    CHECK(r508te::shows_fresh(doc, 64));
+    doc.set_mask(1, {});
+    CHECK(r508te::shows_fresh(doc, 64));
+  });
+
+  test("round 508 (test engineer): another picture of the same size opened under a stack of the four filters, and an .edit loaded over it, show their own pixels", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_edit");
+    fs::make_dirs(dir);
+    edit::Image a = r508::picture(100, 80), b = r508::picture(100, 80);
+    for (size_t i = 0; i < b.px.size(); i += 4) b.px[i] = 1.0f - std::min(1.0f, b.px[i]), b.px[i + 2] *= 0.3f;
+    edit::Doc doc;
+    doc.open_pixels(a, "a");
+    for (const char *t : {"Clarity", "Dehaze", "Sharpen", "Noise Reduction"}) {
+      const int i = doc.add(t);
+      doc.set(i, edit::make_adjustment(t).info()->fields[0].name, 55);
+    }
+    CHECK(r508te::shows_fresh(doc, 64));
+    const std::string text = doc.stack_text();
+    doc.open_pixels(b, "b");  // (the stack is gone; the same one typed back in)
+    doc.stack_from_text(text);
+    CHECK(doc.stack().size() == 4);
+    CHECK(r508te::shows_fresh(doc, 64) && r508te::shows_fresh(doc, 0));
+    CHECK(!r508te::same_bits(doc.result(), r508te::chain(doc, a, 1.0f)));  // (it is b's picture, not a's)
+    /* An .edit file loaded over a document that has kept parts. */
+    edit::Doc keeper;
+    std::string err;
+    const std::string png = fs::join(dir, "src.png");
+    std::vector<uint32_t> px((size_t)100 * 80);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    CHECK(write_png(png, px.data(), 100, 80, 100));
+    CHECK(keeper.open_file(png, err));
+    keeper.stack_from_text(text);
+    CHECK(keeper.save(fs::join(dir, "x.edit"), err));
+    edit::Doc loaded;
+    loaded.open_pixels(a, "a");
+    loaded.stack_from_text(text);
+    CHECK(r508te::shows_fresh(loaded, 64));
+    CHECK(loaded.load(fs::join(dir, "x.edit"), err));
+    CHECK(loaded.stack().size() == 4);
+    CHECK(r508te::shows_fresh(loaded, 64) && r508te::shows_fresh(loaded, 0));
+  });
+
+  test("round 508 (test engineer): 1x1, 1xN and Nx1 pictures through the four filters, dragged and previewed, match the keep-free apply and do not crash", [] {
+    for (const std::pair<int, int> &sz : {std::pair<int, int>{1, 1}, std::pair<int, int>{1, 37}, std::pair<int, int>{41, 1}, std::pair<int, int>{2, 2}, std::pair<int, int>{3, 300}}) {
+      edit::Image img = r508::picture(sz.first, sz.second);
+      for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+        edit::Doc doc;
+        doc.open_pixels(img, "r508te");
+        doc.add(type);
+        const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+        bool ok = true;
+        for (float v : {25.0f, 60.0f, -30.0f}) {
+          doc.set(0, field, type == std::string("Sharpen") || type == std::string("Noise Reduction") ? std::fabs(v) : v, false);
+          ok = ok && r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 1) && r508te::shows_fresh(doc, 16);
+        }
+        if (!ok) std::printf("    %d x %d %s differs\n", sz.first, sz.second, type);
+        CHECK(ok);
+      }
+    }
+  });
+
+  test("round 508 (test engineer): a picture with NaN and Inf pixels through the four filters, dragged, is bit for bit the keep-free apply (NaN counted equal)", [] {
+    edit::Image img = r508::picture(60, 40);
+    img.at(10, 10)[0] = std::nanf("");
+    img.at(11, 10)[1] = std::numeric_limits<float>::infinity();
+    img.at(30, 20)[2] = -std::numeric_limits<float>::infinity();
+    img.at(0, 0)[1] = std::nanf("");
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc doc;
+      doc.open_pixels(img, "r508te");
+      doc.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      bool ok = true;
+      for (float v : {20.0f, 50.0f, 80.0f}) {
+        doc.set(0, field, v, false);
+        ok = ok && r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 32);
+      }
+      if (!ok) std::printf("    %s with NaN/Inf differs from the keep-free apply\n", type);
+      CHECK(ok);
+    }
+  });
+
+  test("round 508 (test engineer): Dehaze's airlight on odd pictures - flat grey, all black, one hot pixel, a huge value, tiny values - equals the plain sort's and does not crash", [] {
+    struct Case {
+      const char *name;
+      float base, hot;
+    };
+    for (const Case &c : {Case{"flat grey", 0.4f, 0.4f}, Case{"all black", 0.0f, 0.0f}, Case{"one hot pixel", 0.1f, 5.0f}, Case{"huge value", 0.2f, 3e30f}, Case{"tiny 1e-20", 1e-20f, 3e-20f},
+                          Case{"tiny 1e-36", 1e-36f, 2e-36f}, Case{"tiny 1e-37 flat", 1e-37f, 1e-37f}, Case{"denormal", 1e-41f, 1e-41f}}) {
+      edit::Image img;
+      img.resize(40, 30);
+      for (size_t i = 0; i < img.px.size(); i += 4) img.px[i] = img.px[i + 1] = img.px[i + 2] = c.base, img.px[i + 3] = 1.0f;
+      img.at(20, 15)[0] = img.at(20, 15)[1] = img.at(20, 15)[2] = c.hot;
+      for (float amount : {60.0f, -60.0f}) {
+        std::fprintf(stderr, "    airlight case %s amount %g\n", c.name, (double)amount);  // (stderr: a crash in a case must still name it)
+        const edit::Image want = r508::ref_dehaze(img, amount);
+        edit::Doc doc;
+        doc.open_pixels(img, "r508te");
+        doc.add("Dehaze");
+        doc.set(0, "Dehaze", amount, false);
+        const edit::Image got = doc.result();
+        const float scale = std::max(1.0f, std::max(c.base, c.hot));
+        const float d = r508::max_diff(got, want);
+        if (!(d <= 2e-4f * scale)) std::printf("    %s amount %g: off by %g\n", c.name, (double)amount, (double)d);
+        CHECK(d <= 2e-4f * scale);
+      }
+    }
+  });
+
+  test("round 508 (test engineer): a picture past the 4.2M-pixel keep limit and one just under it give the keep-free picture dragged; only the one under it holds its parts between moves", [] {
+    for (const std::pair<int, int> &sz : {std::pair<int, int>{2100, 2100}, std::pair<int, int>{2048, 2048}}) {
+      edit::Image img = r508::picture(sz.first, sz.second);
+      edit::Doc doc;
+      doc.open_pixels(img, "r508te");
+      doc.add("Clarity");
+      doc.set(0, "Clarity", 30);
+      doc.result();
+      const uint64_t made = edit::filter_parts_made();
+      doc.set(0, "Clarity", 60, false);
+      const edit::Image got = doc.result();
+      const bool kept = (int64_t)sz.first * sz.second <= edit::kKeepPixels;
+      std::printf("    %d x %d: parts made on the second move: %llu (%s)\n", sz.first, sz.second, (unsigned long long)(edit::filter_parts_made() - made), kept ? "held" : "too large to hold");
+      CHECK(kept ? edit::filter_parts_made() == made : edit::filter_parts_made() > made);
+      CHECK(r508te::same_bits(got, r508::fresh(img, "Clarity", {{"Clarity", 60}})));
+    }
+  });
+
+  test("round 508 (test engineer): the keep is not shared between filters: Sharpen then Clarity then Sharpen at another radius on one picture each match the keep-free apply (radius and strength keys)", [] {
+    edit::Doc doc;
+    doc.open_pixels(r508::picture(130, 100), "r508te");
+    doc.add("Sharpen");
+    doc.set(0, "Amount", 80);
+    CHECK(r508te::shows_fresh(doc, 0));
+    for (float radius : {0.5f, 1.0f, 1.4f, 1.5f, 2.6f, 3.0f, 1.0f}) {
+      doc.set(0, "Radius", radius, false);
+      CHECK(r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 64));
+    }
+    doc.add("Noise Reduction");
+    for (float lum : {0.0f, 100.0f, 33.0f, 0.0f}) {
+      for (float col : {0.0f, 100.0f, 50.0f, 0.0f}) {
+        doc.set(1, "Luminance", lum, false);
+        doc.set(1, "Color", col, false);
+        CHECK(r508te::shows_fresh(doc, 64));
+      }
+    }
+  });
+}
+
+/* The async open, hardest cases first. */
+static void tests_round508_te_open() {
+  test("round 508 (test engineer): an async open of a truncated, empty, text-as-png, directory and missing path ends (opened or failed), never hangs, and a failure leaves the open picture as it was", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_open");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)200 * 150);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    const std::string good = fs::join(dir, "good.png");
+    CHECK(write_png(good, px.data(), 200, 150, 200));
+    std::string bytes;
+    {
+      std::ifstream in(good, std::ios::binary);
+      bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    CHECK(bytes.size() > 200);
+    auto write_file = [&](const char *name, const std::string &content) {
+      const std::string p = fs::join(dir, name);
+      std::ofstream out(p, std::ios::binary);
+      out.write(content.data(), (std::streamsize)content.size());
+      return p;
+    };
+    const std::string cases[] = {write_file("trunc_half.png", bytes.substr(0, bytes.size() / 2)), write_file("trunc_header.png", bytes.substr(0, 20)), write_file("empty.png", ""),
+                                 write_file("text.png", "this is not a picture at all\n"), write_file("zeros.png", std::string(4096, '\0')), dir, fs::join(dir, "nothing_here.png"), ""};
+    for (const std::string &path : cases) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(20, 10), "px");
+      doc.open_file_async(path);
+      std::string err;
+      edit::Doc::Landed how = edit::Doc::Landed::Nothing;
+      const bool landed = r508::wait_landed(doc, err, how);
+      CHECK(landed && !doc.loading());
+      if (how == edit::Doc::Landed::Failed) CHECK(doc.is_open() && doc.source().w == 20 && !err.empty());
+      else if (how == edit::Doc::Landed::Opened) CHECK(doc.source().w > 0 && doc.source().h > 0 && doc.source().px.size() == (size_t)doc.source().w * doc.source().h * 4);
+      std::printf("    %-18s %s\n", path.empty() ? "(empty path)" : fs::filename(path).c_str(), how == edit::Doc::Landed::Failed ? "failed" : how == edit::Doc::Landed::Opened ? "opened" : "NEVER LANDED");
+    }
+  });
+
+  test("round 508 (test engineer): a Doc destroyed while a 3000 x 3000 picture is still being read, and a read dropped by many opens in a row, end cleanly", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_big");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)3000 * 3000);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)((i % 3000) * 7 + (i / 3000) * 3) * 0x010101u;
+    const std::string big = fs::join(dir, "big.png");
+    CHECK(write_png(big, px.data(), 3000, 3000, 3000));
+    for (int i = 0; i < 3; i++) {
+      edit::Doc doc;
+      doc.open_file_async(big);
+      CHECK(doc.loading());
+    }  // (destroyed mid-read, three times)
+    edit::Doc doc;
+    for (int i = 0; i < 4; i++) doc.open_file_async(big);  // (3 reads dropped while they run: the third drop waits for the oldest - at most two run on)
+    doc.open_pixels(r508::picture(8, 8), "px");
+    CHECK(!doc.loading() && doc.source().w == 8);
+    std::string err;
+    edit::Doc sync;
+    std::vector<uint32_t> sm(30 * 20, 0xFF2040FFu);
+    const std::string small = fs::join(dir, "small.png");
+    CHECK(write_png(small, sm.data(), 30, 20, 30));
+    doc.open_file_async(big);
+    CHECK(doc.open_file(small, err));  // (the synchronous open drops the read in flight)
+    CHECK(!doc.loading() && doc.source().w == 30);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(doc.poll_open(err) == edit::Doc::Landed::Nothing && doc.source().w == 30);
+  });
+
+  test("round 508 (test engineer): twenty rounds of opening A then B at once always end on B, with the edit stack reset", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_race");
+    fs::make_dirs(dir);
+    std::string paths[3];
+    for (int k = 0; k < 3; k++) {
+      const int w = 150 + 70 * k, h = 100 + 20 * k;
+      std::vector<uint32_t> px((size_t)w * h, 0xFF000000u | (uint32_t)(60 * (k + 1)) << 8);
+      paths[k] = fs::join(dir, strprintf("p%d.png", k));
+      CHECK(write_png(paths[k], px.data(), w, h, w));
+    }
+    edit::Doc doc;
+    doc.open_pixels(r508::picture(30, 30), "first");
+    doc.add("Exposure");
+    for (int round = 0; round < 20; round++) {
+      const int a = round % 3, b = (round + 1 + round / 3) % 3;
+      doc.open_file_async(paths[a]);
+      if (round % 2) std::this_thread::sleep_for(std::chrono::milliseconds(round));
+      doc.open_file_async(paths[b]);
+      std::string err;
+      edit::Doc::Landed how = edit::Doc::Landed::Nothing;
+      CHECK(r508::wait_landed(doc, err, how) && how == edit::Doc::Landed::Opened);
+      CHECK(doc.source_path() == paths[b] && doc.stack().empty() && !doc.can_undo());
+      doc.add("Clarity");
+      if (doc.source_path() != paths[b]) return;
+    }
+  });
+
+  test("round 508 (test engineer): console commands while a picture reads - list, add, set, undo, export, save, a second open, render, an .edit - never act on the old picture and never crash; an .edit stays synchronous", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_cmd");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)2500 * 2500);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    const std::string big = fs::join(dir, "big.png"), small = fs::join(dir, "small.png"), edit_file = fs::join(dir, "s.edit"), out = fs::join(dir, "out.png");
+    CHECK(write_png(big, px.data(), 2500, 2500, 2500));
+    std::vector<uint32_t> sm(50 * 40, 0xFF336699u);
+    CHECK(write_png(small, sm.data(), 50, 40, 50));
+    {
+      edit::Doc d;
+      std::string err;
+      CHECK(d.open_file(small, err));
+      d.add("Exposure");
+      CHECK(d.save(edit_file, err));
+    }
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.set_async_jobs_for_test(true);
+    ed.command("window Editing");
+    ed.command("develop open " + small);
+    for (int i = 0; i < 2000 && ed.edit_doc_for_test().loading(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    edit::Doc &doc = ed.edit_doc_for_test();
+    CHECK(doc.is_open() && doc.source().w == 50);
+    ed.command("develop add Clarity");
+    CHECK(doc.stack().size() == 1);
+    ed.command("develop open " + big);
+    CHECK(doc.loading());
+    for (const char *c : {"develop list", "develop add Dehaze", "develop set Clarity.Clarity 50", "develop undo", "develop redo", "develop export", "develop save", "develop remove 0", "develop preset nothing",
+                          "develop split on", "develop open render", "develop look", "develop apply"}) {
+      ed.command(c);
+      ed.step_frame_headless();
+      CHECK(doc.stack().size() <= 1);
+    }
+    ed.command("develop export " + out);
+    CHECK(!fs::exists(out) || doc.loading() == false);
+    ed.command("develop open " + edit_file);  // (an .edit: read at once, the pending read dropped)
+    CHECK(!doc.loading() && doc.is_open() && doc.stack().size() == 1 && doc.source().w == 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ed.step_frame_headless();
+    CHECK(doc.source().w == 50 && !doc.loading());
+    ed.command("develop open " + big);  // (and the picture opened, then New Scene while it reads, then the editor goes)
+    ed.command("newscene");
+    ed.step_frame_headless();
+    ed.command("window Editing");
+    ed.command("develop open " + small);
+    ed.command("newscene");
+    ed.command("develop open " + big);
+  });
+
+  test("round 508 (test engineer): the Editing window closed or hidden while a read lands: the next command or frame opens it, nothing is shown half-way", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_win");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> sm(64 * 48, 0xFF884422u);
+    const std::string small = fs::join(dir, "small.png");
+    CHECK(write_png(small, sm.data(), 64, 48, 64));
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.set_async_jobs_for_test(true);
+    ed.command("window Editing");
+    ed.command("develop open " + small);
+    ed.command("window Editing");  // (toggled off or on again: either way the frames go on)
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    ed.command("develop list");  // (a command polls the read)
+    edit::Doc &doc = ed.edit_doc_for_test();
+    /* (Round 508's review: every frame polls the read, the window shown or not. No time is assumed: a loaded runner may
+     * take long over the decode, so the loop's cap is generous and only the landing is checked.) */
+    for (int i = 0; i < 5000 && doc.loading(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK(!doc.loading() && doc.source().w == 64);
+  });
+
+  test("round 508 (review): a headless script's line after `develop open` waits for the picture - the preset and the export run on it, none is dropped", [] {
+    const std::string dir = fs::join(test_dir(), "r508_runner");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(400 * 300, 0xFF336699u);
+    const std::string in = fs::join(dir, "in.png"), out = fs::join(dir, "out.png");
+    CHECK(write_png(in, px.data(), 400, 300, 400));
+    fs::remove_file(out);
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.set_async_jobs_for_test(true);  // (as the app's headless runner has it)
+    auto line = [&](const std::string &c) {  // (the runner's loop, src/app/main.cpp: a line, then frames while file jobs run)
+      ed.command(c);
+      for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();
+    };
+    line("window Editing");
+    ed.command("develop open " + in);
+    CHECK(ed.file_jobs_running());  // (the read is one the runner waits for)
+    for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();
+    CHECK(!ed.edit_doc_for_test().loading() && ed.edit_doc_for_test().source().w == 400);
+    line("develop add Exposure");
+    CHECK(ed.edit_doc_for_test().stack().size() == 1);
+    line("develop export " + out);
+    CHECK(fs::exists(out));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -13913,5 +14773,8 @@ void run_editor_tests() {
   tests_round506_engineer3();
   tests_round507();
   tests_round507_te();
+  tests_round508();
+  tests_round508_te();
+  tests_round508_te_open();
   coverage_tests();
 }

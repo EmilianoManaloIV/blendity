@@ -23,6 +23,9 @@ inline bool keeps = !(std::getenv("BLENDITY_VIEW_KEEPS") && std::getenv("BLENDIT
 /* One keep alone off (bit 1 << Keep), the others as `keeps` has them: the stress section's per-keep A / B. Keep 4 (the copy) off
  * copies the kept list as before and leaves the others their generation, which names the list. */
 inline unsigned disabled = 0;
+/* Round 508 (ADR 0140): a finished bake's pages sent to the card before it lands; false lands them in the landing frame
+ * as before (the stress table's before / after in one build). */
+inline bool pages_ahead = true;
 
 /* The keeps, in the changelog fragment's order. */
 enum Keep { CardBuffers = 0, Lighting, InstanceKey, ItemsCopy, Unsupported, SolidItems, Hierarchy, KeepCount };
@@ -39,6 +42,10 @@ struct Counters {
    * lil / toon / baked table written, the card's validation loops run. */
   uint64_t light_walks = 0, item_copies = 0, item_hashes = 0, unsupported_walks = 0;
   uint64_t instance_rows_written = 0, table_writes = 0, validations = 0;
+  /* Round 508 (ADR 0140): lightmap pages converted and sent to the card, and what that cost (ms); the pages a finished bake
+   * sent before it landed are counted apart. */
+  double lightmap_page_ms = 0;
+  uint64_t lightmap_pages_sent = 0, lightmap_pages_before_landing = 0;
   uint64_t solid_item_builds = 0, hierarchy_rebuilds = 0, item_gathers = 0;  // ... and collect_items' gathers made whole  // Solid shading's item list gathered, the Hierarchy's rows flattened
   /* Frames each keep answered from what it held / did the work again. */
   uint64_t hit[KeepCount] = {}, miss[KeepCount] = {};
