@@ -957,3 +957,68 @@ gives a door's leaves (hinge pose, slab size) and `blockout_leaf_key` their shap
 (at the start of `update_blockouts` and just before `commit_undo`) makes, re-makes, places and lets go of leaves and
 writes a hand turn back to Open Amount through `blockout_join_step`. Open Amount, Hinge Side, Leaf and Leaf Thickness
 are not read by the kernel pieces and are not in the snapshot hash.
+
+## Blockout, as it stands after round 515 (rounds 480-515, ADRs 0128-0138)
+
+The sections above are in the order the rounds landed; this one is the map. A Blockout is still what round 477 made it:
+pieces under an object, one mesh built from them by `blockout::build` on a worker, nothing built in a window's frame.
+Everything after round 479 adds to what the **snapshot** hands the kernel, or to what the editor does around the
+landing; the kernel stays a kernel of solids with roles.
+
+| Part | Where it lives | Detail |
+|---|---|---|
+| Shapes | `Shape::Wedge`, `Stairs`, `Arch`, `Outline`, `Mesh` (round 480), `Shape::Convex` (round 500) in `scene/blockout.cpp`, `blockout_mesh.cpp` | One piece is one or several solids of one role; a mesh piece is the one solid that need not be convex. "Blockout: shapes of several solids", "architectural pieces" |
+| Draw Piece and its Shape list | `editor/blockout_tool.cpp`, `Editor::RoomTool`, `blockout_drawn_piece` (`blockout_pick.h`) | The Room tool of round 479 became Draw Piece (rounds 495, 496): a footprint dragged on any surface, a height pulled, the preview built by the function that makes the piece. The Shape dropdown lists the nine shapes, then, under an "Openings" heading, Door and Window (round 513). Scale goes into a piece's numbers (`blockout_piece_scale`), never into its matrix, so a piece is never sheared |
+| Drawn openings and `blockout_opening_feet` | `Editor::blockout_opening_feet` (`editor/blockout_editor.cpp`) | A door or window drawn as a rectangle on a wall is the same piece the Create buttons make. The one rule for where its floor is lives in `blockout_opening_feet`; the buttons (`blockout_stand_opening`) and Draw Piece both ask it, and both hold a wall to `kOpeningWallLean` (2 degrees) |
+| Window and door styles | `blockout_window_pieces`, `blockout_opening_set_style` (`scene/blockout_object.cpp`) | A style (frame, bars, sill board, glass, sliding, arched, revolving) is made into kernel pieces at snapshot time, not stored; a made piece's id has bit 63 set and `blockout_piece_owner` names its opening. Face classes `kClassGlass`, `kClassLeaf` carry the materials |
+| Architectural pieces | `blockout_preset_pieces` (`scene/blockout_presets.cpp`) | Nine presets (column, pilaster, beam, railing, roof, stairs with a landing, spiral stairs, arcade ...) generated at snapshot time from their numbers, the same way; `kClassRoof` |
+| Snap and join | `editor/blockout_join.cpp` | Pieces snap to the planes and corners of other Blockouts (`blockout_cross_candidates`); touching Blockouts are found per edit epoch and `blockout join` makes them one |
+| Live modifiers | `editor/blockout_modifiers.cpp`, `blockout_stack_follows` (`scene/scene.cpp`) | A modifier stack on the Blockout object runs on the landed mesh through `GameObject::evaluated_mesh`'s worker; picking names a piece only while the stack keeps the faces (`blockout_pick_takes_whole`) |
+| Piece modifiers | `scene/blockout_piece_stack.h/.cpp` (ADR 0138) | A stack on a piece runs on the build's worker on the piece's own shape (`piece_shape_mesh`), before the piece is added or cut. Kept by a key of numbers and modifiers, never the place, in a bounded cache (512 entries, 64 MB); a result that is not one closed solid is refused and the piece built from its numbers. Order: piece stacks, the pieces combined, the Blockout's stack |
+| Door leaves as objects | `BlockoutLeaf`, `Editor::blockout_sync_leaves` (ADR 0136) | A door's leaf is an object under it with its origin at the hinge; Open Amount is a transform write, not a build. The kernel makes only the frame and the reveals, so the doorway is clear. A hand turn writes Open Amount back in the same undo step. Open Amount, Hinge Side, Leaf and Leaf Thickness are not in the snapshot hash |
+| Grouped dropdowns | `ui::kComboHeading`, `ui::kComboSeparator` | A toolkit feature added for the Shape list; ADR 0145's focus walk steps over them |
+
+What the rounds after 479 never do: call the kernel from the frame (a counter pins it), write the mesh by hand
+(`blockout_refuses_edit_mode`), or let a made piece's id reach the UI without `blockout_piece_owner`. The stress
+section `blockout` (round 476, `bench_rows` from round 483) is what measures the lot; its rows are in
+`stress/results/baseline.md`.
+
+## Pass 22: posing (rounds 468-475, ADRs 0124-0127)
+
+Posing an avatar cost what the avatar cost, whatever was moved. The pass changed what a frame does, not what a pose
+is; the pose that comes out is the same (goldens kept for the solver). The rows above hold the names; this is how they
+fit.
+
+| Idea | Where | Rule to keep |
+|---|---|---|
+| Measure first | `perf drag` / `perf clip` (`editor/perf_script.cpp`), `build_avatar_like`, `PoseCounts`, the `posing` stress section (round 468) | A drag is played as real events through the editor's input path and timed per step; tallies of what a frame cost below the editor are subtracted before and after |
+| Skin once, only what moved | `edit_epoch::structure()` / `transforms()`, `GameObject::below_version`, `SkinKeep`, `ArmaturePose`, `KeptCache<T>` (round 469, ADR 0124) | A skin's key is kept while the structure, its mesh and the transforms under its character hold. A cache on a component goes in a `KeptCache` (a copy of the component starts empty). A bump that is not a move must be a structure bump |
+| A posed mesh follows in place | `Mesh::update_in_place`, `split_corner`, `Mesh::needs_settle`, `GameObject::settle_evaluated` (round 470) | A small move sends only its ranges to the card; a corner whose normal leaves its shared vertex gets one of its own; at rest the meshes are settled whole |
+| The world stays kept while a character moves | `Editor::InstanceRows`, `instance_item_sum` (round 471, ADR 0125) | The card's instances and see-through lists are kept by object; a field the raster path reads must be in `instance_item_sum` |
+| The pose buffer | `autopose::Rig`, `build_rig`, `solve(Rig &)`, `write` (round 473, ADR 0127) | The full-body solver reads the scene into a buffer, solves, and writes each changed joint once; `solve` touches no scene object. The buffer holds raw object pointers: rebuild it when `stale`, never keep it across an undo. No early exit without new goldens |
+| Solve order, Record, the Animation window | `Editor::solve_after_tools`, `bind_clip` / `clip_bindings`, `AnimationClip::touch_keys` (round 472, ADR 0126) | Constraints are solved before the windows are drawn and again after the Scene view's tools wrote a transform. Code that changes a track's path, property or axis, or adds, removes or reorders tracks, calls `touch()` |
+| Play with the springs | `physics_step`, `Editor::autopose_pins`, `trail_follow_edit` (round 474) | Nothing that runs before the constraints and springs in Play may ask for evaluated bounds: the views would build the mesh twice |
+
+Where it stopped (round 475): an IK drag meets 16.7 ms on the stand-in (48-56 ms before, 10-13 now); whole-body poses
+are 35-53 ms, what is left being the moved meshes sent to the card, their normals and tangents on the CPU and the outline
+shells. Skinning on the card is the owner's open decision (`docs/PERFORMANCE.md`, "Pass 22 in one table").
+
+## Pass 25: speed and usability surveys (rounds 504-515, ADRs 0140, 0145)
+
+Pass 25 measured the whole program twice, ranked what an artist would notice, and fixed from the top. Two
+instruments came out of it that later rounds should keep running.
+
+| What | How | Why |
+|---|---|---|
+| The HCI live sweep (`tests/test_hci.cpp`, `tools/hci_sweep.py`, `tools/hci_sweep_baseline.json`) | Every layout, window, menu, submenu, dialog, component Inspector and 15 scenario screens is opened as the artist opens it and the toolkit's record of the controls it drew is checked. The suite runs one configuration (1366x768, Dark, scale 1); `BLENDITY_SWEEP=full` runs the **12 configurations**: 1920x1080, 1366x768 and 1024x640, Dark and Light, UI scale 1 and 1.5 (about 2,140 screens). `BLENDITY_SWEEP_OUT` writes JSON for `hci_sweep.py --check`, `BLENDITY_SWEEP_SHOTS` a picture of each screen. The suite asserts zero for `elided`, `no-tooltip`, `overlap`, `covered`, `no-key`, `small` and `tab-order`; the baseline file holds what the full sweep still finds (`elided` 7, `small-handle` 3) | A layout that fits at one size and cuts a label at another is found by running the sizes, not by looking. The numbers of each round are `docs/hci/sweep-505.md` (before) and `sweep-509.md` (after) |
+| Recorded controls (`ui::Context::ControlRec`, `record_control`, `focus_stop`, `walk_stop`) | Every toolkit control records its kind, rectangle, label, layer, clip and whether Tab stops on it, in drawing order (tooltips are kept by rectangle: `tooltip_texts`); the hand-drawn widgets (`mark_widget`, `text_area`, `drag_label`, `curve_field`, `color_ramp`) record themselves too, as kinds with no Tab stop (round 510). The sweep judges the record: one control on another (`covered`, comparing what each clip lets through), a target under the limit (`target_limit`), a cut label, a missing or sentenceless tooltip, a Tab step that goes backwards | One definition of "a control" for the audits; a new widget that does not record itself is invisible to them, so a new widget calls `record_control` |
+| Keyboard focus (`ui::Context::focus_stop`, `focus_first_in`, `focus_request`, `focus_enter_popup`, `focus_release`; `Editor::focus_window_step`, `focus_menu_bar`; ADR 0145) | At most one control has the focus; a field that is edited has it as before. It is entered on purpose: F6 / Shift+F6 (`ui.focus_window`), F10 or Alt pressed and let go alone (`ui.menu_bar`), a click in a field, or Tab inside a dialog or popup. A bare Tab over a window stays Edit Mode. With a control focused, Tab / Shift+Tab walk every control in drawing order, Space or Enter presses, Left / Right step a slider, the arrows walk menus and lists, Esc lets go; a press of the mouse or a modal tool starting drops it. Ring: the theme's focus colour with a one-pixel outline in the text colour | Every control drawn through the toolkit is a stop by construction; a panel that draws out of reading order is fixed in the panel, not by a table of indices. A new widget calls `focus_stop` where it is drawn |
+| `Editor::button_grid`, `ui::Context::button_cells` | A label too long for its grid cell takes a row of its own and the rest keep their columns; pairs and triples of buttons sit side by side when the labels fit and one under the other when not | The fix for most of the 49 cut labels, in one place |
+| The performance survey's stress sections (`stress/stress_survey.inc`) | `image_edit`, `sculpt_paint`, `sequencer`, `importers`, `unity_export`, `asset_windows`, `cold_first_use` (round 504) and `scene_views` (round 506): named-only (`--only <name>`, `--quick` for the smallest size), every row ending in `ok` / `OVER` / `-` against ADR 0105's budgets; `tools/perf_suite.py` runs them in its default sections. The ranked list is `docs/perf/sweep-504.md` | A part with no row has no time on record; a new heavy window or tool adds its row to a section |
+| Landing frames (round 507) | A job that ends in one frame is split so the frame it lands in stays under 100 ms: `export unitypackage`'s folder walk, `budget pc`'s count (`budget_snapshot` on the main thread, `budget_count_snapshot` on a worker), a bake's files moved by `move_baked_files`, the importer's per-GUID material cache and the GUID index kept by a fingerprint of Assets (`unity_guid_index_checked`) | An import or a bake is judged by its longest frame, not its total |
+| The Scene view's kept work (`core/view_perf.h`, `editor/view_keeps.h`, round 506; ADR 0115's change counter) | What a Scene view worked out each frame and that did not change is kept while the scene holds: the card's per-instance buffers (one write a generation), the lights and probes `make_lighting` gathered, `instances_key`, `collect_items_ref`, `gpu_view_unsupported`, `solid_items_ref` and the Hierarchy's flattened rows. `view_perf::keeps` turns every keep off at once (`BLENDITY_VIEW_KEEPS=0`), `disabled` one; `stale_for_test` lets a unit test prove its picture can tell a stale keep | A keep that does not move the frame by 0.5 ms does not stay. A new keep needs its invalidation tested with `stale_for_test`, and a stress row with it off and on |
+| Image filters keep their parts, a picture opens on a worker (round 508) | `FilterKeep`, `Pipeline::keeps`, `Doc::open_file_async`; the card's lightmap pages sent before a bake lands (`bake_pages_ready`, ADR 0140) | A slider's amount must not remake what it does not change |
+
+The audits that stand beside the sweep (`tools/hci_label_audit.py`, `hci_consistency_audit.py`, `hci_console_audit.py`,
+`hci_fitts_audit.py`, `tools/test_coverage_map.py --check`) are static; the sweep is the live one. All run at their
+baselines (`docs/requirements.md`, "Usability").

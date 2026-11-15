@@ -143,7 +143,8 @@ rem The build's identity (task 0079): VERSION's number, and CI's release tag (BL
 set /p BL_VERSION_NUMBER=<VERSION
 if "%BLENDITY_BUILD%"=="" set BLENDITY_BUILD=dev
 set LIBDEFS=%LIBDEFS% /DBL_VERSION_NUMBER=%BL_VERSION_NUMBER% /DBL_BUILD=%BLENDITY_BUILD%
-set COMMON=/nologo /Iextern\sky\include /std:c++17 /EHsc /W3 /MP /utf-8 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX /permissive- /Zc:__cplusplus %LIBDEFS% %LIBINC%
+rem /bigobj (round 512): the largest test files are near the 65,536-section limit of an object file.
+set COMMON=/nologo /Iextern\sky\include /std:c++17 /EHsc /W3 /MP /utf-8 /bigobj /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX /permissive- /Zc:__cplusplus %LIBDEFS% %LIBINC%
 rem Blender's libraries use the DLL runtime (/MD); the dependency-free build
 rem stays a single static executable (/MT).
 set CRT=/MT

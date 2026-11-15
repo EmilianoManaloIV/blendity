@@ -138,7 +138,7 @@ screens themselves.
 | Set Origin could only use fixed points (or Edit Mode's selection, hidden in a menu). | Edit Origin with Handles: the gizmo moves the origin alone, and a click snaps it to a vertex, edge midpoint or face centre. Edit Mode has Origin to Selection as a button. |
 | Only text and number fields could take the keyboard: no button, checkbox, dropdown, slider or menu. (round 509) | F6 focuses a window's controls, F10 or Alt the menu bar; Tab, Space, Enter and the arrows work every control, with a focus ring. |
 | At 1024x640 with the UI at 1.5 the Inspector's Transform fields had no width, Play / Pause / Step lay on other toolbar buttons, and 49 labels were cut. (round 509) | Rows wrap, the toolbar compacts, a long label in a grid takes its own row; the live sweep finds nothing on anything in 12 configurations. |
-| Eight places told the artist to type a command in the Console (13 to 5 by the audit); the Board's, Sequencer's, Draw window's and a few other shortcut labels were written into the text and right in one keymap only. (round 510) | They name the button or menu; those labels follow the keymap. (The Sketch Pad's four keys and the Draw tool's Tab were right in every keymap: fixed gestures.) |
+| Eight places told the artist to type a command in the Console (13 to 6 by the audit); the Board's, Sequencer's, Draw window's and a few other shortcut labels were written into the text and right in one keymap only. (round 510) | They name the button or menu; those labels follow the keymap. (The Sketch Pad's four keys and the Draw tool's Tab were right in every keymap: fixed gestures.) |
 | The Sequencer's last toolbar buttons could not be reached in a narrow pane; the Game view lost its camera dropdown; two buttons were both ">". (round 510) | The toolbar wraps; the dropdown shrinks; Play says Play. |
 | Modifiers were scattered among the components, with only an on/off switch. | One Blender-style modifier stack with Edit Mode / Viewport / Render toggles, Apply per modifier, Duplicate, Copy to Selected and reordering. |
 | A shape could only start from a primitive: there was no way to extrude a vertex or an edge. | E / Ctrl+E in vertex and edge mode, with wire edges as in Blender. |
@@ -525,3 +525,66 @@ screens themselves.
 5. **Proportional editing during G / R / S** (it already works with the gizmos), with the wheel changing its radius.
 6. **Spin** (an interactive Screw on the selection) and **Knife cuts through several faces** in one stroke: the Knife and the Screw modifier are in; these are their next steps.
 7. **The Inspector's operator grids are long.** The Modeling Tools window now has collapsible sections; collapsible groups (Select, Transform, Topology), or showing only the operators the current selection can use, would help.
+
+## Pass 25: the HCI survey, the sweep's faults and the keyboard (rounds 505, 509, 510, 513)
+
+Round 505 measured what is wrong with the interface on main (the live sweep in 12 configurations: three sizes x Dark and
+Light x UI scale 1 and 1.5, about 2,140 screens; the ranked list is `docs/hci/sweep-505.md`); rounds 509, 510 and 513
+fixed it from the top (`docs/hci/sweep-509.md`, `docs/tasks/0493-hci-faults-to-zero.md`, `0494-hci-ranked-findings.md`).
+The owner's two decisions (2026-11-14): the keyboard gets one focus entered on purpose, never by a bare Tab over a window
+(ADR 0145); mouse density stays, and every target is 7 mm at UI scale 1.5, which is Tablet Mode's scale. The rules are
+now checks: `docs/requirements.md`, U-01 to U-07.
+
+### Before and after
+
+Distinct names per kind over every screen of the 12 configurations; Windows with Blender's libraries.
+
+| What the sweep counts | Round 505 | After round 509 | What fixed it |
+|---|---|---|---|
+| Controls the keyboard cannot stop on (`no-key`) | 328 | **0** | Keyboard focus for every toolkit control (ADR 0145): F6 / Shift+F6, F10 or Alt, Tab, Space / Enter, the arrows, Esc. At 1366x768 x1: 11,445 of 11,493 controls drawn have a stop (1,810 of 11,508 before); the 48 without are disabled menu rows |
+| A control lying on another (`covered`) | 18 | **0** | The toolbar's transport, the Scene and Game headers, the Inspector's header, the job tray, the Draw toolbar, the tab overflow |
+| Labelled buttons overlapping (`overlap`) | 6 | **0** | Three were real; three were the check's mistake (it now compares what each control's clip lets through) |
+| Cut labels (`elided`) | 49 | **7** (2 when first measured, 7 after CI's repair; see below) | A long label in a grid takes a row of its own, pairs of buttons wrap, a word keeps its place before its icon |
+| Buttons without a tooltip (`no-tooltip`) | 11 | **0** | Each has one that ends a sentence |
+| Targets under the limit (`small`) | 473 names | **0** (as decided) | The job tray, bare checkboxes' hit areas, the Scene and Game headers, the status bar, the breadcrumbs, the Console's and Hierarchy's strips and Preferences' buttons are a row (20 px); at x1.5 every recorded target is 26 px or more |
+| Tab order going backwards (`tab-order`) | 0 | **0** | Now covers every kind of control, not only fields |
+| Popup outside its window, disabled control with no reason, clipped | 0 | 0 | |
+| Text that sends the artist to the Console (the console audit) | 13 | 6 (round 510: 5 at first; the review widened the audit to `button_grid` / `icon_button` tooltips and found one more; round 513 brought it back to 6 after #410's two) | Fix Model, Create Visemes, Decimate to fit, the UI file, polygon sides, the ID mask and VR paint name the control |
+| Shortcut labels written into strings (the label audit) | 16 | 0 (round 510) | The Board's Paste, the Sequencer's rows, the Draw window's tooltips and more take the keymap's text |
+| Contrast | all themes' text at 4.5:1 or more | unchanged | The focus ring carries a one-pixel text-colour outline, so no theme's own focus colour (three are 2.4-2.7:1) had to change |
+
+What the artist sees at the default size (1366x768 x1): the Hierarchy, Console, Project, Materials and Textures strips are
+2 px taller and a three-number row's letters are 1 to 2 px tighter. The Inspector, toolbar and Scene view's header
+at 1024x640 x1.5 work (Position, Rotation and Scale keep four digits a field; Play, Pause and Step stand right of the
+left group; the header drops "Persp", the Edit Mode label and, narrowest, the four toggles into Overlays).
+CI found that the first layout made panels taller than eight tests of other groups expected; the rule now is that a panel
+grows only by the rows a too-long label or a too-narrow pane needs (`docs/hci/sweep-509.md`, "After CI"). One row stays:
+in an Inspector under about 300 px Fold and Pin have a row of their own.
+
+Round 513 added no new fault and kept the sweep at or below its baseline while adding grouped dropdown lists (headings
+and separators the keyboard steps over; a list as wide as its longest row) and Draw Piece's Door and Window.
+
+### What is left (the user's to decide where it names an owner)
+
+| Open item | Where | Owner | What would fix it |
+|---|---|---|---|
+| 7 cut labels (each ends in "..." and its tooltip says it whole): "Generate Lighting", "Clear Baked Data" | the Lighting window docked in the left pane (about 150 px), 1024x640 x1.5 | round 509's stream | A wider pane or shorter words |
+| "Edit Origin with Handles..." | the Inspector, 1024x640 x1.5 (240 px of label in 200) | round 509's stream | A shorter label |
+| "Delete Zero Weight Bones", "Separate by Material", "Separate Loose Parts", "Separate by Shape Keys" | the Avatar window's Fix Model buttons, 1024x640 x1.5 (the first also at 1366x768 x1.5) | the Avatar window's owner; an open item for the user | Shorter words, or a wider pane |
+| "Anime Face Normals (Ellipsoid)" | the Rigging window and the humanoid-rigging scenario, 1024x640 x1.5 | the Rigging window's owner; an open item for the user | The same |
+| A long label takes a row of its own (up to two rows more) | the Modeling Tools' Object grid in a 215 px pane ("Make Faces (Close Holes)") | round 509's stream; a wording choice for the owner | Shorter labels |
+| Hand-drawn widgets are not keyboard stops: brush tiles and the brush puck, object and asset field boxes, the Editing window's curve box, command-palette rows, the job tray's bar, the Learn button's icon, the Scene view's badges | several windows; the sweep records them and prints "hand-drawn, no keyboard stop" per configuration | round 510's list, each with what it would need (`docs/tasks/0494-hci-ranked-findings.md`) | Most need a design choice (a keyboard gesture for the puck, Enter / Shift+Enter on a brush tile, a curve editor's keyboard model); the palette's rows need nothing (the palette is the keyboard path) |
+| The X, Y, Z letters of a vector field are 10 x 20 px (`small-handle`, baseline 3) | every vector field | owner's call | Widening them takes a field's room; the number field beside each is the full target |
+| Lights Gamma has no control, so its toast names a Console command (round 510 left 6 in the console audit, each named in task 0494's write-up; Lights Gamma is the one without a control to point at) | `editor.cpp` | the hub's | A control for Lights Gamma |
+| Tab past a docked window's last control walks on through the other windows, the status bar and the menu bar | every docked window | by ADR 0145 | F6 / Shift+F6 jump by window |
+| While a field is being edited F6, F10 and Alt wait for Esc or Enter | the toolkit | by ADR 0145 | - |
+
+"After CI": the first count of `elided` was 2. The repair after CI (a label too long for its cell takes a row of its own
+and the other buttons keep the caller's columns) gave five labels back their cut; `tools/hci_sweep_baseline.json` is
+`{"elided": 7, "small-handle": 3}` and `py tools/hci_sweep.py <sweep.json> --check` fails on more.
+
+### The interface after the speed rounds
+
+Round 508's two rows in "What was fixed in this pass" (the image editor's sliders, a bake's landing) and rounds 506-507 (the Scene
+view of 50,000 cubes 33 ms a frame to 10, a Unity import, `budget pc` and a bake's file moves off the main thread) are
+the artist-facing half of Pass 25; their numbers are in `docs/PERFORMANCE.md`, "Pass 25".

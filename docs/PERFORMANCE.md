@@ -4255,3 +4255,80 @@ Reduction 18.3). Opening a 4096 x 4096 picture: the decode on a worker, 181 -> 3
 whole mesh for what moved, made every face's normals and the whole box again; it now tells the render mesh what it moved
 (`Mesh::note_moved`): 19.6 - 20.6 -> 15.4 - 16.6 ms on CPU views, 6 - 8 ms on the card. A finished bake's lightmap pages go to
 the card before it lands (ADR 0140): the landing frame 78 -> 41 ms at 4.19 M texels, 28 -> 19 ms at 0.26 M.
+
+## Pass 25: the speed survey and what it fixed (rounds 504, 506-508, 511)
+
+Pass 25's speed stream timed every part of the program that had no row, ranked what a user would notice by how far a row
+is over its ADR 0105 budget (the ratio) times how often it is met, and fixed from the top. The ranked list, with the
+machine and the method, is `docs/perf/sweep-504.md` (tables in `sweep-504-tables.md`); round 506's Scene view tables are
+`sweep-506-scene-views.md`. The budgets: 16.7 ms for a live drag, scroll or typed letter; 50 ms for a frame while a job
+runs; 100 ms for the one frame an indivisible operation lands in; a single call that blocks the window for over 100 ms is
+OVER whatever it is.
+
+**Numbers marked `TBD(511)` come from round 511's timed run of the whole suite on the joined tree, which had not
+landed when this section was written. Until it does, the "after" column is the number the fixing round reported
+(one untimed or one timed run on its own, named in its CHANGELOG entry), and the "round 511" column is empty.**
+
+### The survey's new sections (round 504)
+
+Seven named-only stress sections in `stress/stress_survey.inc` (`blendity_stress --only <name>`, `--quick` for the smallest
+size), all in `tools/perf_suite.py`'s default sections: `image_edit`, `sculpt_paint`, `sequencer`, `importers`,
+`unity_export`, `asset_windows`, `cold_first_use`; round 506 added `scene_views` (50,000 and 10,000 cubes on the card,
+six actions, each off / on / off again). One timed run of all 23 sections took 28 minutes. Most of what was newly timed
+is inside its budget: the sequencer (scrub and play at 32 strips: 2 ms), the History window, the command palette (a
+letter under 3 ms), the Materials window at 2,000 materials, texture, weight and mask paint, the VRM and PMX imports
+(landing frames 12-88 ms) and every cold first use but the Render window's.
+
+### What each round fixed, by the survey's ranked line
+
+| Line | What the user sees | Survey (round 504) | After the fixing round | Round 511 (joined tree, timed) | Budget |
+|---|---|---|---|---|---|
+| 1 (round 506) | Scene view of 50,000 cubes on the card, camera orbiting, Shaded, windowed app | 32.6 - 39.8 ms a frame | 9.6 - 10.2 ms | TBD(511): the same row | 16.7 ms |
+| 1 (round 506) | The same, Solid shading | 53.6 ms | 18.0 ms (over by 1.3 ms) | TBD(511): the same row | 16.7 ms |
+| 1 (round 506) | A Scene view and a Game view both drawn, 50,000 cubes | 121.4 ms | 77.2 ms (OVER) | TBD(511): the same row | 16.7 ms |
+| 1 (round 506) | One object moved every frame, 50,000 cubes | 243.3 ms | 206.1 ms (OVER; not slower was the criterion) | TBD(511): the same row | 16.7 ms |
+| 1 (round 506) | 10,000 cubes: orbit Shaded / Solid / both views / a drag | 6.9 / 9.0 / 25.1 / 46.2 ms | 3.7 / 3.4 / 18.4 / 39.6 ms | TBD(511): the four rows | 16.7 ms |
+| 4 (round 508) | Dragging Clarity, Dehaze, Sharpen in the Editing window | 30 - 51 ms the slider's longest frame | 10.1 - 10.4 ms (Noise Reduction 18.3 ms) | TBD(511): the `image_edit` slider rows | 16.7 ms |
+| 15 (round 508) | Opening a 4096 x 4096 picture in the Editing window | the frame 181 ms (decode 152 ms) | the frame 33 ms (decode on a worker) | TBD(511): the `image_edit` open row | 100 ms |
+| 5 (round 508) | Sculpting a 500k-face mesh, a working frame, CPU views | 19.6 - 20.6 ms | 15.4 - 16.6 ms (6 - 8 ms on the card) | TBD(511): the `sculpt_paint` 500k rows | 16.7 ms |
+| 9 (round 508) | The frame a finished bake lands in (lightmap pages to the card) | 78 ms at 4.19 M texels, 28 ms at 0.26 M | 41 ms, 19 ms | TBD(511): the `bake` landing rows | 100 ms |
+| 6 (round 507) | A Unity scene's import, the one call | 1,000 objects 247 ms, 10,000 objects 1.74 s | a third to a quarter of that; 111 ms at 1,000 objects, 533 ms at 10,000 (still over; the parse and the build in slices are a round of their own) | TBD(511): the `unity_export` import rows | 100 ms (250 ms for the first import) |
+| 7 (round 507) | `export unitypackage` | threw `bad allocation` on nested folders; the folder walk on the main thread | fixed; the walk on the worker, the call 0.4 - 0.9 ms (100 objects) | TBD(511): the `unity_export` export rows | no call over 100 ms |
+| 8 (round 507) | `budget pc` | SideRail 10 s in one call (on record) | counted on a worker, the call returns at once (101 objects: 1.1 ms); SideRail not re-measured | TBD(511): SideRail's `budget pc`, if the owner's project is available | no call over 100 ms |
+| 10 (round 507) | A render to video's frames | the longest frame 181 ms (the start frame alone) | start frame 349 ms - 2.3 s (first use), steady frames median 2.0 ms and longest 6.2 ms warm | TBD(511): the `sequencer` video rows | 50 ms a frame |
+
+How the rounds moved each number:
+- **Round 506, the Scene view's kept work.** What the CPU did for every object every frame and did not change is kept while
+  the scene holds (ADR 0115's change counter): the card's per-instance buffers, the lights and probes, the instances' key,
+  the draw-item list, the refusal check, Solid's item list and the Hierarchy's rows. Each keep turned off alone over the
+  Shaded orbit is worth: the lights 7.6 ms, the card's buffers 5.6, the refusal check 3.4, the item copy 1.2, the
+  instance key 1.0. Two keeps that did not move the frame by 0.5 ms were taken out again.
+- **Round 507, landing frames.** `export unitypackage`'s folder walk and `budget pc`'s count run on a worker; a bake's
+  files are moved by a job of their own; a Unity import asks the library once a GUID and keeps the GUID index while
+  Assets is unchanged.
+- **Round 508.** The four blur-based filters keep what they work out from their input, the blur's vertical pass goes by
+  blocks of 64 columns, Dehaze's airlight is a histogram's bin, a picture opens on a worker; a sculpt dab says which
+  vertices it moved (`Mesh::note_moved`) so the render mesh's scan, bounds and retriangulation walk those and not the
+  mesh; a finished bake's pages go to the card before it lands (ADR 0140).
+
+### Rows round 504 saw move against the baseline (not over a budget)
+
+`perf_suite.py` reported 11 rows more than 20 % slower than `stress/results/baseline.md`, on one run each: Scene save of a
+393k-vertex mesh (10.8 -> 22.6 ms), Subdivide 2 levels on the 50k sphere, the longest frame (3.1 -> 12.1 ms), opening the
+10,000 cubes' scene (1.0 -> 8.3 ms), fbx / obj export of the 50k sphere (3.4 / 3.0 -> 7.1 / 4.3 ms), F12 rasterized on 400
+spheres (3.5 -> 5.1 ms), moving an object with glass / transparent materials in Solid and Shaded (12.35 -> 19.68 ms and
+13.00 -> 16.44 ms), and with toon materials (8.98 -> 11.11 ms).
+TBD(511): which of these are still slower on the joined tree, and which were noise.
+
+### What is left over budget (TBD(511): confirm each on the joined tree)
+
+- The Scene view with both a Scene and a Game view at 50,000 cubes (77 ms) and with an object moved every frame (206 ms):
+  their cost is the work per object that changes, not the kept work. TBD(511): the numbers.
+- Solid shading's orbit at 50,000 cubes, 1.3 ms over.
+- A Unity scene's import at 10,000 objects (533 ms against 250): the parse on a worker, then the objects made in slices.
+- Posing a whole body (35 - 53 ms; Pass 22's open decision: skinning on the card), outside this pass.
+- Blockout's kernel at 100 interior pieces (180 - 187 ms a build, Pass 23b's) and Enter Edit Mode on the 500k sphere
+  (101.7 ms against 100, CPU views only).
+- The Render window's first open (175 ms), the Textures window's first open at 2,000 textures (258 ms), an MMD motion of
+  30,000 keys (350 ms) and a Godot scene of 10,000 nodes (158 ms), none taken up in this pass.
+- TBD(511): the whole suite's count of rows over budget, before (round 504: posing 41, Blockout 8, Edit Mode entry 1) and after.
