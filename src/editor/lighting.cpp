@@ -6,6 +6,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../core/view_perf.h"
 #include "../render/gpu_device.h"
 #include "../render/pathtracer.h"
 
@@ -203,6 +204,10 @@ void Editor::attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it) {
 
 void Editor::load_lighting_data() {
   render_job_wait("the scene's lighting is replaced");  // (round 412: a render on a worker reads the lightmaps and probes)
+  if (lighting_move_) {  // (round 507 review: the bake's files still moving in - read a whole folder, and land nothing for the scene being left)
+    const std::unique_ptr<LightingMove> m = std::move(lighting_move_);
+    m->moved.wait();
+  }
   scene_ident_++;  // a new or opened scene: nothing published for the last one shows
   if (preview_running_) preview_baker_.cancel();
   preview_running_ = false;
@@ -257,6 +262,7 @@ void Editor::save_lighting_data() {
   if (!lighting_dir().empty() && light_volume_bakes_dirty_) save_light_volume_bakes(lighting_dir()), light_volume_bakes_dirty_ = false;  // (review 398: on its own)
   if (!lighting_dir().empty() && reflection_probe_bakes_dirty_) save_reflection_probe_bakes(lighting_dir()), reflection_probe_bakes_dirty_ = false;  // (round 401)
   if (lighting_data_.empty() && (probes_.empty() || probes_.scene_key == 0)) return;
+  if (lighting_move_) return;  // (round 507: the bake's files are on their way in; the poll writes again if they don't arrive)
   const std::string dir = lighting_dir();
   if (dir.empty() || dir == lighting_saved_dir_) return;
   std::string err;
@@ -454,6 +460,7 @@ void Editor::bake_start() {
     refuse("Generate Lighting: Baked Global Illumination is off (Lighting window).", "window Lighting", "Open Lighting");
     return;
   }
+  lighting_move_poll(true);  // (the last landing's files first: the bake's folder is the same one)
   if (bake_job_) {  // (a cancelled bake still finishing its slice: waited for, its finished probes kept)
     std::unique_ptr<BakeJob> old = std::move(bake_job_);
     old->cancel.store(true);
@@ -696,6 +703,7 @@ void Editor::bake_cancel(bool discard) {
 }
 
 void Editor::bake_clear() {
+  lighting_move_poll(true);  // (files on their way into the folder this deletes)
   bake_cancel(true);  // (a job still finishing lands nothing: the data is being cleared)
   render_job_wait("Clear Baked Data");  // (round 412: a render on a worker reads the lightmaps and probes about to go)
   light_volume_bakes_.clear();  // (review 398: the volumes' bakes go with the rest)
@@ -732,9 +740,100 @@ void Editor::step_bake() {
   }
   if (!j->done.load(std::memory_order_acquire)) return;
   if (render_job_holds_lighting()) return;  // (lands next frame: an F12 render on a worker reads the lightmaps it would replace)
+  if (!bake_pages_ready(*j)) return;  // (round 508: its pages still going up to the card - the old set is drawn meanwhile)
   std::unique_ptr<BakeJob> job = std::move(bake_job_);
   if (job->thread.joinable()) job->thread.join();
   bake_job_land(*job);
+}
+
+/* Round 508 (ADR 0140): a finished bake's lightmap pages go to the card before the bake lands - at least one a frame, more
+ * while the frame's upload budget (the meshes' `mesh_budget_ms_`) lasts - so the landing frame no longer converts and sends
+ * every page at once (4 pages of 1024 x 1024: about 100 ms of a 146 ms frame). The views draw the old lighting whole until
+ * the new set is up and then switch in one frame: no frame mixes new UVs with old texels. The card keys its copy by the
+ * page's address and serial, and moving the LightingData into lighting_data_ keeps both, so the landing finds every page
+ * there. Only while the Scene view draws on the card (scene_full_size: the card open is not enough - it stays open after
+ * choosing CPU views, and pages sent there would never be read nor let go) and the jobs run on workers: a headless editor
+ * and the CPU views land at once, as before. A page the card refuses lands anyway (the draw reports it as it did). */
+bool Editor::bake_pages_ready(BakeJob &j) {
+  if (!view_perf::pages_ahead || !jobs_async() || !gpu_view_ || !scene_full_size() || j.cancel.load() || j.discard || j.scene_ident != scene_ident_) return true;
+  ScopedTimer t;
+  bool sent = false, more = false;
+  /* Every page the draw sends through gpu_lightmap (attach_lightmap): the colour pages, the direction pages in Directional
+   * mode (round 426), the shadowmask pages (round 444). */
+  auto send = [&](const std::vector<Lightmap> &set) {
+    for (const Lightmap &p : set) {
+      if (more) return;
+      const auto found = gpu_lightmaps_.find(&p);
+      if (found != gpu_lightmaps_.end() && found->second.first == p.serial && gpu_textures_.count(found->second.second.get())) {
+        gpu_textures_[found->second.second.get()].used = gpu_calls_;  // (kept while the others go up: the views' unused-texture ageing would let it go)
+        continue;
+      }
+      if (sent && t.ms() >= mesh_budget_ms_) {
+        more = true;
+        return;
+      }
+      std::string err;
+      gpu_lightmap(p, err);
+      view_perf::counters.lightmap_pages_before_landing++;
+      sent = true;
+    }
+  };
+  send(j.lighting.pages);
+  if (scene_->lighting.directional_mode != 0) send(j.lighting.dir_pages);
+  send(j.lighting.mask_pages);
+  if (!sent) return true;
+  /* (The tray says what the bake is doing meanwhile: phase 5, its progress the share of the pages on the card.) */
+  size_t total = j.lighting.pages.size() + j.lighting.mask_pages.size() + (scene_->lighting.directional_mode != 0 ? j.lighting.dir_pages.size() : 0), up = 0;
+  auto count_up = [&](const std::vector<Lightmap> &set) {
+    for (const Lightmap &p : set) {
+      const auto found = gpu_lightmaps_.find(&p);
+      up += found != gpu_lightmaps_.end() && found->second.first == p.serial;
+    }
+  };
+  count_up(j.lighting.pages);
+  if (scene_->lighting.directional_mode != 0) count_up(j.lighting.dir_pages);
+  count_up(j.lighting.mask_pages);
+  j.phase.store(5);
+  j.progress.store(total ? (float)up / (float)total : 1.0f);
+  ui_.redraw = true;  // (the landing comes in the next frame: keep frames coming)
+  return false;
+}
+
+/* The worker's files (in `tmp`, the bake's own folder) moved over the scene's lighting folder, older ones replaced; `tmp` taken
+ * away. False when a file would not move. Touches no editor state: the landing's job or its follow-up runs it. */
+bool Editor::move_baked_files(const std::string &save_dir, const std::string &tmp, bool drop_probes) {
+  std::error_code ec;
+  fs::make_dirs(save_dir);
+  bool moved = true;
+  for (const DirEntry &de : fs::list(tmp)) {
+    const std::string to = fs::join(save_dir, de.name);
+    std::filesystem::remove(std::filesystem::u8path(to), ec);
+    std::filesystem::rename(std::filesystem::u8path(fs::join(tmp, de.name)), std::filesystem::u8path(to), ec);
+    if (ec) moved = false;
+  }
+  if (drop_probes) std::filesystem::remove(std::filesystem::u8path(fs::join(save_dir, "ProbeVolume.bin")), ec);  // an older bake's probes must not come back
+  std::filesystem::remove_all(std::filesystem::u8path(tmp), ec);
+  return moved;
+}
+
+/* The landing's last step once the files are over: where they are, said. */
+void Editor::land_baked_files(const std::string &save_dir, bool moved) {
+  if (!moved) return;
+  lighting_saved_dir_ = save_dir;
+  project_listed_ = -100;
+  Log::info("Saved the baked lighting to %s", save_dir.c_str());
+}
+
+/* Once a frame (and waited for where a bake or a clear would touch the same folder): the files' follow-up job done. A scene that
+ * moved meanwhile has its lighting written where it is now; files that would not move are written again from memory. */
+void Editor::lighting_move_poll(bool wait) {
+  if (!lighting_move_) return;
+  if (!wait && lighting_move_->moved.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+  const std::unique_ptr<LightingMove> m = std::move(lighting_move_);
+  const bool moved = m->moved.get();
+  if (moved && m->dir == lighting_dir()) land_baked_files(m->dir, true);
+  else if (!lighting_dir().empty()) save_lighting_data();
+  ui_.redraw = true;
 }
 
 /* The results into the scene: the lightmaps and the probe volume (not when cancelled), the Light Volumes and the
@@ -750,14 +849,15 @@ void Editor::bake_job_land(BakeJob &j) {
       BakeTimes &b = ed.last_bake_times_;
       for (int k = 0; k < 5; k++) b.phase_ms[k] = j.phase_ms[k];
       b.finish_ms = j.lightmap_finish_ms, b.land_ms = t.ms(), b.total_ms = j.ms;
+      b.land_move_ms = ed.land_move_ms_, b.land_save_ms = ed.land_save_ms_;
       b.texels = j.lightmap_texels, b.gpu_texels = j.lightmap_gpu_texels, b.rays = j.lightmap_rays;
       b.gpu_cards = j.lightmap_gpu_cards;
       if (!b.gpu_cards.empty())  // (round 487: which cards gathered, and how the texels were shared between them)
         Log::info("Generate Lighting: the gather ran on %s", b.gpu_cards.c_str());
       Log::info("Generate Lighting phases: lightmaps %.1f s (%zu texels, %.0f Mrays, %zu on the GPU; %s and dilation %.0f ms), probes %.1f s, "
-                "Light Volumes %.1f s, reflection probes %.1f s, saving %.1f s; the landing frame %.0f ms",
+                "Light Volumes %.1f s, reflection probes %.1f s, saving %.1f s; the landing frame %.0f ms (moving the files %.0f, save_lighting_data %.0f)",
                 b.phase_ms[0] / 1000.0, b.texels, b.rays / 1e6, b.gpu_texels, j.lightmap_denoiser.empty() ? "no filter" : j.lightmap_denoiser.c_str(), b.finish_ms,
-                b.phase_ms[1] / 1000.0, b.phase_ms[2] / 1000.0, b.phase_ms[3] / 1000.0, b.phase_ms[4] / 1000.0, b.land_ms);
+                b.phase_ms[1] / 1000.0, b.phase_ms[2] / 1000.0, b.phase_ms[3] / 1000.0, b.phase_ms[4] / 1000.0, b.land_ms, b.land_move_ms, b.land_save_ms);
       /* Round 484: what the light picking did, for `lighting pick`'s comparisons (light_pick.h). */
       b.pick_texels = j.lightmap_pick_texels, b.chance_kept = j.lightmap_chance_kept, b.chance_dropped = j.lightmap_chance_dropped;
       if (b.pick_texels)
@@ -811,26 +911,23 @@ void Editor::bake_job_land(BakeJob &j) {
   if (j.lightmap_gpu_cards.find(", ") != std::string::npos) bake_status_ += " - the gather on " + j.lightmap_gpu_cards;
   lighting_saved_dir_.clear();
   Log::info("Generate Lighting: done in %.1f s", secs);
+  ScopedTimer move_t;  // (round 507: the landing's two file jobs, timed apart)
+  land_move_ms_ = land_save_ms_ = 0.0;
   if (j.saved && j.save_dir == lighting_dir()) {  // (the worker's files moved over: the scene's folder is still the one it was)
-    fs::make_dirs(j.save_dir);
-    bool moved = true;
-    for (const DirEntry &de : fs::list(j.saved_tmp)) {
-      const std::string to = fs::join(j.save_dir, de.name);
-      std::filesystem::remove(std::filesystem::u8path(to), ec);
-      std::filesystem::rename(std::filesystem::u8path(fs::join(j.saved_tmp, de.name)), std::filesystem::u8path(to), ec);
-      if (ec) moved = false;
+    const bool drop_probes = probes_.empty() || probes_.scene_key == 0;
+    if (jobs_async()) {  // (round 507: about a millisecond a file - on a job of its own, the next frame's poll finishes the landing)
+      lighting_move_ = std::make_unique<LightingMove>();
+      lighting_move_->dir = j.save_dir;
+      lighting_move_->moved = std::async(std::launch::async, move_baked_files, j.save_dir, j.saved_tmp, drop_probes);
     }
-    if (probes_.empty() || probes_.scene_key == 0) std::filesystem::remove(std::filesystem::u8path(fs::join(j.save_dir, "ProbeVolume.bin")), ec);  // an older bake's probes must not come back
-    std::filesystem::remove_all(std::filesystem::u8path(j.saved_tmp), ec);
-    if (moved) {
-      lighting_saved_dir_ = j.save_dir;
-      project_listed_ = -100;
-      Log::info("Saved the baked lighting to %s", j.save_dir.c_str());
-    }
+    else land_baked_files(j.save_dir, move_baked_files(j.save_dir, j.saved_tmp, drop_probes));
   }
   else if (!j.saved_tmp.empty()) std::filesystem::remove_all(std::filesystem::u8path(j.saved_tmp), ec);  // (the scene moved meanwhile: save_lighting_data writes them where it is now)
+  land_move_ms_ = move_t.ms();
+  ScopedTimer save_t;
   if (lighting_dir().empty()) Log::info("Save the scene to keep its lightmaps: they are written next to the scene file.");
   else save_lighting_data();  // (the volumes' and probes' files; the lightmaps again only if the scene moved meanwhile)
+  land_save_ms_ = save_t.ms();
   ui_.redraw = true;
 }
 
@@ -1098,6 +1195,7 @@ bool Editor::frozen_out_of_date() {
 }
 
 void Editor::lighting_update_step() {
+  lighting_move_poll(false);
   const bool rgi = scene_->lighting.realtime_gi;
   if (rgi && !last_realtime_gi_ && lighting_manual() && !lighting_update_requested_) lighting_update();  // turned on, or a scene opened
   last_realtime_gi_ = rgi;

@@ -764,6 +764,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   poll_unity_package();  // (round 369)
   poll_unity_gloss();    // (round 485: after the package - an unpack writes its own table)
   poll_unity_export();   // (round 372)
+  poll_budget_job();     // (round 507: `budget pc` and the Profiler's recount, counted on a job)
+  edit_open_poll();      // (round 508: the Editing window's picture lands, and a failed read warns, with the window hidden too)
   poll_unity_model_ids();  // (round 395)
   poll_unity_lighting();   // (round 400)
   anim_tick();

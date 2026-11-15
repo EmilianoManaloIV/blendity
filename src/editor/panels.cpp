@@ -3,6 +3,7 @@
 // Project (Blender: File/Asset Browser), Console (Blender: Info editor),
 // Profiler (Blender: Statistics overlay / --debug timings).
 #include "editor.h"
+#include "../core/edit_epoch.h"
 #include "../texture/procedural_texture.h"
 #include "../texture/surface.h"
 #include "../scene/stroke_object.h"
@@ -83,23 +84,49 @@ void Editor::draw_hierarchy(const Recti &r) {
   u.text_field(u.id("hier_search"), {plus.right() + u.px(6), bar.y + u.px(4), bar.right() - plus.right() - u.px(12), h},
                hierarchy_search_, nullptr, "Search...");
 
-  /* Flatten the visible tree (only expanded branches; virtualised drawing). */
-  struct Row { GameObject *g; int depth; };
-  std::vector<Row> rows;
-  std::string filter = to_lower(hierarchy_search_);
-  if (!filter.empty()) {
-    scene_->for_each_ordered([&](GameObject &g, int) {
-      if (to_lower(g.name).find(filter) != std::string::npos) rows.push_back({&g, 0});
-    });
+  /* Flatten the visible tree (only expanded branches; virtualised drawing). Round 506: kept between frames, made again when what it
+   * is made from changes - the scene and its structure counter (an object added, deleted, re-parented, renamed, re-ordered,
+   * activated), the folds and the search text - and, as the other walks are, on the check interval. */
+  uint64_t folds = expanded_.size();
+  for (uint64_t id : expanded_) {  // (a sum of a mixed id - splitmix64 - so the set's order doesn't matter and {5,7} is not {4,8})
+    uint64_t z = id + 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    folds += z ^ (z >> 31);
   }
+  const uint64_t structure = edit_epoch::structure();
+  /* Under a search the rows also depend on every name, and a name typed in the Inspector changes with each key without moving the
+   * structure counter (it moves when the rename is committed): the names are folded into the key, so the row appears the frame the
+   * name starts to match. One pass of hashes, far less than the filter's lower-casing and search; nothing is walked with no search. */
+  uint64_t names = 0;
+  if (!hierarchy_search_.empty() && view_perf::on(view_perf::Hierarchy))
+    scene_->for_each_ordered([&](GameObject &g, int) { names += (std::hash<std::string>()(g.name) ^ g.id) * 0x9E3779B97F4A7C15ull; });
+  const bool rows_kept = view_perf::on(view_perf::Hierarchy) && hier_key_.valid && (view_perf::stale(view_perf::Hierarchy) || (hier_key_.scene == scene_.get() && hier_key_.serial == scene_->serial &&
+                         hier_key_.structure == structure && hier_key_.folds == folds && hier_key_.names == names && hier_key_.search == hierarchy_search_ &&
+                         hash_frame_ >= hier_key_.frame && hash_frame_ - hier_key_.frame < (uint64_t)scene_hash_check_every_));
+  if (rows_kept) view_perf::hit(view_perf::Hierarchy);
   else {
-    std::function<void(GameObject *, int)> walk = [&](GameObject *g, int d) {
-      rows.push_back({g, d});
-      if (expanded_.count(g->id))
-        for (GameObject *c : g->children) walk(c, d + 1);
-    };
-    for (GameObject *g : scene_->roots) walk(g, 0);
+    view_perf::miss(view_perf::Hierarchy);
+    view_perf::counters.hierarchy_rebuilds++;
+    hier_rows_.clear();
+    const std::string filter = to_lower(hierarchy_search_);
+    if (!filter.empty()) {
+      scene_->for_each_ordered([&](GameObject &g, int) {
+        if (to_lower(g.name).find(filter) != std::string::npos) hier_rows_.push_back({&g, 0});
+      });
+    }
+    else {
+      std::function<void(GameObject *, int)> walk = [&](GameObject *g, int d) {
+        hier_rows_.push_back({g, d});
+        if (expanded_.count(g->id))
+          for (GameObject *c : g->children) walk(c, d + 1);
+      };
+      for (GameObject *g : scene_->roots) walk(g, 0);
+    }
+    hier_key_ = {scene_.get(), scene_->serial, structure, folds, names, hash_frame_, hierarchy_search_, true};
   }
+  const std::vector<HierRow> &rows = hier_rows_;
+  const std::string filter = to_lower(hierarchy_search_);  // (as the rows were made: the row drawing below reads it)
 
   int rh = u.row_h();
   Recti list{r.x, bar.bottom(), r.w, r.h - bh};

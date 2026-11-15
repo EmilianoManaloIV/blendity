@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,13 @@ struct BudgetCounts {
   size_t textures_reading = 0;  // (review 399: engine-only textures not read yet - Texture Memory counts them once they are)
 };
 BudgetCounts budget_count(const std::vector<GameObject *> &objects);
+/* Round 507: the same count in two steps, so a window need not wait for it. The snapshot is taken on the main thread (what
+ * each object adds, its evaluated mesh held - meshes are copy-on-write - and each drawn map's size); the count reads
+ * nothing of the live scene and may run on a worker, where it also reads the files' headers. budget_count is the two
+ * in a row, so both give the same numbers. */
+struct BudgetSnapshot;
+std::shared_ptr<const BudgetSnapshot> budget_snapshot(const std::vector<GameObject *> &objects);
+BudgetCounts budget_count_snapshot(const BudgetSnapshot &snap);
 /* Round 422: a texture file's size from its header (PNG, JPEG, TGA) and whether it can hold alpha; `alpha_known` false
  * when only its texels can say (a PNG or TGA with an alpha channel). False: not one of these, or cut short. */
 bool budget_texture_header(const std::string &abs, int &w, int &h, bool &alpha, bool &alpha_known);

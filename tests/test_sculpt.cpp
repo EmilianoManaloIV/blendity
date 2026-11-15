@@ -2130,6 +2130,612 @@ static void tests_round368() {
   });
 }
 
+/* ---- round 508 (task 0492, part D): sculpting a dense mesh - the render mesh follows a dab by looking at what moved only ---- */
+
+namespace {
+
+/* True when a's render mesh draws the same triangles as a rebuild from scratch of the same mesh (corner by corner: position and
+ * normal within `tol`) and its bounds are the vertices'. */
+bool render_is_rebuild(const Mesh &a, float tol, std::string &why) {
+  Mesh fresh;
+  {
+    MeshCopyBare bare;  // (no caches carried over: its render mesh is a full build)
+    fresh = a;
+  }
+  const RenderMesh &x = a.render_mesh(), &y = fresh.render_mesh();
+  if (x.indices.size() != y.indices.size()) return why = "the triangle counts differ", false;
+  float worst_p = 0.0f, worst_n = 0.0f;
+  for (size_t i = 0; i < x.indices.size(); i++) {
+    worst_p = std::max(worst_p, length(x.positions[x.indices[i]] - y.positions[y.indices[i]]));
+    worst_n = std::max(worst_n, length(x.normals[x.indices[i]] - y.normals[y.indices[i]]));
+  }
+  const AABB box = a.bounds();
+  const bool bounds_same = std::memcmp(&x.bounds.min, &box.min, sizeof(Vec3)) == 0 && std::memcmp(&x.bounds.max, &box.max, sizeof(Vec3)) == 0;
+  why = strprintf("positions off by %g, normals by %g, bounds %s", (double)worst_p, (double)worst_n, bounds_same ? "exact" : "STALE");
+  return worst_p <= tol && worst_n <= tol && bounds_same;
+}
+
+/* The vertices within r of p, each pushed along its own radial direction by `amount` times a smooth falloff (what a Draw dab does). */
+std::vector<uint32_t> push_patch(Mesh &m, Vec3 p, float r, float amount) {
+  std::vector<uint32_t> ids;
+  for (uint32_t v = 0; v < (uint32_t)m.positions.size(); v++) {
+    const float d = length(m.positions[v] - p);
+    if (d >= r) continue;
+    const float w = (1.0f - d / r) * (1.0f - d / r);
+    m.positions[v] += normalize(m.positions[v]) * (amount * w);
+    ids.push_back(v);
+  }
+  return ids;
+}
+
+bool same_render(const Mesh &a, const Mesh &b) {
+  const RenderMesh &x = a.render_mesh(), &y = b.render_mesh();
+  return x.positions.size() == y.positions.size() && x.indices == y.indices &&
+         std::memcmp(x.positions.data(), y.positions.data(), x.positions.size() * sizeof(Vec3)) == 0 &&
+         std::memcmp(x.normals.data(), y.normals.data(), x.normals.size() * sizeof(Vec3)) == 0;
+}
+
+}  // namespace
+
+static void tests_round508() {
+  test("sculpting a 100k-face sphere (round 508): a dab told which vertices moved gives the render mesh a rebuild from scratch makes, bit for bit what the whole scan gives, with the normals of the faces around the dab only - at the texture seam, at a pole, and after a bump nobody told of", [] {
+    MeshPtr told = primitives::uv_sphere(0.5f, 450, 225), scanned = primitives::uv_sphere(0.5f, 450, 225);
+    CHECK(told->face_count() > 100000);
+    /* Both are warm (a build, then one in-place move: the first in-place frame works the whole mesh out and keeps it). */
+    auto bump = [](Mesh &m, const std::vector<uint32_t> &ids, bool tell) {
+      m.deform_version++;
+      if (tell) m.note_moved(ids);
+      m.render_mesh();
+    };
+    for (Mesh *m : {told.get(), scanned.get()}) {
+      m->render_mesh();
+      m->positions[3] += Vec3(0.001f, 0.0f, 0.0f);
+      bump(*m, {3}, m == told.get());
+    }
+    const MeshCounts c0 = mesh_counts();
+    /* The seam's ends and the poles (they stand on the box's sides), the middle, a dab inside the box and one that grows it. */
+    struct Spot {
+      Vec3 at;
+      float amount;
+    };
+    const Spot spots[] = {{Vec3(0.5f, 0.0f, 0.0f), 0.03f},  {Vec3(0.0f, 0.5f, 0.0f), 0.03f}, {Vec3(0.0f, -0.2f, 0.45f), 0.03f},
+                          {Vec3(-0.5f, 0.0f, 0.0f), 0.03f}, {Vec3(0.35f, 0.35f, 0.0f), 0.01f}, {Vec3(0.35f, 0.35f, 0.0f), 0.4f}};
+    size_t dab_faces = 0;
+    for (const Spot &s : spots) {
+      const MeshCounts before = mesh_counts();
+      const std::vector<uint32_t> ids = push_patch(*told, s.at, 0.06f, s.amount);
+      push_patch(*scanned, s.at, 0.06f, s.amount);
+      CHECK(!ids.empty());
+      bump(*told, ids, true);
+      bump(*scanned, ids, false);
+      dab_faces = std::max<size_t>(dab_faces, (size_t)((mesh_counts() - before).normal_faces / 2));  // (two meshes followed)
+      CHECK(same_render(*told, *scanned));
+      const AABB box = told->bounds();  // (each dab's box, not only the last: a stale one would stay wrong)
+      CHECK(std::memcmp(&told->render_mesh().bounds.min, &box.min, sizeof(Vec3)) == 0 && std::memcmp(&told->render_mesh().bounds.max, &box.max, sizeof(Vec3)) == 0);
+    }
+    const MeshCounts c1 = mesh_counts() - c0;  // (before the rebuild below: that is a full build of its own)
+    std::string why;
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    std::printf("    %zu faces; the dab's normals were worked out for at most %zu faces; vs a rebuild: %s\n", told->face_count(), dab_faces, why.c_str());
+    CHECK(c1.full_builds == 0 && c1.in_place >= 12 && c1.partial_normals >= 12);
+    /* A count, not a time: the faces around the dab (a pole packs the most into a patch: 4 % of this mesh), not the mesh. */
+    CHECK(dab_faces > 0 && dab_faces < told->face_count() / 10);
+    /* A bump nobody told of between two told ones: the chain is broken, the whole scan finds the vertex it moved. */
+    told->positions[1000] += Vec3(0.0f, 0.01f, 0.0f), scanned->positions[1000] += Vec3(0.0f, 0.01f, 0.0f);
+    told->deform_version++, scanned->deform_version++;
+    const std::vector<uint32_t> ids = push_patch(*told, Vec3(0.0f, 0.0f, -0.5f), 0.05f, 0.02f);
+    push_patch(*scanned, Vec3(0.0f, 0.0f, -0.5f), 0.05f, 0.02f);
+    bump(*told, ids, true);
+    bump(*scanned, ids, false);
+    CHECK(same_render(*told, *scanned));
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+  });
+
+  test("sculpting a mesh with loose parts (round 508): an isolated vertex, a loose edge and a separate triangle moved by a dab told to the render mesh follow like the rest", [] {
+    auto make = [] {
+      MeshPtr mp = primitives::uv_sphere(0.5f, 64, 32);
+      Mesh &m = *mp;
+      const uint32_t a = m.add_vert(Vec3(2.0f, 0.0f, 0.0f)), b = m.add_vert(Vec3(2.5f, 0.0f, 0.0f)), c = m.add_vert(Vec3(2.0f, 0.5f, 0.0f)), d = m.add_vert(Vec3(2.5f, 0.5f, 0.0f));
+      m.add_vert(Vec3(-2.0f, 0.0f, 0.0f));  // (a vertex with no face at all)
+      m.add_face({a, b, c});                // (a separate triangle)
+      m.add_loose_edge(b, d);
+      m.touch();
+      return mp;
+    };
+    MeshPtr told = make(), scanned = make();
+    for (Mesh *m : {told.get(), scanned.get()}) {
+      m->render_mesh();
+      m->positions[5] += Vec3(0.001f, 0.0f, 0.0f);
+      m->deform_version++;
+      if (m == told.get()) m->note_moved({5});
+      m->render_mesh();
+    }
+    const uint32_t first_loose = (uint32_t)told->positions.size() - 5;
+    const std::vector<uint32_t> ids = {first_loose, first_loose + 1, first_loose + 2, first_loose + 3, first_loose + 4, 10, 11};
+    for (Mesh *m : {told.get(), scanned.get()}) {
+      for (uint32_t v : ids) m->positions[v] += Vec3(0.0f, 0.05f, 0.03f);
+      m->deform_version++;
+      if (m == told.get()) m->note_moved(ids);
+    }
+    CHECK(same_render(*told, *scanned));
+    std::string why;
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    std::printf("    vs a rebuild: %s\n", why.c_str());
+  });
+
+  test("sculpt a subdivided sphere (round 508): a stroke's render mesh, normals and bounds are a rebuild's; undo and redo bring the sphere back and the render mesh with it; a mirrored stroke follows too", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const MeshPtr mesh = g->mesh_filter()->mesh;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    std::string why;
+    CHECK(render_is_rebuild(*mesh, 1e-5f, why));  // (warm: the frames drew it)
+    const std::vector<Vec3> before = mesh->positions;
+    ed.command("sculpt size 25");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt stroke %g %g %g %g 12", px.x - 15.0f, px.y, px.x + 15.0f, px.y));
+    step(ed);
+    step(ed);
+    const std::vector<Vec3> after = mesh->positions;
+    CHECK(changed_count(before, after) > 0);
+    CHECK(render_is_rebuild(*mesh, 1e-5f, why));
+    std::printf("    stroke: %zu vertices moved; vs a rebuild: %s\n", changed_count(before, after), why.c_str());
+    ed.command("undo");
+    step(ed);
+    CHECK(changed_count(before, mesh->positions) == 0);
+    CHECK(render_is_rebuild(*mesh, 1e-5f, why));
+    ed.command("redo");
+    step(ed);
+    CHECK(changed_count(after, mesh->positions) == 0);
+    CHECK(render_is_rebuild(*mesh, 1e-5f, why));
+    /* Mirror X: both sides move, and the render mesh follows both. */
+    const std::vector<Vec3> mid = mesh->positions;
+    ed.command("sculpt front off");
+    ed.command("sculpt symmetry x");
+    ed.command(strprintf("sculpt dab %g %g", px.x + 12.0f, px.y));
+    step(ed);
+    size_t left = 0, right = 0;
+    for (size_t v = 0; v < mid.size(); v++) {
+      if (std::memcmp(&mid[v], &mesh->positions[v], sizeof(Vec3)) == 0) continue;
+      (mid[v].x < 0.0f ? left : right)++;
+    }
+    std::printf("    mirrored dab: %zu vertices moved on the left, %zu on the right\n", left, right);
+    CHECK(left > 0 && right > 0);
+    CHECK(render_is_rebuild(*mesh, 1e-5f, why));
+  });
+
+  test("sculpt a sphere with an Array modifier (round 508): the base's stroke shows in the evaluated copies and their render mesh is a rebuild's", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    ArrayModifier *arr = g->add<ArrayModifier>();
+    arr->count = 2;
+    ed.mark_changed_for_test("Array");
+    step(ed);
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const std::vector<Vec3> before = g->mesh_filter()->mesh->positions;
+    ed.command("sculpt size 25");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt stroke %g %g %g %g 8", px.x - 10.0f, px.y, px.x + 10.0f, px.y));
+    step(ed);
+    step(ed);
+    const Mesh &base = *g->mesh_filter()->mesh;
+    const Mesh *ev = g->evaluated_mesh();
+    CHECK(changed_count(before, base.positions) > 0);
+    CHECK(ev && ev->face_count() == base.face_count() * 2);
+    if (!ev) return;
+    size_t same = 0;
+    for (size_t v = 0; v < base.positions.size(); v++) same += std::memcmp(&ev->positions[v], &base.positions[v], sizeof(Vec3)) == 0;
+    CHECK(same == base.positions.size());  // (the first copy is the base, as sculpted)
+    std::string why;
+    CHECK(render_is_rebuild(*ev, 1e-5f, why));
+    CHECK(render_is_rebuild(base, 1e-5f, why));
+  });
+}
+
+/* ---- round 508 (test engineer): the sculpt's noted moves against a from-scratch rebuild, edge cases first ---- */
+
+namespace {
+
+/* render_is_rebuild's check for the flat (force_flat) render mesh: corner by corner against a copy that has no caches. */
+bool flat_render_is_rebuild(const Mesh &a, float tol) {
+  Mesh fresh;
+  {
+    MeshCopyBare bare;
+    fresh = a;
+  }
+  const RenderMesh &x = a.render_mesh(true), &y = fresh.render_mesh(true);
+  if (x.indices.size() != y.indices.size()) return false;
+  for (size_t i = 0; i < x.indices.size(); i++)
+    if (length(x.positions[x.indices[i]] - y.positions[y.indices[i]]) > tol || length(x.normals[x.indices[i]] - y.normals[y.indices[i]]) > tol) return false;
+  const AABB fb = fresh.bounds();
+  return std::memcmp(&x.bounds.min, &fb.min, sizeof(Vec3)) == 0 && std::memcmp(&x.bounds.max, &fb.max, sizeof(Vec3)) == 0;
+}
+
+bool same_bounds(const Mesh &a, const Mesh &b) {
+  const AABB &x = a.render_mesh().bounds, &y = b.render_mesh().bounds;
+  return std::memcmp(&x.min, &y.min, sizeof(Vec3)) == 0 && std::memcmp(&x.max, &y.max, sizeof(Vec3)) == 0;
+}
+
+/* push_patch at a scale: the sphere's radius is 0.5 * s. */
+std::vector<uint32_t> push_patch_scaled(Mesh &m, Vec3 p, float r, float amount, float s) { return push_patch(m, p * s, r * s, amount * s); }
+
+}  // namespace
+
+static void tests_round508_te() {
+  test("round 508 (test engineer): every sculpt brush, with no symmetry, each mirror axis and radial, leaves the render mesh what a rebuild from scratch makes", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 1");
+    ed.command("sculpt front off");
+    const MeshCounts c0 = mesh_counts();
+    const char *brushes[] = {"draw", "smooth", "grab", "clay", "inflate", "flatten", "pinch", "crease", "scrape", "snake", "mask"};
+    const char *syms[] = {"off", "x", "y", "z", "radial"};
+    int bad = 0, k = 0;
+    for (const char *b : brushes)
+      for (const char *s : syms) {
+        ed.command("sculpt symmetry off");
+        if (std::string(s) == "radial") ed.command("sculpt symmetry radial 3");
+        else if (std::string(s) != "off") ed.command(std::string("sculpt symmetry ") + s);
+        ed.command(std::string("sculpt brush ") + b);
+        const float off = (float)(k++ % 7) * 4.0f - 12.0f;
+        ed.command(strprintf("sculpt stroke %g %g %g %g 5", px.x + off, px.y - 6.0f, px.x + off + 20.0f, px.y + 6.0f));
+        step(ed);
+        step(ed);
+        std::string why;
+        const Mesh &m = *g->mesh_filter()->mesh;
+        if (!render_is_rebuild(m, 1e-5f, why) || !flat_render_is_rebuild(m, 1e-5f)) {
+          bad++;
+          std::printf("    STALE after brush %s symmetry %s: %s\n", b, s, why.c_str());
+        }
+      }
+    const MeshCounts d = mesh_counts() - c0;
+    std::printf("    55 strokes: %llu in place, %llu full builds, %d stale\n", (unsigned long long)d.in_place, (unsigned long long)d.full_builds, bad);
+    CHECK(bad == 0);
+    CHECK(d.in_place > 0);
+  });
+
+  test("round 508 (test engineer): Grab and Snake Hook dragged with the mouse keep the render mesh a rebuild's after every frame, and an undo of the drag restores it", [] {
+    for (const char *brush : {"grab", "snake"}) {
+      Editor ed;
+      GameObject *g = sphere_scene(ed, 3);
+      CHECK(g);
+      if (!g) return;
+      const Vec2 px = pixel_of(ed, g->world_position());
+      const Recti s = ed.scene_rect_for_test();
+      const int wx = s.x + (int)px.x, wy = s.y + (int)px.y;
+      ed.command("sculpt size 40");
+      ed.command("sculpt strength 1");
+      ed.command(std::string("sculpt brush ") + brush);
+      const std::vector<Vec3> before = g->mesh_filter()->mesh->positions;
+      step(ed, {mouse_event(platform::EventType::MouseMove, wx, wy)});
+      step(ed, {mouse_event(platform::EventType::MouseDown, wx, wy)});
+      int stale = 0;
+      for (int i = 1; i <= 10; i++) {
+        step(ed, {mouse_event(platform::EventType::MouseMove, wx + 6 * i, wy - 2 * i)});
+        std::string why;
+        if (!render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why)) stale++;
+      }
+      step(ed, {mouse_event(platform::EventType::MouseUp, wx + 60, wy - 20)});
+      step(ed);
+      std::string why;
+      CHECK(stale == 0);
+      CHECK(changed_count(before, g->mesh_filter()->mesh->positions) > 0);
+      CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+      ed.command("undo");
+      step(ed);
+      CHECK(changed_count(before, g->mesh_filter()->mesh->positions) == 0);
+      CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+      ed.command("redo");
+      step(ed);
+      CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+      std::printf("    %s: %d stale frames; last: %s\n", brush, stale, why.c_str());
+    }
+  });
+
+  test("round 508 (test engineer): with Dyntopo on the render mesh is still a rebuild's after the stroke and after a following stroke with it off (the notes must not leak across)", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 40");
+    ed.command("sculpt strength 1");
+    ed.command("sculpt front off");
+    std::string why;
+    ed.command("sculpt dyntopo on");
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - 15.0f, px.y, px.x + 15.0f, px.y));
+    step(ed);
+    step(ed);
+    CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+    ed.command("sculpt dyntopo off");
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - 15.0f, px.y + 10.0f, px.x + 15.0f, px.y + 10.0f));
+    step(ed);
+    step(ed);
+    CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+    ed.command("sculpt dyntopo on");  // (the other way round: a plain stroke's notes, then a Dyntopo stroke's unnoted bumps)
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - 15.0f, px.y - 10.0f, px.x + 15.0f, px.y - 10.0f));
+    step(ed);
+    CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+    ed.command("undo");
+    step(ed);
+    CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+    std::printf("    after Dyntopo and undo: %s\n", why.c_str());
+  });
+
+  test("round 508 (test engineer): a stroke, its undo, a different stroke, two undos and two redos: the render mesh is a rebuild's at every step", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 1");
+    std::string why;
+    auto ok = [&] { return render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why); };
+    const std::vector<Vec3> p0 = g->mesh_filter()->mesh->positions;
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - 20.0f, px.y, px.x, px.y));
+    step(ed);
+    const std::vector<Vec3> p1 = g->mesh_filter()->mesh->positions;
+    CHECK(ok());
+    ed.command("undo");
+    step(ed);
+    CHECK(ok() && changed_count(p0, g->mesh_filter()->mesh->positions) == 0);
+    ed.command("sculpt brush inflate");
+    ed.command(strprintf("sculpt stroke %g %g %g %g 6", px.x - 5.0f, px.y - 15.0f, px.x + 20.0f, px.y + 10.0f));
+    step(ed);
+    const std::vector<Vec3> p2 = g->mesh_filter()->mesh->positions;
+    CHECK(ok() && changed_count(p0, p2) > 0);
+    ed.command("undo");
+    step(ed);
+    CHECK(ok() && changed_count(p0, g->mesh_filter()->mesh->positions) == 0);
+    ed.command("redo");
+    step(ed);
+    CHECK(ok() && changed_count(p2, g->mesh_filter()->mesh->positions) == 0);
+    ed.command("undo");
+    step(ed);
+    CHECK(ok());
+    ed.command("redo");
+    step(ed);
+    CHECK(ok() && changed_count(p2, g->mesh_filter()->mesh->positions) == 0);
+    (void)p1;
+  });
+
+  test("round 508 (test engineer): duplicating the sculpted object between two dabs leaves two meshes, each a rebuild's, the copy's dab not showing on the original", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    step(ed);
+    step(ed);
+    std::string why;
+    CHECK(render_is_rebuild(*g->mesh_filter()->mesh, 1e-5f, why));
+    const size_t objects = ed.scene().objects().size();
+    ed.command("duplicate");
+    step(ed);
+    CHECK(ed.scene().objects().size() == objects + 1);
+    std::vector<GameObject *> spheres;
+    for (const auto &up : ed.scene().objects()) {
+      GameObject *o = up.get();
+      if (o->mesh_filter() && o->mesh_filter()->mesh && o->mesh_filter()->mesh->face_count() > 1000) spheres.push_back(o);
+    }
+    CHECK(spheres.size() == 2);
+    if (spheres.size() != 2) return;
+    ed.command("sculpt on");
+    GameObject *active = ed.active_object_for_test();
+    GameObject *other = spheres[0] == active ? spheres[1] : spheres[0];
+    const Vec3 home = other->world_position();
+    active->set_world_position(home + Vec3(1.5f, 0.0f, 0.0f));  // (apart, so a dab can only hit the one being sculpted)
+    for (int i = 0; i < 4; i++) step(ed);
+    const std::vector<Vec3> other_before = other->mesh_filter()->mesh->positions;
+    const Vec2 apx = pixel_of(ed, active->world_position());
+    for (int i = 0; i < 3; i++) {
+      ed.command(strprintf("sculpt dab %g %g", apx.x + 3.0f * i, apx.y));
+      step(ed);
+      CHECK(render_is_rebuild(*active->mesh_filter()->mesh, 1e-5f, why));
+      CHECK(render_is_rebuild(*other->mesh_filter()->mesh, 1e-5f, why));
+    }
+    std::printf("    the duplicate was sculpted (%zu vertices changed), the other has %zu changed vertices\n",
+                changed_count(other_before, active->mesh_filter()->mesh->positions), changed_count(other_before, other->mesh_filter()->mesh->positions));
+    CHECK(changed_count(other_before, other->mesh_filter()->mesh->positions) == 0);
+    CHECK(changed_count(other_before, active->mesh_filter()->mesh->positions) > 0);  // (the dabs landed: a test that moved nothing proves nothing)
+  });
+
+  test("round 508 (test engineer): the notes' edge cases on a 34k-vertex sphere - 40 told bumps before the render mesh looks (past the notes kept), ids out of range and repeated, an empty note, NaN in and out, a pole pulled in, a vertex moved and moved back, both render caches", [] {
+    auto make = [] { return primitives::uv_sphere(0.5f, 260, 130); };
+    MeshPtr told = make(), scanned = make();
+    CHECK(told->vert_count() > 33000);
+    for (Mesh *m : {told.get(), scanned.get()}) {
+      m->render_mesh();
+      m->render_mesh(true);
+      m->positions[3] += Vec3(0.001f, 0.0f, 0.0f);
+      m->deform_version++;
+      if (m == told.get()) m->note_moved({3});
+      m->render_mesh();
+      m->render_mesh(true);
+    }
+    auto bump = [&](const std::vector<uint32_t> &ids, bool tell_extra = true) {
+      told->deform_version++, scanned->deform_version++;
+      if (tell_extra) told->note_moved(ids);
+    };
+    std::string why;
+    /* 40 told bumps in a row before anything looks: the log keeps 32. A cache that far behind must scan, not trust a partial chain. */
+    for (int i = 0; i < 40; i++) {
+      const Vec3 at = normalize(Vec3(std::cos(i * 0.7f), std::sin(i * 0.3f), std::sin(i * 0.7f))) * 0.5f;
+      const std::vector<uint32_t> ids = push_patch(*told, at, 0.04f, 0.01f);
+      push_patch(*scanned, at, 0.04f, 0.01f);
+      bump(ids);
+    }
+    CHECK(same_render(*told, *scanned) && same_bounds(*told, *scanned));
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    CHECK(flat_render_is_rebuild(*told, 1e-5f));
+    /* Ids out of range, repeated, and an empty note. */
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[7] += Vec3(0.0f, 0.0f, 0.02f);
+    bump({7, 7, 7, 0xFFFFFFF0u, (uint32_t)told->vert_count()});
+    CHECK(same_render(*told, *scanned) && same_bounds(*told, *scanned));
+    bump({});  // (a bump that moved nothing, said so)
+    CHECK(same_render(*told, *scanned));
+    /* NaN in, then back out. */
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[100] = Vec3(std::nanf(""), 0.1f, 0.1f);
+    bump({100});
+    CHECK(same_bounds(*told, *scanned));
+    told->render_mesh(), scanned->render_mesh();
+    CHECK(std::isfinite(told->render_mesh().bounds.max.x) && std::isfinite(told->render_mesh().bounds.min.x));
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[100] = Vec3(0.2f, 0.1f, 0.1f);
+    bump({100});
+    CHECK(same_render(*told, *scanned) && same_bounds(*told, *scanned));
+    /* A pole pulled in: the box shrinks on that side. */
+    uint32_t top = 0;
+    for (uint32_t v = 0; v < (uint32_t)told->vert_count(); v++)
+      if (told->positions[v].y > told->positions[top].y) top = v;
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[top].y -= 0.08f;
+    bump({top});
+    CHECK(same_bounds(*told, *scanned));
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    /* A vertex pushed out of the box and back in again between two looks: the final position is what counts. */
+    const Vec3 p500 = told->positions[500];
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[500] = p500 * 3.0f;
+    bump({500});
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[500] = p500;
+    bump({500});
+    CHECK(same_render(*told, *scanned) && same_bounds(*told, *scanned));
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    /* Flat cache looked at first this time (the smooth one is behind by two bumps). */
+    for (int i = 0; i < 2; i++) {
+      const std::vector<uint32_t> ids = push_patch(*told, Vec3(0.0f, -0.5f, 0.0f), 0.05f, 0.03f * (i + 1));
+      push_patch(*scanned, Vec3(0.0f, -0.5f, 0.0f), 0.05f, 0.03f * (i + 1));
+      bump(ids);
+      if (i == 0) told->render_mesh(true), scanned->render_mesh(true);
+    }
+    CHECK(flat_render_is_rebuild(*told, 1e-5f));
+    CHECK(same_render(*told, *scanned) && same_bounds(*told, *scanned));
+  });
+
+  test("round 508 (test engineer): a mesh copied between two dabs, and the copy and the original each dabbed on, render like rebuilds", [] {
+    MeshPtr a = primitives::uv_sphere(0.5f, 120, 60);
+    a->render_mesh();
+    a->positions[3] += Vec3(0.001f, 0, 0);
+    a->deform_version++, a->note_moved({3});
+    a->render_mesh();
+    std::vector<uint32_t> ids = push_patch(*a, Vec3(0.5f, 0, 0), 0.08f, 0.02f);
+    a->deform_version++, a->note_moved(ids);
+    Mesh b = *a;  // (copied after a told bump, before the render mesh looked at it)
+    std::string why;
+    CHECK(render_is_rebuild(b, 1e-5f, why));
+    ids = push_patch(b, Vec3(-0.5f, 0, 0), 0.08f, 0.05f);
+    b.deform_version++, b.note_moved(ids);
+    CHECK(render_is_rebuild(b, 1e-5f, why));
+    ids = push_patch(*a, Vec3(0, 0.5f, 0), 0.08f, 0.04f);
+    a->deform_version++, a->note_moved(ids);
+    CHECK(render_is_rebuild(*a, 1e-5f, why));
+    Mesh c = b;  // (and a copy of a copy, whose caches are warm)
+    ids = push_patch(c, Vec3(0, 0, 0.5f), 0.08f, 0.04f);
+    c.deform_version++, c.note_moved(ids);
+    CHECK(render_is_rebuild(c, 1e-5f, why));
+    CHECK(render_is_rebuild(b, 1e-5f, why));
+    /* Assigning over a mesh whose caches are warm and whose notes are of another history. */
+    Mesh d = *a;
+    d.render_mesh();
+    d = c;
+    ids = push_patch(d, Vec3(0.5f, 0, 0), 0.08f, 0.03f);
+    d.deform_version++, d.note_moved(ids);
+    CHECK(render_is_rebuild(d, 1e-5f, why));
+  });
+
+  test("round 508 (test engineer): told dabs on a huge (radius 5e5) and a tiny (radius 5e-7) sphere give the box and normals of a rebuild", [] {
+    for (float s : {1e6f, 1e-6f}) {
+      MeshPtr told = primitives::uv_sphere(0.5f * s, 100, 50), scanned = primitives::uv_sphere(0.5f * s, 100, 50);
+      for (Mesh *m : {told.get(), scanned.get()}) {
+        m->render_mesh();
+        m->positions[3] += Vec3(0.001f * s, 0, 0);
+        m->deform_version++;
+        if (m == told.get()) m->note_moved({3});
+        m->render_mesh();
+      }
+      std::string why;
+      for (int i = 0; i < 5; i++) {
+        const Vec3 at = normalize(Vec3(std::cos(i * 1.3f), 0.4f, std::sin(i * 1.3f)));
+        const std::vector<uint32_t> ids = push_patch_scaled(*told, at * 0.5f, 0.07f, i == 4 ? 0.3f : 0.02f, s);
+        push_patch_scaled(*scanned, at * 0.5f, 0.07f, i == 4 ? 0.3f : 0.02f, s);
+        told->deform_version++, scanned->deform_version++;
+        told->note_moved(ids);
+        CHECK(same_render(*told, *scanned) && same_bounds(*told, *scanned));
+      }
+      CHECK(render_is_rebuild(*told, 1e-5f * s, why) || (std::printf("    scale %g: %s\n", (double)s, why.c_str()), false));
+    }
+  });
+
+  test("round 508 (test engineer): a position edit that bumps deform_version but does not say so, between two told dabs, is not lost", [] {
+    MeshPtr told = primitives::uv_sphere(0.5f, 100, 50), scanned = primitives::uv_sphere(0.5f, 100, 50);
+    for (Mesh *m : {told.get(), scanned.get()}) {
+      m->render_mesh();
+      m->positions[3] += Vec3(0.001f, 0, 0);
+      m->deform_version++;
+      if (m == told.get()) m->note_moved({3});
+      m->render_mesh();
+    }
+    /* told dab, then a script move (bump, no note), then a told dab, all before the render mesh looks. */
+    std::vector<uint32_t> ids = push_patch(*told, Vec3(0.5f, 0, 0), 0.07f, 0.02f);
+    push_patch(*scanned, Vec3(0.5f, 0, 0), 0.07f, 0.02f);
+    told->deform_version++, scanned->deform_version++;
+    told->note_moved(ids);
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[2000] += Vec3(0.05f, 0.05f, 0);
+    told->deform_version++, scanned->deform_version++;
+    ids = push_patch(*told, Vec3(-0.5f, 0, 0), 0.07f, 0.02f);
+    push_patch(*scanned, Vec3(-0.5f, 0, 0), 0.07f, 0.02f);
+    told->deform_version++, scanned->deform_version++;
+    told->note_moved(ids);
+    CHECK(same_render(*told, *scanned));
+    std::string why;
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    /* The same with the script's bump last: the cache is behind by a told bump and an unnoted one. */
+    ids = push_patch(*told, Vec3(0, 0.5f, 0), 0.07f, 0.02f);
+    push_patch(*scanned, Vec3(0, 0.5f, 0), 0.07f, 0.02f);
+    told->deform_version++, scanned->deform_version++;
+    told->note_moved(ids);
+    for (Mesh *m : {told.get(), scanned.get()}) m->positions[3000] += Vec3(0.05f, 0, 0.05f);
+    told->deform_version++, scanned->deform_version++;
+    CHECK(same_render(*told, *scanned));
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+  });
+
+  test("round 508 (review): a vertex moved with touch() only, between two told dabs and no frame drawn, still shows in the render mesh, its normals and box", [] {
+    auto make = [] {
+      MeshPtr mp = primitives::uv_sphere(0.5f, 64, 32);
+      mp->touch();
+      return mp;
+    };
+    MeshPtr told = make(), scanned = make();
+    for (Mesh *m : {told.get(), scanned.get()}) {
+      m->render_mesh();
+      m->positions[5] += Vec3(0.001f, 0.0f, 0.0f);  // (a told dab, drawn: the cache is at it)
+      m->deform_version++;
+      if (m == told.get()) m->note_moved({5});
+      m->render_mesh();
+      m->positions[900] += Vec3(0.4f, 0.3f, 0.2f);  // (an edit someone made with touch() alone - a console line between two dabs)
+      m->touch();
+      m->positions[7] += Vec3(0.0f, 0.002f, 0.0f);  // (the next told dab, without vertex 900; no frame in between)
+      m->deform_version++;
+      if (m == told.get()) m->note_moved({7});
+    }
+    CHECK(same_render(*told, *scanned));
+    std::string why;
+    CHECK(render_is_rebuild(*told, 1e-5f, why));
+    if (!why.empty()) std::printf("    vs a rebuild: %s\n", why.c_str());
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -2140,4 +2746,6 @@ void run_sculpt_tests() {
   tests_round261();
   tests_round262();
   tests_round368();
+  tests_round508();
+  tests_round508_te();
 }

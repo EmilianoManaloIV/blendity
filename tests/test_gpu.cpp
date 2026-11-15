@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the gpu tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/core/view_perf.h"
 #include <cstring>
 #include <numeric>
 
@@ -5617,6 +5618,592 @@ static void tests_round471_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 506: the Scene view's kept per-frame work, on the card (task 0490) */
+struct R506gPics {
+  std::vector<uint32_t> scene, game;
+};
+static R506gPics r506g_pics(Editor &ed) { return {r35_scene_view(ed), r35_game(ed)}; }
+static size_t r506g_differ(const R506gPics &a, const R506gPics &b) {
+  size_t n = 0;
+  for (size_t i = 0; i < a.scene.size() && i < b.scene.size(); i++) n += (a.scene[i] & 0xFFFFFF) != (b.scene[i] & 0xFFFFFF);
+  for (size_t i = 0; i < a.game.size() && i < b.game.size(); i++) n += (a.game[i] & 0xFFFFFF) != (b.game[i] & 0xFFFFFF);
+  return n + (a.scene.size() != b.scene.size()) + (a.game.size() != b.game.size());
+}
+
+/* The Scene view nudged every frame so it draws; with `both`, the Main Camera too, so the Game view draws as well (two views on one
+ * card, their slots sharing its buffers). Ends where r458_field leaves the camera. */
+static void r506g_orbit(Editor &ed, int pairs, bool both = false) {
+  GameObject *cam = both ? ed.scene().find_by_name("Main Camera") : nullptr;
+  for (int k = 0; k < pairs; k++) {
+    ed.command("camera 0 6 9.03 0 0 0");
+    if (cam) cam->set_local_position(cam->local().position + Vec3(0.001f, 0.0f, 0.0f));
+    r34_steps(ed, 1);
+    ed.command("camera 0 6 9 0 0 0");
+    if (cam) cam->set_local_position(cam->local().position - Vec3(0.001f, 0.0f, 0.0f));
+    r34_steps(ed, 1);
+  }
+}
+
+struct R506gSwitches {
+  bool keeps = view_perf::keeps;
+  unsigned disabled = view_perf::disabled, stale = view_perf::stale_for_test;
+  ~R506gSwitches() { view_perf::keeps = keeps, view_perf::disabled = disabled, view_perf::stale_for_test = stale; }
+};
+
+/* What an edit does to the two views on the card, with the keeps on (a few orbit frames after it, in their kept state) and off. */
+static void r506g_edit(Editor &ed, const char *what, bool both, const std::function<void()> &edit, bool shown_expected = true) {
+  R506gSwitches restore;
+  r506g_orbit(ed, 3, both);
+  const R506gPics before = r506g_pics(ed);
+  edit();
+  r506g_orbit(ed, 3, both);
+  const R506gPics on = r506g_pics(ed);
+  view_perf::keeps = false;
+  r506g_orbit(ed, 2, both);
+  const R506gPics off = r506g_pics(ed);
+  view_perf::keeps = true;
+  const size_t shown = r506g_differ(before, on), wrong = r506g_differ(on, off);
+  R506gPics scene_only_a = before, scene_only_b = on;
+  scene_only_a.game.clear(), scene_only_b.game.clear();
+  const size_t shown_scene = r506g_differ(scene_only_a, scene_only_b);
+  std::printf("    %s: %zu pixels changed (%zu in the Scene view), %zu differ from the picture drawn with every keep off\n", what, shown, shown_scene, wrong);
+  CHECK(!shown_expected || shown > 50);
+  CHECK(wrong == 0);
+}
+
+static void tests_round506_gpu() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (card): an object moved, added or deleted, a material's colour, a light turned, added and deleted show in both views the same frame - the picture is the one drawn with every keep off, each view's rows are its own - and undo takes each back (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r458_field(ed, 12);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    for (bool both : {false, true}) {
+      std::printf("    %s\n", both ? "both views drawn every frame:" : "the Scene view drawn every frame:");
+      r506g_edit(ed, "an object moved", both, [&] { ed.scene().find_by_name("K458_4")->set_local_position({0.3f, 1.1f, 0.2f}), ed.mark_changed_for_test("moved"); });
+      r506g_edit(ed, "...undone", both, [&] { ed.command("undo"); });
+      r506g_edit(ed, "an object added", both, [&] {
+        GameObject *g = create_primitive(ed.scene(), "Cube");
+        g->name = both ? "R506g B" : "R506g A";
+        g->set_local_position({both ? -2.5f : 2.5f, 0.6f, 2.5f});  // (the second pass's at the other side: the first pass's still stands there)
+        g->set_local_scale(Vec3(0.6f));
+        ed.mark_changed_for_test("added");
+      });
+      r506g_edit(ed, "its material's colour", both, [&] {
+        GameObject *g = ed.scene().find_by_name(both ? "R506g B" : "R506g A");
+        g->get<MeshRenderer>()->materials = {make_material("R506g", Vec3(0.9f, 0.1f, 0.1f))};
+        ed.mark_changed_for_test("material");
+      });
+      r506g_edit(ed, "...and its colour changed", both, [&] {
+        GameObject *g = ed.scene().find_by_name(both ? "R506g B" : "R506g A");
+        MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+        m->base_color = Vec3(0.1f, 0.3f, 0.9f);
+        m->touch();
+        ed.mark_changed_for_test("colour");
+      });
+      r506g_edit(ed, "the object deleted", both, [&] {
+        ed.scene().destroy(ed.scene().find_by_name(both ? "R506g B" : "R506g A"));
+        ed.mark_changed_for_test("deleted");
+      });
+      r506g_edit(ed, "...undone", both, [&] { ed.command("undo"); });
+      r506g_edit(ed, "the sun turned", both, [&] {
+        ed.scene().find_by_name("Directional Light")->set_local_euler(Vec3(both ? 35.0f : 60.0f, both ? 80.0f : 30.0f, 0.0f));
+        ed.mark_changed_for_test("sun");
+      });
+      r506g_edit(ed, "a Point Light added", both, [&] {
+        ed.command("create Point Light");
+        if (GameObject *l = ed.scene().find_by_name("Point Light")) l->set_local_position({0.0f, 1.0f, 0.0f}), l->get<Light>()->intensity = 8.0f;
+        ed.mark_changed_for_test("lamp");
+      });
+      r506g_edit(ed, "the Point Light deleted", both, [&] {
+        ed.scene().destroy(ed.scene().find_by_name("Point Light"));
+        ed.mark_changed_for_test("lamp deleted");
+      });
+      r506g_edit(ed, "...undone", both, [&] { ed.command("undo"); });
+      r506g_edit(ed, "the world's colour", both, [&] {
+        ed.command("world color");
+        ed.scene().environment.color = Vec3(0.7f, 0.4f, 0.2f);
+        ed.mark_changed_for_test("world");
+      });
+      r506g_edit(ed, "...undone", both, [&] { ed.command("undo"); });
+      r506g_edit(ed, "Solid shading", both, [&] { ed.command("shading solid"); });
+      r506g_edit(ed, "Shaded again", both, [&] { ed.command("shading shaded"); });
+    }
+    CHECK(ed.scene_on_gpu_for_test());
+    CHECK(Editor::render_cache_mismatches_all() == m0);
+  });
+  test("round 506 (card): a frame in which only the camera moved rewrites no instance row, hashes no item, fits no shadow, asks the card's refusal check no walk, walks no lights and copies no draw-item list (counts; a frame after an edit does each once) (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 30);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    /* Orbit until a lighting walk was made (its own frame of the eight): the frames after it come before the next. */
+    bool walked = false;
+    for (int i = 0; i < 20 && !walked; i++) {
+      view_perf::reset();
+      r506g_orbit(ed, 1);
+      walked = view_perf::counters.light_walks > 0;
+    }
+    CHECK(walked);
+    view_perf::reset();
+    r506g_orbit(ed, 2);  // (4 frames)
+    const view_perf::Counters c = view_perf::counters;
+    std::printf("    4 camera-only frames: %llu instance rows written, %llu table writes, %llu validations, %llu item hashes, %llu refusal walks, %llu light walks, %llu item copies\n",
+                (unsigned long long)c.instance_rows_written, (unsigned long long)c.table_writes, (unsigned long long)c.validations, (unsigned long long)c.item_hashes,
+                (unsigned long long)c.unsupported_walks, (unsigned long long)c.light_walks, (unsigned long long)c.item_copies);
+    CHECK(c.instance_rows_written == 0);
+    CHECK(c.table_writes == 0);
+    CHECK(c.validations == 0);
+    CHECK(c.item_hashes == 0);
+    CHECK(c.unsupported_walks == 0);
+    CHECK(c.light_walks == 0);
+    CHECK(c.item_copies == 0);
+    CHECK(c.hit[view_perf::InstanceKey] >= 3 && c.hit[view_perf::Unsupported] >= 3 && c.hit[view_perf::CardBuffers] >= 3);
+    /* The same four frames with every keep off do all of it. */
+    {
+      R506gSwitches restore;
+      view_perf::keeps = false;
+      view_perf::reset();
+      r506g_orbit(ed, 2);
+      const view_perf::Counters off = view_perf::counters;
+      std::printf("    4 frames, keeps off: %llu rows written, %llu table writes, %llu item hashes, %llu refusal walks, %llu light walks, %llu item copies\n",
+                  (unsigned long long)off.instance_rows_written, (unsigned long long)off.table_writes, (unsigned long long)off.item_hashes,
+                  (unsigned long long)off.unsupported_walks, (unsigned long long)off.light_walks, (unsigned long long)off.item_copies);
+      CHECK(off.instance_rows_written >= 4 * 30 && off.table_writes >= 4 && off.item_hashes >= 3 && off.unsupported_walks >= 8 && off.light_walks >= 4 &&
+            off.item_copies >= 4);
+    }
+    /* An edit: each does its work again, once. */
+    view_perf::reset();
+    ed.scene().find_by_name("K458_2")->set_local_position({0.4f, 0.9f, 0.1f});
+    ed.mark_changed_for_test("moved");
+    r506g_orbit(ed, 1);
+    const view_perf::Counters edit = view_perf::counters;
+    std::printf("    the frames after an edit: %llu rows written, %llu item hashes, %llu refusal walks, %llu light walks\n", (unsigned long long)edit.instance_rows_written,
+                (unsigned long long)edit.item_hashes, (unsigned long long)edit.unsupported_walks, (unsigned long long)edit.light_walks);
+    CHECK(edit.instance_rows_written >= 30 && edit.unsupported_walks >= 1 && edit.light_walks >= 1);
+  });
+  test("round 506 (card): with a keep's invalidation skipped its edit is not seen - the card's rows, the instance key, the refusal check and the lights each go stale, by count, and the first two by the picture (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 12);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    int serial = 0;
+    /* One edit - a cube moved - seen with the keep intact (every keep walks or rewrites once) and with its invalidation skipped. */
+    auto run = [&](unsigned stale, uint64_t view_perf::Counters::*count, size_t &differ_from_fresh, uint64_t &counted) {
+      R506gSwitches restore;
+      view_perf::stale_for_test = stale;
+      r506g_orbit(ed, 3);
+      GameObject *g = ed.scene().find_by_name("K458_5");
+      view_perf::reset();
+      g->set_local_position({-2.0f + 0.4f * (float)(++serial % 3), 1.4f, 0.5f});
+      ed.mark_changed_for_test("moved");
+      r506g_orbit(ed, 1);
+      counted = view_perf::counters.*count;
+      r506g_orbit(ed, 2);
+      const R506gPics on = r506g_pics(ed);
+      view_perf::stale_for_test = 0;
+      view_perf::keeps = false;
+      r506g_orbit(ed, 2);
+      differ_from_fresh = r506g_differ(on, r506g_pics(ed));
+    };
+    struct Case {
+      const char *name;
+      unsigned stale;
+      uint64_t view_perf::Counters::*count;
+      bool picture;
+    };
+    const Case cases[] = {{"the card's rows", 1u << view_perf::CardBuffers, &view_perf::Counters::instance_rows_written, true},
+                          {"the instance key", 1u << view_perf::InstanceKey, &view_perf::Counters::item_hashes, true},
+                          {"the refusal check", 1u << view_perf::Unsupported, &view_perf::Counters::unsupported_walks, false},
+                          {"the lights", 1u << view_perf::Lighting, &view_perf::Counters::light_walks, false}};
+    for (const Case &c : cases) {
+      size_t intact_differ = 0, stale_differ = 0;
+      uint64_t intact_count = 0, stale_count = 0;
+      run(0, c.count, intact_differ, intact_count);
+      run(c.stale, c.count, stale_differ, stale_count);
+      std::printf("    %s: intact %llu done, %zu pixels from the fresh picture; invalidation skipped %llu done, %zu pixels from it\n", c.name, (unsigned long long)intact_count, intact_differ,
+                  (unsigned long long)stale_count, stale_differ);
+      CHECK(intact_count >= 1 && intact_differ == 0);
+      CHECK(stale_count == 0);
+      CHECK(!c.picture || stale_differ > 20);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- round 506, second part on the card: probes, Solid shading, two views */
+static ReflectionProbeBake r506g_bake(Vec3 colour) {
+  ReflectionProbeBake b;
+  b.size = 4;
+  for (auto &f : b.faces) f.assign(16, colour);
+  return b;
+}
+
+static void tests_round506_more_gpu() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (card): a Reflection Probe with a bake added, rebaked, moved and deleted shows on a shiny cube in both views the same frame - the picture is the one drawn with every keep off (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 12);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    MaterialPtr shiny = make_material("R506g Shiny", Vec3(0.9f));
+    shiny->metallic = 1.0f, shiny->roughness = 0.1f;
+    for (int i = 0; i < 12; i++) ed.scene().find_by_name(strprintf("K458_%d", i))->get<MeshRenderer>()->materials = {shiny};
+    ed.mark_changed_for_test("shiny");
+    uint64_t id = 0;
+    for (bool both : {false, true}) {
+      r506g_edit(ed, "a probe with a red bake added", both, [&] {
+        GameObject *p = ed.scene().create("R506g Probe");
+        p->set_local_position({0.0f, 1.0f, 0.0f});
+        p->add<ReflectionProbeComponent>();
+        id = p->id;
+        ed.reflection_probe_bakes_for_test()[id] = r506g_bake(Vec3(0.9f, 0.05f, 0.05f));
+        ed.reflection_probe_bakes_changed();
+        ed.mark_changed_for_test("a probe");
+      });
+      r506g_edit(ed, "its bake replaced by a blue one", both, [&] {
+        ed.reflection_probe_bakes_for_test()[id] = r506g_bake(Vec3(0.05f, 0.1f, 0.9f));
+        ed.reflection_probe_bakes_changed();
+      });
+      r506g_edit(ed, "the probe deleted", both, [&] {
+        ed.scene().destroy(ed.scene().find(id));
+        ed.reflection_probe_bakes_for_test().erase(id);
+        ed.reflection_probe_bakes_changed();
+        ed.mark_changed_for_test("probe deleted");
+      });
+    }
+  });
+  test("round 506 (card): Solid shading shows an object moved, added or deleted, a material's colour and undo of each the same frame - the picture is the one drawn with every keep off - and a camera-only Solid frame rewrites no row, hashes no item, walks no refusal check and gathers no list (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 12);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    ed.command("shading solid");
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    for (bool both : {false, true}) {
+      r506g_edit(ed, "an object moved", both, [&] { ed.scene().find_by_name("K458_4")->set_local_position({0.3f, 1.1f, both ? 0.5f : 0.2f}), ed.mark_changed_for_test("moved"); });
+      r506g_edit(ed, "...undone", both, [&] { ed.command("undo"); });
+      r506g_edit(ed, "an object added", both, [&] {
+        GameObject *g = create_primitive(ed.scene(), "Cube");
+        g->name = both ? "R506g SB" : "R506g SA";
+        g->set_local_position({both ? -2.5f : 2.5f, 0.6f, 2.5f});
+        g->set_local_scale(Vec3(0.6f));
+        ed.mark_changed_for_test("added");
+      });
+      r506g_edit(ed, "its material's colour", both, [&] {
+        ed.scene().find_by_name(both ? "R506g SB" : "R506g SA")->get<MeshRenderer>()->materials = {make_material("R506g S", Vec3(0.9f, 0.1f, 0.1f))};
+        ed.mark_changed_for_test("material");
+      });
+      r506g_edit(ed, "the object deleted", both, [&] { ed.scene().destroy(ed.scene().find_by_name(both ? "R506g SB" : "R506g SA")), ed.mark_changed_for_test("deleted"); });
+      r506g_edit(ed, "...undone", both, [&] { ed.command("undo"); });
+    }
+    r506g_orbit(ed, 3);
+    view_perf::reset();
+    r506g_orbit(ed, 2);
+    const view_perf::Counters c = view_perf::counters;
+    std::printf("    4 camera-only Solid frames: %llu rows written, %llu item hashes, %llu refusal walks, %llu lists gathered, %llu table writes, %llu light walks\n", (unsigned long long)c.instance_rows_written,
+                (unsigned long long)c.item_hashes, (unsigned long long)c.unsupported_walks, (unsigned long long)c.solid_item_builds, (unsigned long long)c.table_writes,
+                (unsigned long long)c.light_walks);
+    CHECK(c.instance_rows_written == 0 && c.unsupported_walks == 0 && c.solid_item_builds == 0 && c.table_writes == 0);  // (Solid's array is gathered by rows each frame, as before: the hash that would store it whole is not asked of this test)
+    CHECK(c.hit[view_perf::SolidItems] >= 3 && c.hit[view_perf::Unsupported] >= 3);
+  });
+  test("round 506 (card): a Scene view and a Game view drawn every frame each keep their refusal check (a slot a list), and the lights keep serves both - no walk of either after the first (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 30);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    bool walked = false;
+    for (int i = 0; i < 20 && !walked; i++) {
+      view_perf::reset();
+      r506g_orbit(ed, 1, true);
+      walked = view_perf::counters.light_walks > 0;
+    }
+    CHECK(walked);
+    view_perf::reset();
+    r506g_orbit(ed, 2, true);
+    const view_perf::Counters c = view_perf::counters;
+    std::printf("    4 frames of both views: %llu refusal walks, %llu light walks, %llu item hashes; the Game view drew %llu times\n",
+                (unsigned long long)c.unsupported_walks, (unsigned long long)c.light_walks, (unsigned long long)c.item_hashes, (unsigned long long)(c.hit[view_perf::InstanceKey] + c.miss[view_perf::InstanceKey]));
+    CHECK(c.unsupported_walks == 0 && c.light_walks == 0);
+    CHECK(c.hit[view_perf::InstanceKey] + c.miss[view_perf::InstanceKey] >= 6);  // (two views a frame)
+  });
+}
+
+/* ---------------------------------------------------------------- round 506, third part on the card: a regathered list, the preview's own list */
+static void tests_round506_third_gpu() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (card): a draw-item list regathered with the same contents - a light moved, Solid shading and back - costs one hash of the items, not one every frame after (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 30);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    r506g_orbit(ed, 3);
+    auto hashes_after = [&](const char *what, const std::function<void()> &edit) {
+      edit();
+      r506g_orbit(ed, 1);  // (the first frame after: the list is new, the key is confirmed)
+      view_perf::reset();
+      r506g_orbit(ed, 3);
+      std::printf("    %s: %llu item hashes in the 6 frames after the first\n", what, (unsigned long long)view_perf::counters.item_hashes);
+      CHECK(view_perf::counters.item_hashes == 0);
+    };
+    hashes_after("a light moved", [&] {
+      ed.scene().find_by_name("Directional Light")->set_local_euler(Vec3(50.0f, 20.0f, 0.0f));
+      ed.mark_changed_for_test("sun");
+    });
+    hashes_after("another edit that regathers (a light's intensity)", [&] {
+      ed.scene().find_by_name("Directional Light")->get<Light>()->intensity = 0.6f;
+      ed.mark_changed_for_test("sun intensity");
+    });
+    hashes_after("Solid shading", [&] { ed.command("shading solid"); });
+    hashes_after("Shaded again", [&] { ed.command("shading shaded"); });
+  });
+  test("round 506 (card): a Scene view, a Game view and the Camera Preview of the selected camera drawn every frame gather no list after the first frame and keep their work, each on its own list (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r458_field(ed, 30);
+    ed.viewport_device_for_test(2);
+    ed.set_scene_hash_check_every_for_test(8);
+    ed.command("select Main Camera");  // (the preview shows)
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    r506g_orbit(ed, 3, true);
+    bool walked = false;
+    for (int i = 0; i < 20 && !walked; i++) {
+      view_perf::reset();
+      r506g_orbit(ed, 1, true);
+      walked = view_perf::counters.light_walks > 0;
+    }
+    CHECK(walked);
+    view_perf::reset();
+    r506g_orbit(ed, 2, true);
+    const view_perf::Counters c = view_perf::counters;
+    std::printf("    4 frames, three views: %llu lists gathered, %llu refusal walks, %llu item hashes, %llu light walks; instance key kept %llu, missed %llu\n",
+                (unsigned long long)c.item_gathers, (unsigned long long)c.unsupported_walks, (unsigned long long)c.item_hashes,
+                (unsigned long long)c.light_walks, (unsigned long long)c.hit[view_perf::InstanceKey], (unsigned long long)c.miss[view_perf::InstanceKey]);
+    CHECK(c.item_gathers == 0 && c.unsupported_walks == 0 && c.item_hashes == 0 && c.light_walks == 0);
+    CHECK(c.hit[view_perf::InstanceKey] >= 6 && c.miss[view_perf::InstanceKey] == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 506, the test engineer's pass, on the card (task 0490) */
+static void tests_round506_engineer_gpu() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (test engineer, card): an object dragged by the Move gizmo, a light edited, a material swapped, an object added and deleted, Solid shading and the keeps turned off and on mid-session draw on the card every frame as with every keep off, with both views drawn every frame (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    R506ePair p(8, true);
+    p.nudge_game = true;
+    CHECK(p.a.scene_on_gpu_for_test());
+    p.edit("a lamp", [](Editor &e) {
+      e.command("create Point Light");
+      GameObject *l = e.scene().find_by_name("Point Light");
+      l->set_local_position({0.0f, 1.2f, 0.0f});
+      l->get<Light>()->intensity = 8.0f;
+      e.mark_changed_for_test("lamp");
+    });
+    size_t shown = 0;
+    shown += p.edit("lamp colour", [](Editor &e) { e.command("select Point Light"), e.command("set Light.Color 1 0 0"); });
+    shown += p.edit("lamp range", [](Editor &e) { e.command("set Light.Range 1.5"); });
+    shown += p.edit("lamp type spot", [](Editor &e) { e.scene().find_by_name("Point Light")->set_local_euler(Vec3(90.0f, 0.0f, 0.0f)), e.command("set Light.Type spot"); });
+    shown += p.edit("lamp type back", [](Editor &e) { e.command("set Light.Type point"); });
+    shown += p.edit("lamp disabled", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->enabled = false, e.mark_changed_for_test("off"); });
+    shown += p.edit("lamp enabled", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->enabled = true, e.mark_changed_for_test("on"); });
+    const float cube_moved = r506e_drag(p, "Cube", 8, false);
+    const float lamp_moved = r506e_drag(p, "Point Light", 8, false);
+    r506e_drag(p, "Cube", 6, true);
+    std::printf("    the cube dragged %.2f m, the lamp %.2f m\n", cube_moved, lamp_moved);
+    CHECK(cube_moved > 0.05f && lamp_moved > 0.05f);
+    shown += p.edit("a material swapped", [](Editor &e) { e.scene().find_by_name("Cube")->get<MeshRenderer>()->materials = {make_material("R506e card", Vec3(0.1f, 0.7f, 0.2f))}, e.mark_changed_for_test("m"); });
+    shown += p.edit("object added", [](Editor &e) { e.command("create Sphere"), e.command("position -2 0.5 1"); });
+    shown += p.edit("object deleted", [](Editor &e) { e.command("delete"); });
+    shown += p.edit("undo", [](Editor &e) { e.command("undo"); });
+    p.a_keeps = false;
+    shown += p.edit("(keeps off) a cube moved", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({1.4f, 0.5f, 0.1f}), e.mark_changed_for_test("m"); });
+    p.a_keeps = true;
+    shown += p.edit("(keeps on) a cube moved", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({-1.4f, 0.5f, 0.1f}), e.mark_changed_for_test("m"); });
+    p.cmd("shading solid");
+    p.steps(4, "Solid");
+    shown += p.edit("Solid: a cube moved", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({0.4f, 0.5f, -1.1f}), e.mark_changed_for_test("m"); });
+    r506e_drag(p, "Cube", 8, false);
+    shown += p.edit("Solid: a lamp colour", [](Editor &e) { e.command("select Point Light"), e.command("set Light.Color 0 1 0"); });
+    for (int i = 0; i < 6; i++) {
+      p.cmd(i % 2 ? "shading shaded" : "shading solid");
+      p.steps(1, "switching");
+    }
+    p.cmd("shading shaded");
+    p.steps(4, "Shaded");
+    std::printf("    the edits changed %zu pixels\n", shown);
+    CHECK(shown > 1000);
+    CHECK(p.a.scene_on_gpu_for_test());
+    p.report("the card");
+  });
+
+  test("round 506 (test engineer, card): 10,000 instances drawn, all deleted, then 10 added draw no stale row, and the same after an Undo and a Redo - every frame as with every keep off (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    R506ePair p(8, true, "camera 0 60 120.5 0 0 0", "camera 0 60 120 0 0 0");
+    p.cmd("benchscene cubes10k");
+    p.steps(6, "10,000 cubes");
+    CHECK(p.a.scene().object_count() >= 10000);
+    CHECK(p.a.scene_on_gpu_for_test());
+    p.edit("one cube moved among 10,000", [](Editor &e) { e.scene().find_by_name("Cube 0")->set_local_position({0.0f, 3.0f, 0.0f}), e.mark_changed_for_test("m"); });
+    p.edit("every object deleted", [](Editor &e) {
+      e.command("selectall");
+      e.command("delete");
+    });
+    p.steps(4, "nothing left");
+    CHECK(p.a.scene().object_count() < 100);
+    p.cmd("create Cube 10");
+    p.steps(6, "10 cubes");
+    p.edit("a cube moved among 10", [](Editor &e) { e.command("position 0 2 0"); });
+    p.edit("undo", [](Editor &e) { e.command("undo"); });
+    p.edit("undo", [](Editor &e) { e.command("undo"); });
+    p.edit("undo (the 10,000 are back)", [](Editor &e) { e.command("undo"); });
+    p.edit("redo", [](Editor &e) { e.command("redo"); });
+    p.steps(4, "after the redo");
+    p.report("10,000 instances then 10");
+  });
+}
+
+static void tests_round508_gpu() {
+  test("Generate Lighting with the views on the card (round 508, ADR 0140): the pages go up before the bake lands, a few a frame; the view shows the old lighting whole until then; the landing frame sends none; the lightmaps and the landed picture are the one-frame landing's (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto make = [](Editor &ed, bool workers) {
+      ed.init_headless(800, 450);
+      if (workers) ed.set_async_jobs_for_test(true);
+      ed.viewport_device_for_test(2);
+      /* A still scene (worldlike's view changes every frame while it bakes, so no picture there can be compared): a floor and
+       * 120 cubes at 48 texels a metre - more than one page. */
+      GameObject *floor = ed.scene().create("Floor");
+      floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+      floor->add<MeshRenderer>()->contribute_gi = true;
+      for (int i = 0; i < 120; i++) {
+        GameObject *box = ed.scene().create("Box" + std::to_string(i));
+        box->add<MeshFilter>()->mesh = primitives::cube();
+        box->set_local_position({(float)(i % 12) - 5.5f, 0.5f, (float)(i / 12) - 4.5f});
+        box->set_local_scale({0.5f, 0.5f, 0.5f});
+        box->add<MeshRenderer>()->contribute_gi = true;
+      }
+      ed.command("create Directional Light");
+      ed.commit_change("r508 scene");
+      ed.command("camera 30 35 16 0 0 0");
+      ed.command("shading shaded");
+      r34_steps(ed, 3);
+      r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+      r34_steps(ed, 3);
+      ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
+    };
+    std::vector<std::vector<Vec3>> one_frame;
+    std::vector<uint32_t> one_frame_pic;
+    {
+      Editor ed;
+      make(ed, false);  // (no workers: the bake lands in the frame that started it, pages and all - the old behaviour)
+      ed.command("bake start");
+      for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+      r34_steps(ed, 6);
+      for (const Lightmap &p : ed.lighting_data_for_test().pages) one_frame.push_back(p.texels);
+      one_frame_pic = r34_crop(ed, ed.scene_view_rect());
+    }
+    Editor ed;
+    make(ed, true);
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    ed.command("bake start");
+    std::vector<uint32_t> before_pages, last_before;
+    size_t frames_sending = 0, mixed = 0, unsteady = 0;  // (unsteady: frames before any page went up that differ from the one before)
+    size_t tray_said = 0;  // (frames sending pages whose job tray named that step)
+    bool still = false;  // (the last two frames before the first page are the same picture: the view is still, so `mixed` means a frame showed something new)
+    uint64_t sent_in_landing = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
+      const uint64_t ahead = view_perf::counters.lightmap_pages_before_landing, sent = view_perf::counters.lightmap_pages_sent;
+      if (ahead == ahead0) {  // (the last picture before any page went up)
+        before_pages = r34_crop(ed, ed.scene_view_rect());
+        still = !last_before.empty() && r458_differ(last_before, before_pages) == 0;
+        if (!last_before.empty() && !still) unsteady++;  // (said, not checked: the first frames after `bake start` settle - the toolbar's state, the status line)
+        last_before = before_pages;
+      }
+      ed.step_frame_headless();
+      if (view_perf::counters.lightmap_pages_before_landing != ahead) {
+        frames_sending++;
+        for (const Editor::JobView &jv : ed.jobs_for_test()) tray_said += jv.label == "Sending the bake to the card";
+        if (!before_pages.empty() && r458_differ(before_pages, r34_crop(ed, ed.scene_view_rect())) != 0) mixed++;
+      }
+      if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
+    }
+    CHECK(!ed.baking_for_test());
+    const size_t pages = ed.lighting_data_for_test().pages.size();
+    std::printf("    %zu page(s): %llu sent before the landing over %zu frame(s); %llu in the landing frame; %zu of those frames drew anything but the old lighting (%zu frames before them were not still)\n", pages,
+                (unsigned long long)(view_perf::counters.lightmap_pages_before_landing - ahead0), frames_sending, (unsigned long long)sent_in_landing, mixed, unsteady);
+    CHECK(pages > 1);
+    CHECK(view_perf::counters.lightmap_pages_before_landing - ahead0 >= pages);  // (the direction pages in Directional mode too)
+    CHECK(frames_sending >= 1);
+    CHECK(still);
+    CHECK(mixed == 0);
+    CHECK(sent_in_landing == 0);
+    CHECK(tray_said == frames_sending);  // (the job tray says what the bake is doing while its pages go up)
+    r34_steps(ed, 6);
+    CHECK(pages == one_frame.size());
+    for (size_t k = 0; k < pages && k < one_frame.size(); k++) {
+      const std::vector<Vec3> &t = ed.lighting_data_for_test().pages[k].texels;
+      CHECK(t.size() == one_frame[k].size() && std::memcmp(t.data(), one_frame[k].data(), t.size() * sizeof(Vec3)) == 0);
+    }
+    const size_t differ = r458_differ(one_frame_pic, r34_crop(ed, ed.scene_view_rect()));
+    std::printf("    the landed picture against the one-frame landing's: %zu pixels differ\n", differ);
+    CHECK(differ == 0);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -5654,4 +6241,9 @@ void run_gpu_tests() {
   tests_round470_gpu();
   tests_round471_gpu();
   tests_round487_gpu();
+  tests_round506_gpu();
+  tests_round506_more_gpu();
+  tests_round506_third_gpu();
+  tests_round506_engineer_gpu();
+  tests_round508_gpu();
 }

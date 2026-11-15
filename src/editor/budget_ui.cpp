@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <future>
 
 namespace bl {
 
@@ -54,7 +55,14 @@ void Editor::draw_budget(ui::Layout &lay) {
   if (budget_target_ < 0) return;
   /* The counts kept half a second (review 355: every frame walked every mesh and looked up every texture). */
   const double now = clock_now();
-  if (now - budget_cache_.at > 0.5) budget_cache_ = {budget_count(budget_objects()), now};
+  if (!budget_job_ && now - budget_cache_.at > 0.5) {
+    if (budget_windowed()) budget_start_count("");  // (round 507: counted on a job, never in the frame; the last result shows meanwhile)
+    else budget_cache_ = {budget_count(budget_objects()), now};
+  }
+  if (budget_cache_.at < 0.0) {  // (the first count still running)
+    u.label(lay.row(), "Counting ...", u.theme.text_dim);
+    return;
+  }
   const BudgetCounts &c = budget_cache_.counts;
   const BudgetTarget &t = target_of(budget_target_);
   const BudgetResult r = budget_rank(t, c);
@@ -211,6 +219,41 @@ void Editor::budget_list() {
   Log::info("  %zu object(s) - `budget` for the totals and the rank", lines.size());
 }
 
+/* Round 507: what a window's count is run over. The snapshot (the objects' facts, their meshes held, the drawn maps'
+ * sizes) is taken here; the count - every triangle, every texture's header or .meta - runs on a worker. `what` is the
+ * words of the report (empty: the Profiler's recount, which only keeps the counts). */
+void Editor::budget_start_count(const std::string &what) {
+  const std::vector<GameObject *> objs = budget_objects();
+  auto job = std::make_unique<BudgetJob>();
+  job->what = what, job->objects = objs.size(), job->scene_ident = scene_ident_;
+  const std::shared_ptr<const BudgetSnapshot> snap = budget_snapshot(objs);
+  job->counts = std::async(std::launch::async, [snap] { return budget_count_snapshot(*snap); });
+  budget_job_ = std::move(job);
+}
+
+/* Once a frame: a finished count kept for the Profiler and, when a command asked, reported. */
+void Editor::poll_budget_job() {
+  if (!budget_job_ || budget_job_->counts.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+  const std::unique_ptr<BudgetJob> job = std::move(budget_job_);
+  const BudgetCounts c = job->counts.get();
+  if (job->scene_ident != scene_ident_) {  // (another scene since: its count is not this one's)
+    if (!job->what.empty()) Log::warn("Budget: the scene changed while counting - type budget pc again");
+    budget_cache_.at = -1.0;  // (the old scene's counts go; the Profiler recounts)
+    return;
+  }
+  budget_cache_ = {c, clock_now()};
+  if (!job->what.empty()) budget_print(c, job->what.c_str());
+}
+
+/* The rows and the one-line report of a count (the same text a window's job and a headless call give). */
+void Editor::budget_print(const BudgetCounts &c, const char *what) {
+  const BudgetTarget &bt = target_of(budget_target_);
+  const BudgetResult r = budget_rank(bt, c);
+  for (int row = 0; row < (int)BudgetRow::Count; row++)
+    Log::info("  %-36s %10s  %s", budget_row_name((BudgetRow)row), value_text((BudgetRow)row, c.value[row]).c_str(), budget_rank_name(bt, r.row_rank[row]).c_str());
+  budget_report(c, what);
+}
+
 /* budget [pc|quest|<target name>] | budget list | budget fix [good|medium|...]: the rows in the Console; Decimate to fit. */
 void Editor::budget_command(const std::vector<std::string> &t) {
   const std::string a = t.size() > 1 ? to_lower(t[1]) : "";
@@ -225,6 +268,8 @@ void Editor::budget_command(const std::vector<std::string> &t) {
     budget_fix_triangles(rank);
     return;
   }
+  /* A count under way is refused before anything changes: a target set here would relabel the running count's report. */
+  if (budget_windowed() && budget_job_ && !budget_job_->what.empty()) return Log::warn("Budget: still counting - its report comes when it is done");
   if (budget_target_ < 0) budget_target_ = 0;  // (asked for: VRChat PC unless a target is named)
   if (a == "pc" || a == "quest") budget_target_ = std::max(0, budget_target_index(a == "pc" ? "VRChat PC" : "VRChat Quest"));
   if (!a.empty() && a != "pc" && a != "quest") {
@@ -234,13 +279,11 @@ void Editor::budget_command(const std::vector<std::string> &t) {
     if (i < 0) return Log::warn("budget: pc, quest or a target's name (VRChat PC, VRChat Quest) | budget fix [good|medium|poor]");
     budget_target_ = i;
   }
-  const BudgetTarget &bt = target_of(budget_target_);
-  const std::vector<GameObject *> objs = budget_objects();
-  const BudgetCounts c = budget_count(objs);
-  const BudgetResult r = budget_rank(bt, c);
-  for (int row = 0; row < (int)BudgetRow::Count; row++)
-    Log::info("  %-36s %10s  %s", budget_row_name((BudgetRow)row), value_text((BudgetRow)row, c.value[row]).c_str(), budget_rank_name(bt, r.row_rank[row]).c_str());
-  budget_report(c, selected_objects(true).empty() ? "the scene" : "the selection");
+  const char *what = selected_objects(true).empty() ? "the scene" : "the selection";
+  if (!budget_windowed()) return budget_print(budget_count(budget_objects()), what);
+  if (budget_job_ && budget_job_->what.empty()) budget_job_->what = what;  // (the Profiler's count is under way: reported when it lands)
+  else if (!budget_job_) budget_start_count(what);
+  Log::info("Budget: counting %zu object(s) ...", budget_job_->objects);
 }
 
 }  // namespace bl

@@ -117,7 +117,7 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   if (file_export_job_) add("Writing " + fs::filename(file_export_job_->path), -1.0f, nullptr);
   if (baking_ && bake_job_) {  // (round 412: one job through its phases - the lightmaps with their progress, then the probes, volumes and reflection probes)
     const int phase = bake_job_->phase.load();
-    add(phase == 0 ? "Baking lighting" : phase == 1 ? "Baking probes" : phase == 2 ? "Baking Light Volumes" : "Baking reflection probes", bake_job_->progress.load(),
+    add(phase == 0 ? "Baking lighting" : phase == 1 ? "Baking probes" : phase == 2 ? "Baking Light Volumes" : phase == 5 ? "Sending the bake to the card" : "Baking reflection probes", bake_job_->progress.load(),
         [this] { bake_cancel(); }, bake_job_->cancel.load());
   }
   if (rendering_ && mr_job_) {

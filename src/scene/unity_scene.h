@@ -124,6 +124,8 @@ struct UnityImport {
   int materials = 0, outlines = 0, springs = 0;  // (round 371)
   int light_volumes = 0;                         // (round 397: VRC Light Volumes and their lights)
   std::vector<std::string> notes;
+  /* Round 507: when set, the top-level build adds the ms each of its passes took (the stress table's rows; nested prefabs count inside "instantiate"). */
+  std::vector<std::pair<std::string, double>> *pass_ms = nullptr;
 };
 
 /* Every GUID a project knows (round 371: shared by the scene import and the material loader): the unpacked packages'
@@ -169,6 +171,12 @@ const float *unity_gloss_session_mean(const std::string &guid, const std::string
 /* The project's index, kept a few seconds (a material loads a texture's path through it; many load at once). */
 /* `fresh`: read again now (an import: files may have just arrived). */
 std::shared_ptr<const UnityGuidIndex> unity_guid_index_cached(const std::string &assets_dir, const std::string &project_root, bool fresh = false);
+/* Round 507: the kept index when nothing under Assets changed since it was walked (every entry's name, size and write time
+ * fingerprinted: a file added, removed, renamed or resized, or rewritten with a new write time, makes it walk again), else a new one.
+ * An edit that keeps a file's size and write time (an unpack that keeps times) goes unnoticed on Windows (POSIX adds the change time);
+ * Blendity's own unpack walks fresh.
+ * `reused` says which. What a Unity import asks, so a second import doesn't read every .meta again. */
+std::shared_ptr<const UnityGuidIndex> unity_guid_index_checked(const std::string &assets_dir, const std::string &project_root, bool *reused = nullptr);
 /* A Unity shader's name by its GUID and fileID: the built-in Standard, URP's Lit and Unlit, else its file's name. */
 std::string unity_shader_name(const UnityGuidIndex &index, const std::string &guid, int64_t file_id);
 /* The material loader for Unity .mat files (set_foreign_material_loader): its textures and shader through the

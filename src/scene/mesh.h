@@ -151,6 +151,25 @@ struct MeshCacheFields {
     size_t bytes() const { return (tess.capacity() + cv_off.capacity() + cv_by.capacity() + cv_face.capacity()) * 4; }
   };
   mutable BuildShare share_;
+  /* Round 508 (task 0492, part D): which vertices a run of deform_version bumps moved, when the one who bumped said so
+   * (Mesh::note_moved) - a sculpt dab. The render cache then compares only those vertices to what it drew instead of
+   * all of them. Entry `to` is the deform_version after that bump; entries are consecutive, and a bump nobody noted
+   * breaks the chain (the cache falls back to the whole scan). A copy starts without it, as NormalState does. */
+  struct MovedLog {
+    struct Entry {
+      uint64_t to = 0;
+      std::vector<uint32_t> ids;
+    };
+    std::vector<Entry> entries;
+    size_t ids = 0;  // (the ids held, over all entries)
+    MovedLog() = default;
+    MovedLog(const MovedLog &) {}
+    MovedLog &operator=(const MovedLog &) {
+      entries.clear(), ids = 0;
+      return *this;
+    }
+  };
+  mutable MovedLog moved_log_;
 };
 
 /* While one is open on this thread, a copied Mesh starts with empty caches (see MeshCacheFields). */
@@ -332,6 +351,9 @@ struct Mesh : MeshCaches {
    * render mesh then moves its vertices in place rather than being rebuilt. Code that caches positions
    * on `version` alone must check this too. */
   uint64_t deform_version = 0;
+  /* Call right after `deform_version++` for a bump that moved only `ids` (any order, repeats fine): the render mesh then
+   * follows by looking at those vertices alone. Not calling it is always safe (the render mesh scans every vertex). */
+  void note_moved(const std::vector<uint32_t> &ids);
   /* Changes whenever what the render and edge caches are built from besides positions changes (ADR 0034): faces,
    * UVs, materials, smoothing, seams and sharp edges. Caches elsewhere key on it too (the GPU cage's edge colours). */
   uint64_t topology_serial() const;
@@ -347,7 +369,15 @@ struct Mesh : MeshCaches {
   Vec3 face_weighted(size_t f) const;  // the face's area-weighted normal (Newell), as corner_normals sums it
   void build_vertex_sides() const;
   /* The faces with a vertex whose position differs from the one cache ci drew, ascending. */
-  void moved_faces(int ci, std::vector<uint32_t> &faces) const;
+  struct BoundsGrowth {  // (round 508) the render mesh's old box grown by the moved vertices' new positions - the new box when `exact`
+    bool exact = false;
+    AABB box;
+  };
+  void moved_faces(int ci, std::vector<uint32_t> &faces, BoundsGrowth *grown = nullptr) const;
+  /* The vertices noted as moved since cache ci was made (note_moved), without repeats; false when the notes don't cover
+   * every bump since (the caller scans all vertices). */
+  bool noted_moved(int ci, std::vector<uint32_t> &verts) const;
+  AABB positions_bounds() const;  // bounds(), on every thread (a render cache's bounds follow a sculpt dab)
   /* Positions and corner normals into cache ci's render vertices: every corner, or only those at `verts`. The changed
    * render vertices are added to `changed`. A corner whose normal no longer matches its render vertex (the build
    * would split it) gets a render vertex of its own, appended (round 470, ADR 0124): `split` lists those corners,
@@ -378,8 +408,8 @@ struct Mesh : MeshCaches {
    * build then). */
   bool update_in_place(int ci, bool flat) const;
   void build_edge_sides() const;
-  /* `moved`: per face, whether any of its vertices moved (null: all of them); the others keep their triangles. */
-  bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const;
+  /* `moved`: the faces (ascending) with a vertex that moved (null: all of them); the others keep their triangles. */
+  bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint32_t> *moved) const;
 };
 
 using MeshPtr = std::shared_ptr<Mesh>;
@@ -393,6 +423,8 @@ struct MeshCounts {
   uint64_t partial_normals = 0;  // task 0099: in-place moves whose normals were worked out only around what moved
   double ms_copies = 0, ms_full_builds = 0, ms_in_place = 0, ms_tangents = 0, ms_edges = 0;
   double ms_in_place_normals = 0, ms_in_place_tangents = 0;  // round 468: inside ms_in_place - the move's normals, and its tangents (a normal-mapped mesh's)
+  uint64_t normal_faces = 0;  // round 508: faces whose normals the in-place moves worked out (a partial move: those around what moved; else every face)
+  double ms_in_place_scan = 0, ms_in_place_retri = 0, ms_in_place_bounds = 0;  // round 508: inside ms_in_place - finding the moved faces, splitting them again, the bounds
   /* Round 468: in-place moves refused (the render mesh is then built whole, and its tangents with it) - and, of
    * them, the ones refused because a render vertex's corners no longer share a normal (the build would split it). */
   uint64_t in_place_refused = 0, in_place_split = 0;  // (in_place_split, since round 470: corners given a render vertex of their own in place)

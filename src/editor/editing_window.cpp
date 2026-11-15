@@ -46,20 +46,50 @@ void draw_scaled(Image *fb, const std::vector<uint32_t> &src, int w, int h, cons
 
 /* ---- opening ---- */
 
+/* An image is read on a worker when the editor runs its jobs on workers (round 508: a 4K picture takes 150 ms to
+ * decode, a frame the user feels); the window shows "Loading" meanwhile and the picture opens in the first frame after
+ * the read ends (edit_open_poll, asked each frame the window draws and by the console's commands). */
 bool Editor::edit_open_file(const std::string &path) {
   std::string err;
   const bool is_edit = fs::extension(path) == ".edit";
+  if (!is_edit && jobs_async()) {
+    edit_doc_.open_file_async(path);
+    Log::info("Editing: reading %s", fs::filename(path).c_str());
+    ui_.redraw = true;
+    return true;
+  }
   if (!(is_edit ? edit_doc_.load(path, err) : edit_doc_.open_file(path, err))) {
     Log::warn("Editing: couldn't open %s: %s", path.c_str(), err.c_str());
     return false;
   }
+  edit_opened(path, is_edit);
+  return true;
+}
+
+/* The finished read, if there is one: the picture opens in the window. False while it is still being read, when nothing
+ * was being read, and when the read failed (a warning). */
+bool Editor::edit_open_poll() {
+  if (!edit_doc_.loading()) return false;
+  std::string err;
+  const std::string path = edit_doc_.loading_path();
+  const edit::Doc::Landed landed = edit_doc_.poll_open(err);
+  if (landed == edit::Doc::Landed::Nothing) return false;
+  if (landed == edit::Doc::Landed::Failed) {
+    Log::warn("Editing: couldn't open %s: %s", path.c_str(), err.c_str());
+    return false;
+  }
+  edit_opened(path, false);
+  return true;
+}
+
+/* A picture or an .edit is open: the window's per-picture state starts over. */
+void Editor::edit_opened(const std::string &path, bool is_edit) {
   edit_opened_++;
   edit_mask_select(-1, -1);  // (the masks selected belonged to the last picture)
   edit_texture_asset_.clear();
   edit_zoom_ = 0, edit_pan_ = Vec2(0, 0);
   Log::info("Editing: %s (%d x %d)%s", fs::filename(path).c_str(), edit_doc_.source().w, edit_doc_.source().h,
             is_edit ? strprintf(", %zu adjustments", edit_doc_.stack().size()).c_str() : "");
-  return true;
 }
 
 bool Editor::edit_open_render() {
@@ -158,6 +188,10 @@ void Editor::edit_command(const std::vector<std::string> &t, const std::string &
   const size_t at = t.size() > 1 ? line.find(t[1]) + t[1].size() : line.size();
   std::string rest = at < line.size() ? line.substr(at) : "";
   while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
+  if (verb != "open" && edit_doc_.loading()) {  // (a picture still being read: took if it has ended, else the command waits for the next try)
+    edit_open_poll();
+    if (edit_doc_.loading()) return Log::warn("Editing: still reading %s", fs::filename(edit_doc_.loading_path()).c_str());
+  }
   if (verb == "open") {
     if (to_lower(rest) == "render") edit_open_render();
     else if (to_lower(rest).compare(0, 8, "texture ") == 0) edit_open_texture(rest.substr(8));
@@ -290,6 +324,11 @@ void Editor::draw_editing_canvas(const Recti &r) {
   auto &u = ui_;
   edit_canvas_rect_ = r;
   u.canvas.fill_rect(r, Color::hex(0x262626));
+  const std::string loading = edit_doc_.loading() ? "Loading " + fs::filename(edit_doc_.loading_path()) + "..." : std::string();
+  if (!edit_doc_.is_open() && !loading.empty()) {
+    u.label(r, loading, u.theme.text_dim, ui::Align::Center);
+    return;
+  }
   if (!edit_doc_.is_open()) {
     const char *hint = "Open Render, Open Image, or drop an image here";
     u.label(r, u.font.text_width(hint) + u.px(16) <= r.w ? hint : "Open or drop an image", u.theme.text_dim, ui::Align::Center);  // (task 0293: whole in a narrow pane)
@@ -331,6 +370,7 @@ void Editor::draw_editing_canvas(const Recti &r) {
           strprintf("%s  |  %d x %d%s  |  %.0f%%  |  %.1f ms  |  wheel zoom, middle-drag pan, double-click fit", edit_doc_.label().c_str(), iw, ih,
                     edit_shown_scale_ < 1.0f ? strprintf(" (a %d x %d preview)", edit_after_w_, edit_after_h_).c_str() : "", sc * 100.0f, edit_shown_ms_),
           u.theme.text_dim);
+  if (!loading.empty()) u.label({r.x + u.px(8), r.y + u.px(4), r.w - u.px(16), u.row_h()}, loading, u.theme.text_bright);  // (the old picture stays until the new one lands)
   u.canvas.pop_clip();
 }
 
@@ -565,6 +605,10 @@ void Editor::draw_edit_targets(ui::Layout &lay) {
 void Editor::draw_editing_window(const Recti &r) {
   auto &u = ui_;
   edit_window_rect_ = r;
+  if (edit_doc_.loading()) {  // (the picture opens in the first frame after its read ends: the redraw keeps frames coming until then)
+    edit_open_poll();
+    u.redraw = true;
+  }
   /* The panel first, so the picture drawn after it shows what the panel just changed. Narrower than 460 px (a side
    * pane), the picture goes above the panel instead of beside it (task 0293: the panel had a toolbar of slivers). */
   const bool stacked = r.w < u.px(460);
