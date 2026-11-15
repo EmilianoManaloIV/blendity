@@ -15,7 +15,7 @@ The same sweep, 2,140 screens, Windows with Blender's libraries. Distinct names 
 | `no-key` (a control the keyboard cannot stop on) | 328 | **0** | keyboard focus for every toolkit control (ADR 0145) |
 | `covered` (a control lying on another) | 18 | **0** | the toolbar, the Scene and Game headers, the Inspector's header, the job tray, the Draw toolbar, the tab overflow |
 | `overlap` (labelled buttons, the old check) | 6 | **0** | three were real (fixed with `covered`); three were the check's mistake - it now compares what each control's clip lets through |
-| `elided` (a cut label) | 49 | **2** | a long label in a grid takes a row of its own, pairs of buttons wrap, a word keeps its place before its icon; the two left are below |
+| `elided` (a cut label) | 49 | **7** | a long label in a grid takes a row of its own, pairs of buttons wrap, a word keeps its place before its icon; the seven left are below (2 when first measured - see "After CI") |
 | `no-tooltip` | 11 | **0** | each has one |
 | `small` | 473 (under 7 mm at every scale) | **0** (as decided) | see "Targets" |
 | `tab-order` (a step backwards in a column) | 0 | **0** | the order now covers every kind of control, not only fields |
@@ -24,7 +24,7 @@ The same sweep, 2,140 screens, Windows with Blender's libraries. Distinct names 
 Keyboard reach at 1366x768 x1: 11,445 of the 11,493 controls drawn have a stop (1,810 of 11,508 in round 505). The 48
 without one are disabled menu rows, which the arrows step over.
 
-`tools/hci_sweep_baseline.json` is now `{"elided": 2}`; `py tools/hci_sweep.py <sweep.json> --check` fails on anything
+`tools/hci_sweep_baseline.json` is now `{"elided": 7}`; `py tools/hci_sweep.py <sweep.json> --check` fails on anything
 more. The suite's own configuration (1366x768 Dark x1, in every run of the `hci` group) asserts **zero** for `elided`,
 `no-tooltip`, `overlap`, `covered`, `no-key`, `small` and `tab-order` and prints the name and screen of whatever it
 finds; Blockout's scenario screens are left to their own stream there (they are at zero today as well).
@@ -114,12 +114,22 @@ wide), so every Inspector control there is a row lower than before round 509.
 |---|---|---|---|
 | "Generate Lighting" (116 px of label in 110 px) and "Clear Baked Data" (111 in 110) end in "..." | the Lighting window docked in the left pane at 1024x640 x1.5 only | this stream | the pane is about 150 px wide there; the label is longer than the window can give it. The tooltip says it whole. |
 | "Edit Origin with Handles..." ends in "..." | the Inspector at 1024x640 x1.5 | this stream | about 240 px of label in a 200 px pane, on a row of its own; the tooltip says it whole. (The sweep's cut-label check reads labelled buttons by their whole label, so a label that itself ends in "..." is not in its list.) |
+| "Delete Zero Weight Bones" (170 px of label in 169 at 1366x768 x1.5; in 113 at 1024x640 x1.5), "Separate by Material" (134 in 113), "Separate Loose Parts" (135 in 113), "Separate by Shape Keys" (154 in 113) end in "..." | the Avatar window's Fix Model buttons, at 1024x640 x1.5 (the first also at 1366x768 x1.5), Dark and Light | the Avatar window's owner; an open item for the user | the trade made after CI (77132dc1): the grid keeps the caller's columns so the sections under it stay in sight, and in a pane this narrow a label on a row of its own is still wider than the pane. Shorter words or a wider pane would fix them. The tooltip says each whole. |
+| "Anime Face Normals (Ellipsoid)" (200 px of label in 172) ends in "..." | the Rigging window and the humanoid-rigging scenario, 1024x640 x1.5, Dark and Light | the Rigging window's owner; an open item for the user | the same trade; the tooltip says it whole. |
 | A label too long for its grid cell takes a row of its own | the Modeling Tools' Object grid in a 215 px pane ("Make Faces (Close Holes)") | this stream; a choice | up to two rows more for each such label (its own, and a row it leaves part empty), instead of a cut label. Shorter labels would give the rows back: a wording choice for the owner. |
 | ~~The Game view's camera dropdown is left out when its header has under 60 px for it~~ | a Game view narrower than its Guides and Stats buttons and that | this stream, round 510 | the camera can still be picked in the Hierarchy; a dropdown as an icon would be the fix **Fixed in round 510:** the dropdown stays, down to what is left of the header (its name in the tooltip); under a control's height (no room for the arrow) it is left out and the Hierarchy picks the camera. |
 | With a control focused in a docked window, Tab past the window's last control walks on through the other windows, the status bar and the menu bar | every docked window | by ADR 0145 (order is drawing order); Shift+F6 / F6 jump by window | |
 | ~~The Sequencer's toolbar runs past its pane at 1024x640 x1.5 and is cut there~~ | Sequencer window | this stream, round 510 | not a control on another (the clip cuts it); its last buttons cannot be reached there. **Fixed in round 510:** the toolbar wraps item by item onto further rows. |
 | Widgets drawn by hand (`mark_widget`, `text_area`, `drag_label`, `curve_field`, `color_ramp`) are not recorded and are not keyboard stops | several windows | round 510 | they are not the toolkit's calls. Recorded (round 510): kinds mark, textarea, draglabel, curve, ramp, counted in the keyboard table and judged for small and covered (printed per configuration); the clickable ones are listed in task 0494's write-up, not yet keyboard stops. |
 | ~~Texts that send the artist to the Console (13), shortcut labels written into strings (16), Preferences' rows and the two ">" buttons~~ | survey findings 7, 8, 13 | round 510 | **Fixed in round 510:** console texts 13 to 5 (the other streams' and Lights Gamma), labels 16 to 0, Preferences' rows and the transport's two ">" buttons. |
+
+## After CI
+
+The sweep's first count of `elided` was 2. The repair after CI (77132dc1: a label too long for its cell takes a row of
+its own and the other buttons keep the caller's columns, where the first version dropped the whole grid to one column
+and pushed the sections under it out of sight) gave five labels back their cut, all in panes about 120-180 px wide at
+x1.5: the four Avatar buttons and Anime Face Normals above. Measured again on round 509's head with main d0e6a942
+(round 513's check, 2026-11-15): 7 names, 18 screens; the baseline is 7, each named under "What is left".
 
 ## Where each number comes from
 
