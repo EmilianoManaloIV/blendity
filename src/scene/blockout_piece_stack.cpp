@@ -59,6 +59,7 @@ uint64_t numbers_key(const blockout::Piece &p) {
   h = mix_f(mix_f(mix_f(mix_f(h, p.radius), p.height), p.inner_radius), p.angle);
   h = (h ^ ((uint64_t)(uint32_t)p.segments | (uint64_t)(uint32_t)p.rings << 20 | (uint64_t)(uint32_t)p.steps << 40 | (uint64_t)p.fill_under << 63)) * kFnvPrime;
   for (const Vec2 &q : p.outline) h = mix_f(mix_f(h, q.x), q.y);
+  for (const Vec3 &q : p.points) h = mix_f(mix_f(mix_f(h, q.x), q.y), q.z);  // (a convex piece's corners, round 500)
   return (h ^ p.mesh_key) * kFnvPrime;
 }
 
@@ -141,14 +142,23 @@ void note_refusal(uint64_t piece, uint64_t key, const std::string &why) {
 
 /* Points at the same place made one, and pairs of faces that lie exactly on each other the opposite way round dropped (an Array's
  * copies that touch, a Mirror of a piece centred on its own plane): what the kernel needs to meet one closed surface. */
+struct PointBits {
+  uint32_t b[3];
+  bool operator==(const PointBits &o) const { return b[0] == o.b[0] && b[1] == o.b[1] && b[2] == o.b[2]; }
+};
+struct PointHash {
+  size_t operator()(const PointBits &p) const { return (size_t)(((uint64_t)p.b[0] * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)p.b[1] * 0xC2B2AE3D27D4EB4Full) ^ p.b[2]); }
+};
+
 void tidy(Mesh &m) {
-  std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint32_t> at;
+  std::unordered_map<PointBits, uint32_t, PointHash> at;
+  at.reserve(m.positions.size());
   std::vector<uint32_t> remap(m.positions.size());
   std::vector<Vec3> kept;
   for (size_t i = 0; i < m.positions.size(); i++) {
-    uint32_t b[3];
-    std::memcpy(b, &m.positions[i], sizeof(b));
-    const auto key = std::make_tuple(b[0], b[1], b[2]);
+    const Vec3 v(m.positions[i].x + 0.0f, m.positions[i].y + 0.0f, m.positions[i].z + 0.0f);  // (+ 0: -0 and 0 are one point - a Mirror through a point at 0)
+    PointBits key;
+    std::memcpy(key.b, &v, sizeof(key.b));
     const auto found = at.find(key);
     if (found != at.end()) {
       remap[i] = found->second;
@@ -156,7 +166,7 @@ void tidy(Mesh &m) {
     }
     remap[i] = (uint32_t)kept.size();
     at.emplace(key, remap[i]);
-    kept.push_back(m.positions[i]);
+    kept.push_back(v);
   }
   std::vector<std::vector<uint32_t>> faces;
   for (size_t f = 0; f + 1 < m.face_offsets.size(); f++) {
@@ -189,11 +199,18 @@ void tidy(Mesh &m) {
         break;
       }
   }
+  /* Only the points a kept face uses, in their first order (a dropped pair's points go with it: they would widen the bounds `unusable` reads;
+   * the order is kept so a mesh with nothing to tidy comes out as the modifiers made it). */
   Mesh out;
-  out.positions = std::move(kept);
+  std::vector<uint32_t> renum(kept.size(), UINT32_MAX);
+  for (size_t i = 0; i < faces.size(); i++)
+    if (!drop[i])
+      for (uint32_t v : faces[i]) renum[v] = 0;
+  for (size_t v = 0; v < kept.size(); v++)
+    if (renum[v] == 0) renum[v] = (uint32_t)out.positions.size(), out.positions.push_back(kept[v]);
   for (size_t i = 0; i < faces.size(); i++) {
     if (drop[i]) continue;
-    out.corner_verts.insert(out.corner_verts.end(), faces[i].begin(), faces[i].end());
+    for (uint32_t v : faces[i]) out.corner_verts.push_back(renum[v]);
     out.face_offsets.push_back((uint32_t)out.corner_verts.size());
   }
   out.touch();
@@ -202,15 +219,17 @@ void tidy(Mesh &m) {
 
 /* Whether every edge has one face on each side, the opposite way round (what the kernel's exact path takes). */
 bool closed(const Mesh &m) {
-  std::map<std::pair<uint32_t, uint32_t>, int> directed;
+  std::vector<uint64_t> edges;  // (from << 32 | to, sorted: each once, and its reverse once)
+  edges.reserve(m.corner_verts.size());
   for (size_t f = 0; f + 1 < m.face_offsets.size(); f++) {
     const uint32_t a = m.face_offsets[f], b = m.face_offsets[f + 1];
-    for (uint32_t c = a; c < b; c++) directed[{m.corner_verts[c], m.corner_verts[c + 1 < b ? c + 1 : a]}]++;
+    for (uint32_t c = a; c < b; c++) edges.push_back((uint64_t)m.corner_verts[c] << 32 | m.corner_verts[c + 1 < b ? c + 1 : a]);
   }
-  for (const auto &e : directed) {
-    if (e.second != 1) return false;
-    const auto back = directed.find({e.first.second, e.first.first});
-    if (back == directed.end() || back->second != 1) return false;
+  std::sort(edges.begin(), edges.end());
+  for (size_t i = 0; i < edges.size(); i++) {
+    if (i + 1 < edges.size() && edges[i + 1] == edges[i]) return false;
+    const uint64_t back = (edges[i] & 0xFFFFFFFFull) << 32 | edges[i] >> 32;
+    if (!std::binary_search(edges.begin(), edges.end(), back)) return false;
   }
   return true;
 }
@@ -291,6 +310,7 @@ std::string blockout_piece_modifier_refusal(const char *type) {
 std::string blockout_piece_stack_refusal(const BlockoutPiece &bp) {
   if (bp.opening != 0) return "a door or window is a cut sized by its Width, Head and Sill";
   if (bp.is_room()) return "a room's walls, floor and ceiling come from its numbers";
+  if (bp.is_preset()) return "a preset (a column, beam, railing, roof or stair) is several shapes made from its numbers";  // (round 500's presets are collected apart: a stack would never run)
   if (bp.operation == 2) return "an Intersect piece with a stack is not built yet";
   return "";
 }

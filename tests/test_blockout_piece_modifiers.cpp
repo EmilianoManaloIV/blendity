@@ -598,9 +598,13 @@ double r514e_volume(const Mesh &m) {
   return v;
 }
 
+/* The same mesh, point for point. Coordinates compare by value, not by bits: the build makes -0 and 0 one point (a Mirror through 0 welds), so a
+ * stack's mesh holds 0 where the modifier alone wrote -0 - the same place. */
 bool r514e_bits(const Mesh &a, const Mesh &b) {
-  return a.positions.size() == b.positions.size() && a.face_offsets == b.face_offsets && a.corner_verts == b.corner_verts &&
-         (a.positions.empty() || std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0);
+  if (a.positions.size() != b.positions.size() || a.face_offsets != b.face_offsets || a.corner_verts != b.corner_verts) return false;
+  for (size_t i = 0; i < a.positions.size(); i++)
+    if (a.positions[i].x != b.positions[i].x || a.positions[i].y != b.positions[i].y || a.positions[i].z != b.positions[i].z) return false;
+  return true;
 }
 
 /* What the Blockout's pieces build from scratch: the stacks evaluated again with an emptied cache (so not a mesh the cache kept). */
@@ -1931,7 +1935,9 @@ void tests_round514_engineer() {
     CHECK(m.w > 0);
     r514_click(ed, m.x + m.w / 2, m.y + m.h / 2);
     r514_settle(ed, 2);
+    const size_t mark = r514e_mark();
     CHECK(r514_click_key(ed, "menu:Copy to Selected"));
+    CHECK(r514e_log_since(mark).find("not to '" + room->name + "'") != std::string::npos);  // (the room is named)
     CHECK(r514_count(*a, "BevelModifier") == 1);     // (a piece takes it)
     CHECK(r514_count(*room, "BevelModifier") == 0);  // (a room does not: named in the log)
   });
@@ -2011,6 +2017,42 @@ void tests_round514_engineer() {
     r514e_land(ed, *bo);
     r514_settle(ed, 3);
     CHECK(r514e_click_world(ed, {-1.9f, 0.4f, 0.0f}) == left);  // (on the chamfer between Left's top and its -x side)
+  });
+
+  test("blockout piece modifiers: a convex shape's corners are part of its stack's key, its hull is the closed shape a modifier meets, and a preset piece takes no stack (it says why)", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *box = r514_box(ed);
+    CHECK(box != nullptr);
+    if (!box) return;
+    ed.command("select " + box->name);
+    ed.command("component BevelModifier");
+    blockout::Piece cube;
+    cube.shape = blockout::Shape::Convex;
+    for (int i = 0; i < 8; i++) cube.points.push_back(Vec3(i & 1 ? 0.5f : -0.5f, i & 2 ? 0.5f : -0.5f, i & 4 ? 0.5f : -0.5f));
+    blockout::Piece moved = cube;
+    moved.points[7].y = 0.9f;  // (one corner raised: a different shape)
+    BlockoutSurface a, b, c;
+    blockout_piece_stack_note(*box, cube, 0, a);
+    blockout_piece_stack_note(*box, moved, 0, b);
+    blockout_piece_stack_note(*box, cube, 0, c);
+    CHECK(a.stacks.size() == 1 && b.stacks.size() == 1 && c.stacks.size() == 1);
+    if (a.stacks.size() != 1 || b.stacks.size() != 1 || c.stacks.size() != 1) return;
+    CHECK(a.stacks[0].key != b.stacks[0].key);  // (otherwise the raised corner would take the cube's cached mesh)
+    CHECK(a.stacks[0].key == c.stacks[0].key);
+    Mesh hull;
+    CHECK(blockout::piece_shape_mesh(cube, hull));
+    CHECK(hull.positions.size() == 8 && hull.face_count() == 6);  // (the cube's hull: 8 corners, 6 quads)
+    std::vector<blockout::Piece> pieces{cube};
+    CHECK(blockout_piece_stacks_apply(pieces, a) == 1);
+    CHECK(pieces[0].shape == blockout::Shape::Mesh && pieces[0].mesh && pieces[0].mesh->face_count() > 6);  // (bevelled: more faces than the cube)
+    /* A preset piece: the stack is refused by name, as a room's is. */
+    BlockoutPiece *bp = box->get<BlockoutPiece>();
+    bp->preset = 1;
+    CHECK(bp->is_preset());
+    CHECK(!blockout_piece_stack_refusal(*bp).empty());
+    CHECK(!blockout_piece_stack_live(*box));
   });
 
   test("blockout piece modifiers: a bevelled cylinder column shades smooth by angle - every face of its stacked mesh is marked smooth, a plain box's are not", [] {

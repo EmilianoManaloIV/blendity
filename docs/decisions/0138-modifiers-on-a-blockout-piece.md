@@ -56,6 +56,9 @@ inert and the Inspector shows no Modifiers section for it.
    until now) shows that modifier's effect from this round on - the change is named in the changelog.
 
 ## As built (round 514, after review)
+- Merged with round 500 (#410): a preset piece (a column, beam, railing, roof or stair) is several kernel shapes made
+  from its numbers and collected apart, so it takes no stack either, said like a room's. The Convex shape that presets
+  make has its own outline in `piece_shape_mesh` (its hull) and its corners in the stack's key.
 - The snapshot only notes a stacked piece (its place in the piece list, the key, clones of its modifiers, carried by the
   `BlockoutSurface` the build already receives); `to_piece` is unchanged. The build (its worker, or the synchronous
   build of tests and scripts) turns the noted piece into a mesh piece just before the kernel runs.

@@ -2004,9 +2004,12 @@ void Editor::draw_inspector(const Recti &r) {
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
       if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
         const std::string why = blockout_piece_stack_refusal(*mod_piece);
+        const bool live = blockout_piece_stack_live(*g);
         Recti nr = lay.row();
-        u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, why.empty() ? "Runs on this piece's own shape before it is added or cut." : "This piece takes no modifiers: " + why + ".",
-                why.empty() ? u.theme.text_dim : u.theme.warning);
+        u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h},
+                !why.empty() ? "This piece takes no modifiers: " + why + "." : live ? std::string("Runs on this piece's own shape before it is added or cut.")
+                                                                            : std::string("Its modifiers do nothing yet - the Blockout's status says why."),
+                why.empty() && live ? u.theme.text_dim : u.theme.warning);
         u.tooltip(why.empty() ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
                                 "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
                                 "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
@@ -2214,7 +2217,8 @@ void Editor::draw_inspector(const Recti &r) {
             for (GameObject *o : selected_objects(false)) {
               const BlockoutPiece *to_piece = o->get<BlockoutPiece>();  // (round 514: a piece takes a stack too - one that cannot is skipped and named)
               if (o == g || (!o->get<MeshFilter>() && !to_piece)) continue;
-              const std::string no = !to_piece ? std::string() : !blockout_piece_modifier_refusal(type).empty() ? blockout_piece_modifier_refusal(type) : blockout_piece_stack_refusal(*to_piece);
+              const std::string kind_no = to_piece ? blockout_piece_modifier_refusal(type) : std::string();
+              const std::string no = !to_piece ? std::string() : !kind_no.empty() ? kind_no : blockout_piece_stack_refusal(*to_piece);
               if (!no.empty()) {
                 Log::warn("Copy to Selected: not to '%s' - %s", o->name.c_str(), no.c_str());
                 continue;

@@ -1840,8 +1840,18 @@ bool piece_shape_mesh(const Piece &piece, Mesh &out) {
   if (!finite_piece(p)) return false;
   Solid s;
   const double identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
-  const bool one = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : p.shape == Shape::Sphere ? local_sphere(p, s)
-                   : p.shape == Shape::Wedge ? local_wedge(p, identity, nullptr, s) : false;
+  bool one = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : p.shape == Shape::Sphere ? local_sphere(p, s)
+             : p.shape == Shape::Wedge ? local_wedge(p, identity, nullptr, s) : false;
+  if (p.shape == Shape::Convex) {  // (round 500's convex piece: its hull, in the piece's space)
+    Hull h;
+    if (convex_hull(p.points, h)) return false;
+    s.verts = h.verts;
+    for (const std::vector<uint32_t> &f : h.faces) {
+      s.face_verts.insert(s.face_verts.end(), f.begin(), f.end());
+      s.face_offsets.push_back((uint32_t)s.face_verts.size());
+    }
+    one = true;
+  }
   if (!one) {  // (stairs, an arch, an outline: several convex parts, united - on the grid, by a cell fine enough for the piece's smallest part)
     double small = std::min((double)std::fabs(p.height), 1e30);
     if (p.shape == Shape::Stairs) small = std::min({(double)std::fabs(p.size.x), (double)std::fabs(p.size.y) / std::max(1, p.steps), (double)std::fabs(p.size.z) / std::max(1, p.steps)});

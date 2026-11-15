@@ -18,7 +18,7 @@ approved with "Approve 514 and 515" and the three recommended choices.
 - **The Inspector:** a selected piece has the Modifiers section an object has. Modifiers a piece does not take are off
   in its Add Modifier list with the reason in the tooltip (Boolean - use a Subtract piece; Curve, Lattice, Mesh Deform,
   Armature, Normal Transfer read another object; Smooth Normals only changes shading). A room, a door or window and an
-  Intersect piece take no stack yet: their section says why, and a stack put on one by the console does nothing (the
+  Intersect piece, and a preset (round 500's column, beam, railing, roof or stair), take no stack yet: their section says why, and a stack put on one by the console does nothing (the
   Blockout's status names the piece). Apply on a piece is refused with Bake to Mesh offered.
 - **The status** names the stacked pieces ("built as a mesh: slower and less exact than its numbers").
 - A Learn section "Modifiers on a piece".
@@ -40,7 +40,7 @@ the picking names a piece by the meshes the build used.
 
 **Limits:** a piece with a stack builds as a mesh - on the exact path through Manifold, on the grid path as coarse as
 the cell; its Blend radius is not read, nor that of the pieces in its cluster (round 480's rule for mesh pieces); stairs, arches and outlines are united by a build of the piece alone before the
-stack (on builds without Blender's libraries, by the grid). No stacks on rooms, doors / windows and Intersect pieces.
+stack (on builds without Blender's libraries, by the grid). No stacks on rooms, doors / windows, presets and Intersect pieces.
 
 **Checked:** CHECKED_514
 
