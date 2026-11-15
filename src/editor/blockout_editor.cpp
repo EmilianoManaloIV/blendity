@@ -96,12 +96,16 @@ void Editor::update_blockouts(bool force) {
   blockout_publish_piece_sources(std::move(sources));
 }
 
-/* The pieces are back at what the mesh already is (an undo during a build): what runs or waits for this Blockout is not wanted. */
+/* The pieces are back at what the mesh already is (an undo during a build, a drag over the piece's own start): the build waiting
+ * for this Blockout is not wanted. The running one finishes, and blockout_finish lands it only if the pieces have moved on by
+ * then - round 477's rule, a running build finishes and lands. (Round 502: it was cancelled here, so a drag that kept passing
+ * its start while builds were slower than the passes stopped every build before it finished and the mesh froze.) Under the
+ * measured cancel-stale policy it is stopped as before. */
 void Editor::blockout_unwant(uint64_t obj) {
   for (const auto &j : blockout_jobs_) {
     if (j->obj != obj) continue;
     j->has_next = false;
-    j->cancel.store(true);
+    if (blockout_cancel_stale_) j->cancel.store(true);
   }
 }
 
@@ -138,7 +142,9 @@ void Editor::blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Pi
   job->cache = std::move(b.state.cache);  // (the job owns it while it runs; it comes back with the job)
   if (!job->cache) job->cache = std::make_unique<blockout::Cache>();
   BlockoutJob *raw = job.get();
-  raw->thread = std::thread([raw] {
+  const int delay_ms = blockout_delay_ms_for_test_;  // (round 502: a test standing in for a slow build)
+  raw->thread = std::thread([raw, delay_ms] {
+    if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     JobSystem::global().run_background([raw] {
       MeshPtr mesh = std::make_shared<Mesh>();
       raw->ok = blockout::build(raw->pieces, raw->settings, *mesh, &raw->faces, &raw->report, raw->cache.get(), &raw->cancel);
@@ -2360,7 +2366,9 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   }
   else if (sub == "wait") {
     blockout_jobs_wait();
+    blockout_stacks_settle();  // (round 502: and the modifier stacks over the meshes that landed - a script's next command reads the drawn mesh)
   }
+  else if (sub == "join") blockout_join_command(t);  // (round 501: blockout_join.cpp)
   else if (sub == "bake") {  // (round 482)
     std::vector<GameObject *> live;  // (the selected Blockouts and those of the selected pieces: with nothing selected nothing is baked - a bake is not one to run on everything)
     const std::vector<GameObject *> sel = selected_objects(false);

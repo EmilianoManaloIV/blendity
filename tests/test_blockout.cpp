@@ -6522,7 +6522,10 @@ static void tests_round479_engineer_handles() {
 }
 
 static void tests_round479_engineer_snapping() {
-  test("blockout handles (te): pieces of ANOTHER Blockout are no snap candidates, the same Blockout's are", [] {
+  /* Changed in round 501 (task 0485, criterion 2): this test pinned round 479's rule that another Blockout's pieces are no snap candidates.
+   * The owner asked for snapping between Blockouts (Pass 23b's plan, 2026-11-11), so that rule is reversed on purpose - not loosened: a face
+   * handle dragged to another Blockout's plane now lands in it, as it does for a piece of its own Blockout. The same-Blockout half is as it was. */
+  test("blockout handles (te): pieces of ANOTHER Blockout are snap candidates too (round 501), as the same Blockout's are", [] {
     for (int same = 0; same < 2; same++) {
       Editor ed;
       te_view(ed, "camera 20 55 22 3 0 0");
@@ -6538,7 +6541,7 @@ static void tests_round479_engineer_snapping() {
       const float face = r479e_face(*b, -1.0f).x;
       std::printf("    %s Blockout: face at %.4f, snapped %d\n", same ? "same" : "another", face, (int)snapped);
       if (same) CHECK(snapped && std::fabs(face - 1.1f) < 1e-4f);
-      else CHECK(!snapped && std::fabs(face - 1.0f) < 1e-4f);
+      else CHECK(snapped && std::fabs(face - 1.1f) < 1e-4f);  // (round 501: the other Blockout's plane at 1.1, not the grid's 1.0)
     }
   });
 
