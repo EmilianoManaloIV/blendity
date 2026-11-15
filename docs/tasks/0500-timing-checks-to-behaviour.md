@@ -4,7 +4,7 @@
 - **Requirements:** Q-06 (responsiveness), the suite's reliability (ADR 0056)
 - **Decisions:** ADR 0056 (a unit test pins a behaviour; a measurement is a stress row) - none new
 - **Model:** main session (the HCI worker)
-- **PR:** (link when opened) - base `main`, its own
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/417 (base `main`, its own)
 
 ## Goal
 Three checks in the `livelink` and `vr` groups (and a fourth found on the way) assert wall-clock times and failed when the machine was busy with other
