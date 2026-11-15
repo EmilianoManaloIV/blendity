@@ -57,6 +57,16 @@ bool r502_valid(const Mesh &m) {
   return true;
 }
 
+/* Whether the Blockout's mesh is what its pieces build from scratch now (positions to the bit, the same faces). */
+bool r502_mesh_is_scratch(Editor &, const GameObject &bo) {
+  std::vector<blockout::Piece> pieces;
+  blockout::Settings st;
+  blockout_snapshot(bo, pieces, st);
+  Mesh ref;
+  const MeshFilter *mf = bo.get<MeshFilter>();
+  return mf && mf->mesh && blockout::build(pieces, st, ref) && r502_bits(ref, *mf->mesh);
+}
+
 size_t r502_nan_points(const Mesh &m) {
   size_t n = 0;
   for (const Vec3 &p : m.positions) n += !(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z));
@@ -1603,6 +1613,40 @@ void tests_round502_second() {
     ed.command("blockout wait");
     const Mesh *ev = bo->evaluated_mesh();
     CHECK(ev && r502_same(*ev, r502_by_hand(*bo)));
+  });
+
+  /* ---- A slow build lands while a drag passes over the piece's start ---- */
+  test("blockout builds: dragging back over the piece's start while builds are slow still shows the new mesh (round 477's rule: a running build finishes and lands)", [] {
+    /* Found by CI's sanitizer shard (round 502, #403): 667 builds started, 0 landed in a 20,000-frame drag. The door came back to its start every
+     * 30 frames, bit for bit; there the pieces are again what the shown mesh was built from, and the running build used to be cancelled - under
+     * ASan each build outlasted the 30 frames, so every one was cancelled before it finished and the mesh froze for the whole drag. Now the
+     * running build finishes; it lands unless the pieces are still back at the shown mesh when it returns (an undo), and the newest starts. */
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r502_empty(ed);
+    GameObject *bo = r502_hand(ed);
+    const std::vector<GameObject *> rooms = r502_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    ed.set_blockout_delay_ms_for_test(600);
+    GameObject *door = rooms.back();
+    const Vec3 home = door->local().position;
+    const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test();
+    const double start = now_seconds();
+    int f = 0;
+    for (; now_seconds() - start < 4.0; f++) {
+      door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));  // (f % 30 == 0: the start, bit for bit)
+      ed.step_frame_headless();
+      const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+      if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+    }
+    const uint64_t started = ed.blockout_started_for_test() - started0, landed = ed.blockout_landed_for_test() - landed0;
+    std::printf("    %d frames in %.1f s, builds of 0.6 s: started %llu, landed %llu\n", f, now_seconds() - start, (unsigned long long)started, (unsigned long long)landed);
+    CHECK(started >= 2);
+    CHECK(landed >= 2);  // (one a build's time, give or take: a drag never leaves the mesh frozen)
+    ed.set_blockout_delay_ms_for_test(0);
+    ed.command("blockout wait");
+    CHECK(r502_mesh_is_scratch(ed, *bo));
   });
 
   /* ---- A slow machine never starves the drag of results ---- */

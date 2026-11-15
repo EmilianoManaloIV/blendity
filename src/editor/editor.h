@@ -7315,6 +7315,8 @@ class Editor {
   uint64_t eval_adopted_for_test() const { return eval_adopted_; }
   uint64_t eval_dropped_for_test() const { return eval_dropped_; }
   void set_eval_delay_ms_for_test(int ms) { eval_delay_ms_for_test_ = ms; }
+  int blockout_delay_ms_for_test_ = 0;                           // (each Blockout build on a worker waits this long first: a slow build in a test)
+  void set_blockout_delay_ms_for_test(int ms) { blockout_delay_ms_for_test_ = ms; }
   /* Round 501 (task 0485), blockout_join.cpp: snapping between Blockouts, and joining Blockouts that touch. */
   void blockout_cross_candidates(const GameObject &own_blockout, Vec3 origin, Vec3 dir, std::vector<float> &out);  // (the other Blockouts' planes and corners along a line: a piece's snap and a face handle's)
   bool blockout_whole_snap(const GameObject &lead, Vec3 start_pos, Vec3 axis, const std::vector<uint64_t> &roots, float &d, Vec3 *marker = nullptr);  // (moved Blockouts' corners onto other Blockouts' along an axis; marker: where the landed corner is)
