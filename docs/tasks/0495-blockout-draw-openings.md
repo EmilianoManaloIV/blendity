@@ -7,7 +7,7 @@
   stream's keyboard-reach rule (ADR 0145) - none new expected
 - **Model:** implementer, then test-engineer, then code-reviewer; the HCI worker reviews the round's UI before it is
   published (the hub)
-- **PR:** its own, base `main` (the door stack #400 <- #405 <- #410 and the HCI stack #401 <- #404 <- #408 merged first)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/414 (base `main`)
 
 ## Goal
 The Blockout Draw Piece tool can draw a door or a window: drag a rectangle on a wall and the opening stands in that wall,
