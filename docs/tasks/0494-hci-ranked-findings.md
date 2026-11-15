@@ -4,7 +4,7 @@
 - **Requirements:** Q-usability
 - **Decisions:** ADR 0085 (the HCI rules: recognition rather than recall; labels from the keymap); none new
 - **Model:** implementer (Sonnet)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/408
 
 ## Goal
 What round 505's survey ranked after the sweep's own faults, and that is a fix and not a feature, is fixed: no text
