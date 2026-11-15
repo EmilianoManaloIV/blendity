@@ -84,6 +84,13 @@ bool r514_numbers_build(const GameObject &bo) {
          ref.corner_verts == m->corner_verts && (ref.positions.empty() || std::memcmp(ref.positions.data(), m->positions.data(), ref.positions.size() * sizeof(Vec3)) == 0);
 }
 
+/* Whether Decimate does anything in this build: it is meshoptimizer's (BL_WITH_MESHOPT), and without Blender's libraries it leaves the mesh
+ * as it was - so a stack can't be decimated to nothing there, and the tests of that refusal have nothing to see. */
+bool r514_decimate_here() {
+  Mesh probe = *primitives::cube(2.0f);
+  return meshops::decimate(probe, 0.3f);
+}
+
 size_t r514_count(const GameObject &g, const char *type) {
   size_t n = 0;
   for (const auto &c : g.components) n += std::string(c->type_name()) == type;
@@ -151,7 +158,10 @@ void r514_shapes() {
                     r514_open_edges(shape), m ? m->face_count() : 0, m ? m->vert_count() : 0, st.refusal.c_str());
         CHECK(r514_open_edges(shape) == 0 && st.refusal.empty());
         const size_t want = std::string(type) == "BevelModifier" ? 26 : gap ? 18 : 6;  // (touching boxes are one box; apart, three)
-        CHECK(m && m->face_count() == want);
+        /* The face count is the exact path's. A build without it (no Blender libraries: CI's Linux) meshes the bevelled box on the grid, which
+         * keeps the chamfers but not one face each (19 faces seen there): there it is closed and more than a box. */
+        if (blockout::crisp_available() || std::string(type) != "BevelModifier") CHECK(m && m->face_count() == want);
+        else CHECK(m && m->face_count() > 6 && r514_open_edges(*m) == 0);
       }
   });
 }
@@ -1328,7 +1338,8 @@ bool r514e_sweep_case(size_t s, size_t k, const R514eShape &shape, const R514eMo
     else if (out.face_count() && r514e_volume(out) <= 0.0) bad = "inside out";
     /* (On the grid a wire or shell thinner than the cell can be lost: ADR 0138 decision 5 accepts it, and the Blockout's status warns of it -
      * "...thinner than the Field Cell..." - which the editor test below reads. Only that case is let through here.) */
-    else if (!subtract && out.face_count() == 0 && rep.skipped.empty() && rep.notes.empty() && !(field && r514e_thinner_than_cell(*st.modifiers[0], set.cell)))
+    else if (!subtract && out.face_count() == 0 && rep.skipped.empty() && rep.notes.empty() &&
+             !((field || !blockout::crisp_available()) && r514e_thinner_than_cell(*st.modifiers[0], set.cell)))  // (Auto is the grid too where there is no exact path)
       bad = "empty with nothing skipped or noted";  // (the status shows skipped pieces and notes; an Add piece that makes nothing with neither is a silent loss)
   }
   if (!bad.empty()) {
@@ -1843,13 +1854,15 @@ void tests_round514_engineer() {
     ed.command("component DecimateModifier");
     box->get<DecimateModifier>()->ratio = 0.3f;
     ed.command("blockout wait");
-    CHECK(bo && r514_numbers_build(*bo));  // (the box from its numbers, not nothing)
+    const bool decimates = r514_decimate_here();
+    if (!decimates) std::printf("    (no Decimate in this build - no meshoptimizer: its part is not checked)\n");
+    if (decimates) CHECK(bo && r514_numbers_build(*bo));  // (the box from its numbers, not nothing)
     std::vector<std::pair<std::string, bool>> lines;
     if (bo) blockout_piece_stack_status(*bo, lines);
     bool said = false;
     for (const auto &l : lines) said = said || (l.second && l.first.find(box->name) != std::string::npos && l.first.find("built from its numbers") != std::string::npos);
     for (const auto &l : lines) std::printf("    status: %s\n", l.first.c_str());
-    CHECK(said);
+    if (decimates) CHECK(said);
     box->get<DecimateModifier>()->enabled = false;
     ed.command("component WireframeModifier");
     box->get<WireframeModifier>()->thickness = 0.05f;
@@ -1864,6 +1877,7 @@ void tests_round514_engineer() {
 
   /* ---- Round 514's code review ---- */
   test("blockout piece modifiers: a refusal follows the stack in use - undo back to a good stack shows it built as a mesh again, and a refused stack is not run again at every build", [] {
+    if (!r514_decimate_here()) return std::printf("    (no Decimate in this build - no meshoptimizer: the refusal it makes can't be made)\n"), void();
     blockout_piece_stack_cache_clear();
     Editor ed;
     ed.init_headless(900, 600);
