@@ -5,7 +5,7 @@
 - **Decisions:** ADR 0123 (changelog fragments, folded in the write-up), ADR 0104 (the books), ADR 0145 (keyboard focus)
   - none new
 - **Model:** main session (the HCI worker) for the folds and the build fixes; the implementer for the chapters
-- **PR:** (link when opened) - base `main`, the single top of the joined stack (#412 speed, #411, #413, #414, and rounds
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/419 - base `main`, the single top of the joined stack (#412 speed, #411, #413, #414, and rounds
   503 / 511 when they publish), stacked on round 511's
 
 ## Goal
