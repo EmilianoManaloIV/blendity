@@ -9,6 +9,8 @@
 #include "grade.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -105,27 +107,54 @@ template<class F> void per_pixel(const Image &in, Image &out, F fn) {
   });
 }
 
-/* A plane blurred by three box passes each way (close to a Gaussian of sigma ~ radius / 1.4). */
+std::atomic<uint64_t> g_parts_made{0};
+
+/* A plane blurred by three box passes each way (close to a Gaussian of sigma ~ radius / 1.4). A box of a running sum
+ * costs the same whatever the radius (Blender's compositor does the same for its box and fast Gaussian blurs); the
+ * rows go over the threads, the vertical pass by blocks of columns so each step reads whole cache lines (a pass down
+ * one column at a time touched a new line a pixel). The sums are added in the same order as a column alone would, so
+ * the result does not depend on the block. */
 void blur_plane(std::vector<float> &p, int w, int h, int radius) {
   if (radius < 1 || w <= 0 || h <= 0) return;
   std::vector<float> tmp(p.size());
-  auto pass = [&](std::vector<float> &src, std::vector<float> &dst, bool horizontal) {
-    const int n = horizontal ? w : h, lines = horizontal ? h : w;
-    JobSystem::global().parallel_for(lines, 16, [&](int64_t l0, int64_t l1) {
-      for (int64_t l = l0; l < l1; l++) {
-        auto idx = [&](int i) { return horizontal ? (size_t)l * w + i : (size_t)i * w + l; };
+  auto horizontal = [&](const std::vector<float> &src, std::vector<float> &dst) {
+    JobSystem::global().parallel_for(h, 16, [&](int64_t r0, int64_t r1) {
+      for (int64_t r = r0; r < r1; r++) {
+        const float *s = src.data() + (size_t)r * w;
+        float *d = dst.data() + (size_t)r * w;
         double sum = 0;
-        for (int i = -radius; i <= radius; i++) sum += src[idx(std::max(0, std::min(n - 1, i)))];
-        for (int i = 0; i < n; i++) {
-          dst[idx(i)] = (float)(sum / (2 * radius + 1));
-          sum += src[idx(std::min(n - 1, i + radius + 1))] - src[idx(std::max(0, i - radius))];
+        for (int i = -radius; i <= radius; i++) sum += s[std::max(0, std::min(w - 1, i))];
+        for (int i = 0; i < w; i++) {
+          d[i] = (float)(sum / (2 * radius + 1));
+          sum += s[std::min(w - 1, i + radius + 1)] - s[std::max(0, i - radius)];
+        }
+      }
+    });
+  };
+  constexpr int kBlock = 64;
+  auto vertical = [&](const std::vector<float> &src, std::vector<float> &dst) {
+    JobSystem::global().parallel_for((w + kBlock - 1) / kBlock, 1, [&](int64_t b0, int64_t b1) {
+      for (int64_t b = b0; b < b1; b++) {
+        const int x0 = (int)b * kBlock, n = std::min(kBlock, w - x0);
+        double sum[kBlock] = {};
+        for (int i = -radius; i <= radius; i++) {
+          const float *s = src.data() + (size_t)std::max(0, std::min(h - 1, i)) * w + x0;
+          for (int c = 0; c < n; c++) sum[c] += s[c];
+        }
+        for (int i = 0; i < h; i++) {
+          float *d = dst.data() + (size_t)i * w + x0;
+          const float *add = src.data() + (size_t)std::min(h - 1, i + radius + 1) * w + x0, *sub = src.data() + (size_t)std::max(0, i - radius) * w + x0;
+          for (int c = 0; c < n; c++) {
+            d[c] = (float)(sum[c] / (2 * radius + 1));
+            sum[c] += add[c] - sub[c];
+          }
         }
       }
     });
   };
   for (int k = 0; k < 3; k++) {
-    pass(p, tmp, true);
-    pass(tmp, p, false);
+    horizontal(p, tmp);
+    vertical(tmp, p);
   }
 }
 
@@ -139,6 +168,67 @@ std::vector<float> luminance_plane(const Image &in) {
 
 /* The colour scaled so its luminance becomes y2 (hue and saturation kept). */
 Vec3 with_luminance(Vec3 c, float y, float y2) { return y > 1e-8f ? c * (y2 / y) : Vec3(y2); }
+
+/* ---- the parts the four filters keep (FilterKeep) ---- */
+
+bool kept_for(const FilterKeep &k, const Image &in) { return k.w == in.w && k.h == in.h; }
+/* The keep set to `in`'s size; parts of another size are dropped. */
+void keep_for(FilterKeep &k, const Image &in) {
+  if (!kept_for(k, in)) k.clear();
+  k.w = in.w, k.h = in.h;
+}
+
+const std::vector<float> &keep_luminance(FilterKeep &k, const Image &in) {
+  if (k.lum.size() != (size_t)in.w * in.h) {
+    k.lum = luminance_plane(in);
+    g_parts_made++;
+  }
+  return k.lum;
+}
+
+/* The luminance blurred by `radius`. */
+const std::vector<float> &keep_luminance_blur(FilterKeep &k, const Image &in, int radius) {
+  const std::vector<float> &y = keep_luminance(k, in);
+  if (k.lum_blur.size() != y.size() || k.lum_blur_radius != radius) {
+    k.lum_blur = y;
+    blur_plane(k.lum_blur, in.w, in.h, radius);
+    k.lum_blur_radius = radius;
+    g_parts_made++;
+  }
+  return k.lum_blur;
+}
+
+/* The value that sorts `rank`th (from 0, ascending) in v, which holds finite numbers from 0 up: a histogram finds the
+ * bin it falls in and only that bin is partially sorted (std::nth_element on the whole plane cost as much as a blur). */
+float ranked_value(const std::vector<float> &v, size_t rank) {
+  float mx = 0.0f;
+  bool plain = true;
+  for (float x : v) {
+    if (!(x >= 0.0f && x <= FLT_MAX)) plain = false;
+    else if (x > mx) mx = x;
+  }
+  auto by_nth = [&] {
+    std::vector<float> sorted = v;
+    std::nth_element(sorted.begin(), sorted.begin() + (ptrdiff_t)rank, sorted.end());
+    return sorted[rank];
+  };
+  if (!plain || mx <= 0.0f) return by_nth();
+  constexpr int kBins = 8192;
+  // In double: kBins / mx overflows a float once mx is under ~2.4e-35, and (int)inf gave a negative bin (a crash).
+  const double scale = kBins / (double)mx;
+  auto bin_of = [&](float x) { return std::min(kBins - 1, (int)((double)x * scale)); };
+  std::vector<uint32_t> count(kBins, 0);
+  for (float x : v) count[(size_t)bin_of(x)]++;
+  size_t below = 0;
+  int b = 0;
+  while (b < kBins - 1 && below + count[(size_t)b] <= rank) below += count[(size_t)b++];
+  std::vector<float> in_bin;
+  in_bin.reserve(count[(size_t)b]);
+  for (float x : v)
+    if (bin_of(x) == b) in_bin.push_back(x);
+  std::nth_element(in_bin.begin(), in_bin.begin() + (ptrdiff_t)(rank - below), in_bin.end());
+  return in_bin[rank - below];
+}
 
 /* ---- the adjustments ---- */
 
@@ -240,14 +330,16 @@ void vibrance_saturation(const Adjustment &a, const Image &in, Image &out) {
 }
 
 /* Clarity: local contrast - the luminance's detail against a wide blur, weighted to the midtones. */
-void clarity(const Adjustment &a, const Image &in, Image &out) {
+void clarity(const Adjustment &a, const Image &in, Image &out, FilterKeep &keep) {
   const float k = a.v[0] / 100.0f * 0.8f;
+  const int radius = std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h)));
   if (k == 0.0f) {
+    if (keep.persistent) keep_luminance_blur(keep, in, radius);  // (made while the step does nothing: its slider's first move is then as cheap as the rest)
     out = in;
     return;
   }
-  std::vector<float> y = luminance_plane(in), b = y;
-  blur_plane(b, in.w, in.h, std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h))));
+  const std::vector<float> &b = keep_luminance_blur(keep, in, radius);
+  const std::vector<float> &y = keep.lum;
   per_pixel(in, out, [&](Vec3 &c, int x, int yy) {
     const size_t i = (size_t)yy * in.w + x;
     const float p = std::min(1.0f, enc(y[i])), w = 4.0f * p * (1.0f - p);
@@ -257,21 +349,31 @@ void clarity(const Adjustment &a, const Image &in, Image &out) {
 
 /* Dehaze: the dark channel prior (He, Sun & Tang 2009) - a blurred minimum channel as the haze, the airlight its
  * brightest thousandth; negative amounts add haze toward the airlight. */
-void dehaze(const Adjustment &a, const Image &in, Image &out) {
-  const float amount = a.v[0] / 100.0f;
-  if (amount == 0.0f) {
-    out = in;
-    return;
-  }
-  std::vector<float> dark((size_t)in.w * in.h);
+void keep_dark(FilterKeep &keep, const Image &in, int radius) {
+  if (keep.dark.size() == (size_t)in.w * in.h && keep.dark_radius == radius) return;
+  std::vector<float> &dark = keep.dark;
+  dark.resize((size_t)in.w * in.h);
   JobSystem::global().parallel_for((int64_t)dark.size(), 4096, [&](int64_t i0, int64_t i1) {
     for (int64_t i = i0; i < i1; i++) dark[(size_t)i] = std::max(0.0f, std::min(in.px[i * 4], std::min(in.px[i * 4 + 1], in.px[i * 4 + 2])));
   });
-  blur_plane(dark, in.w, in.h, std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h))));
-  std::vector<float> sorted = dark;
-  const size_t k = sorted.empty() ? 0 : sorted.size() - 1 - sorted.size() / 1000;
-  std::nth_element(sorted.begin(), sorted.begin() + (ptrdiff_t)k, sorted.end());
-  const float A = std::max(0.05f, sorted.empty() ? 1.0f : sorted[k]);
+  blur_plane(dark, in.w, in.h, radius);
+  const size_t k = dark.empty() ? 0 : dark.size() - 1 - dark.size() / 1000;
+  keep.airlight = std::max(0.05f, dark.empty() ? 1.0f : ranked_value(dark, k));
+  keep.dark_radius = radius;
+  g_parts_made++;
+}
+
+void dehaze(const Adjustment &a, const Image &in, Image &out, FilterKeep &keep) {
+  const float amount = a.v[0] / 100.0f;
+  const int radius = std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h)));
+  if (amount == 0.0f) {
+    if (keep.persistent) keep_dark(keep, in, radius);
+    out = in;
+    return;
+  }
+  keep_dark(keep, in, radius);
+  const std::vector<float> &dark = keep.dark;
+  const float A = keep.airlight;
   per_pixel(in, out, [&](Vec3 &c, int x, int y) {
     if (amount < 0.0f) {
       c = c + (Vec3(A) - c) * (-amount * 0.5f);
@@ -345,14 +447,16 @@ void hsl(const Adjustment &a, const Image &in, Image &out) {
   });
 }
 
-void sharpen(const Adjustment &a, const Image &in, Image &out) {
+void sharpen(const Adjustment &a, const Image &in, Image &out, FilterKeep &keep) {
   const float amount = a.v[0] / 100.0f, masking = a.v[2] / 100.0f;
+  const int radius = std::max(1, (int)std::lround(a.v[1]));
   if (amount == 0.0f) {
+    if (keep.persistent) keep_luminance_blur(keep, in, radius);
     out = in;
     return;
   }
-  std::vector<float> y = luminance_plane(in), b = y;
-  blur_plane(b, in.w, in.h, std::max(1, (int)std::lround(a.v[1])));
+  const std::vector<float> &b = keep_luminance_blur(keep, in, radius);
+  const std::vector<float> &y = keep.lum;
   per_pixel(in, out, [&](Vec3 &c, int x, int yy) {
     const size_t i = (size_t)yy * in.w + x;
     const float detail = y[i] - b[i];
@@ -384,13 +488,17 @@ struct NoiseKernel {
 
 /* One row of the luminance smoothed: each pixel by its 5 x 5 neighbours of a similar tone. */
 void bilateral_row(const std::vector<float> &y, const std::vector<float> &pe, std::vector<float> &ys, int w, int h, int r, const NoiseKernel &k) {
+  size_t rows[5];  // (the five rows' offsets, edge rows repeated: once a row, not once a tap)
+  for (int dy = -2; dy <= 2; dy++) rows[dy + 2] = (size_t)std::max(0, std::min(h - 1, r + dy)) * w;
   for (int x = 0; x < w; x++) {
     const float p0 = pe[(size_t)r * w + x];
+    size_t cols[5];
+    for (int dx = -2; dx <= 2; dx++) cols[dx + 2] = (size_t)std::max(0, std::min(w - 1, x + dx));
     float sum = 0, wsum = 0;
     for (int dy = -2; dy <= 2; dy++) {
-      const size_t row = (size_t)std::max(0, std::min(h - 1, r + dy)) * w;
+      const size_t row = rows[dy + 2];
       for (int dx = -2; dx <= 2; dx++) {
-        const size_t i = row + std::max(0, std::min(w - 1, x + dx));
+        const size_t i = row + cols[dx + 2];
         const float wt = dx == 0 && dy == 0 ? 1.0f : k.space[(dy + 2) * 5 + dx + 2] * k.range_weight(pe[i] - p0);  // (the centre: always 1)
         sum += wt * y[i], wsum += wt;
       }
@@ -399,28 +507,46 @@ void bilateral_row(const std::vector<float> &y, const std::vector<float> &pe, st
   }
 }
 
-void noise_reduction(const Adjustment &a, const Image &in, Image &out) {
+void noise_reduction(const Adjustment &a, const Image &in, Image &out, FilterKeep &keep) {
   const float lum = a.v[0] / 100.0f, col = a.v[1] / 100.0f;
   if (lum == 0.0f && col == 0.0f) {
     out = in;
     return;
   }
-  std::vector<float> y = luminance_plane(in), ys((size_t)in.w * in.h), pe(y.size());
+  const std::vector<float> &y = keep_luminance(keep, in);
   const float sr = 0.02f + 0.2f * lum;
-  JobSystem::global().parallel_for((int64_t)y.size(), 4096, [&](int64_t i0, int64_t i1) {
-    for (int64_t i = i0; i < i1; i++) pe[(size_t)i] = enc(y[(size_t)i]);  // (the display axis once, not 25 times a pixel)
-  });
-  NoiseKernel kernel(sr);
-  JobSystem::global().parallel_for(in.h, 8, [&](int64_t y0, int64_t y1) {
-    for (int64_t r = y0; r < y1; r++) bilateral_row(y, pe, ys, in.w, in.h, (int)r, kernel);
-  });
-  std::vector<float> ch[3];
-  for (int k = 0; k < 3; k++) {
-    ch[k].resize(y.size());
-    for (size_t i = 0; i < y.size(); i++) ch[k][i] = in.px[i * 4 + k] - y[i];
-    const float s = a.v.size() > 2 ? a.v[2] : 1.0f;  // (a preview's scale, set by apply)
-    if (col > 0.0f) blur_plane(ch[k], in.w, in.h, std::max(1, (int)std::lround((1 + 3 * col) * s)));
+  if (keep.smooth_lum.size() != y.size() || keep.smooth_lum_sr != sr) {  // (only the luminance strength changes it)
+    std::vector<float> &pe = keep.display_lum;
+    keep.smooth_lum.resize(y.size());
+    if (pe.size() != y.size()) {
+      pe.resize(y.size());
+      JobSystem::global().parallel_for((int64_t)y.size(), 4096, [&](int64_t i0, int64_t i1) {
+        for (int64_t i = i0; i < i1; i++) pe[(size_t)i] = enc(y[(size_t)i]);  // (the display axis once, not 25 times a pixel)
+      });
+    }
+    const NoiseKernel kernel(sr);
+    JobSystem::global().parallel_for(in.h, 8, [&](int64_t y0, int64_t y1) {
+      for (int64_t r = y0; r < y1; r++) bilateral_row(y, pe, keep.smooth_lum, in.w, in.h, (int)r, kernel);
+    });
+    keep.smooth_lum_sr = sr;
+    g_parts_made++;
   }
+  const std::vector<float> &ys = keep.smooth_lum;
+  const float scale = a.v.size() > 2 ? a.v[2] : 1.0f;  // (a preview's scale, set by apply)
+  const int chroma_radius = col > 0.0f ? std::max(1, (int)std::lround((1 + 3 * col) * scale)) : 0;
+  if (keep.chroma_radius != chroma_radius || keep.chroma[0].size() != y.size()) {  // (only the colour strength changes it)
+    for (int k = 0; k < 3; k++) {
+      std::vector<float> &c = keep.chroma[k];
+      c.resize(y.size());
+      JobSystem::global().parallel_for((int64_t)y.size(), 65536, [&](int64_t i0, int64_t i1) {
+        for (int64_t i = i0; i < i1; i++) c[(size_t)i] = in.px[(size_t)i * 4 + k] - y[(size_t)i];
+      });
+      if (chroma_radius > 0) blur_plane(c, in.w, in.h, chroma_radius);
+    }
+    keep.chroma_radius = chroma_radius;
+    g_parts_made++;
+  }
+  const std::vector<float> *ch = keep.chroma;
   per_pixel(in, out, [&](Vec3 &c, int x, int yy) {
     const size_t i = (size_t)yy * in.w + x;
     const float yl = y[i] + (ys[i] - y[i]) * lum;
@@ -566,7 +692,7 @@ Adjustment scaled(const Adjustment &a, float s) {
   return b;
 }
 
-void apply_unmasked(const Adjustment &a, const Image &in, Image &out) {
+void apply_unmasked(const Adjustment &a, const Image &in, Image &out, FilterKeep &keep) {
   const std::string &t = a.type;
   if (t == "Exposure") exposure(a, in, out);
   else if (t == "Contrast") contrast(a, in, out);
@@ -576,12 +702,12 @@ void apply_unmasked(const Adjustment &a, const Image &in, Image &out) {
   else if (t == "Blacks") tone_range(a, in, out, 3);
   else if (t == "Temperature / Tint") white_balance(a, in, out);
   else if (t == "Vibrance / Saturation") vibrance_saturation(a, in, out);
-  else if (t == "Clarity") clarity(a, in, out);
-  else if (t == "Dehaze") dehaze(a, in, out);
+  else if (t == "Clarity") clarity(a, in, out, keep);
+  else if (t == "Dehaze") dehaze(a, in, out, keep);
   else if (t == "Tone Curve") tone_curve(a, in, out);
   else if (t == "HSL") hsl(a, in, out);
-  else if (t == "Sharpen") sharpen(a, in, out);
-  else if (t == "Noise Reduction") noise_reduction(a, in, out);
+  else if (t == "Sharpen") sharpen(a, in, out, keep);
+  else if (t == "Noise Reduction") noise_reduction(a, in, out, keep);
   else if (t == "Vignette") vignette(a, in, out);
   else if (t == "Crop / Straighten") crop(a, in, out);
   else if (t == "Flip / Rotate") flip_rotate(a, in, out);
@@ -604,14 +730,22 @@ void blend_by_mask(const std::vector<MaskPart> &mask, const Image &in, Image &ou
 
 }  // namespace
 
-void apply(const Adjustment &a, const Image &in, Image &out, float scale) {
+bool adjustment_keeps_parts(const std::string &type) { return type == "Clarity" || type == "Sharpen" || type == "Dehaze" || type == "Noise Reduction"; }
+
+uint64_t filter_parts_made() { return g_parts_made.load(); }
+
+void apply(const Adjustment &a, const Image &in, Image &out, float scale, FilterKeep *keep) {
   if (!a.enabled || in.empty() || !a.info()) {
     out = in;
     return;
   }
   Adjustment at_scale;
   const Adjustment &use = scale == 1.0f ? a : (at_scale = scaled(a, scale));  // (a preview: the pixel-sized fields at its scale)
-  apply_unmasked(use, in, out);
+  FilterKeep once;  // (a picture too large to keep parts of, or no keep given: made for this call alone)
+  FilterKeep &parts = keep && (int64_t)in.w * in.h <= kKeepPixels ? *keep : once;
+  keep_for(parts, in);
+  parts.persistent = &parts != &once;
+  apply_unmasked(use, in, out, parts);
   if (a.mask.empty() || a.info()->geometry || out.w != in.w || out.h != in.h) return;
   blend_by_mask(a.mask, in, out);
 }

@@ -9,9 +9,11 @@
 #include "image.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <thread>
 
 namespace bl::edit {
 
@@ -76,6 +78,91 @@ bool Doc::open_file(const std::string &path, std::string &error) {
   return true;
 }
 
+/* A file read on a worker (open_file_async). */
+struct Doc::Read {
+  std::string path, error;
+  Image img;
+  bool ok = false;
+  std::atomic<bool> done{false};
+  std::thread thread;
+  void join() {
+    if (thread.joinable()) thread.join();
+  }
+};
+
+Doc::Doc() = default;
+
+Doc::~Doc() {
+  if (read_) read_->join();
+  reap_dropped(true);
+}
+
+void Doc::open_file_async(const std::string &path) {
+  cancel_open();
+  auto read = std::make_unique<Read>();
+  read->path = path;
+  Read *raw = read.get();
+  raw->thread = std::thread([raw] {
+    JobSystem::global().run_background([raw] {
+      /* (An exception out of a thread ends the program: a read that throws - out of memory on a huge picture - fails the
+       * read instead.) */
+      try {
+        Bitmap b;
+        raw->ok = load_image(raw->path, b, raw->error);
+        if (raw->ok && (b.width <= 0 || b.height <= 0)) raw->ok = false, raw->error = "empty image";
+        if (raw->ok) raw->img = image_from_bitmap(b);
+      } catch (const std::exception &e) {
+        raw->ok = false, raw->error = e.what(), raw->img = Image();
+      }
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  read_ = std::move(read);
+}
+
+const std::string &Doc::loading_path() const {
+  static const std::string none;
+  return read_ ? read_->path : none;
+}
+
+void Doc::cancel_open() {
+  if (!read_) return;
+  dropped_.push_back(std::move(read_));
+  reap_dropped(false);
+  /* A dropped read decodes to its end (a decoder can't be stopped midway), each holding a whole picture: at most two
+   * run on, and a third drop waits for the oldest - opening many large pictures in a row can't hold gigabytes. */
+  while (dropped_.size() > 2) {
+    dropped_.front()->join();
+    dropped_.erase(dropped_.begin());
+  }
+}
+
+/* The dropped reads that have ended are joined and freed (all of them when `wait`). */
+void Doc::reap_dropped(bool wait) {
+  for (size_t i = 0; i < dropped_.size();) {
+    if (!wait && !dropped_[i]->done.load(std::memory_order_acquire)) {
+      i++;
+      continue;
+    }
+    dropped_[i]->join();
+    dropped_.erase(dropped_.begin() + (ptrdiff_t)i);
+  }
+}
+
+Doc::Landed Doc::poll_open(std::string &error) {
+  reap_dropped(false);
+  if (!read_ || !read_->done.load(std::memory_order_acquire)) return Landed::Nothing;
+  std::unique_ptr<Read> read = std::move(read_);
+  read->join();
+  if (!read->ok) {
+    error = read->error;
+    return Landed::Failed;
+  }
+  open_pixels(std::move(read->img), read->path);
+  source_path_ = read->path;
+  return Landed::Opened;
+}
+
 /* One row of `out` as the average of the source pixels it covers (an area filter: no aliasing when shrinking). */
 void downsample_row(const Image &in, Image &out, int y) {
   const float sx = (float)in.w / out.w, sy = (float)in.h / out.h;
@@ -92,6 +179,7 @@ void downsample_row(const Image &in, Image &out, int y) {
 }
 
 void Doc::open_pixels(Image img, const std::string &label) {
+  cancel_open();  // (a read still under way is of the picture this replaces)
   source_ = std::move(img);
   source_path_.clear();
   edit_path_.clear();
@@ -250,7 +338,7 @@ bool Doc::redo() {
 
 void Pipeline::clear() {
   for (Image &img : cache) recycle(img);
-  cache.clear(), keys.clear();
+  cache.clear(), keys.clear(), keeps.clear();
 }
 
 void Pipeline::recycle(Image &img) {
@@ -287,10 +375,16 @@ const Image &Doc::run(Pipeline &p, const Image &src, int steps) {
   int start = first;
   while (start > 0 && p.cache[(size_t)start - 1].empty()) start--;
   p.evaluated = steps - start;
+  /* A step's kept parts are of its input: the input of step `first` is unchanged (it is the result of steps before it, all
+   * the same), every later one's is recomputed - and an undo, a mask or any edit before a step lowers `first` past it. */
+  if (p.keeps.size() < stack_.size()) p.keeps.resize(stack_.size());
+  for (size_t i = (size_t)first + 1; i < p.keeps.size(); i++) p.keeps[i].clear();
+  for (size_t i = 0; i < p.keeps.size(); i++)  // (a step that is no longer one of the four holds nothing)
+    if (i >= stack_.size() || !adjustment_keeps_parts(stack_[i].type)) p.keeps[i].clear();
   for (int i = start; i < steps; i++) {
     const Image &in = i == 0 ? src : p.cache[(size_t)i - 1];
     Image out = p.take(in.w, in.h);
-    apply(stack_[(size_t)i], in, out, p.scale);
+    apply(stack_[(size_t)i], in, out, p.scale, &p.keeps[(size_t)i]);
     if (i < first) {
       p.cache[(size_t)i] = std::move(out);
       continue;

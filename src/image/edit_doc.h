@@ -8,6 +8,7 @@
 #include "../render/shading.h"
 #include "adjustments.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@ const std::vector<Preset> &builtin_presets();
 struct Pipeline {
   std::vector<Image> cache;       // cache[i]: through steps 0..i (empty when dropped; its key kept)
   std::vector<std::string> keys;  // to_text of step i when cached
+  std::vector<FilterKeep> keeps;  // keeps[i]: what step i's filter made of its input (see FilterKeep); valid while that input is
   std::vector<Image> spare;       // buffers to write the next results into
   float scale = 1.0f;             // the picture's size over the source's (pixel-sized fields follow it)
   size_t max_spare = 2;
@@ -41,8 +43,19 @@ ViewTransform saved_view(int vt);
 
 class Doc {
  public:
+  Doc();
+  ~Doc();  // (joins the reads still running)
   /* A file (PNG, JPEG, TGA, BMP, HDR, EXR; 8-bit files decoded from sRGB to linear) or pixels handed over. */
   bool open_file(const std::string &path, std::string &error);
+  /* The same read on a worker (round 508: a 4K picture takes 150 ms to decode). The document keeps showing what it
+   * holds until poll_open() finds the read done and opens it. Another read started, the document opened by any other
+   * way (open_pixels, load) or cancel_open() drops the read in flight: its result is thrown away when it ends. */
+  void open_file_async(const std::string &path);
+  bool loading() const { return read_ != nullptr; }
+  const std::string &loading_path() const;
+  enum class Landed { Nothing, Opened, Failed };
+  Landed poll_open(std::string &error);  // Opened: the picture is the document now; Failed: `error` says why
+  void cancel_open();
   void open_pixels(Image img, const std::string &label);
   bool is_open() const { return !source_.empty(); }
   const Image &source() const { return source_; }
@@ -112,6 +125,10 @@ class Doc {
   void stack_from_text(const std::string &text);
 
  private:
+  struct Read;
+  std::unique_ptr<Read> read_;                  // the newest read still wanted
+  std::vector<std::unique_ptr<Read>> dropped_;  // reads dropped while running: joined once they end, or at the end
+  void reap_dropped(bool wait);
   const Image &run(Pipeline &p, const Image &src, int steps);
   bool save_source(const std::string &path, std::string &error);
   Image source_;

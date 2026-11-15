@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the lighting tests (task 0177: one file a subsystem; the groups keep their rounds' order).
+#include "../src/core/view_perf.h"
 #include "test_common.h"
 #include "../src/render/reflection_probe.h"
 #include "../src/scene/unity_material.h"
@@ -11952,6 +11953,287 @@ static void tests_round482() {
   });
 }
 
+/* ---------------------------------------------------------------- round 507: the bake's landing (task 0491) */
+static std::vector<std::vector<Vec3>> r507_pages(const Editor &ed) {
+  std::vector<std::vector<Vec3>> out;
+  for (const Lightmap &p : ed.lighting_data_for_test().pages) out.push_back(p.texels);
+  return out;
+}
+
+static void r507_scene(Editor &ed) {
+  GameObject *floor = ed.scene().create("Floor");
+  floor->add<MeshFilter>()->mesh = primitives::plane(6.0f, 4);
+  floor->add<MeshRenderer>()->contribute_gi = true;
+  for (int i = 0; i < 3; i++) {
+    GameObject *box = ed.scene().create("Box" + std::to_string(i));
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->set_local_position({(float)i * 1.5f - 1.5f, 0.5f, 0});
+    box->add<MeshRenderer>()->contribute_gi = true;
+  }
+  ed.scene().lighting.texels_per_unit = 8.0f;
+  ed.scene().lighting.indirect_samples = 16;
+  ed.commit_change("scene");
+}
+
+static void tests_round507() {
+  test("Generate Lighting's landing (round 507): the lightmaps after a bake that lands frames later are the ones of a bake that lands in the frame that started it, and a bake started the moment the first landed lands whole too", [] {
+    const std::string scene = "Assets/Scenes/R507Land.scene";
+    std::string dir;
+    std::vector<std::vector<Vec3>> one_frame, later, again;
+    {
+      Editor ed;
+      ed.init_headless(640, 400);
+      r507_scene(ed);
+      ed.command("save " + scene);
+      dir = ed.lighting_dir_for_test();
+      ed.command("bake start");  // (headless without workers: the worker is joined where the frame lands it)
+      for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+      one_frame = r507_pages(ed);
+      std::printf("    inline landing: %zu page(s), landing %.1f ms (files moved %.1f, save_lighting_data %.1f)\n", one_frame.size(), ed.last_bake_times_for_test().land_ms,
+                  ed.last_bake_times_for_test().land_move_ms, ed.last_bake_times_for_test().land_save_ms);
+    }
+    {
+      Editor ed;
+      ed.init_headless(640, 400);
+      r507_scene(ed);
+      ed.command("save " + scene);
+      ed.set_async_jobs_for_test(true);
+      ed.command("bake start");
+      CHECK(ed.baking_for_test());
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+      while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+      CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+      later = r507_pages(ed);
+      const auto &b = ed.last_bake_times_for_test();
+      std::printf("    worker landing: %zu page(s), the landing frame %.1f ms (files moved %.1f, save_lighting_data %.1f), saving on the worker %.1f ms\n", later.size(), b.land_ms,
+                  b.land_move_ms, b.land_save_ms, b.phase_ms[4]);
+      std::printf("    the files still on their way when the bake landed: %s\n", ed.lighting_moving_for_test() ? "yes" : "no");
+      ed.command("bake start");  // (the next one started as soon as the first has landed: it waits for the files, then uses the same folder)
+      ed.step_frame_headless();
+      CHECK(ed.baking_for_test());
+      while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+      CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+      again = r507_pages(ed);
+      for (int i = 0; i < 400 && ed.lighting_moving_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.lighting_moving_for_test() && fs::exists(fs::join(ed.lighting_dir_for_test(), "LightingData.bin")) && !fs::exists(ed.lighting_dir_for_test() + ".baking"));
+      /* A third bake: once landed and its files arrived, the folder holds them and the scene says it is saved there. */
+      ed.command("bake start");
+      while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+      for (int i = 0; i < 400 && ed.lighting_moving_for_test(); i++) ed.step_frame_headless();
+      CHECK(!ed.lighting_moving_for_test() && fs::exists(fs::join(ed.lighting_dir_for_test(), "LightingData.bin")) && !fs::exists(ed.lighting_dir_for_test() + ".baking"));
+    }
+    CHECK(!one_frame.empty() && one_frame.size() == later.size() && later.size() == again.size());
+    for (size_t k = 0; k < std::min(one_frame.size(), later.size()); k++) {
+      CHECK(one_frame[k].size() == later[k].size());
+      CHECK(one_frame[k].size() != later[k].size() || std::memcmp(one_frame[k].data(), later[k].data(), one_frame[k].size() * sizeof(Vec3)) == 0);
+    }
+    for (size_t k = 0; k < std::min(later.size(), again.size()); k++)
+      CHECK(later[k].size() == again[k].size() && std::memcmp(later[k].data(), again[k].data(), later[k].size() * sizeof(Vec3)) == 0);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::remove(resolve_asset_path(scene).c_str());
+    /* What the landing's moves cost per file on this machine (printed, never asserted): 60 pages of 256 KB written, then moved over older ones. */
+    const std::string from = fs::join(test_dir(), "r507_move_from"), to = fs::join(test_dir(), "r507_move_to");
+    fs::make_dirs(from), fs::make_dirs(to);
+    const std::string blob(256 * 1024, 'x');
+    for (int i = 0; i < 60; i++) fs::write_file(fs::join(from, "page" + std::to_string(i) + ".bin"), blob), fs::write_file(fs::join(to, "page" + std::to_string(i) + ".bin"), blob);
+    ScopedTimer move_t;
+    for (const DirEntry &de : fs::list(from)) {
+      std::filesystem::remove(std::filesystem::u8path(fs::join(to, de.name)), ec);
+      std::filesystem::rename(std::filesystem::u8path(fs::join(from, de.name)), std::filesystem::u8path(fs::join(to, de.name)), ec);
+    }
+    std::printf("    moving 60 files over older ones: %.1f ms\n", move_t.ms());
+    std::filesystem::remove_all(from, ec), std::filesystem::remove_all(to, ec);
+  });
+}
+
+/* Round 507, test engineer (task 0491): the bake's files moving on a follow-up job, with the scene doing other things meanwhile. */
+namespace r507te {
+/* A scene saved, baked on workers, stopped on the frame the bake landed (the file move may still be running). */
+static void bake_until_landed(Editor &ed, const std::string &scene) {
+  ed.init_headless(640, 400);
+  r507_scene(ed);
+  ed.command("save " + scene);
+  ed.set_async_jobs_for_test(true);
+  ed.command("bake start");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+  while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+}
+static void settle(Editor &ed) {
+  for (int i = 0; i < 600 && ed.lighting_moving_for_test(); i++) {
+    ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+}
+static void drop(const std::string &dir, const std::string &scene) {
+  std::error_code ec;
+  std::filesystem::remove_all(std::filesystem::u8path(dir), ec);
+  std::filesystem::remove_all(std::filesystem::u8path(dir + ".baking"), ec);
+  std::remove(resolve_asset_path(scene).c_str());
+}
+}  // namespace r507te
+
+static void tests_round507_te() {
+  test("round 507 (test engineer): Clear Baked Data the moment a bake lands leaves nothing baked, no files and no .baking folder - and stays that way", [] {
+    const std::string scene = "Assets/Scenes/R507teClear.scene";
+    Editor ed;
+    r507te::bake_until_landed(ed, scene);
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    const std::string dir = ed.lighting_dir_for_test();
+    std::printf("    files still moving at the Clear: %s\n", ed.lighting_moving_for_test() ? "yes" : "no");
+    ed.command("bake clear");
+    CHECK(!ed.lighting_moving_for_test());
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    CHECK(ed.lighting_data_for_test().empty());
+    CHECK(!fs::exists(fs::join(dir, "LightingData.bin")) && !fs::exists(dir + ".baking"));
+    ed.command("undo");  // (what Clear did, undone: a valid scene, no fault, nothing half-written)
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    CHECK(!ed.lighting_moving_for_test() && !fs::exists(dir + ".baking"));
+    r507te::drop(dir, scene);
+  });
+  test("round 507 (test engineer): Save As to another file the moment a bake lands writes the lightmaps next to the new file", [] {
+    const std::string scene = "Assets/Scenes/R507teSaveA.scene", scene2 = "Assets/Scenes/R507teSaveB.scene";
+    Editor ed;
+    r507te::bake_until_landed(ed, scene);
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    const std::string dir = ed.lighting_dir_for_test();
+    const auto pages = r507_pages(ed);
+    ed.command("save " + scene2);
+    const std::string dir2 = ed.lighting_dir_for_test();
+    CHECK(dir2 != dir);
+    r507te::settle(ed);
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    const auto after = r507_pages(ed);
+    std::printf("    new folder %s: LightingData.bin %d\n", dir2.c_str(), (int)fs::exists(fs::join(dir2, "LightingData.bin")));
+    CHECK(fs::exists(fs::join(dir2, "LightingData.bin")));
+    CHECK(after.size() == pages.size());
+    CHECK(!fs::exists(dir + ".baking") && !fs::exists(dir2 + ".baking"));
+    r507te::drop(dir, scene);
+    r507te::drop(dir2, scene2);
+  });
+  test("round 507 (test engineer): opening the baked scene again the moment the bake lands brings in every page it baked", [] {
+    const std::string scene = "Assets/Scenes/R507teOpen.scene";
+    Editor ed;
+    r507te::bake_until_landed(ed, scene);
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    const std::string dir = ed.lighting_dir_for_test();
+    const auto pages = r507_pages(ed);
+    std::printf("    files still moving at the open: %s\n", ed.lighting_moving_for_test() ? "yes" : "no");
+    ed.command("open " + scene);
+    r507te::settle(ed);
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    const auto after = r507_pages(ed);
+    std::printf("    pages baked %zu, after the open %zu\n", pages.size(), after.size());
+    CHECK(after.size() == pages.size());
+    ed.command("open " + scene);  // (the control: the files have long arrived - what a file gives back is what a late open gives)
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    const auto late = r507_pages(ed);
+    CHECK(late.size() == after.size());
+    for (size_t k = 0; k < std::min(late.size(), after.size()); k++) {
+      CHECK(late[k].size() == after[k].size());
+      CHECK(late[k].size() != after[k].size() || std::memcmp(late[k].data(), after[k].data(), late[k].size() * sizeof(Vec3)) == 0);
+    }
+    float worst = 0.0f;  // (what is saved is not bit for bit what was baked in memory: the file's own precision)
+    for (size_t k = 0; k < std::min(pages.size(), late.size()); k++)
+      for (size_t i = 0; i < std::min(pages[k].size(), late[k].size()); i++)
+        worst = std::max(worst, std::max({std::fabs(pages[k][i].x - late[k][i].x), std::fabs(pages[k][i].y - late[k][i].y), std::fabs(pages[k][i].z - late[k][i].z)}));
+    std::printf("    largest texel difference baked vs loaded: %g\n", worst);
+    CHECK(worst < 0.05f);
+    CHECK(!fs::exists(dir + ".baking"));
+    r507te::drop(dir, scene);
+  });
+  test("round 507 (test engineer): New Scene the moment a bake lands is clean - no lightmaps, no stray folder, no fault when the files arrive", [] {
+    const std::string scene = "Assets/Scenes/R507teNew.scene";
+    Editor ed;
+    r507te::bake_until_landed(ed, scene);
+    const std::string dir = ed.lighting_dir_for_test();
+    ed.command("newscene");
+    r507te::settle(ed);
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    CHECK(ed.lighting_data_for_test().empty());
+    CHECK(ed.lighting_dir_for_test().empty() && !ed.lighting_moving_for_test());
+    CHECK(!fs::exists(dir + ".baking"));
+    r507te::drop(dir, scene);
+  });
+  test("round 507 (review): opening the same scene the moment the bake lands waits for the files - the lightmaps load (as a late open's) and nothing warns", [] {
+    const std::string scene = "Assets/Scenes/R507rvOpen.scene";
+    Editor ed;
+    r507te::bake_until_landed(ed, scene);
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    const std::string dir = ed.lighting_dir_for_test();
+    const size_t baked_pages = r507_pages(ed).size();
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    std::printf("    files still moving at the open: %s\n", ed.lighting_moving_for_test() ? "yes" : "no");
+    ed.command("open " + scene);  // (reads on a worker and lands a frame or more later: the files may still be moving then)
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    CHECK(!ed.lighting_moving_for_test());
+    const auto at_once = r507_pages(ed);
+    CHECK(at_once.size() == baked_pages && !ed.lighting_data_for_test().empty());
+    log.clear();
+    Log::fetch(since, log);
+    bool warned = false;
+    for (const LogEntry &e : log) {
+      warned = warned || e.level != LogLevel::Info;
+      if (e.level != LogLevel::Info) std::printf("    warned: %s\n", e.text.c_str());
+    }
+    ed.command("open " + scene);  // (the control: a late open)
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    const auto late = r507_pages(ed);
+    CHECK(late.size() == at_once.size());
+    for (size_t k = 0; k < std::min(late.size(), at_once.size()); k++)
+      CHECK(late[k].size() == at_once[k].size() && std::memcmp(late[k].data(), at_once[k].data(), late[k].size() * sizeof(Vec3)) == 0);
+    CHECK(!warned);
+    r507te::drop(dir, scene);
+  });
+}
+
+static void tests_round508() {
+  test("Generate Lighting with the views on the CPU (round 508, ADR 0140): the bake lands in the frame after its worker ends, as before - no page is sent ahead, and the lightmaps are the one-frame landing's", [] {
+    std::vector<std::vector<Vec3>> inline_pages, cpu_pages;
+    {
+      Editor ed;
+      ed.init_headless(640, 400);
+      r507_scene(ed);
+      ed.command("bake start");
+      for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+      inline_pages = r507_pages(ed);
+    }
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.viewport_device_for_test(1);  // (1: the CPU)
+    r507_scene(ed);
+    ed.set_async_jobs_for_test(true);
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test());
+    CHECK(view_perf::counters.lightmap_pages_before_landing == ahead0);
+    cpu_pages = r507_pages(ed);
+    CHECK(!cpu_pages.empty() && cpu_pages.size() == inline_pages.size());
+    for (size_t k = 0; k < cpu_pages.size() && k < inline_pages.size(); k++)
+      CHECK(cpu_pages[k].size() == inline_pages[k].size() && std::memcmp(cpu_pages[k].data(), inline_pages[k].data(), cpu_pages[k].size() * sizeof(Vec3)) == 0);
+  });
+  test("Generate Lighting with the card open but the views on the CPU (round 508's review): nothing is sent to the card ahead - it would never be read nor let go - and the bake lands at once", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.viewport_device_for_test(2);  // (the card opened first, where there is one)
+    r507_scene(ed);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    ed.viewport_device_for_test(1);  // (then CPU views: the card stays open, drawing nothing)
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    ed.set_async_jobs_for_test(true);
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    CHECK(view_perf::counters.lightmap_pages_before_landing == ahead0);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -11995,4 +12277,7 @@ void run_lighting_tests() {
   tests_round486_independent();
   tests_round487();
   tests_round482();
+  tests_round507();
+  tests_round507_te();
+  tests_round508();
 }

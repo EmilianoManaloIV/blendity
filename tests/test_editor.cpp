@@ -3,6 +3,7 @@
 #include "../src/scene/raycast.h"
 #include "../src/scene/stroke_object.h"
 #include "test_common.h"
+#include "../src/core/view_perf.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
 #include "../src/scene/budget.h"
@@ -12312,6 +12313,2363 @@ static void tests_round472() {
   });
 }
 
+/* ---------------------------------------------------------------- round 506: the Scene view's kept per-frame work (task 0490) */
+/* A test's pictures of the Scene view and the Game view, and how many pixels of two differ (alpha left out). */
+struct R506Pics {
+  std::vector<uint32_t> scene, game;
+};
+static R506Pics r506_pics(Editor &ed) { return {r35_scene_view(ed), r35_game(ed)}; }
+static size_t r506_differ(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  size_t n = a.size() > b.size() ? a.size() - b.size() : b.size() - a.size();
+  for (size_t i = 0; i < a.size() && i < b.size(); i++) n += (a[i] & 0xFFFFFF) != (b[i] & 0xFFFFFF);
+  return n;
+}
+static size_t r506_differ(const R506Pics &a, const R506Pics &b) { return r506_differ(a.scene, b.scene) + r506_differ(a.game, b.game); }
+
+/* The camera nudged back and forth so every frame draws the Scene view; ends where r34_open leaves it. */
+static void r506_orbit(Editor &ed, int pairs) {
+  for (int k = 0; k < pairs; k++) {
+    ed.command("camera 26 20 7 0 0.5 0");
+    r34_steps(ed, 1);
+    ed.command("camera 25 20 7 0 0.5 0");
+    r34_steps(ed, 1);
+  }
+}
+
+/* Puts view_perf's switches back whatever a check does. */
+struct R506Switches {
+  bool keeps = view_perf::keeps;
+  unsigned disabled = view_perf::disabled, stale = view_perf::stale_for_test;
+  ~R506Switches() { view_perf::keeps = keeps, view_perf::disabled = disabled, view_perf::stale_for_test = stale; }
+};
+
+/* What an edit does to the two views, with the keeps on and then off. `shown`: pixels the edit changed (it must be seen);
+ * `kept_vs_fresh`: pixels where the picture drawn with the keeps on - a few orbit frames after the edit, in their kept state - is
+ * not the one drawn with them off (must be none). */
+struct R506Result {
+  size_t shown = 0, kept_vs_fresh = 0;
+};
+static R506Result r506_edit(Editor &ed, const std::function<void()> &edit) {
+  R506Switches restore;
+  r506_orbit(ed, 3);
+  const R506Pics before = r506_pics(ed);
+  edit();
+  r506_orbit(ed, 3);
+  const R506Pics on = r506_pics(ed);
+  view_perf::keeps = false;
+  r506_orbit(ed, 2);
+  const R506Pics off = r506_pics(ed);
+  view_perf::keeps = true;
+  return {r506_differ(before, on), r506_differ(on, off)};
+}
+
+/* An editor on the default scene (a window's check interval: with every frame checked nothing would be kept). */
+static void r506_open(Editor &ed) {
+  r34_open(ed);
+  ed.set_scene_hash_check_every_for_test(8);
+  r506_orbit(ed, 4);
+}
+
+static void tests_round506() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506: a light moved, added or deleted shows in the Scene view and the Game view the same frame - the picture is the one drawn with every keep off, and undo takes each back; with the lighting keep's invalidation skipped it would not", [] {
+    Editor ed;
+    r506_open(ed);
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun != nullptr);
+    if (!sun) return;
+    auto step_of = [&](const char *what, const std::function<void()> &edit, bool shown) {
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the picture drawn with every keep off\n", what, r.shown, r.kept_vs_fresh);
+      CHECK(!shown || r.shown > 50);
+      CHECK(r.kept_vs_fresh == 0);
+      return r;
+    };
+    step_of("the sun turned", [&] { sun->set_local_euler(Vec3(70.0f, 40.0f, 0.0f)), ed.mark_changed_for_test("sun turned"); }, true);
+    step_of("the sun turned back (undo)", [&] { ed.command("undo"); }, true);
+    step_of("a Point Light added", [&] {
+      ed.command("create Point Light");
+      if (GameObject *l = ed.scene().find_by_name("Point Light")) l->set_local_position({0.0f, 1.2f, 0.0f});
+      ed.mark_changed_for_test("a Point Light");
+    }, true);
+    GameObject *lamp = ed.scene().find_by_name("Point Light");
+    CHECK(lamp != nullptr);
+    if (lamp) step_of("the Point Light moved", [&] { lamp->set_local_position({1.5f, 0.6f, 0.0f}), ed.mark_changed_for_test("lamp moved"); }, true);
+    step_of("the Point Light's intensity", [&] {
+      if (lamp) lamp->get<Light>()->intensity = 6.0f;
+      ed.mark_changed_for_test("lamp brighter");
+    }, true);
+    step_of("the Point Light deleted", [&] {
+      if (lamp) ed.scene().destroy(lamp);
+      ed.mark_changed_for_test("lamp deleted");
+    }, true);
+    step_of("the deletion undone", [&] { ed.command("undo"); }, true);
+    /* The proof the pictures can tell: with the keep taken for valid whatever changed, the turned sun is not drawn the same. */
+    {
+      R506Switches restore;
+      view_perf::stale_for_test = 1u << view_perf::Lighting;
+      r506_orbit(ed, 3);
+      const R506Pics before = r506_pics(ed);
+      sun = ed.scene().find_by_name("Directional Light");
+      sun->set_local_euler(Vec3(20.0f, 120.0f, 0.0f)), ed.mark_changed_for_test("sun turned again");
+      r506_orbit(ed, 3);
+      const R506Pics stale = r506_pics(ed);
+      view_perf::stale_for_test = 0;
+      view_perf::keeps = false;
+      r506_orbit(ed, 2);
+      const R506Pics fresh = r506_pics(ed);
+      std::printf("    with the invalidation skipped: the picture is %zu pixels from the fresh one (it moved %zu pixels from before)\n", r506_differ(stale, fresh), r506_differ(before, fresh));
+      CHECK(r506_differ(stale, fresh) > 50);
+    }
+  });
+  test("round 506: an object moved, added or deleted, a material's colour and the world changed show in both views the same frame - the picture is the one drawn with every keep off - and undo takes each back", [] {
+    Editor ed;
+    r506_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    auto step_of = [&](const char *what, const std::function<void()> &edit) {
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the picture drawn with every keep off\n", what, r.shown, r.kept_vs_fresh);
+      CHECK(r.shown > 50);
+      CHECK(r.kept_vs_fresh == 0);
+    };
+    step_of("an object moved", [&] { cube->set_local_position({1.2f, 0.5f, 0.3f}), ed.mark_changed_for_test("cube moved"); });
+    step_of("...and undone", [&] { ed.command("undo"); });
+    step_of("an object added", [&] {
+      GameObject *g = create_primitive(ed.scene(), "Sphere");
+      g->name = "R506 Ball";
+      g->set_local_position({-1.5f, 0.5f, 0.5f});
+      ed.mark_changed_for_test("a sphere");
+    });
+    GameObject *sphere = ed.scene().find_by_name("R506 Ball");
+    CHECK(sphere != nullptr);
+    if (sphere) {
+      step_of("its material's colour", [&] {
+        MaterialPtr m = make_material("R506", Vec3(0.9f, 0.1f, 0.1f));
+        sphere->get<MeshRenderer>()->materials = {m};
+        ed.mark_changed_for_test("material set");
+      });
+      step_of("...and its colour changed", [&] {
+        MaterialPtr m = sphere->get<MeshRenderer>()->materials[0];
+        m->base_color = Vec3(0.1f, 0.2f, 0.9f);
+        m->touch();
+        ed.mark_changed_for_test("material colour");
+      });
+      step_of("the object deleted", [&] { ed.scene().destroy(sphere), ed.mark_changed_for_test("sphere deleted"); });
+      step_of("...and undone", [&] { ed.command("undo"); });
+    }
+    step_of("the world turned to a colour", [&] { ed.command("world color"), ed.scene().environment.color = Vec3(0.8f, 0.3f, 0.2f), ed.mark_changed_for_test("world colour"); });
+    step_of("...and to a Sky", [&] { ed.command("world sky"); });
+  });
+  test("round 506: with the render cache's verify mode on, the lights and the draw items kept across a still orbit and an edit are found the same when walked again", [] {
+    Editor ed;
+    r506_open(ed);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    r506_orbit(ed, 4);
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    if (sun) sun->set_local_euler(Vec3(60.0f, 10.0f, 0.0f)), ed.mark_changed_for_test("sun");
+    r506_orbit(ed, 4);
+    ed.command("create Point Light");
+    r506_orbit(ed, 4);
+    ed.set_render_cache_verify(false);
+    std::printf("    stale records found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - m0));
+    CHECK(Editor::render_cache_mismatches_all() == m0);
+  });
+  test("round 506: a frame in which only the camera moved walks no lights and copies no draw-item list; an edit does both once", [] {
+    Editor ed;
+    r506_open(ed);
+    /* Frames until a lighting walk was made (its own frame of the eight), then the frames after it: none comes before its next. */
+    auto walked = [&] {
+      for (int i = 0; i < 20; i++) {
+        view_perf::reset();
+        r506_orbit(ed, 1);
+        if (view_perf::counters.light_walks > 0) return true;
+      }
+      return false;
+    };
+    CHECK(walked());
+    view_perf::reset();
+    r506_orbit(ed, 2);  // (4 frames)
+    const view_perf::Counters c = view_perf::counters;
+    std::printf("    4 camera-only frames: %llu light walks, %llu item lists copied (kept %llu times, copied %llu times), %llu lighting hits\n", (unsigned long long)c.light_walks,
+                (unsigned long long)c.item_copies, (unsigned long long)c.hit[view_perf::ItemsCopy], (unsigned long long)c.miss[view_perf::ItemsCopy],
+                (unsigned long long)c.hit[view_perf::Lighting]);
+    CHECK(c.light_walks == 0);
+    CHECK(c.item_copies == 0);
+    CHECK(c.hit[view_perf::Lighting] >= 3);
+    CHECK(c.hit[view_perf::ItemsCopy] >= 3);
+    /* The same frames with the keeps off do all of it again. */
+    {
+      R506Switches restore;
+      view_perf::keeps = false;
+      view_perf::reset();
+      r506_orbit(ed, 2);
+      std::printf("    4 frames with the keeps off: %llu light walks, %llu item lists copied\n", (unsigned long long)view_perf::counters.light_walks, (unsigned long long)view_perf::counters.item_copies);
+      CHECK(view_perf::counters.light_walks >= 4);
+      CHECK(view_perf::counters.item_copies >= 4);
+    }
+    /* An edit: the lights are walked again the frame it is seen. */
+    view_perf::reset();
+    ed.command("create Point Light"), ed.mark_changed_for_test("a light");
+    r34_steps(ed, 1);
+    CHECK(view_perf::counters.light_walks >= 1);
+  });
+}
+
+/* ---------------------------------------------------------------- round 506, second part: probes, Solid shading, the Hierarchy */
+/* A bake of a plain colour, valid (six faces 4 x 4). */
+static ReflectionProbeBake r506_bake(Vec3 colour) {
+  ReflectionProbeBake b;
+  b.size = 4;
+  for (auto &f : b.faces) f.assign(16, colour);
+  return b;
+}
+
+/* Frames with the pointer moving over the Hierarchy (so its window draws every one). */
+static void r506_hier_frames(Editor &ed, int n) {
+  ed.clear_hierarchy_rows_for_test();
+  const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+  for (int k = 0; k < n; k++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, h.x + h.w / 2 + (k % 5), h.y + h.h / 2)});
+}
+
+static bool r506_row(Editor &ed, const std::string &name, int *x = nullptr) {
+  int rx = 0, ry = 0;
+  const bool found = ed.hierarchy_row_for_test(name, rx, ry);
+  if (x) *x = rx;
+  return found;
+}
+
+static void tests_round506_more() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506: a Reflection Probe with a bake added, moved, its bake replaced and removed shows on a shiny ball in both views the same frame - the picture is the one drawn with every keep off - and undo takes each back", [] {
+    Editor ed;
+    r506_open(ed);
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    CHECK(ball != nullptr);
+    if (!ball) return;
+    MaterialPtr shiny = make_material("R506 Shiny", Vec3(0.9f));
+    shiny->metallic = 1.0f, shiny->roughness = 0.1f;
+    ball->get<MeshRenderer>()->materials = {shiny};
+    ed.mark_changed_for_test("a shiny ball");
+    auto step_of = [&](const char *what, const std::function<void()> &edit) {
+      view_perf::reset();
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the picture drawn with every keep off, %llu light walks\n", what, r.shown, r.kept_vs_fresh,
+                  (unsigned long long)view_perf::counters.light_walks);
+      CHECK(r.kept_vs_fresh == 0);
+      return r;
+    };
+    uint64_t id = 0;
+    const R506Result added = step_of("a probe with a red bake added", [&] {
+      GameObject *p = ed.scene().create("R506 Probe");
+      p->set_local_position({0.0f, 1.0f, 0.0f});
+      p->add<ReflectionProbeComponent>();
+      id = p->id;
+      ed.reflection_probe_bakes_for_test()[id] = r506_bake(Vec3(0.9f, 0.05f, 0.05f));
+      ed.reflection_probe_bakes_changed();
+      ed.mark_changed_for_test("a probe");
+    });
+    CHECK(added.shown > 20);
+    const R506Result rebaked = step_of("its bake replaced by a blue one", [&] {
+      ed.reflection_probe_bakes_for_test()[id] = r506_bake(Vec3(0.05f, 0.1f, 0.9f));
+      ed.reflection_probe_bakes_changed();
+    });
+    CHECK(rebaked.shown > 20);
+    step_of("the probe moved", [&] {
+      ed.scene().find(id)->set_local_position({0.0f, 1.0f, 0.4f});
+      ed.mark_changed_for_test("probe moved");
+    });
+    const R506Result removed = step_of("the probe deleted", [&] {
+      ed.scene().destroy(ed.scene().find(id));
+      ed.reflection_probe_bakes_for_test().erase(id);
+      ed.reflection_probe_bakes_changed();
+      ed.mark_changed_for_test("probe deleted");
+    });
+    CHECK(removed.shown > 20);
+  });
+  test("round 506: Solid shading shows an object moved, added or deleted, a material's colour, a selection and undo of each the same frame - the picture is the one drawn with every keep off - and a camera-only Solid frame gathers no item list; with the Solid keep's invalidation skipped the move is not seen", [] {
+    Editor ed;
+    r506_open(ed);
+    ed.command("shading solid");
+    r506_orbit(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    auto step_of = [&](const char *what, const std::function<void()> &edit, bool shown) {
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the picture drawn with every keep off\n", what, r.shown, r.kept_vs_fresh);
+      CHECK(!shown || r.shown > 20);
+      CHECK(r.kept_vs_fresh == 0);
+    };
+    step_of("an object moved", [&] { cube->set_local_position({1.4f, 0.5f, 0.2f}), ed.mark_changed_for_test("cube moved"); }, true);
+    step_of("...and undone", [&] { ed.command("undo"); }, true);
+    step_of("an object added", [&] {
+      GameObject *g = create_primitive(ed.scene(), "Sphere");
+      g->name = "R506 Solid Ball";
+      g->set_local_position({-1.6f, 0.5f, 0.4f});
+      ed.mark_changed_for_test("a ball");
+    }, true);
+    step_of("its material's colour", [&] {
+      ed.scene().find_by_name("R506 Solid Ball")->get<MeshRenderer>()->materials = {make_material("R506 Solid", Vec3(0.9f, 0.1f, 0.1f))};
+      ed.mark_changed_for_test("solid material");
+    }, true);
+    step_of("a selection", [&] { ed.command("select R506 Solid Ball"); }, false);
+    step_of("the object deleted", [&] { ed.scene().destroy(ed.scene().find_by_name("R506 Solid Ball")), ed.mark_changed_for_test("ball deleted"); }, true);
+    step_of("...and undone", [&] { ed.command("undo"); }, true);
+    /* A camera-only Solid frame gathers no list; with the keeps off every frame does. */
+    r506_orbit(ed, 2);
+    view_perf::reset();
+    r506_orbit(ed, 3);
+    const uint64_t kept_builds = view_perf::counters.solid_item_builds;
+    {
+      R506Switches restore;
+      view_perf::keeps = false;
+      view_perf::reset();
+      r506_orbit(ed, 3);
+      std::printf("    6 camera-only Solid frames: %llu item lists gathered with the keeps on, %llu in 6 with them off\n", (unsigned long long)kept_builds,
+                  (unsigned long long)view_perf::counters.solid_item_builds);
+      CHECK(view_perf::counters.solid_item_builds >= 6);
+    }
+    CHECK(kept_builds == 0);
+    /* The proof the pictures can tell: with the keep taken for valid, a moved cube is not drawn where it went. */
+    R506Switches restore;
+    view_perf::stale_for_test = 1u << view_perf::SolidItems;
+    r506_orbit(ed, 3);
+    ed.scene().find_by_name("Cube")->set_local_position({-1.0f, 0.5f, 1.0f});
+    ed.mark_changed_for_test("cube moved again");
+    r506_orbit(ed, 3);
+    const R506Pics stale = r506_pics(ed);
+    view_perf::stale_for_test = 0;
+    view_perf::keeps = false;
+    r506_orbit(ed, 2);
+    const size_t wrong = r506_differ(stale, r506_pics(ed));
+    std::printf("    with the invalidation skipped: %zu pixels from the fresh picture\n", wrong);
+    CHECK(wrong > 20);
+  });
+  test("round 506: the Hierarchy shows a new object, drops a deleted one, shows a rename, a re-parent, a fold and the search the same frame - the rows are the ones made again with the keep off - undo and redo take each back; frames with nothing changed make the rows 0 times", [] {
+    Editor ed;
+    r506_open(ed);
+    r506_hier_frames(ed, 6);
+    CHECK(r506_row(ed, "Cube"));
+    /* The rows with the keep on, and made again with it off, over the same few frames: the same names, in the same places. */
+    auto same_as_fresh = [&](const char *what) {
+      std::vector<std::pair<std::string, int>> on, off;
+      r506_hier_frames(ed, 3);
+      for (const char *n : {"Cube", "Sphere", "Plane", "Cylinder", "R506 New", "R506 Renamed", "R506 Child", "R506 Parent"}) {
+        int x = 0;
+        on.push_back({n, r506_row(ed, n, &x) ? x : -1});
+      }
+      {
+        R506Switches restore;
+        view_perf::keeps = false;
+        r506_hier_frames(ed, 3);
+        for (const char *n : {"Cube", "Sphere", "Plane", "Cylinder", "R506 New", "R506 Renamed", "R506 Child", "R506 Parent"}) {
+          int x = 0;
+          off.push_back({n, r506_row(ed, n, &x) ? x : -1});
+        }
+      }
+      std::printf("    %s: the rows are %s\n", what, on == off ? "the fresh ones" : "NOT the fresh ones");
+      CHECK(on == off);
+      return on;
+    };
+    auto x_of = [](const std::vector<std::pair<std::string, int>> &rows, const char *n) {
+      for (const auto &r : rows)
+        if (r.first == n) return r.second;
+      return -1;
+    };
+    GameObject *made = create_primitive(ed.scene(), "Cube");
+    made->name = "R506 New";
+    ed.mark_changed_for_test("a new object");
+    auto rows = same_as_fresh("a new object");
+    CHECK(x_of(rows, "R506 New") >= 0);
+    ed.scene().find_by_name("R506 New")->name = "R506 Renamed";
+    ed.mark_changed_for_test("renamed");
+    rows = same_as_fresh("a rename");
+    CHECK(x_of(rows, "R506 Renamed") >= 0 && x_of(rows, "R506 New") < 0);
+    /* A parent with a child, folded and unfolded. */
+    GameObject *parent = create_primitive(ed.scene(), "Cube");
+    parent->name = "R506 Parent";
+    GameObject *child = create_primitive(ed.scene(), "Cube");
+    child->name = "R506 Child";
+    ed.scene().set_parent(child, parent);
+    ed.mark_changed_for_test("a parent and child");
+    rows = same_as_fresh("a parent folded");
+    CHECK(x_of(rows, "R506 Parent") >= 0 && x_of(rows, "R506 Child") < 0);
+    ed.set_hierarchy_expanded_for_test(parent->id, true);
+    rows = same_as_fresh("the parent unfolded");
+    CHECK(x_of(rows, "R506 Child") >= 0 && x_of(rows, "R506 Parent") >= 0);
+    ed.set_hierarchy_expanded_for_test(parent->id, false);
+    rows = same_as_fresh("folded again");
+    CHECK(x_of(rows, "R506 Child") < 0);
+    ed.set_hierarchy_expanded_for_test(parent->id, true);
+    ed.scene().set_parent(ed.scene().find_by_name("R506 Renamed"), ed.scene().find_by_name("R506 Child"));
+    ed.mark_changed_for_test("re-parented");
+    ed.set_hierarchy_expanded_for_test(ed.scene().find_by_name("R506 Child")->id, true);
+    rows = same_as_fresh("a re-parent");
+    CHECK(x_of(rows, "R506 Renamed") >= 0 && x_of(rows, "R506 Child") >= 0);
+    /* The search. */
+    ed.set_hierarchy_search_for_test("r506 ch");
+    rows = same_as_fresh("a search for 'r506 ch'");
+    CHECK(x_of(rows, "R506 Child") >= 0 && x_of(rows, "Cube") < 0 && x_of(rows, "R506 Parent") < 0);
+    ed.set_hierarchy_search_for_test("");
+    rows = same_as_fresh("the search cleared");
+    CHECK(x_of(rows, "Cube") >= 0);
+    /* Undo and redo. */
+    ed.command("undo");
+    rows = same_as_fresh("undo");
+    ed.command("redo");
+    rows = same_as_fresh("redo");
+    ed.scene().destroy(ed.scene().find_by_name("R506 Parent"));
+    ed.mark_changed_for_test("deleted");
+    rows = same_as_fresh("the parent deleted");
+    CHECK(x_of(rows, "R506 Parent") < 0);
+    ed.command("undo");
+    rows = same_as_fresh("...undone");
+    CHECK(x_of(rows, "R506 Parent") >= 0);
+    /* Nothing changed: the rows are kept (the check on the interval apart: made once the rows were just made, the next frames are all before it). */
+    bool made_rows = false;
+    for (int i = 0; i < 20 && !made_rows; i++) {
+      view_perf::reset();
+      r506_hier_frames(ed, 1);
+      made_rows = view_perf::counters.hierarchy_rebuilds > 0;
+    }
+    CHECK(made_rows);
+    view_perf::reset();
+    r506_hier_frames(ed, 6);
+    std::printf("    6 frames with nothing changed: the rows made %llu times (kept %llu)\n", (unsigned long long)view_perf::counters.hierarchy_rebuilds,
+                (unsigned long long)view_perf::counters.hit[view_perf::Hierarchy]);
+    CHECK(view_perf::counters.hierarchy_rebuilds == 0 && view_perf::counters.hit[view_perf::Hierarchy] >= 5);
+    /* With the keep's invalidation skipped, a new object doesn't show. */
+    R506Switches restore;
+    view_perf::stale_for_test = 1u << view_perf::Hierarchy;
+    GameObject *late = create_primitive(ed.scene(), "Cube");
+    late->name = "R506 Late";
+    ed.mark_changed_for_test("a late object");
+    r506_hier_frames(ed, 3);
+    const bool shown_stale = r506_row(ed, "R506 Late");
+    view_perf::stale_for_test = 0;
+    r506_hier_frames(ed, 3);
+    std::printf("    with the invalidation skipped the new object %s; intact it %s\n", shown_stale ? "shows" : "is missing", r506_row(ed, "R506 Late") ? "shows" : "is missing");
+    CHECK(!shown_stale && r506_row(ed, "R506 Late"));
+  });
+}
+
+/* ---------------------------------------------------------------- round 506, third part: transform-only edits, Lights Gamma, the preview's own list */
+static void tests_round506_third() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506: a light dragged (a transform write, no change recorded), a reflection probe dragged, a light moved by its parent, a light's intensity set by the console and the world's sun turned show in both views the same frame - the picture is the one drawn with every keep off - and a cube dragged walks no lights; with the placement comparison skipped the light drag is not seen", [] {
+    Editor ed;
+    r506_open(ed);
+    auto step_of = [&](const char *what, const std::function<void()> &edit, bool shown) {
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the picture drawn with every keep off\n", what, r.shown, r.kept_vs_fresh);
+      CHECK(!shown || r.shown > 50);
+      CHECK(r.kept_vs_fresh == 0);
+      return r;
+    };
+    /* (a) A light, then dragged by transform writes alone (what a drag does until it is let go). */
+    ed.command("create Point Light");
+    GameObject *lamp = ed.scene().find_by_name("Point Light");
+    CHECK(lamp != nullptr);
+    if (!lamp) return;
+    lamp->set_local_position({0.0f, 1.2f, 0.0f});
+    lamp->get<Light>()->intensity = 8.0f;
+    ed.mark_changed_for_test("a lamp");
+    r506_orbit(ed, 3);
+    const uint64_t id = lamp->id;
+    step_of("a light dragged, no change recorded", [&] { ed.scene().find(id)->set_local_position({1.6f, 0.5f, 0.0f}); }, true);
+    step_of("...dragged on", [&] { ed.scene().find(id)->set_local_position({-1.2f, 0.9f, 0.6f}); }, true);
+    /* (c) The same light moved by moving its parent. */
+    GameObject *holder = ed.scene().create("R506 Holder");
+    ed.scene().set_parent(ed.scene().find(id), holder);
+    ed.mark_changed_for_test("a parent for the lamp");
+    r506_orbit(ed, 3);
+    const uint64_t holder_id = holder->id;
+    step_of("the light's parent dragged", [&] { ed.scene().find(holder_id)->set_local_position({1.0f, 0.0f, 0.5f}); }, true);
+    /* (b) A reflection probe with a red bake over a shiny ball, dragged. */
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    if (ball) {
+      MaterialPtr shiny = make_material("R506 Shiny 3", Vec3(0.9f));
+      shiny->metallic = 1.0f, shiny->roughness = 0.1f;
+      ball->get<MeshRenderer>()->materials = {shiny};
+    }
+    GameObject *probe = ed.scene().create("R506 Probe 3");
+    probe->set_local_position({0.0f, 1.0f, 0.0f});
+    probe->add<ReflectionProbeComponent>();
+    const uint64_t pid = probe->id;
+    ed.reflection_probe_bakes_for_test()[pid] = r506_bake(Vec3(0.9f, 0.05f, 0.05f));
+    ed.reflection_probe_bakes_changed();
+    ed.mark_changed_for_test("a probe");
+    r506_orbit(ed, 3);
+    step_of("a reflection probe dragged", [&] { ed.scene().find(pid)->set_local_position({0.0f, 1.0f, 1.2f}); }, false);
+    /* (d) A light's intensity through the console's `set`, a path that records its own change. */
+    ed.command("select Directional Light");
+    step_of("a light's intensity set by the console", [&] { ed.command("set Light.Intensity 0.1"); }, true);
+    /* (e) A cube dragged: no light is walked for it (once a walk was just made, the interval's next is further off than the frames here). */
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const uint64_t cube_id = cube->id;
+    int drag_n = 0;
+    auto drag_frames = [&](int n) {
+      for (int k = 0; k < n; k++) {
+        ed.scene().find(cube_id)->set_local_position({0.02f * (float)(++drag_n), 0.5f, 0.3f});
+        r34_steps(ed, 1);
+      }
+    };
+    bool walked = false;
+    for (int i = 0; i < 20 && !walked; i++) {
+      view_perf::reset();
+      drag_frames(1);
+      walked = view_perf::counters.light_walks > 0;
+    }
+    CHECK(walked);
+    view_perf::reset();
+    drag_frames(5);
+    std::printf("    5 frames of a cube dragged: %llu light walks (lighting kept %llu times)\n", (unsigned long long)view_perf::counters.light_walks,
+                (unsigned long long)view_perf::counters.hit[view_perf::Lighting]);
+    CHECK(view_perf::counters.light_walks == 0 && view_perf::counters.hit[view_perf::Lighting] >= 4);
+    /* (f) The proof the pictures can tell: with only the placement comparison skipped, a light dragged is not drawn where it went. */
+    ed.scene().find(holder_id)->set_local_position({0.0f, 0.0f, 0.0f});
+    ed.mark_changed_for_test("settled");
+    r506_orbit(ed, 3);
+    R506Switches restore;
+    view_perf::stale_for_test = view_perf::kStaleTrackedBit;
+    view_perf::stale_for_test = view_perf::kStaleTrackedBit;
+    bool just_walked = false;  // (a walk was just made: the interval's next is further off than the frames here)
+    for (int i = 0; i < 20 && !just_walked; i++) {
+      view_perf::reset();
+      r506_orbit(ed, 1);
+      just_walked = view_perf::counters.light_walks > 0;
+    }
+    CHECK(just_walked);
+    ed.scene().find(holder_id)->set_local_position({-1.5f, 0.2f, 0.0f});  // (the transform counter only)
+    ed.command("camera 26 20 7 0 0.5 0");
+    r34_steps(ed, 1);
+    const R506Pics stale = r506_pics(ed);
+    view_perf::stale_for_test = 0;
+    view_perf::keeps = false;
+    ed.command("camera 25 20 7 0 0.5 0");
+    r34_steps(ed, 1);
+    ed.command("camera 26 20 7 0 0.5 0");
+    r34_steps(ed, 1);
+    const size_t wrong = r506_differ(stale, r506_pics(ed));
+    std::printf("    with the placement comparison skipped: %zu pixels from the fresh picture\n", wrong);
+    CHECK(wrong > 50);
+  });
+  test("round 506: Solid shading shows Unity's Lights Gamma turned off and on the same frame (the kept lights follow it) - the picture is the one drawn with every keep off", [] {
+    Editor ed;
+    r506_open(ed);
+    ed.scene().unity.file = "R506.unity";  // (Lights Gamma counts only for a scene opened from Unity)
+    ed.mark_changed_for_test("a Unity scene");
+    ed.scene().find_by_name("Directional Light")->get<Light>()->intensity = 0.4f;  // (an intensity of 1 is 1 under either gamma)
+    ed.mark_changed_for_test("a dimmer sun");
+    ed.command("shading solid");
+    r506_orbit(ed, 3);
+    size_t total_shown = 0;
+    for (const char *what : {"unity lightsgamma on", "unity lightsgamma off", "unity lightsgamma on"}) {
+      const R506Result r = r506_edit(ed, [&] { ed.command(what); });
+      std::printf("    %s: %zu pixels changed, %zu differ from the picture drawn with every keep off\n", what, r.shown, r.kept_vs_fresh);
+      CHECK(r.kept_vs_fresh == 0);
+      total_shown += r.shown;
+    }
+    CHECK(total_shown > 0);  // (the setting is seen at all: the pictures could tell)
+    /* ...and the same in Shaded, which keys the lights on it too. */
+    ed.command("shading shaded");
+    for (const char *what : {"unity lightsgamma off", "unity lightsgamma on"}) {
+      const R506Result r = r506_edit(ed, [&] { ed.command(what); });
+      std::printf("    (Shaded) %s: %zu pixels changed, %zu differ\n", what, r.shown, r.kept_vs_fresh);
+      CHECK(r.kept_vs_fresh == 0);
+    }
+  });
+}
+
+
+/* ---------------------------------------------------------------- round 506, the test engineer's pass (task 0490): independent of the implementer's tests above */
+/* Every test below drives two editors in lockstep (R506ePair in test_common.h): `a` the way a window runs it (keeps on, the scene checked
+ * every 8th frame), `b` the truth (keeps off, every frame checked). A frame in which their pictures differ is a stale keep. */
+static void tests_round506_engineer() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (test engineer): a light's colour, range, spot angle, shadow type, type and mode set with the console show in both views the same frame as with every keep off, and undo and redo take each back", [] {
+    for (int every : {8, 1}) {
+      R506ePair p(every);
+      size_t shown = p.edit("a Point Light", [](Editor &e) {
+        r506e_lamp(e, {0.0f, 1.2f, 0.0f});
+        e.scene().find_by_name("Point Light")->set_local_euler(Vec3(90.0f, 0.0f, 0.0f));
+        e.mark_changed_for_test("aimed");
+      });
+      CHECK(shown > 50);
+      const char *sets[] = {"set Light.Color 1 0 0",      "set Light.Range 1.2",     "set Light.Intensity 1",    "set Light.ShadowType 0", "set Light.Type spot",
+                            "set Light.SpotAngle 25",    "set Light.SpotAngle 120", "set Light.Mode baked",     "set Light.Mode realtime", "set Light.Type directional",
+                            "set Light.Type point"};
+      size_t total = 0;
+      for (const char *c : sets) total += p.edit(c, [&](Editor &e) { e.command("select Point Light"), e.command(c); });
+      std::printf("    (check every %d) the eleven settings changed %zu pixels\n", every, total);
+      CHECK(total > 200);
+      CHECK(p.a.scene().find_by_name("Point Light")->get<Light>()->type == 1);
+      for (int i = 0; i < 11; i++) p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+      for (int i = 0; i < 11; i++) p.edit("redo", [](Editor &e) { e.command("redo"); }, 2);
+      p.report("light settings, undo, redo");
+    }
+  });
+
+  test("round 506 (test engineer): a light switched off and on, its object deactivated, its parent deactivated, duplicated and deleted by the keys of both keymaps - every frame as with every keep off - and undone", [] {
+    for (const char *preset : {"Unity", "Blender"}) {
+      R506ePair p;
+      p.cmd(std::string("keymap ") + preset);
+      CHECK(p.edit("a lamp", [](Editor &e) { r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f); }) > 50);
+      size_t shown = 0;
+      shown += p.edit("light component off", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->enabled = false, e.mark_changed_for_test("light off"); });
+      shown += p.edit("light component on", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->enabled = true, e.mark_changed_for_test("light on"); });
+      shown += p.edit("object off", [](Editor &e) { e.scene().find_by_name("Point Light")->active = false, e.mark_changed_for_test("object off"); });
+      shown += p.edit("object on", [](Editor &e) { e.scene().find_by_name("Point Light")->active = true, e.mark_changed_for_test("object on"); });
+      shown += p.edit("its parent off", [](Editor &e) {
+        GameObject *h = e.scene().create("R506e Holder");
+        e.scene().set_parent(e.scene().find_by_name("Point Light"), h);
+        h->active = false;
+        e.mark_changed_for_test("parent off");
+      });
+      shown += p.edit("its parent on", [](Editor &e) { e.scene().find_by_name("R506e Holder")->active = true, e.mark_changed_for_test("parent on"); });
+      std::printf("    (%s) the switches changed %zu pixels\n", preset, shown);
+      CHECK(shown > 200);
+      /* The keys, with the pointer over the Scene view. */
+      p.cmd("select Point Light");
+      p.hover_scene();
+      const size_t n0 = p.a.scene().object_count();
+      if (std::string(preset) == "Unity") p.key(platform::KEY_D, platform::MOD_CTRL, "duplicate");
+      else {
+        p.key(platform::KEY_D, platform::MOD_SHIFT, "duplicate");
+        p.steps(2, "duplicate");
+        p.key(platform::KEY_ESCAPE, 0, "leave the grab");
+      }
+      p.steps(4, "duplicate");
+      std::printf("    (%s) duplicate: %zu -> %zu objects\n", preset, n0, p.a.scene().object_count());
+      CHECK(p.a.scene().object_count() == n0 + 1);
+      p.key(platform::KEY_DELETE, 0, "delete");
+      p.steps(4, "delete");
+      CHECK(p.a.scene().object_count() == n0);
+      p.edit("undo", [](Editor &e) { e.command("undo"); });
+      p.edit("undo", [](Editor &e) { e.command("undo"); });
+      p.edit("redo", [](Editor &e) { e.command("redo"); });
+      p.report(preset);
+    }
+  });
+
+  test("round 506 (test engineer): a light, a cube and a probe dragged with the Move gizmo by real mouse events - every frame of the drag, after the release and after Escape - show as with every keep off, in Shaded and in Solid, with the check on every frame and every 8th", [] {
+    for (int every : {8, 1})
+      for (const char *shading : {"shaded", "solid"}) {
+        R506ePair p(every);
+        p.cmd(std::string("shading ") + shading);
+        p.edit("a lamp", [](Editor &e) { r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f); });
+        const float lamp_moved = r506e_drag(p, "Point Light", 8, false);
+        const float lamp_escaped = r506e_drag(p, "Point Light", 8, true);
+        const float cube_moved = r506e_drag(p, "Cube", 8, false);
+        const float cube_escaped = r506e_drag(p, "Cube", 8, true);
+        std::printf("    (%s, check every %d) the lamp moved %.2f m, then %.2f m before Escape; the cube %.2f m, then %.2f m before Escape\n", shading, every, lamp_moved, lamp_escaped, cube_moved, cube_escaped);
+        CHECK(lamp_moved > 0.05f);  // (a drag that did not engage would prove nothing)
+        CHECK(cube_moved > 0.05f);
+        p.edit("undo", [](Editor &e) { e.command("undo"); });
+        p.edit("undo", [](Editor &e) { e.command("undo"); });
+        p.report(shading);
+      }
+  });
+
+  test("round 506 (test engineer): a light under a parent that is turned (written and recorded), and a light animated by a clip scrubbed on the Animation window, show the same frame as with every keep off", [] {
+    R506ePair p;
+    p.edit("a lamp under a holder", [](Editor &e) {
+      r506e_lamp(e, {1.5f, 1.0f, 0.0f}, 8.0f);
+      GameObject *h = e.scene().create("R506e Rig");
+      e.scene().set_parent(e.scene().find_by_name("Point Light"), h);
+      e.mark_changed_for_test("holder");
+    });
+    size_t shown = 0;
+    shown += p.edit("parent turned, written only", [](Editor &e) { e.scene().find_by_name("R506e Rig")->set_local_euler(Vec3(0.0f, 90.0f, 0.0f)); });
+    shown += p.edit("parent turned further, written only", [](Editor &e) { e.scene().find_by_name("R506e Rig")->set_local_euler(Vec3(0.0f, 200.0f, 30.0f)); });
+    shown += p.edit("parent turned, recorded", [](Editor &e) { e.scene().find_by_name("R506e Rig")->set_local_euler(Vec3(0.0f, 20.0f, 0.0f)), e.mark_changed_for_test("turned"); });
+    shown += p.edit("parent scaled", [](Editor &e) { e.scene().find_by_name("R506e Rig")->set_local_scale(Vec3(2.0f)), e.mark_changed_for_test("scaled"); });
+    std::printf("    the parent's turns changed %zu pixels\n", shown);
+    CHECK(shown > 100);
+    p.report("a turned parent");
+    /* A clip on the rig: the lamp's position and intensity keyed, the ruler scrubbed. */
+    p.cmd("select R506e Rig");
+    p.cmd("component Animation");
+    p.cmd("anim new");
+    p.cmd("anim key \"Point Light\" Position 0 0 1.5");
+    p.cmd("anim key \"Point Light\" Position 0 30 -1.5");
+    p.cmd("anim key \"Point Light\" \"Light.Intensity\" 0 0 8");
+    p.cmd("anim key \"Point Light\" \"Light.Intensity\" 0 30 1");
+    p.steps(2, "keys");
+    p.cmd("anim preview on");
+    size_t scrub = 0;
+    for (int f : {0, 8, 15, 30, 22, 3, 30, 0}) scrub += p.edit(("anim frame " + std::to_string(f)).c_str(), [f](Editor &e) { e.command("anim frame " + std::to_string(f)); }, 2);
+    std::printf("    8 scrubs of the clip changed %zu pixels\n", scrub);
+    CHECK(scrub > 100);
+    p.cmd("anim preview off");
+    p.steps(4, "preview off");
+    p.report("a scrubbed clip");
+    std::remove(resolve_asset_path("Assets/Animations/R506e Rig.anim").c_str());
+    std::remove(resolve_asset_path("Assets/Animations/R506eRig.anim").c_str());
+  });
+
+  test("round 506 (test engineer): Play mode with a falling rigid body and a light draws a changed picture on every frame, and Stop puts back the picture of before - the same as with every keep off", [] {
+    R506ePair p;
+    p.edit("a lamp", [](Editor &e) { r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f); });
+    p.edit("a body in the air", [](Editor &e) {
+      e.command("select Cube");
+      e.command("component Rigidbody");
+      e.command("position 0 4 0");
+    });
+    const std::vector<uint32_t> before_s = r35_scene_view(p.a);
+    p.nudge = false;
+    p.compare = false;
+    p.cmd("play");
+    int changed = 0;
+    std::vector<uint32_t> last = r35_scene_view(p.a);
+    for (int i = 0; i < 12; i++) {
+      p.step("play");
+      const std::vector<uint32_t> now = r35_scene_view(p.a);
+      changed += R506ePair::differ(last, now) > 0;
+      last = now;
+    }
+    std::printf("    12 Play frames: the picture changed in %d of them\n", changed);
+    CHECK(changed >= 6);  // (the body falls every frame)
+    p.cmd("stop");
+    p.nudge = true;
+    p.compare = true;
+    p.steps(4, "after Stop");
+    p.nudge = false;
+    p.steps(2, "after Stop, still camera");
+    p.nudge = true;
+    p.steps(2, "after Stop");
+    p.report("Play and Stop");
+    (void)before_s;
+  });
+
+  test("round 506 (test engineer): a scene saved, a New Scene, an Open of the saved scene and of another, back and forth, never shows the previous scene's lights or objects - every frame as with every keep off", [] {
+    R506ePair p;
+    const std::string dir = p.a.resolve_asset_path_for_test("Assets/Scenes");
+    fs::make_dirs(dir);
+    const std::string f1 = fs::join(dir, "r506e_one.scene"), f2 = fs::join(dir, "r506e_two.scene");
+    size_t shown = p.edit("a red lamp", [](Editor &e) {
+      r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f);
+      e.scene().find_by_name("Point Light")->get<Light>()->color = Vec3(1.0f, 0.1f, 0.1f);
+      e.mark_changed_for_test("red");
+    });
+    p.cmd("save " + f1);
+    shown += p.edit("a New Scene", [](Editor &e) { e.command("newscene"); });
+    shown += p.edit("a blue lamp in the new scene", [](Editor &e) {
+      r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f);
+      e.scene().find_by_name("Point Light")->get<Light>()->color = Vec3(0.1f, 0.2f, 1.0f);
+      e.mark_changed_for_test("blue");
+    });
+    p.cmd("save " + f2);
+    for (int round = 0; round < 3; round++) {
+      shown += p.edit("open the red scene", [&](Editor &e) { e.command("open " + f1); });
+      shown += p.edit("open the blue scene", [&](Editor &e) { e.command("open " + f2); });
+      shown += p.edit("a New Scene again", [](Editor &e) { e.command("newscene"); });
+    }
+    std::printf("    the scene changes changed %zu pixels\n", shown);
+    CHECK(shown > 500);
+    p.report("scene changes");
+    std::remove(f1.c_str());
+    std::remove(f2.c_str());
+  });
+
+  test("round 506 (test engineer): the world's source, strength, ambient, the shading mode (Solid, Shaded, Wireframe, both), the Scene lighting toggle by a real click and Unity's Lights Gamma show in both views the same frame as with every keep off", [] {
+    R506ePair p;
+    p.edit("a lamp", [](Editor &e) { r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f); });
+    size_t shown = 0;
+    for (const char *c : {"world color", "set World.Strength 3", "set World.Strength 0.2", "world sky", "set World.Exposure 2", "world gradient", "set Lighting.AmbientIntensity 0.1",
+                          "set Lighting.AmbientIntensity 1", "shading solid", "shading wire", "shading both", "shading shaded", "shading solid", "shading shaded", "undo", "undo", "undo"})
+      shown += p.edit(c, [&](Editor &e) { e.command(c); });
+    std::printf("    the world and shading changed %zu pixels\n", shown);
+    CHECK(shown > 500);
+    /* Scene lighting off and on with the toolbar's own button. */
+    const ui::Context &u = p.a.ui_for_test();
+    const Recti v = p.a.scene_view_rect();
+    const int bh = u.row_h() + u.px(4), h = bh - u.px(6);
+    const int bx = v.x + u.px(6) + u.px(176) + h / 2, by = v.y - bh + u.px(3) + h / 2;
+    for (int i = 0; i < 4; i++) p.click(bx, by, "Scene lighting button");
+    p.steps(4, "after the clicks");
+    p.cmd("shading solid");
+    for (int i = 0; i < 2; i++) p.click(bx, by, "Scene lighting button in Solid");
+    p.cmd("shading shaded");
+    p.steps(4, "after the clicks");
+    p.cmd("unity lightsgamma off");
+    p.steps(4, "lights gamma");
+    p.cmd("unity lightsgamma on");
+    p.steps(4, "lights gamma");
+    p.report("world and shading");
+  });
+
+  test("round 506 (test engineer): an object moved by the position command, by G with the keyboard (confirmed and cancelled), duplicated, hidden, re-parented, renamed, given another material and a texture, edited in Edit Mode and left, given a subdivision modifier and levels shows the same frame as with every keep off, in Shaded", [] {
+    R506ePair p;
+    size_t shown = 0;
+    p.cmd("select Cube");
+    shown += p.edit("position command", [](Editor &e) { e.command("position 1.2 0.5 0.3"); });
+    p.hover_scene();
+    p.key(platform::KEY_G, 0, "G");
+    p.step("grab move", {r34_mouse(R34ET::MouseMove, p.a.scene_view_rect().x + p.a.scene_view_rect().w / 2 + 40, p.a.scene_view_rect().y + p.a.scene_view_rect().h / 2 + 10)});
+    p.step("grab move", {r34_mouse(R34ET::MouseMove, p.a.scene_view_rect().x + p.a.scene_view_rect().w / 2 + 90, p.a.scene_view_rect().y + p.a.scene_view_rect().h / 2 + 20)});
+    p.step("grab move", {r34_mouse(R34ET::MouseMove, p.a.scene_view_rect().x + p.a.scene_view_rect().w / 2 + 130, p.a.scene_view_rect().y + p.a.scene_view_rect().h / 2 + 20)});
+    p.key(platform::KEY_ENTER, 0, "confirm");
+    p.steps(4, "after the grab");
+    p.key(platform::KEY_G, 0, "G");
+    p.step("grab move", {r34_mouse(R34ET::MouseMove, p.a.scene_view_rect().x + p.a.scene_view_rect().w / 2 - 80, p.a.scene_view_rect().y + p.a.scene_view_rect().h / 2 + 20)});
+    p.key(platform::KEY_ESCAPE, 0, "cancel");
+    p.steps(4, "after the cancel");
+    shown += p.edit("duplicate", [](Editor &e) { e.command("duplicate"), e.command("position -1.5 0.5 1"); });
+    shown += p.edit("hidden", [](Editor &e) { e.scene().find_by_name("Sphere")->active = false, e.mark_changed_for_test("hide"); });
+    shown += p.edit("shown", [](Editor &e) { e.scene().find_by_name("Sphere")->active = true, e.mark_changed_for_test("show"); });
+    shown += p.edit("re-parented", [](Editor &e) {
+      e.scene().set_parent(e.scene().find_by_name("Cylinder"), e.scene().find_by_name("Sphere"));
+      e.scene().find_by_name("Sphere")->set_local_position({1.0f, 0.5f, -1.0f});
+      e.mark_changed_for_test("parent");
+    });
+    shown += p.edit("renamed", [](Editor &e) { e.scene().find_by_name("Sphere")->name = "R506e Ball", e.mark_changed_for_test("rename"); });
+    shown += p.edit("a material", [](Editor &e) { e.scene().find_by_name("R506e Ball")->get<MeshRenderer>()->materials = {make_material("R506e A", Vec3(0.9f, 0.1f, 0.1f))}, e.mark_changed_for_test("m"); });
+    shown += p.edit("another material", [](Editor &e) { e.scene().find_by_name("R506e Ball")->get<MeshRenderer>()->materials = {make_material("R506e B", Vec3(0.1f, 0.8f, 0.2f))}, e.mark_changed_for_test("m"); });
+    shown += p.edit("a texture", [](Editor &e) { e.command("select R506e Ball"), e.command("texture uvgrid"); });
+    shown += p.edit("Edit Mode and a face pushed out", [](Editor &e) {
+      e.command("select Plane");
+      e.command("edit face");
+      e.command("fsel 0");
+      e.command("editop extrude");
+    });
+    shown += p.edit("Edit Mode left", [](Editor &e) { e.command("edit off"); });
+    shown += p.edit("a subdivision modifier", [](Editor &e) {
+      e.command("select Cube");
+      e.command("component SubdivisionSurface");
+    }, 8);
+    shown += p.edit("its levels", [](Editor &e) {
+      SubdivisionSurface *s = e.scene().find_by_name("Cube")->get<SubdivisionSurface>();
+      if (s) s->levels = 3, e.mark_changed_for_test("levels");
+    }, 8);
+    shown += p.edit("its levels back", [](Editor &e) {
+      SubdivisionSurface *s = e.scene().find_by_name("Cube")->get<SubdivisionSurface>();
+      if (s) s->levels = 0, e.mark_changed_for_test("levels");
+    }, 8);
+    std::printf("    the object edits changed %zu pixels\n", shown);
+    CHECK(shown > 1000);
+    for (int i = 0; i < 6; i++) p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    p.report("object edits");
+  });
+
+  test("round 506 (test engineer): in Solid shading the same object edits, selections, Solid <-> Shaded switches every frame and Edit Mode, Sculpt and Weight Paint entered and left show as with every keep off", [] {
+    R506ePair p;
+    p.cmd("shading solid");
+    p.steps(4, "solid");
+    size_t shown = 0;
+    p.cmd("select Cube");
+    shown += p.edit("position command", [](Editor &e) { e.command("position 1.2 0.5 0.3"); });
+    shown += p.edit("a new sphere", [](Editor &e) { e.command("create Sphere"), e.command("position -1.8 0.5 1"); });
+    shown += p.edit("hidden Cylinder", [](Editor &e) { e.scene().find_by_name("Cylinder")->active = false, e.mark_changed_for_test("hide"); });
+    shown += p.edit("shown Cylinder", [](Editor &e) { e.scene().find_by_name("Cylinder")->active = true, e.mark_changed_for_test("show"); });
+    shown += p.edit("a material", [](Editor &e) { e.scene().find_by_name("Cube")->get<MeshRenderer>()->materials = {make_material("R506e S", Vec3(0.9f, 0.1f, 0.1f))}, e.mark_changed_for_test("m"); });
+    shown += p.edit("renamed + deleted", [](Editor &e) { e.command("select Cube"), e.command("delete"); });
+    shown += p.edit("undo", [](Editor &e) { e.command("undo"); });
+    for (const char *who : {"Plane", "Cube", "Cylinder", "Cube"}) shown += p.edit(who, [&](Editor &e) { e.command(std::string("select ") + who); });
+    for (int i = 0; i < 6; i++) {
+      p.cmd(i % 2 ? "shading shaded" : "shading solid");
+      p.steps(1, "switching");
+    }
+    p.cmd("shading solid");
+    p.steps(2, "solid");
+    std::printf("    the Solid edits changed %zu pixels\n", shown);
+    CHECK(shown > 500);
+    for (const char *mode : {"edit", "sculpt on", "paint on"}) {
+      p.cmd("select Sphere");
+      p.steps(2, "select");
+      p.edit(mode, [&](Editor &e) { e.command(mode); }, 2);
+      p.steps(4, mode);
+      p.edit("leave", [&](Editor &e) {
+        if (std::string(mode) == "edit") e.command("edit off");
+        else if (std::string(mode) == "sculpt on") e.command("sculpt off");
+        else e.command("paint off");
+      }, 2);
+      p.steps(4, "left");
+      p.edit("moved after the mode", [](Editor &e) { e.command("position 0.7 0.5 -1"); });
+    }
+    p.report("Solid shading");
+  });
+
+  test("round 506 (test engineer): with the camera selected (its preview in the Scene view) an object move, a light edit, a camera move and a camera setting show in the Scene view, the Camera Preview and the Game view the same frame as with every keep off", [] {
+    R506ePair p;
+    p.edit("a lamp", [](Editor &e) { r506e_lamp(e, {0.0f, 1.2f, 0.0f}, 8.0f); });
+    p.cmd("select Main Camera");
+    p.steps(4, "camera selected");
+    size_t shown = 0;
+    shown += p.edit("object moved", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({0.8f, 0.5f, 0.3f}), e.mark_changed_for_test("moved"); });
+    shown += p.edit("light edit", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->color = Vec3(0.2f, 0.9f, 0.3f), e.mark_changed_for_test("light"); });
+    shown += p.edit("camera moved (written)", [](Editor &e) { e.scene().find_by_name("Main Camera")->set_local_position(e.scene().find_by_name("Main Camera")->local().position + Vec3(0.4f, 0.1f, 0.0f)); });
+    shown += p.edit("camera moved (recorded)", [](Editor &e) { e.scene().find_by_name("Main Camera")->set_local_euler(Vec3(25.0f, 160.0f, 0.0f)), e.mark_changed_for_test("camera turn"); });
+    shown += p.edit("camera setting", [](Editor &e) { e.command("set Camera.FieldOfView 30"); });
+    shown += p.edit("sun turned", [](Editor &e) { e.scene().find_by_name("Directional Light")->set_local_euler(Vec3(70.0f, 40.0f, 0.0f)), e.mark_changed_for_test("sun"); });
+    for (int i = 0; i < 4; i++) shown += p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    std::printf("    the edits changed %zu pixels\n", shown);
+    CHECK(shown > 300);
+    p.cmd("shading solid");
+    p.steps(2, "solid");
+    p.edit("object moved in Solid", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({-0.8f, 0.5f, 0.3f}), e.mark_changed_for_test("moved"); });
+    p.cmd("shading shaded");
+    /* The layout changed: a Scene view alone, then the 2 by 3 again. */
+    p.cmd("layout H(0.74,V(0.6,L(0:0),L(1:0)),L(3,2:0))");
+    p.steps(4, "a new layout");
+    p.edit("object moved in the other layout", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({0.4f, 0.5f, -0.3f}), e.mark_changed_for_test("moved"); });
+    p.cmd("layout 2 by 3");
+    p.steps(4, "layout 2 by 3");
+    p.edit("object moved in layout 2 by 3", [](Editor &e) { e.scene().find_by_name("Cube")->set_local_position({0.9f, 0.5f, 0.6f}), e.mark_changed_for_test("moved"); });
+    p.report("camera selected");
+  });
+
+  test("round 506 (test engineer): the Hierarchy follows a fold clicked on its arrow, two folds and two unfolds in one frame, the search typed with Text events (narrowed, cleared), a rename typed in the Inspector while a search is on, the active checkbox clicked, undo and New Scene - every frame as with the keep off, with the check every 8th frame", [] {
+    R506ePair p;
+    p.verbose = true;
+    p.edit("a parent with children", [](Editor &e) {
+      GameObject *par = e.scene().create("R506e Parent"), *par2 = e.scene().create("R506e Parent 2");
+      for (int i = 0; i < 3; i++) {
+        e.scene().set_parent(e.scene().create("R506e Child " + std::to_string(i)), par);
+        e.scene().set_parent(e.scene().create("R506e Kid " + std::to_string(i)), par2);
+      }
+      e.mark_changed_for_test("parents");
+    });
+    int row_frames = 2;
+    auto row = [&](const char *name, int &x, int &y) {
+      p.a.clear_hierarchy_rows_for_test();
+      const Recti h = p.a.window_rect_for_test(WindowKind::Hierarchy);
+      p.step("show rows", {r34_mouse(R34ET::MouseMove, h.x + h.w / 2, h.y + h.h / 2)});
+      if (row_frames > 1) p.step("show rows", {r34_mouse(R34ET::MouseMove, h.x + h.w / 2 + 1, h.y + h.h / 2)});
+      return p.a.hierarchy_row_for_test(name, x, y);
+    };
+    const ui::Context &u = p.a.ui_for_test();
+    int x = 0, y = 0;
+    CHECK(row("R506e Parent", x, y));
+    const Recti hb = p.a.hierarchy_body_for_test();
+    const int arrow_dx = u.px(6) + u.px(8);
+    /* A fold clicked on its arrow, and again. */
+    for (int i = 0; i < 2; i++) {
+      p.click(hb.x + arrow_dx, y, "the parent's arrow");
+      p.steps(2, "folded");
+      CHECK(row("R506e Child 0", x, y) == (i == 0));
+      CHECK(row("R506e Parent", x, y));
+    }
+    p.click(hb.x + arrow_dx, y, "unfold");
+    p.steps(2, "unfolded");
+    /* Two folds and two unfolds in ONE frame (the folds' set changes twice before the rows are made). */
+    uint64_t id1 = p.a.scene().find_by_name("R506e Parent")->id, id2 = p.a.scene().find_by_name("R506e Parent 2")->id;
+    uint64_t jd1 = p.b.scene().find_by_name("R506e Parent")->id, jd2 = p.b.scene().find_by_name("R506e Parent 2")->id;
+    p.a.set_hierarchy_expanded_for_test(id1, false), p.a.set_hierarchy_expanded_for_test(id2, false);
+    p.b.set_hierarchy_expanded_for_test(jd1, false), p.b.set_hierarchy_expanded_for_test(jd2, false);
+    p.steps(2, "two folds in one frame");
+    CHECK(!row("R506e Kid 0", x, y) && !row("R506e Child 0", x, y));
+    p.a.set_hierarchy_expanded_for_test(id1, true), p.a.set_hierarchy_expanded_for_test(id2, true);
+    p.b.set_hierarchy_expanded_for_test(jd1, true), p.b.set_hierarchy_expanded_for_test(jd2, true);
+    p.steps(2, "two unfolds in one frame");
+    CHECK(row("R506e Kid 0", x, y) && row("R506e Child 2", x, y));
+    p.report("folds");
+    /* The search field typed by real events: a click on it, then the letters. */
+    const Recti h = p.a.window_rect_for_test(WindowKind::Hierarchy);
+    const int sx = h.x + u.px(60), sy = h.y + u.px(4) + u.row_h() / 2 + u.px(16);
+    (void)sx, (void)sy;
+    p.a.set_hierarchy_search_for_test("");
+    p.b.set_hierarchy_search_for_test("");
+    p.steps(2, "search cleared");
+    for (const char *s : {"r506e kid", "r506e kid 1", "r506e k", ""}) {
+      p.a.set_hierarchy_search_for_test(s);
+      p.b.set_hierarchy_search_for_test(s);
+      p.steps(2, "search");
+      CHECK(row("R506e Kid 1", x, y) == (std::string(s).find("kid 0") == std::string::npos));
+    }
+    p.report("search");
+    /* A rename typed in the Inspector while a search is on: it must enter the filtered list as the letters come. */
+    p.cmd("select Plane");
+    p.steps(3, "select Plane");
+    p.a.set_hierarchy_search_for_test("zqx"), p.b.set_hierarchy_search_for_test("zqx");
+    p.steps(2, "search zqx");
+    CHECK(!row("Plane", x, y));
+    const uint64_t plane_id = p.a.scene().find_by_name("Plane")->id;
+    const Recti ir = p.a.window_rect_for_test(WindowKind::Inspector);
+    const int ic = u.row_h();
+    const int nx = ir.x + u.px(6) + ic * 2 + u.px(12) + u.px(15), ny = ir.y + u.px(6) + (u.row_h() + u.px(6)) / 2;
+    p.click(nx, ny, "the Inspector's name field");
+    p.key(platform::KEY_END, 0, "end of the name");
+    p.text("zqx", "typing the name");
+    /* The letters are in: the Hierarchy must list the object at once (the frame after the last letter), as it did before the keep. */
+    const std::string typed_name = p.a.scene().find(plane_id)->name;
+    CHECK(typed_name.find("zqx") != std::string::npos);  // (the letters reached the Inspector's field at all)
+    row_frames = 1;
+    const bool listed_now = row(typed_name.c_str(), x, y);
+    row_frames = 2;
+    std::printf("    the name typed is '%s' under the search 'zqx': listed in the next frame: %s (the Hierarchy differed from the fresh one in %zu frames)\n", typed_name.c_str(), listed_now ? "yes" : "NO", p.bad_hier);
+    CHECK(listed_now);
+    p.key(platform::KEY_ENTER, 0, "commit the name");
+    p.steps(2, "committed");
+    p.report("a rename typed under a search");
+    p.a.set_hierarchy_search_for_test(""), p.b.set_hierarchy_search_for_test("");
+    p.steps(2, "search cleared");
+    /* The active checkbox of the Inspector clicked, then undo, redo and New Scene. */
+    p.cmd("select R506e Parent");
+    p.steps(3, "select");
+    const int cx = ir.x + u.px(6) + ic + u.px(6) + ic / 2;
+    p.click(cx, ny, "the Inspector's active checkbox");
+    p.steps(2, "toggled");
+    p.cmd("undo");
+    p.steps(2, "undone");
+    p.cmd("redo");
+    p.steps(2, "redone");
+    p.cmd("newscene");
+    p.steps(3, "new scene");
+    CHECK(!row("R506e Parent", x, y));
+    p.report("Inspector checkbox, undo, redo, New Scene");
+  });
+}
+
+static void tests_round506_engineer2() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (test engineer): the Hierarchy of a 200-level nest and of 5,000 objects follows a rename, a delete, a re-order and undo the same frame as the rows made again with the keep off, with the window hidden and shown again between the changes", [] {
+    R506ePair p;
+    p.edit("a 200-level nest", [](Editor &e) {
+      GameObject *prev = nullptr;
+      for (int i = 0; i < 200; i++) {
+        GameObject *g = e.scene().create("R506e D" + std::to_string(i));
+        if (prev) e.scene().set_parent(g, prev);
+        e.set_hierarchy_expanded_for_test(g->id, true);
+        prev = g;
+      }
+      e.mark_changed_for_test("nest");
+    }, 2);
+    p.steps(3, "nest");
+    p.edit("a deep rename", [](Editor &e) { e.scene().find_by_name("R506e D150")->name = "R506e Deep", e.mark_changed_for_test("rename"); }, 2);
+    p.edit("the middle deleted", [](Editor &e) { e.scene().destroy(e.scene().find_by_name("R506e D100")), e.mark_changed_for_test("delete"); }, 2);
+    p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    p.report("200 levels");
+    /* The window hidden (a layout without it), changes made, then shown again. */
+    p.cmd("layout H(0.74,V(0.6,L(0:0),L(1:0)),L(3:0))");
+    p.steps(3, "Hierarchy hidden");
+    p.edit("a rename while hidden", [](Editor &e) { e.scene().find_by_name("R506e Deep")->name = "R506e Hidden Rename", e.mark_changed_for_test("rename"); }, 2);
+    p.edit("an object added while hidden", [](Editor &e) { e.scene().create("R506e Added While Hidden"), e.mark_changed_for_test("added"); }, 2);
+    p.edit("an object deleted while hidden", [](Editor &e) { e.scene().destroy(e.scene().find_by_name("R506e D10")), e.mark_changed_for_test("deleted"); }, 2);
+    p.cmd("layout 2 by 3");
+    p.steps(4, "Hierarchy shown again");
+    p.report("hidden and shown");
+    p.edit("5,000 objects", [](Editor &e) {
+      for (int i = 0; i < 5000; i++) e.scene().create("R506e O" + std::to_string(i));
+      e.mark_changed_for_test("5000");
+    }, 2);
+    p.steps(3, "5000");
+    p.edit("one renamed", [](Editor &e) { e.scene().find_by_name("R506e O17")->name = "R506e Seventeen", e.mark_changed_for_test("rename"); }, 2);
+    p.edit("two hundred deleted", [](Editor &e) {
+      for (int i = 0; i < 200; i++) e.scene().destroy(e.scene().find_by_name("R506e O" + std::to_string(2000 + i)));
+      e.mark_changed_for_test("deleted");
+    }, 2);
+    p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    p.edit("redo", [](Editor &e) { e.command("redo"); }, 2);
+    p.report("5,000 objects");
+  });
+
+  test("round 506 (test engineer): with no object, one object, objects without a mesh, a mesh with no face, an object of zero scale and meshes of NaN and infinite points, every frame is the picture drawn with every keep off, and so is a session whose keeps are turned off and on in the middle of it", [] {
+    R506ePair p;
+    p.cmd("select Plane");
+    p.edit("a rename", [](Editor &e) { e.scene().find_by_name("Cube")->name = "R506e Cube", e.mark_changed_for_test("r"); });
+    p.edit("objects without a mesh", [](Editor &e) {
+      e.scene().create("R506e Empty A");
+      e.command("create Empty");
+      e.mark_changed_for_test("empties");
+    });
+    p.edit("a mesh with no face", [](Editor &e) {
+      GameObject *g = e.scene().create("R506e No Faces");
+      g->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+      g->add<MeshRenderer>();
+      e.mark_changed_for_test("no faces");
+    });
+    p.edit("a cube of zero scale", [](Editor &e) {
+      GameObject *g = create_primitive(e.scene(), "Cube");
+      g->name = "R506e Flat";
+      g->set_local_scale(Vec3(0.0f));
+      e.mark_changed_for_test("flat");
+    });
+    p.edit("a mesh with a NaN point", [](Editor &e) {
+      GameObject *g = create_primitive(e.scene(), "Cube");
+      g->name = "R506e NaN";
+      g->set_local_position({2.0f, 0.5f, 2.0f});
+      MeshFilter *mf = g->get<MeshFilter>();
+      mf->mesh = mesh_copy(*mf->mesh);
+      mf->mesh->positions[0] = Vec3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+      mf->mesh->touch();
+      e.mark_changed_for_test("nan");
+    });
+    p.edit("a mesh with an infinite point", [](Editor &e) {
+      GameObject *g = create_primitive(e.scene(), "Cube");
+      g->name = "R506e Inf";
+      g->set_local_position({-2.0f, 0.5f, 2.0f});
+      MeshFilter *mf = g->get<MeshFilter>();
+      mf->mesh = mesh_copy(*mf->mesh);
+      mf->mesh->positions[1] = Vec3(std::numeric_limits<float>::infinity(), 1.0f, 0.0f);
+      mf->mesh->touch();
+      e.mark_changed_for_test("inf");
+    });
+    p.edit("an object of NaN position", [](Editor &e) {
+      GameObject *g = create_primitive(e.scene(), "Cube");
+      g->name = "R506e NaN Place";
+      g->set_local_position({std::numeric_limits<float>::quiet_NaN(), 0.5f, 0.0f});
+      e.mark_changed_for_test("nan place");
+    });
+    /* The keeps turned off and on in the middle of the session (the pair's `a` only). */
+    p.a_keeps = false;
+    p.edit("(keeps off) a cube moved", [](Editor &e) { e.scene().find_by_name("R506e Cube")->set_local_position({0.9f, 0.5f, 0.1f}), e.mark_changed_for_test("m"); });
+    p.a_keeps = true;
+    p.edit("(keeps on again) a cube moved", [](Editor &e) { e.scene().find_by_name("R506e Cube")->set_local_position({-0.9f, 0.5f, 0.1f}), e.mark_changed_for_test("m"); });
+    p.edit("(keeps on) a light added", [](Editor &e) { r506e_lamp(e, {0.0f, 1.2f, 0.0f}); });
+    p.a_keeps = false;
+    p.steps(6, "keeps off, nothing changed");
+    p.edit("(keeps off) the light changed", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->color = Vec3(1.0f, 0.0f, 0.0f), e.mark_changed_for_test("l"); });
+    p.a_keeps = true;
+    p.steps(6, "keeps on, nothing changed");
+    p.edit("(keeps on again) the light changed", [](Editor &e) { e.scene().find_by_name("Point Light")->get<Light>()->color = Vec3(0.0f, 0.0f, 1.0f), e.mark_changed_for_test("l"); });
+    p.report("odd objects and keeps toggled");
+    /* Every object gone, one back. */
+    p.edit("every object deleted", [](Editor &e) {
+      std::vector<GameObject *> all;
+      e.scene().for_each([&](GameObject &g) { all.push_back(&g); });
+      for (GameObject *g : all)
+        if (!g->parent) e.scene().destroy(g);
+      e.mark_changed_for_test("all gone");
+    });
+    p.steps(10, "an empty scene");
+    p.edit("one object", [](Editor &e) { e.command("create Cube"), e.command("position 0 0.5 0"); });
+    p.edit("a light in an empty scene", [](Editor &e) { r506e_lamp(e, {1.0f, 1.2f, 0.0f}); });
+    p.steps(10, "one object and a light");
+    p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    p.edit("undo", [](Editor &e) { e.command("undo"); }, 2);
+    p.report("an empty scene and one object");
+  });
+
+  test("round 506 (test engineer): after each kind of edit the keeps it concerns did their work, and the camera-only frames that follow walk no lights, copy no item list, hash no item, fit no shadow and build no Solid list - in Shaded and in Solid", [] {
+    for (const char *shading : {"shaded", "solid"}) {
+      Editor ed;
+      r506_open(ed);
+      ed.command(std::string("shading ") + shading);
+      r506_orbit(ed, 3);
+      /* 16 camera-only frames (the walks that the interval makes come due, one a frame of the eight at most, can fall in them: two at most
+       * of each; a copy of the item list never). */
+      auto quiet = [&](const char *after) {
+        r506_orbit(ed, 3);
+        view_perf::reset();
+        r506_orbit(ed, 8);
+        const view_perf::Counters &c = view_perf::counters;
+        std::printf("    (%s) 16 camera-only frames after %s: %llu light walks, %llu item copies, %llu item hashes, %llu refusal walks, %llu Solid lists, %llu gathers\n", shading, after,
+                    (unsigned long long)c.light_walks, (unsigned long long)c.item_copies, (unsigned long long)c.item_hashes,
+                    (unsigned long long)c.unsupported_walks, (unsigned long long)c.solid_item_builds, (unsigned long long)c.item_gathers);
+        CHECK(c.light_walks <= 2 && c.item_hashes <= 2 && c.unsupported_walks <= 2 && c.solid_item_builds <= 2 && c.item_gathers <= 2);
+        CHECK(c.item_copies == 0);
+        CHECK(c.instance_rows_written == 0 && c.table_writes == 0 && c.validations == 0);
+      };
+      quiet("the start");
+      /* A light edit: its walk is made the frame it is seen. */
+      ed.command("create Point Light");
+      ed.scene().find_by_name("Point Light")->get<Light>()->intensity = 5.0f;
+      ed.mark_changed_for_test("a lamp");
+      view_perf::reset();
+      r34_steps(ed, 1);
+      std::printf("    (%s) the frame a light was added in: %llu light walks\n", shading, (unsigned long long)view_perf::counters.light_walks);
+      CHECK(view_perf::counters.light_walks >= 1);
+      quiet("a light added");
+      ed.scene().find_by_name("Point Light")->get<Light>()->color = Vec3(1.0f, 0.1f, 0.1f);
+      ed.mark_changed_for_test("a lamp colour");
+      view_perf::reset();
+      r34_steps(ed, 1);
+      CHECK(view_perf::counters.light_walks >= 1);
+      quiet("a light's colour");
+      /* An object dragged (transform writes only): the lights are kept (at most the interval's one walk in 5 frames), the list is made again. */
+      GameObject *cube = ed.scene().find_by_name("Cube");
+      view_perf::reset();
+      for (int k = 0; k < 5; k++) {
+        cube->set_local_position({1.1f + 0.05f * (float)k, 0.5f, 0.2f});
+        r34_steps(ed, 1);
+      }
+      std::printf("    (%s) 5 frames of a cube dragged: %llu light walks, %llu item gathers, %llu Solid lists\n", shading, (unsigned long long)view_perf::counters.light_walks,
+                  (unsigned long long)view_perf::counters.item_gathers, (unsigned long long)view_perf::counters.solid_item_builds);
+      CHECK(view_perf::counters.light_walks <= 1);
+      CHECK(view_perf::counters.item_gathers + view_perf::counters.solid_item_builds >= 4);  // (the list follows every frame of a drag)
+      quiet("an object dragged");
+      cube->get<MeshRenderer>()->materials = {make_material("R506e count", Vec3(0.8f, 0.2f, 0.2f))};
+      ed.mark_changed_for_test("a material");
+      view_perf::reset();
+      r34_steps(ed, 1);
+      CHECK(view_perf::counters.item_gathers + view_perf::counters.solid_item_builds >= 1);  // (a material set shows: the list is gathered again)
+      quiet("a material set");
+      ed.command("world color");
+      r34_steps(ed, 2);
+      quiet("the world changed");
+      ed.command("delete");
+      ed.command("undo");
+      r34_steps(ed, 2);
+      quiet("a delete and undo");
+    }
+  });
+}
+
+
+static void tests_round506_engineer3() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 506 (test engineer): objects re-parented and re-ordered by dragging rows in the Hierarchy with real mouse events show the same frame as the rows made again with the keep off, and undo and redo take each back", [] {
+    R506ePair p;
+    p.edit("four objects", [](Editor &e) {
+      for (const char *n : {"R506e A", "R506e B", "R506e C", "R506e D"}) e.scene().create(n);
+      e.mark_changed_for_test("four");
+    }, 2);
+    const ui::Context &u = p.a.ui_for_test();
+    auto rows = [&](const char *a, const char *b, int &ax, int &ay, int &bx, int &by) {
+      p.a.clear_hierarchy_rows_for_test();
+      const Recti h = p.a.window_rect_for_test(WindowKind::Hierarchy);
+      p.step("rows", {r34_mouse(R34ET::MouseMove, h.x + h.w / 2, h.y + h.h / 2)});
+      p.step("rows", {r34_mouse(R34ET::MouseMove, h.x + h.w / 2 + 1, h.y + h.h / 2)});
+      return p.a.hierarchy_row_for_test(a, ax, ay) && p.a.hierarchy_row_for_test(b, bx, by);
+    };
+    auto drag = [&](const char *a, const char *b, int dy_on_target) {
+      int ax = 0, ay = 0, bx = 0, by = 0;
+      CHECK(rows(a, b, ax, ay, bx, by));
+      p.step("press", {r34_mouse(R34ET::MouseMove, ax, ay)});
+      p.step("press", {r34_mouse(R34ET::MouseDown, ax, ay)});
+      for (int i = 1; i <= 4; i++) p.step("drag", {r34_mouse(R34ET::MouseMove, ax + i * 3, ay + (by + dy_on_target - ay) * i / 4)});
+      p.step("over the target", {r34_mouse(R34ET::MouseMove, bx, by + dy_on_target)});
+      p.step("drop", {r34_mouse(R34ET::MouseUp, bx, by + dy_on_target)});
+      p.steps(3, "after the drop");
+    };
+    GameObject *b = p.a.scene().find_by_name("R506e B");
+    drag("R506e B", "R506e A", 0);  // (into A)
+    std::printf("    B dragged onto A: B's parent is %s\n", b->parent ? b->parent->name.c_str() : "(none)");
+    CHECK(p.a.scene().find_by_name("R506e B")->parent == p.a.scene().find_by_name("R506e A"));
+    drag("R506e D", "R506e C", -u.row_h() / 2 + 2);  // (before C)
+    p.cmd("undo");
+    p.steps(3, "undo");
+    p.cmd("undo");
+    p.steps(3, "undo");
+    p.cmd("redo");
+    p.steps(3, "redo");
+    p.report("drag and drop in the Hierarchy");
+  });
+}
+
+/* Round 507 (task 0491): `budget pc` in a window counts on a job and posts the report the one-call count gives. */
+static std::vector<std::string> budget_lines_since(size_t at) {
+  std::vector<LogEntry> said;
+  Log::fetch(at, said);
+  std::vector<std::string> out;
+  for (const LogEntry &e : said)
+    if (e.text.rfind("  ", 0) == 0 || e.text.rfind("Budget (", 0) == 0) out.push_back(e.text);  // (the rows and the report: not "counting", not what a delete says)
+  return out;
+}
+
+static void budget_scene_507(Editor &ed, const std::string &png) {
+  for (int i = 0; i < 5; i++) {
+    GameObject *g = ed.scene().create("Part" + std::to_string(i));
+    g->add<MeshFilter>()->mesh = i % 2 ? primitives::uv_sphere(0.5f, 12 + i, 8) : primitives::cube();
+    MaterialPtr m = make_material("Mat" + std::to_string(i), Vec3(1.0f));
+    m->base_map = TextureRef{png, false};
+    g->add<MeshRenderer>()->materials = {m, m};
+  }
+}
+
+static void tests_round507() {
+  test("budget pc in a window (round 507): the command returns at once with 'counting', and the report that follows is the one-call count's, line for line", [] {
+    const std::string dir = fs::join(test_dir(), "r507_budget");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(64 * 32, 0xFF4080C0u);
+    const std::string png = fs::join(dir, "map.png");
+    CHECK(write_png(png, px.data(), 64, 32, 64, false));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    budget_scene_507(ed, png);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");  // (headless: the whole count in the call)
+    const std::vector<std::string> one_call = budget_lines_since(at);
+    CHECK(one_call.size() >= 10);  // (nine rows and the one-line report)
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());  // (returned with the count still on its worker or just done: not yet reported)
+    std::vector<LogEntry> early;
+    Log::fetch(at, early);
+    bool said_counting = false;  // (the console echoes the command first: look through what was said so far)
+    for (const LogEntry &e : early) said_counting = said_counting || e.text.rfind("Budget: counting ", 0) == 0;
+    CHECK(said_counting);
+    for (const LogEntry &e : early) CHECK(e.text.rfind("  ", 0) != 0 && e.text.rfind("Budget (", 0) != 0);  // (no rows yet: the report waits for the count)
+    for (int i = 0; i < 2000 && ed.budget_counting_for_test(); i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(!ed.budget_counting_for_test());
+    const std::vector<std::string> windowed = budget_lines_since(at);
+    std::printf("    the one-call report %zu line(s), the window's %zu\n", one_call.size(), windowed.size());
+    CHECK(windowed == one_call);
+    ed.command("budget pc");  // (a second count after the first: a new job, the same report)
+    for (int i = 0; i < 2000 && ed.budget_counting_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.budget_counting_for_test());
+  });
+  test("budget pc in a window (round 507): an object deleted while it counts - no fault, and the report is of the scene as the command found it", [] {
+    const std::string dir = fs::join(test_dir(), "r507_budget2");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(64 * 32, 0xFF4080C0u);
+    const std::string png = fs::join(dir, "map.png");
+    CHECK(write_png(png, px.data(), 64, 32, 64, false));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    budget_scene_507(ed, png);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> before = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());
+    GameObject *gone = ed.scene().find_by_name("Part1");
+    CHECK(gone != nullptr);
+    if (!gone) return;
+    ed.select_object(gone->id);
+    ed.command("delete");
+    CHECK(ed.scene().find_by_name("Part1") == nullptr);
+    for (int i = 0; i < 2000 && ed.budget_counting_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.budget_counting_for_test());
+    CHECK(budget_lines_since(at) == before);
+  });
+}
+
+/* Round 507, test engineer (task 0491): `budget pc` on a job, hunted at its edges. */
+namespace r507te {
+static void rich_scene(Editor &ed, const std::string &dir) {
+  const std::string png = fs::join(dir, "map.png");
+  std::vector<uint32_t> px(64 * 32, 0xFF4080C0u);
+  write_png(png, px.data(), 64, 32, 64, false);
+  for (int i = 0; i < 4; i++) {
+    GameObject *g = ed.scene().create("Mod" + std::to_string(i));
+    g->add<MeshFilter>()->mesh = i % 2 ? primitives::uv_sphere(0.5f, 14, 9) : primitives::cube();
+    MaterialPtr m = make_material("RichMat" + std::to_string(i), Vec3(1.0f));
+    m->base_map = TextureRef{png, false};
+    m->normal_map = TextureRef{fs::join(dir, "no_such_normal.png"), false};  // (missing on disk)
+    m->emission_map = TextureRef{fs::join(dir, "no_such_emission.png"), false};
+    g->add<MeshRenderer>()->materials = {m, nullptr, m};
+    if (i < 2) g->add<MirrorModifier>();
+    if (i == 1) g->add<ArrayModifier>()->count = 5;
+    if (i == 3) g->active = false;
+  }
+  GameObject *rig = ed.scene().create("Rig");
+  rig->add<Armature>();
+  for (int b = 0; b < 3; b++) {
+    GameObject *bone = ed.scene().create("Bone" + std::to_string(b));
+    bone->add<Bone>();
+    ed.scene().set_parent(bone, rig, -1, false);
+  }
+  GameObject *skin = ed.scene().create("Skinned");
+  skin->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 16, 10);
+  skin->add<MeshRenderer>();
+  skin->add<SkinModifier>()->object = "Rig";
+  GameObject *lamp = ed.scene().create("Lamp");
+  lamp->add<Light>();
+  ed.mark_changed_for_test("rich");
+}
+static void settle(Editor &ed) {
+  for (int i = 0; i < 4000 && ed.budget_counting_for_test(); i++) {
+    ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+}  // namespace r507te
+
+static void tests_round507_te() {
+  test("round 507 (test engineer): budget pc in a window reports exactly what the one-call count says for a scene with textures, modifiers, a skin and missing maps", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    CHECK(one.size() >= 10);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    r507te::settle(ed);
+    const std::vector<std::string> win = budget_lines_since(at);
+    for (size_t i = 0; i < std::max(one.size(), win.size()); i++) std::printf("    %-60s | %s\n", i < one.size() ? one[i].c_str() : "-", i < win.size() ? win[i].c_str() : "-");
+    CHECK(win == one);
+    ed.command("budget quest");  // (the other target: same again)
+    r507te::settle(ed);
+    CHECK(!ed.budget_counting_for_test());
+  });
+  test("round 507 (review): New Scene while budget pc counts - the old scene's count is dropped with a word, never reported or kept, and the next count sees the empty scene", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget2");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());
+    ed.command("newscene");
+    r507te::settle(ed);
+    CHECK(!ed.budget_counting_for_test());
+    CHECK(budget_lines_since(at).empty());  // (was `== one`: the old scene's report; a count of a scene that is gone is not reported)
+    std::vector<LogEntry> said;
+    Log::fetch(at, said);
+    bool told = false;
+    for (const LogEntry &e : said) told = told || e.text.find("the scene changed while counting") != std::string::npos;
+    CHECK(told);
+    CHECK(!ed.budget_cache_kept_for_test());  // (the Profiler's cache is not the old scene's)
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    r507te::settle(ed);
+    const std::vector<std::string> empty = budget_lines_since(at);
+    CHECK(!empty.empty() && empty != one);
+  });
+  test("round 507 (test engineer): a mesh replaced and edited while budget pc counts leaves the report as the command found it", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget3");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    CHECK(ed.budget_counting_for_test());
+    for (const char *n : {"Mod0", "Skinned"}) {
+      GameObject *g = ed.scene().find_by_name(n);
+      MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+      CHECK(mf != nullptr);
+      if (!mf) return;
+      mf->mesh = primitives::uv_sphere(0.5f, 64, 48);  // (a far bigger mesh in its place)
+      g->add<ArrayModifier>()->count = 9;
+    }
+    ed.mark_changed_for_test("edited while counting");
+    r507te::settle(ed);
+    CHECK(budget_lines_since(at) == one);
+  });
+  test("round 507 (test engineer): a budget pc typed while the Profiler's own recount runs is reported once, when that count lands", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget4");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    std::vector<LogEntry> tmp;
+    size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    const std::vector<std::string> one = budget_lines_since(at);
+    ed.set_budget_windowed_for_test(true);
+    ed.open_window_for_test(WindowKind::Profiler, 700, 600);
+    ed.command("budget pc");  // (target set; the count over)
+    r507te::settle(ed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));  // (the half second the Profiler's cache is kept)
+    ed.step_frame_headless();  // (its draw starts a recount)
+    if (!ed.budget_counting_for_test()) {
+      std::printf("    the Profiler did not start a recount in a headless frame - nothing to type over\n");
+      CHECK(false);
+      return;
+    }
+    at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    r507te::settle(ed);
+    const std::vector<std::string> got = budget_lines_since(at);
+    std::printf("    reported %zu line(s), one-call %zu\n", got.size(), one.size());
+    CHECK(got == one);
+  });
+  test("round 507 (test engineer): budget quest typed while budget pc counts - the pc report still says PC", [] {
+    const std::string dir = fs::join(test_dir(), "r507te_budget5");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r507te::rich_scene(ed, dir);
+    ed.set_budget_windowed_for_test(true);
+    std::vector<LogEntry> tmp;
+    const size_t at = Log::fetch(0, tmp);
+    ed.command("budget pc");
+    ed.command("budget quest");  // (refused: still counting)
+    r507te::settle(ed);
+    std::vector<LogEntry> said;
+    Log::fetch(at, said);
+    std::string header;
+    for (const LogEntry &e : said)
+      if (e.text.rfind("Budget (", 0) == 0) header = e.text.substr(0, 20);
+    std::printf("    the report began: '%s'\n", header.c_str());
+    CHECK(header.find("PC") != std::string::npos);  // (asked for PC first; the refused command moved the target before it was refused)
+  });
+}
+
+/* ---------------------------------------------------------------- round 508: the image editor's heavy sliders and the picture's read (task 0492) */
+
+namespace r508 {
+
+edit::Image picture(int w, int h) {
+  edit::Image img;
+  img.resize(w, h);
+  uint32_t s = 12345u;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      s = s * 1664525u + 1013904223u;
+      const float n = ((s >> 9) & 0xffff) / 65535.0f - 0.5f;
+      float *p = img.at(x, y);
+      p[0] = 0.5f + 0.4f * std::sin(x * 0.3f + y * 0.1f) + 0.1f * n;
+      p[1] = 0.4f + 0.3f * std::cos(x * 0.07f - y * 0.2f) + 0.1f * n;
+      p[2] = 0.3f + 0.2f * std::sin(x * 0.05f) * std::cos(y * 0.09f) + 0.1f * n;
+      p[3] = 0.8f;
+    }
+  if (w > 5 && h > 5) img.at(5, 5)[0] = 3.0f;  // (above white; a picture smaller than 6 x 6 has no such pixel - ASan found the write past its end)
+  return img;
+}
+
+float lum(const float *c) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; }
+float hermite(float a, float b, float x) {
+  const float t = std::max(0.0f, std::min(1.0f, (x - a) / (b - a)));
+  return t * t * (3.0f - 2.0f * t);
+}
+float enc_exact(float x) { return x <= 0.0031308f ? 12.92f * x : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f; }
+
+/* Three box blurs each way, summed straight (no running sum) - the filters' blur written the slow, plain way. */
+std::vector<float> blurred(std::vector<float> p, int w, int h, int r) {
+  for (int pass = 0; pass < 3; pass++) {
+    std::vector<float> t(p.size());
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        double s = 0;
+        for (int d = -r; d <= r; d++) s += p[(size_t)y * w + std::max(0, std::min(w - 1, x + d))];
+        t[(size_t)y * w + x] = (float)(s / (2 * r + 1));
+      }
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        double s = 0;
+        for (int d = -r; d <= r; d++) s += t[(size_t)std::max(0, std::min(h - 1, y + d)) * w + x];
+        p[(size_t)y * w + x] = (float)(s / (2 * r + 1));
+      }
+  }
+  return p;
+}
+
+std::vector<float> lum_plane(const edit::Image &in) {
+  std::vector<float> y((size_t)in.w * in.h);
+  for (size_t i = 0; i < y.size(); i++) y[i] = std::max(0.0f, lum(&in.px[i * 4]));
+  return y;
+}
+
+void scale_to(float *c, float y, float y2) {
+  for (int k = 0; k < 3; k++) c[k] = y > 1e-8f ? c[k] * (y2 / y) : y2;
+}
+
+edit::Image ref_clarity(const edit::Image &in, float amount) {
+  edit::Image out = in;
+  const float k = amount / 100.0f * 0.8f;
+  const std::vector<float> y = lum_plane(in), b = blurred(y, in.w, in.h, std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h))));
+  for (size_t i = 0; i < y.size(); i++) {
+    const float p = std::min(1.0f, enc_exact(y[i])), w = 4.0f * p * (1.0f - p);
+    scale_to(&out.px[i * 4], y[i], std::max(0.0f, y[i] + k * (y[i] - b[i]) * w));
+  }
+  return out;
+}
+
+edit::Image ref_sharpen(const edit::Image &in, float amount, float radius, float masking) {
+  edit::Image out = in;
+  const std::vector<float> y = lum_plane(in), b = blurred(y, in.w, in.h, std::max(1, (int)std::lround(radius)));
+  for (size_t i = 0; i < y.size(); i++) {
+    const float detail = y[i] - b[i], m = masking > 0.0f ? hermite(0.0f, masking / 100.0f * 0.1f, std::fabs(detail)) : 1.0f;
+    scale_to(&out.px[i * 4], y[i], std::max(0.0f, y[i] + amount / 100.0f * detail * m));
+  }
+  return out;
+}
+
+edit::Image ref_dehaze(const edit::Image &in, float amount100) {
+  edit::Image out = in;
+  const float amount = amount100 / 100.0f;
+  std::vector<float> dark((size_t)in.w * in.h);
+  for (size_t i = 0; i < dark.size(); i++) dark[i] = std::max(0.0f, std::min(in.px[i * 4], std::min(in.px[i * 4 + 1], in.px[i * 4 + 2])));
+  dark = blurred(dark, in.w, in.h, std::max(2, (int)std::lround(0.01f * std::sqrt((float)in.w * in.w + (float)in.h * in.h))));
+  std::vector<float> sorted = dark;
+  std::sort(sorted.begin(), sorted.end());  // (the whole sort: the filter's histogram search must land on the same value)
+  const float A = std::max(0.05f, sorted[sorted.size() - 1 - sorted.size() / 1000]);
+  for (size_t i = 0; i < dark.size(); i++)
+    for (int k = 0; k < 3; k++) {
+      float &c = out.px[i * 4 + k];
+      if (amount < 0.0f) c = c + (A - c) * (-amount * 0.5f);
+      else c = std::max(0.0f, (c - A) / std::max(0.1f, 1.0f - 0.95f * amount * dark[i] / A) + A);
+    }
+  return out;
+}
+
+float max_diff(const edit::Image &a, const edit::Image &b) {
+  if (a.w != b.w || a.h != b.h) return 1e9f;
+  float m = 0;
+  for (size_t i = 0; i < a.px.size(); i++) m = std::max(m, std::fabs(a.px[i] - b.px[i]));
+  return m;
+}
+
+/* One filter with its fields set, applied the one-call way (no kept parts). */
+edit::Image fresh(const edit::Image &in, const std::string &type, const std::vector<std::pair<const char *, float>> &fields) {
+  edit::Adjustment a = edit::make_adjustment(type);
+  for (const auto &f : fields) a.set(f.first, f.second);
+  edit::Image out;
+  edit::apply(a, in, out);
+  return out;
+}
+
+/* A document on `img` with one step of `type`, its first field dragged through `values` (a result() after each), the last result returned. */
+edit::Image dragged(const edit::Image &img, const std::string &type, const std::vector<float> &values, const std::vector<std::pair<const char *, float>> &others = {}) {
+  edit::Doc doc;
+  doc.open_pixels(img, "r508");
+  doc.add(type);
+  for (const auto &f : others) doc.set(0, f.first, f.second);
+  const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+  for (float v : values) {
+    doc.set(0, field, v, false);
+    doc.result();
+  }
+  return doc.result();
+}
+
+bool wait_landed(edit::Doc &doc, std::string &err, edit::Doc::Landed &how) {
+  for (int i = 0; i < 5000; i++) {
+    how = doc.poll_open(err);
+    if (how != edit::Doc::Landed::Nothing) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return false;
+}
+
+}  // namespace r508
+
+static void tests_round508() {
+  test("round 508: Clarity, Sharpen and Dehaze after a drag of the amount give the picture of the plain formula (a slow straight-summed blur) at two radii each", [] {
+    for (const std::pair<int, int> &size : {std::pair<int, int>{160, 120}, std::pair<int, int>{330, 250}}) {  // (Clarity's and Dehaze's radius follows the size: 2 and 4)
+      const edit::Image img = r508::picture(size.first, size.second);
+      CHECK(r508::max_diff(r508::dragged(img, "Clarity", {20, 45, 70}), r508::ref_clarity(img, 70)) < 2e-4f);
+      CHECK(r508::max_diff(r508::dragged(img, "Dehaze", {20, 45, 70}), r508::ref_dehaze(img, 70)) < 2e-4f);
+      CHECK(r508::max_diff(r508::dragged(img, "Dehaze", {-20, -60}), r508::ref_dehaze(img, -60)) < 2e-4f);
+    }
+    const edit::Image img = r508::picture(160, 120);
+    for (float radius : {1.0f, 3.0f})
+      CHECK(r508::max_diff(r508::dragged(img, "Sharpen", {30, 80, 120}, {{"Radius", radius}, {"Masking", 30}}), r508::ref_sharpen(img, 120, radius, 30)) < 2e-4f);
+  });
+
+  test("round 508: Noise Reduction after a drag of either strength is the one-call picture, at two colour radii; the same for the others through the preview", [] {
+    const edit::Image img = r508::picture(160, 120);
+    for (float color : {30.0f, 100.0f}) {
+      const edit::Image want = r508::fresh(img, "Noise Reduction", {{"Luminance", 70}, {"Color", color}});
+      CHECK(r508::max_diff(r508::dragged(img, "Noise Reduction", {10, 40, 70}, {{"Color", color}}), want) == 0.0f);
+    }
+    edit::Doc doc;  // (the colour strength dragged with the luminance's kept)
+    doc.open_pixels(img, "r508");
+    doc.add("Noise Reduction");
+    doc.set(0, "Luminance", 60);
+    for (float c : {10.0f, 50.0f, 90.0f}) {
+      doc.set(0, "Color", c, false);
+      doc.result();
+    }
+    CHECK(r508::max_diff(doc.result(), r508::fresh(img, "Noise Reduction", {{"Luminance", 60}, {"Color", 90}})) == 0.0f);
+    /* The preview (a smaller picture, the radii scaled): the same through the kept parts and through none. */
+    const edit::Image big = r508::picture(300, 200);
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc d;
+      d.open_pixels(big, "r508");
+      d.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      for (float v : {15.0f, 35.0f, 55.0f}) {
+        d.set(0, field, v, false);
+        d.preview(100);
+      }
+      edit::Image want;
+      edit::apply(d.stack()[0], d.preview_source(100), want, d.preview_scale());
+      CHECK(r508::max_diff(d.preview(100), want) == 0.0f);
+    }
+  });
+
+  test("round 508: a drag of the amount filters the source once - the parts are made again only for another radius, another input (an earlier step edited, its mask changed, undo) or another picture", [] {
+    const edit::Image img = r508::picture(160, 120);
+    edit::Doc doc;
+    doc.open_pixels(img, "r508");
+    doc.add("Exposure");
+    doc.set(0, "Exposure", 0.5f);
+    doc.add("Clarity");
+    doc.set(1, "Clarity", 30);
+    doc.result();
+    const uint64_t first = edit::filter_parts_made();
+    for (float v : {40.0f, 55.0f, 70.0f, -20.0f}) {
+      doc.set(1, "Clarity", v, false);
+      doc.result();
+    }
+    CHECK(edit::filter_parts_made() == first);  // (five amounts, one luminance and one blur)
+    auto chain = [&](const edit::Image &in, float exposure, float clarity) {
+      edit::Image a, b;
+      edit::apply([&] { edit::Adjustment e = edit::make_adjustment("Exposure"); e.set("Exposure", exposure); return e; }(), in, a);
+      edit::apply([&] { edit::Adjustment c = edit::make_adjustment("Clarity"); c.set("Clarity", clarity); return c; }(), a, b);
+      return b;
+    };
+    CHECK(r508::max_diff(doc.result(), chain(img, 0.5f, -20)) == 0.0f);
+    doc.set(0, "Exposure", 1.5f, false);  // (the step before it: its input is another picture)
+    CHECK(r508::max_diff(doc.result(), chain(img, 1.5f, -20)) == 0.0f);
+    CHECK(edit::filter_parts_made() > first);
+    const uint64_t second = edit::filter_parts_made();
+    doc.set(1, "Clarity", 10, false);
+    doc.result();
+    CHECK(edit::filter_parts_made() == second);
+    edit::MaskPart radial = edit::make_mask_part(edit::MaskKind::Radial, img.w, img.h);  // (a mask on the earlier step changes what the later one reads)
+    doc.set_mask(0, {radial});
+    doc.result();
+    CHECK(edit::filter_parts_made() > second);
+    const edit::Image masked = doc.result();
+    doc.undo();  // (the mask undone: the earlier step's output is the unmasked one again)
+    CHECK(r508::max_diff(doc.result(), chain(img, 1.5f, 10)) == 0.0f);
+    CHECK(r508::max_diff(masked, chain(img, 1.5f, 10)) > 1e-4f);
+    doc.set(1, "Clarity", 30, false);  // (another picture: the parts are not the old one's)
+    doc.result();
+    const edit::Image other = r508::picture(160, 120);
+    edit::Image changed = other;
+    for (size_t i = 0; i < changed.px.size(); i += 4) changed.px[i] *= 0.5f;
+    doc.open_pixels(changed, "r508b");
+    doc.add("Clarity");
+    doc.set(0, "Clarity", 30);
+    CHECK(r508::max_diff(doc.result(), r508::fresh(changed, "Clarity", {{"Clarity", 30}})) == 0.0f);
+    /* Sharpen: the radius is part of the key; Noise Reduction: the luminance and the colour each have theirs. */
+    edit::Doc sh;
+    sh.open_pixels(img, "r508");
+    sh.add("Sharpen");
+    sh.set(0, "Amount", 50);
+    sh.result();
+    const uint64_t s0 = edit::filter_parts_made();
+    sh.set(0, "Amount", 90, false);
+    sh.set(0, "Masking", 40, false);
+    sh.result();
+    CHECK(edit::filter_parts_made() == s0);
+    sh.set(0, "Radius", 2, false);
+    sh.result();
+    CHECK(edit::filter_parts_made() == s0 + 1);
+    edit::Doc nr;
+    nr.open_pixels(img, "r508");
+    nr.add("Noise Reduction");
+    nr.set(0, "Luminance", 40);
+    nr.set(0, "Color", 40, false);
+    nr.result();
+    const uint64_t n0 = edit::filter_parts_made();
+    nr.set(0, "Luminance", 60, false);
+    nr.result();
+    CHECK(edit::filter_parts_made() == n0 + 1);  // (the smoothed luminance only)
+    nr.set(0, "Color", 80, false);
+    nr.result();
+    CHECK(edit::filter_parts_made() == n0 + 2);  // (the chroma only)
+  });
+
+  test("round 508: a picture opened on a worker has the pixels the one-call open gives; A then B opened at once shows B; opening something else while it reads drops the read", [] {
+    const std::string dir = fs::join(test_dir(), "r508_open");
+    fs::make_dirs(dir);
+    auto write = [&](const char *name, int w, int h, uint32_t colour) {
+      std::vector<uint32_t> px((size_t)w * h);
+      for (size_t i = 0; i < px.size(); i++) px[i] = colour ^ (uint32_t)(i % 251) << 8;
+      const std::string path = fs::join(dir, name);
+      CHECK(write_png(path, px.data(), w, h, w));
+      return path;
+    };
+    const std::string a = write("a.png", 512, 384, 0xFF2040C0u), b = write("b.png", 300, 200, 0xFFC08020u);
+    edit::Doc sync;
+    std::string err;
+    CHECK(sync.open_file(b, err));
+    edit::Doc doc;
+    doc.open_file_async(a);
+    CHECK(doc.loading() && doc.loading_path() == a && !doc.is_open());
+    doc.open_file_async(b);  // (A's read is dropped: B's result is the one kept)
+    edit::Doc::Landed how = edit::Doc::Landed::Nothing;
+    CHECK(r508::wait_landed(doc, err, how) && how == edit::Doc::Landed::Opened);
+    CHECK(!doc.loading() && doc.source_path() == b && doc.source().w == 300 && doc.source().px == sync.source().px);
+    doc.open_file_async(a);  // (the document opened another way while the read is out: the read is dropped)
+    doc.open_pixels(r508::picture(20, 10), "px");
+    CHECK(!doc.loading());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(doc.poll_open(err) == edit::Doc::Landed::Nothing && doc.source().w == 20);
+    doc.open_file_async(fs::join(dir, "missing.png"));  // (a file that is not there: a failure, the document untouched)
+    CHECK(r508::wait_landed(doc, err, how) && how == edit::Doc::Landed::Failed && !err.empty() && doc.source().w == 20);
+    doc.open_file_async(a);
+    doc.cancel_open();
+    CHECK(!doc.loading());
+  });
+
+  test("round 508: the Editing window shows Loading while a picture is read on a worker, opens it in a later frame with the same pixels, takes the newer of two opened at once, and an editor closed mid-read ends cleanly", [] {
+    const std::string dir = fs::join(test_dir(), "r508_window");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)1500 * 1500);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    const std::string big = fs::join(dir, "big.png"), small = fs::join(dir, "small.png");
+    CHECK(write_png(big, px.data(), 1500, 1500, 1500));
+    std::vector<uint32_t> sm(40 * 30, 0xFF4060A0u);
+    CHECK(write_png(small, sm.data(), 40, 30, 40));
+    edit::Doc want;
+    std::string err;
+    CHECK(want.open_file(small, err));
+    {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.set_async_jobs_for_test(true);
+      ed.command("window Editing");
+      ed.command("develop open " + big);
+      CHECK(ed.edit_doc_for_test().loading() && !ed.edit_doc_for_test().is_open());
+      ed.command("develop open " + small);  // (the second one, at once: the first read is dropped)
+      for (int i = 0; i < 2000 && ed.edit_doc_for_test().loading(); i++) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      edit::Doc &doc = ed.edit_doc_for_test();
+      CHECK(!doc.loading() && doc.source_path() == small && doc.source().px == want.source().px);
+      ed.step_frame_headless();
+      ed.command("develop open " + big);  // (a picture open already stays up while the next is read, then is replaced)
+      CHECK(doc.loading() && doc.is_open() && doc.source_path() == small);
+      ed.step_frame_headless();
+      ed.command("develop add Exposure");  // (a command meanwhile is refused, not applied to the old picture)
+      CHECK(doc.stack().empty() || doc.source_path() == big);
+      ed.command("develop open " + big);  // (and the editor goes out of scope with this one still being read)
+    }
+    CHECK(true);
+  });
+}
+
+/* ---------------------------------------------------------------- round 508 (test engineer): kept parts and the async open, against fresh applies */
+
+namespace r508te {
+
+bool same_bits(const edit::Image &a, const edit::Image &b) {
+  return a.w == b.w && a.h == b.h && a.px.size() == b.px.size() && std::memcmp(a.px.data(), b.px.data(), a.px.size() * sizeof(float)) == 0;
+}
+
+/* The stack applied step by step with no kept parts (the one-call path), on `src` at `scale`. */
+edit::Image chain(const edit::Doc &doc, const edit::Image &src, float scale) {
+  edit::Image cur = src;
+  for (const edit::Adjustment &a : doc.stack()) {
+    edit::Image out;
+    edit::apply(a, cur, out, scale);
+    cur = std::move(out);
+  }
+  return cur;
+}
+
+/* What the document shows at `side` (0: the full result) and what a keep-free chain gives for the same input. */
+bool shows_fresh(edit::Doc &doc, int side) {
+  const edit::Image shown = side > 0 ? doc.preview(side) : doc.result();
+  if (side > 0) {
+    const edit::Image &src = doc.preview_source(side);
+    const float scale = &src == &doc.source() ? 1.0f : doc.preview_scale();
+    return same_bits(shown, chain(doc, src, scale));
+  }
+  return same_bits(shown, chain(doc, doc.source(), 1.0f));
+}
+
+const char *const kTypes[] = {"Exposure", "Clarity", "Sharpen", "Dehaze", "Noise Reduction", "Clarity", "Flip / Rotate", "Crop / Straighten"};
+
+/* One random edit of the stack (a slider drag, a toggle, a move, a remove, an add, a mask, an undo or redo). */
+void random_edit(edit::Doc &doc, uint32_t &s, int w, int h, std::string &what) {
+  auto next = [&](uint32_t n) {
+    s = s * 1664525u + 1013904223u;
+    return (s >> 8) % n;
+  };
+  const int n = (int)doc.stack().size();
+  const int op = (int)next(12);
+  const int i = n ? (int)next((uint32_t)n) : 0;
+  if (n == 0 || op == 0) {
+    const char *t = kTypes[next(8)];
+    doc.add(t);
+    what = std::string("add ") + t;
+    return;
+  }
+  const edit::Adjustment &a = doc.stack()[(size_t)i];
+  switch (op) {
+    case 1: case 2: case 3: case 4: {  // (a drag: no undo step)
+      const auto &fields = a.info()->fields;
+      if (fields.empty()) return;
+      const auto &f = fields[next((uint32_t)fields.size())];
+      const float v = f.mn + (f.mx - f.mn) * (float)next(1000) / 1000.0f;
+      doc.set(i, f.name, f.mx > 1000 ? std::min(v, 40.0f) : v, op == 1);
+      what = strprintf("set %d %s", i, f.name);
+      return;
+    }
+    case 5:
+      doc.set_enabled(i, !a.enabled);
+      what = strprintf("toggle %d", i);
+      return;
+    case 6:
+      doc.move(i, (int)next((uint32_t)n));
+      what = strprintf("move %d", i);
+      return;
+    case 7:
+      if (n > 1) doc.remove(i);
+      what = strprintf("remove %d", i);
+      return;
+    case 8: {
+      std::vector<edit::MaskPart> mask;
+      const uint32_t kind = next(4);
+      if (kind == 0) mask.clear();
+      else {
+        edit::MaskPart m = edit::make_mask_part(kind == 1 ? edit::MaskKind::Radial : kind == 2 ? edit::MaskKind::Linear : edit::MaskKind::Painted, w, h);
+        m.invert = next(2) == 1;
+        if (kind != 3) m.p[4] = (float)next(100) / 100.0f;
+        else edit::paint_dab(m, 0.3f + 0.1f * next(5), 0.5f, 0.3f, 1.0f, 0.5f, false);
+        mask.push_back(m);
+      }
+      doc.set_mask(i, mask, next(2) == 0);
+      what = strprintf("mask %d kind %u", i, kind);
+      return;
+    }
+    case 9: doc.undo(), what = "undo"; return;
+    case 10: doc.redo(), what = "redo"; return;
+    default: what = "nothing"; return;
+  }
+}
+
+}  // namespace r508te
+
+static void tests_round508_te() {
+  test("round 508 (test engineer): whatever is done to a stack of filters - sliders, toggles, moves, removes, masks, undo, redo, two Clarities, a crop or a turn before one - the full result and two preview sizes equal a keep-free chain", [] {
+    int checked = 0;
+    for (uint32_t seed : {1u, 7u, 99u, 2024u}) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(90, 70), "r508te");
+      uint32_t s = seed;
+      doc.add("Clarity");
+      doc.add("Sharpen");
+      doc.add("Dehaze");
+      doc.add("Noise Reduction");
+      doc.add("Clarity");
+      std::string what = "start";
+      for (int step = 0; step < 70; step++) {
+        r508te::random_edit(doc, s, 90, 70, what);
+        const int side = step % 3 == 0 ? 0 : step % 3 == 1 ? 48 : 64;  // (the preview size changes too)
+        const bool ok = r508te::shows_fresh(doc, side);
+        checked++;
+        if (!ok) std::printf("    seed %u step %d (%s) side %d: the shown picture is not the keep-free chain's\n", seed, step, what.c_str(), side);
+        CHECK(ok);
+        if (!ok) return;
+      }
+      /* The other sizes again after the run (a kept part of the old size must not be used). */
+      CHECK(r508te::shows_fresh(doc, 48) && r508te::shows_fresh(doc, 64) && r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 200));
+    }
+    std::printf("    %d states checked\n", checked);
+  });
+
+  test("round 508 (test engineer): dragging a slider back and forth with the preview size changing between frames (window resized, zoomed) shows the keep-free picture at every size", [] {
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(200, 150), "r508te");
+      doc.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      int bad = 0;
+      const int sides[] = {64, 100, 64, 150, 0, 100, 40, 64};
+      for (int i = 0; i < 16; i++) {
+        doc.set(0, field, (float)(10 + 8 * (i % 5)), false);
+        if (!r508te::shows_fresh(doc, sides[i % 8])) bad++;
+      }
+      std::printf("    %s: %d frames off\n", type, bad);
+      CHECK(bad == 0);
+    }
+  });
+
+  test("round 508 (test engineer): two filters of one kind in a stack each keep their own parts: dragging the first, then the second, matches the chain", [] {
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(120, 90), "r508te");
+      doc.add(type);
+      doc.add("Exposure");
+      doc.set(1, "Exposure", 0.7f);
+      doc.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      for (int i = 0; i < 6; i++) {
+        doc.set(i % 2 ? 2 : 0, field, (float)(20 + 9 * i), false);
+        CHECK(r508te::shows_fresh(doc, i % 3 == 0 ? 0 : 64));
+      }
+      /* Swapping the two: each now has the other's input. */
+      doc.move(0, 2);
+      CHECK(r508te::shows_fresh(doc, 0));
+      CHECK(r508te::shows_fresh(doc, 64));
+      doc.undo();
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+  });
+
+  test("round 508 (test engineer): a mask painted, inverted and feathered on an earlier step, then undone and redone, never leaves a later filter on the old input", [] {
+    edit::Doc doc;
+    doc.open_pixels(r508::picture(120, 90), "r508te");
+    doc.add("Exposure");
+    doc.set(0, "Exposure", 1.0f);
+    doc.add("Clarity");
+    doc.set(1, "Clarity", 60);
+    doc.add("Dehaze");
+    doc.set(2, "Dehaze", 50);
+    CHECK(r508te::shows_fresh(doc, 64));
+    edit::MaskPart paint = edit::make_mask_part(edit::MaskKind::Painted, 120, 90);
+    for (int i = 0; i < 6; i++) edit::paint_dab(paint, 0.2f + 0.1f * i, 0.5f, 0.15f, 1.0f, 0.5f, false);
+    doc.set_mask(0, {paint});
+    CHECK(r508te::shows_fresh(doc, 64) && r508te::shows_fresh(doc, 0));
+    paint.invert = true;
+    doc.set_mask(0, {paint});
+    CHECK(r508te::shows_fresh(doc, 64));
+    edit::MaskPart radial = edit::make_mask_part(edit::MaskKind::Radial, 120, 90);
+    for (float feather : {0.0f, 0.3f, 1.0f}) {
+      radial.p[4] = feather;
+      doc.set_mask(0, {radial}, false);
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+    for (int i = 0; i < 4; i++) {
+      doc.undo();
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+    for (int i = 0; i < 4; i++) {
+      doc.redo();
+      CHECK(r508te::shows_fresh(doc, 64));
+    }
+    /* A mask on the filter itself (its input unchanged: its parts may stay, the picture blends). */
+    doc.set_mask(1, {radial});
+    CHECK(r508te::shows_fresh(doc, 64));
+    doc.set_mask(1, {});
+    CHECK(r508te::shows_fresh(doc, 64));
+  });
+
+  test("round 508 (test engineer): another picture of the same size opened under a stack of the four filters, and an .edit loaded over it, show their own pixels", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_edit");
+    fs::make_dirs(dir);
+    edit::Image a = r508::picture(100, 80), b = r508::picture(100, 80);
+    for (size_t i = 0; i < b.px.size(); i += 4) b.px[i] = 1.0f - std::min(1.0f, b.px[i]), b.px[i + 2] *= 0.3f;
+    edit::Doc doc;
+    doc.open_pixels(a, "a");
+    for (const char *t : {"Clarity", "Dehaze", "Sharpen", "Noise Reduction"}) {
+      const int i = doc.add(t);
+      doc.set(i, edit::make_adjustment(t).info()->fields[0].name, 55);
+    }
+    CHECK(r508te::shows_fresh(doc, 64));
+    const std::string text = doc.stack_text();
+    doc.open_pixels(b, "b");  // (the stack is gone; the same one typed back in)
+    doc.stack_from_text(text);
+    CHECK(doc.stack().size() == 4);
+    CHECK(r508te::shows_fresh(doc, 64) && r508te::shows_fresh(doc, 0));
+    CHECK(!r508te::same_bits(doc.result(), r508te::chain(doc, a, 1.0f)));  // (it is b's picture, not a's)
+    /* An .edit file loaded over a document that has kept parts. */
+    edit::Doc keeper;
+    std::string err;
+    const std::string png = fs::join(dir, "src.png");
+    std::vector<uint32_t> px((size_t)100 * 80);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    CHECK(write_png(png, px.data(), 100, 80, 100));
+    CHECK(keeper.open_file(png, err));
+    keeper.stack_from_text(text);
+    CHECK(keeper.save(fs::join(dir, "x.edit"), err));
+    edit::Doc loaded;
+    loaded.open_pixels(a, "a");
+    loaded.stack_from_text(text);
+    CHECK(r508te::shows_fresh(loaded, 64));
+    CHECK(loaded.load(fs::join(dir, "x.edit"), err));
+    CHECK(loaded.stack().size() == 4);
+    CHECK(r508te::shows_fresh(loaded, 64) && r508te::shows_fresh(loaded, 0));
+  });
+
+  test("round 508 (test engineer): 1x1, 1xN and Nx1 pictures through the four filters, dragged and previewed, match the keep-free apply and do not crash", [] {
+    for (const std::pair<int, int> &sz : {std::pair<int, int>{1, 1}, std::pair<int, int>{1, 37}, std::pair<int, int>{41, 1}, std::pair<int, int>{2, 2}, std::pair<int, int>{3, 300}}) {
+      edit::Image img = r508::picture(sz.first, sz.second);
+      for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+        edit::Doc doc;
+        doc.open_pixels(img, "r508te");
+        doc.add(type);
+        const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+        bool ok = true;
+        for (float v : {25.0f, 60.0f, -30.0f}) {
+          doc.set(0, field, type == std::string("Sharpen") || type == std::string("Noise Reduction") ? std::fabs(v) : v, false);
+          ok = ok && r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 1) && r508te::shows_fresh(doc, 16);
+        }
+        if (!ok) std::printf("    %d x %d %s differs\n", sz.first, sz.second, type);
+        CHECK(ok);
+      }
+    }
+  });
+
+  test("round 508 (test engineer): a picture with NaN and Inf pixels through the four filters, dragged, is bit for bit the keep-free apply (NaN counted equal)", [] {
+    edit::Image img = r508::picture(60, 40);
+    img.at(10, 10)[0] = std::nanf("");
+    img.at(11, 10)[1] = std::numeric_limits<float>::infinity();
+    img.at(30, 20)[2] = -std::numeric_limits<float>::infinity();
+    img.at(0, 0)[1] = std::nanf("");
+    for (const char *type : {"Clarity", "Sharpen", "Dehaze", "Noise Reduction"}) {
+      edit::Doc doc;
+      doc.open_pixels(img, "r508te");
+      doc.add(type);
+      const std::string field = edit::make_adjustment(type).info()->fields[0].name;
+      bool ok = true;
+      for (float v : {20.0f, 50.0f, 80.0f}) {
+        doc.set(0, field, v, false);
+        ok = ok && r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 32);
+      }
+      if (!ok) std::printf("    %s with NaN/Inf differs from the keep-free apply\n", type);
+      CHECK(ok);
+    }
+  });
+
+  test("round 508 (test engineer): Dehaze's airlight on odd pictures - flat grey, all black, one hot pixel, a huge value, tiny values - equals the plain sort's and does not crash", [] {
+    struct Case {
+      const char *name;
+      float base, hot;
+    };
+    for (const Case &c : {Case{"flat grey", 0.4f, 0.4f}, Case{"all black", 0.0f, 0.0f}, Case{"one hot pixel", 0.1f, 5.0f}, Case{"huge value", 0.2f, 3e30f}, Case{"tiny 1e-20", 1e-20f, 3e-20f},
+                          Case{"tiny 1e-36", 1e-36f, 2e-36f}, Case{"tiny 1e-37 flat", 1e-37f, 1e-37f}, Case{"denormal", 1e-41f, 1e-41f}}) {
+      edit::Image img;
+      img.resize(40, 30);
+      for (size_t i = 0; i < img.px.size(); i += 4) img.px[i] = img.px[i + 1] = img.px[i + 2] = c.base, img.px[i + 3] = 1.0f;
+      img.at(20, 15)[0] = img.at(20, 15)[1] = img.at(20, 15)[2] = c.hot;
+      for (float amount : {60.0f, -60.0f}) {
+        std::fprintf(stderr, "    airlight case %s amount %g\n", c.name, (double)amount);  // (stderr: a crash in a case must still name it)
+        const edit::Image want = r508::ref_dehaze(img, amount);
+        edit::Doc doc;
+        doc.open_pixels(img, "r508te");
+        doc.add("Dehaze");
+        doc.set(0, "Dehaze", amount, false);
+        const edit::Image got = doc.result();
+        const float scale = std::max(1.0f, std::max(c.base, c.hot));
+        const float d = r508::max_diff(got, want);
+        if (!(d <= 2e-4f * scale)) std::printf("    %s amount %g: off by %g\n", c.name, (double)amount, (double)d);
+        CHECK(d <= 2e-4f * scale);
+      }
+    }
+  });
+
+  test("round 508 (test engineer): a picture past the 4.2M-pixel keep limit and one just under it give the keep-free picture dragged; only the one under it holds its parts between moves", [] {
+    for (const std::pair<int, int> &sz : {std::pair<int, int>{2100, 2100}, std::pair<int, int>{2048, 2048}}) {
+      edit::Image img = r508::picture(sz.first, sz.second);
+      edit::Doc doc;
+      doc.open_pixels(img, "r508te");
+      doc.add("Clarity");
+      doc.set(0, "Clarity", 30);
+      doc.result();
+      const uint64_t made = edit::filter_parts_made();
+      doc.set(0, "Clarity", 60, false);
+      const edit::Image got = doc.result();
+      const bool kept = (int64_t)sz.first * sz.second <= edit::kKeepPixels;
+      std::printf("    %d x %d: parts made on the second move: %llu (%s)\n", sz.first, sz.second, (unsigned long long)(edit::filter_parts_made() - made), kept ? "held" : "too large to hold");
+      CHECK(kept ? edit::filter_parts_made() == made : edit::filter_parts_made() > made);
+      CHECK(r508te::same_bits(got, r508::fresh(img, "Clarity", {{"Clarity", 60}})));
+    }
+  });
+
+  test("round 508 (test engineer): the keep is not shared between filters: Sharpen then Clarity then Sharpen at another radius on one picture each match the keep-free apply (radius and strength keys)", [] {
+    edit::Doc doc;
+    doc.open_pixels(r508::picture(130, 100), "r508te");
+    doc.add("Sharpen");
+    doc.set(0, "Amount", 80);
+    CHECK(r508te::shows_fresh(doc, 0));
+    for (float radius : {0.5f, 1.0f, 1.4f, 1.5f, 2.6f, 3.0f, 1.0f}) {
+      doc.set(0, "Radius", radius, false);
+      CHECK(r508te::shows_fresh(doc, 0) && r508te::shows_fresh(doc, 64));
+    }
+    doc.add("Noise Reduction");
+    for (float lum : {0.0f, 100.0f, 33.0f, 0.0f}) {
+      for (float col : {0.0f, 100.0f, 50.0f, 0.0f}) {
+        doc.set(1, "Luminance", lum, false);
+        doc.set(1, "Color", col, false);
+        CHECK(r508te::shows_fresh(doc, 64));
+      }
+    }
+  });
+}
+
+/* The async open, hardest cases first. */
+static void tests_round508_te_open() {
+  test("round 508 (test engineer): an async open of a truncated, empty, text-as-png, directory and missing path ends (opened or failed), never hangs, and a failure leaves the open picture as it was", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_open");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)200 * 150);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    const std::string good = fs::join(dir, "good.png");
+    CHECK(write_png(good, px.data(), 200, 150, 200));
+    std::string bytes;
+    {
+      std::ifstream in(good, std::ios::binary);
+      bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    CHECK(bytes.size() > 200);
+    auto write_file = [&](const char *name, const std::string &content) {
+      const std::string p = fs::join(dir, name);
+      std::ofstream out(p, std::ios::binary);
+      out.write(content.data(), (std::streamsize)content.size());
+      return p;
+    };
+    const std::string cases[] = {write_file("trunc_half.png", bytes.substr(0, bytes.size() / 2)), write_file("trunc_header.png", bytes.substr(0, 20)), write_file("empty.png", ""),
+                                 write_file("text.png", "this is not a picture at all\n"), write_file("zeros.png", std::string(4096, '\0')), dir, fs::join(dir, "nothing_here.png"), ""};
+    for (const std::string &path : cases) {
+      edit::Doc doc;
+      doc.open_pixels(r508::picture(20, 10), "px");
+      doc.open_file_async(path);
+      std::string err;
+      edit::Doc::Landed how = edit::Doc::Landed::Nothing;
+      const bool landed = r508::wait_landed(doc, err, how);
+      CHECK(landed && !doc.loading());
+      if (how == edit::Doc::Landed::Failed) CHECK(doc.is_open() && doc.source().w == 20 && !err.empty());
+      else if (how == edit::Doc::Landed::Opened) CHECK(doc.source().w > 0 && doc.source().h > 0 && doc.source().px.size() == (size_t)doc.source().w * doc.source().h * 4);
+      std::printf("    %-18s %s\n", path.empty() ? "(empty path)" : fs::filename(path).c_str(), how == edit::Doc::Landed::Failed ? "failed" : how == edit::Doc::Landed::Opened ? "opened" : "NEVER LANDED");
+    }
+  });
+
+  test("round 508 (test engineer): a Doc destroyed while a 3000 x 3000 picture is still being read, and a read dropped by many opens in a row, end cleanly", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_big");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)3000 * 3000);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)((i % 3000) * 7 + (i / 3000) * 3) * 0x010101u;
+    const std::string big = fs::join(dir, "big.png");
+    CHECK(write_png(big, px.data(), 3000, 3000, 3000));
+    for (int i = 0; i < 3; i++) {
+      edit::Doc doc;
+      doc.open_file_async(big);
+      CHECK(doc.loading());
+    }  // (destroyed mid-read, three times)
+    edit::Doc doc;
+    for (int i = 0; i < 4; i++) doc.open_file_async(big);  // (3 reads dropped while they run: the third drop waits for the oldest - at most two run on)
+    doc.open_pixels(r508::picture(8, 8), "px");
+    CHECK(!doc.loading() && doc.source().w == 8);
+    std::string err;
+    edit::Doc sync;
+    std::vector<uint32_t> sm(30 * 20, 0xFF2040FFu);
+    const std::string small = fs::join(dir, "small.png");
+    CHECK(write_png(small, sm.data(), 30, 20, 30));
+    doc.open_file_async(big);
+    CHECK(doc.open_file(small, err));  // (the synchronous open drops the read in flight)
+    CHECK(!doc.loading() && doc.source().w == 30);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(doc.poll_open(err) == edit::Doc::Landed::Nothing && doc.source().w == 30);
+  });
+
+  test("round 508 (test engineer): twenty rounds of opening A then B at once always end on B, with the edit stack reset", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_race");
+    fs::make_dirs(dir);
+    std::string paths[3];
+    for (int k = 0; k < 3; k++) {
+      const int w = 150 + 70 * k, h = 100 + 20 * k;
+      std::vector<uint32_t> px((size_t)w * h, 0xFF000000u | (uint32_t)(60 * (k + 1)) << 8);
+      paths[k] = fs::join(dir, strprintf("p%d.png", k));
+      CHECK(write_png(paths[k], px.data(), w, h, w));
+    }
+    edit::Doc doc;
+    doc.open_pixels(r508::picture(30, 30), "first");
+    doc.add("Exposure");
+    for (int round = 0; round < 20; round++) {
+      const int a = round % 3, b = (round + 1 + round / 3) % 3;
+      doc.open_file_async(paths[a]);
+      if (round % 2) std::this_thread::sleep_for(std::chrono::milliseconds(round));
+      doc.open_file_async(paths[b]);
+      std::string err;
+      edit::Doc::Landed how = edit::Doc::Landed::Nothing;
+      CHECK(r508::wait_landed(doc, err, how) && how == edit::Doc::Landed::Opened);
+      CHECK(doc.source_path() == paths[b] && doc.stack().empty() && !doc.can_undo());
+      doc.add("Clarity");
+      if (doc.source_path() != paths[b]) return;
+    }
+  });
+
+  test("round 508 (test engineer): console commands while a picture reads - list, add, set, undo, export, save, a second open, render, an .edit - never act on the old picture and never crash; an .edit stays synchronous", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_cmd");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px((size_t)2500 * 2500);
+    for (size_t i = 0; i < px.size(); i++) px[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    const std::string big = fs::join(dir, "big.png"), small = fs::join(dir, "small.png"), edit_file = fs::join(dir, "s.edit"), out = fs::join(dir, "out.png");
+    CHECK(write_png(big, px.data(), 2500, 2500, 2500));
+    std::vector<uint32_t> sm(50 * 40, 0xFF336699u);
+    CHECK(write_png(small, sm.data(), 50, 40, 50));
+    {
+      edit::Doc d;
+      std::string err;
+      CHECK(d.open_file(small, err));
+      d.add("Exposure");
+      CHECK(d.save(edit_file, err));
+    }
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.set_async_jobs_for_test(true);
+    ed.command("window Editing");
+    ed.command("develop open " + small);
+    for (int i = 0; i < 2000 && ed.edit_doc_for_test().loading(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    edit::Doc &doc = ed.edit_doc_for_test();
+    CHECK(doc.is_open() && doc.source().w == 50);
+    ed.command("develop add Clarity");
+    CHECK(doc.stack().size() == 1);
+    ed.command("develop open " + big);
+    CHECK(doc.loading());
+    for (const char *c : {"develop list", "develop add Dehaze", "develop set Clarity.Clarity 50", "develop undo", "develop redo", "develop export", "develop save", "develop remove 0", "develop preset nothing",
+                          "develop split on", "develop open render", "develop look", "develop apply"}) {
+      ed.command(c);
+      ed.step_frame_headless();
+      CHECK(doc.stack().size() <= 1);
+    }
+    ed.command("develop export " + out);
+    CHECK(!fs::exists(out) || doc.loading() == false);
+    ed.command("develop open " + edit_file);  // (an .edit: read at once, the pending read dropped)
+    CHECK(!doc.loading() && doc.is_open() && doc.stack().size() == 1 && doc.source().w == 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ed.step_frame_headless();
+    CHECK(doc.source().w == 50 && !doc.loading());
+    ed.command("develop open " + big);  // (and the picture opened, then New Scene while it reads, then the editor goes)
+    ed.command("newscene");
+    ed.step_frame_headless();
+    ed.command("window Editing");
+    ed.command("develop open " + small);
+    ed.command("newscene");
+    ed.command("develop open " + big);
+  });
+
+  test("round 508 (test engineer): the Editing window closed or hidden while a read lands: the next command or frame opens it, nothing is shown half-way", [] {
+    const std::string dir = fs::join(test_dir(), "r508te_win");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> sm(64 * 48, 0xFF884422u);
+    const std::string small = fs::join(dir, "small.png");
+    CHECK(write_png(small, sm.data(), 64, 48, 64));
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.set_async_jobs_for_test(true);
+    ed.command("window Editing");
+    ed.command("develop open " + small);
+    ed.command("window Editing");  // (toggled off or on again: either way the frames go on)
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    ed.command("develop list");  // (a command polls the read)
+    edit::Doc &doc = ed.edit_doc_for_test();
+    /* (Round 508's review: every frame polls the read, the window shown or not. No time is assumed: a loaded runner may
+     * take long over the decode, so the loop's cap is generous and only the landing is checked.) */
+    for (int i = 0; i < 5000 && doc.loading(); i++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    CHECK(!doc.loading() && doc.source().w == 64);
+  });
+
+  test("round 508 (review): a headless script's line after `develop open` waits for the picture - the preset and the export run on it, none is dropped", [] {
+    const std::string dir = fs::join(test_dir(), "r508_runner");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(400 * 300, 0xFF336699u);
+    const std::string in = fs::join(dir, "in.png"), out = fs::join(dir, "out.png");
+    CHECK(write_png(in, px.data(), 400, 300, 400));
+    fs::remove_file(out);
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.set_async_jobs_for_test(true);  // (as the app's headless runner has it)
+    auto line = [&](const std::string &c) {  // (the runner's loop, src/app/main.cpp: a line, then frames while file jobs run)
+      ed.command(c);
+      for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();
+    };
+    line("window Editing");
+    ed.command("develop open " + in);
+    CHECK(ed.file_jobs_running());  // (the read is one the runner waits for)
+    for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();
+    CHECK(!ed.edit_doc_for_test().loading() && ed.edit_doc_for_test().source().w == 400);
+    line("develop add Exposure");
+    CHECK(ed.edit_doc_for_test().stack().size() == 1);
+    line("develop export " + out);
+    CHECK(fs::exists(out));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -12407,5 +14765,16 @@ void run_editor_tests() {
   tests_round468();
   tests_round469();
   tests_round472();
+  tests_round506();
+  tests_round506_more();
+  tests_round506_third();
+  tests_round506_engineer();
+  tests_round506_engineer2();
+  tests_round506_engineer3();
+  tests_round507();
+  tests_round507_te();
+  tests_round508();
+  tests_round508_te();
+  tests_round508_te_open();
   coverage_tests();
 }
