@@ -2452,6 +2452,7 @@ A window in a Blockout does not have to be a bare hole. Give it a Style and the 
 - Width, Head, Sill and Depth are the opening's, as they always were; the window's face handles in the Scene view move Width, Head and Sill and the frame follows. Frame Width (bars are half of it, a Double's mullion all of it), Frame Depth, Panes Across, Panes Up, Arch Rise, Glass, Sill Board and Sill Overhang are in the Inspector - only the rows the style reads - in Adjust Last Operation (F9) right after the window is made, and in the console.
 - Changing the Style keeps every number the two styles share. The frame and the bars take at most seven tenths of the width and of the height, so a light is always left (a wider frame is held to it).
 - The Modeling Tools window has a Window Style dropdown above Draw Piece: the next Window made from a button or a menu has the style last chosen.
+- Draw Piece draws a window onto a wall: choose Window in its Shape list (under Openings) and drag a rectangle on a wall of a Blockout. The window stands in that wall, the size of the drag, upright, with its sill at the dragged rectangle's lower edge, in the Window Style shown; a drag that is not on a wall says why and what to do.
 # Materials
 - The frame, the bars and the sill board are Solid faces, the pane is a new class, Glass, and the hole's reveal is Cut. The Blockout has a Glass Material beside Floor, Walls and the rest, and the window has its own override of it, so a glass material goes on every pane at once or on one window only.
 # How it is built
@@ -2467,6 +2468,7 @@ A window in a Blockout does not have to be a bare hole. Give it a Style and the 
 ! cmd:blockout set material glass Tint | 7. The window's own Glass Material: only its pane takes it (the Blockout's Glass Material would put it on every window's panes)
 ! cmd:blockout set sillboard off | 8. No sill board under the window
 ! cmd:blockout set style round | 9. A porthole in the same wall
+! cmd:blockout roomopt piece window | 10. Draw Piece's Shape set to Window (the same as choosing Window under Openings in its dropdown): drag a rectangle on a wall and the window stands there
 # From the console
 - `blockout add window [opening|single|double|arched|fixed|grid|round] [width head [sill]]` makes one; `blockout set style <name>`, `blockout set frame <width> [depth]`, `blockout set panes <across> <up>`, `blockout set glass on|off` and `blockout set sillboard on|off [overhang]` change the selected windows; `blockout set material glass <material or none>` is the Glass Material.
 ? You change a Grid window to Single. What happens to its Panes Across and Panes Up? | They stay in the piece, unused: Changing the Style keeps every number, and the Inspector only shows the rows the style reads, so Grid brings them back as they were.
@@ -2486,6 +2488,7 @@ A door in a Blockout does not have to be a bare hole either. Give it a Style and
 - Width, Head, Sill and Depth are the opening's, as ever, and the face handles in the Scene view move Width and Head: the frame and the leaf follow. Frame Width, Frame Depth, Arch Rise, Leaf (on or off), Leaf Thickness, Open Amount, Hinge Side, Slide Direction and Drum Radius are in the Inspector - only the rows the style reads - in Adjust Last Operation (F9) right after the door is made, and in the console.
 - Open Amount is 0 closed to 1 open: a swung leaf turns that fraction of 90 degrees about its hinge, into the room the door faces (the door's +Z side); a sliding leaf moves that fraction of its own width. A number for the view, nothing animates. A closed leaf fills the doorway and separates the two rooms; with Leaf off the doorway is open. An open Single or Double leaf clears the doorway's width in front of the wall as far as the leaf reaches: pieces and walls standing there are cut, and the Blockout's status names them ("Door ... its open leaf cuts ..."); Open Amount 0, the default, cuts nothing.
 - Changing the Style keeps every number the styles share. The Modeling Tools window has a Door Style dropdown beside the Window Style one, under the Blockout buttons: the next Door made from the button or the GameObject menu has the style last chosen. The console's `create` makes Opening Only.
+- Draw Piece draws a door onto a wall: choose Door in its Shape list (under Openings) and drag a rectangle on a wall of a Blockout. The door stands in that wall, the size of the drag, upright, with its bottom on the floor the wall stands on, in the Door Style shown; a drag that is not on a wall says why and what to do.
 # Materials
 - The frame, and a revolving door's ring, are Solid faces; the leaf is a new class, Leaf; the hole's reveal is Cut. The Blockout has a Leaf Material beside Glass and the rest, and the door has its own override of it, so a leaf material goes on every door at once or on one door only.
 # How it is built
@@ -2502,6 +2505,8 @@ A door in a Blockout does not have to be a bare hole either. Give it a Style and
 ! cmd:newmat LeafTint | 8. A material asset named LeafTint in Assets/Materials
 ! cmd:blockout set material leaf LeafTint | 9. The door's own Leaf Material: only its leaf takes it (the Blockout's Leaf Material would put it on every door's leaf)
 ! cmd:blockout set style revolving | 10. Only the blocked-out space of a revolving door: a round drum through the wall and a ring round it
+! cmd:blockout roomopt piece door | 11. Draw Piece's Shape set to Door (the same as choosing Door under Openings in its dropdown)
+! cmd:blockout draw door auto at 4.2 0 3 normal 1 0 0 size 1 2.1 0 | 12. A door drawn as Draw Piece draws one: 1 m wide, 2.1 m high on the room's east wall, standing on its floor
 # From the console
 - `blockout add door [opening|single|double|sliding|arched|revolving] [width head]` makes one; `blockout set style <name>`, `blockout set frame <width> [depth]`, `blockout set leaf on|off [thickness]`, `blockout set open <0 to 1>`, `blockout set hinge left|right`, `blockout set slide left|right` and `blockout set drum <radius>` change the selected doors; `blockout set material leaf <material or none>` is the Leaf Material.
 ? You set Open Amount to 1 on a Single door whose Hinge Side is Right. Where is the leaf? | Standing out into the room the door faces, at the jamb on your right when you stand in that room facing the door, turned 90 degrees to the wall; the doorway is open. Hinge Left puts it at the other jamb.

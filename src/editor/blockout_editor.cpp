@@ -1432,9 +1432,6 @@ bool Editor::blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out) {
   return true;
 }
 
-/* How far from vertical a wall may lean for a door or window to stand in it: 2 degrees (sin 2 deg). */
-static constexpr float kOpeningWallLean = 0.0348995f;
-
 /* A room's most upright wall, where an opening goes when the mouse is on no wall: the middle of the air's side, with the point and the normal as a hit on it from
  * inside would give them (the normal into the air). The sides are tried in a fixed order - a box's -X, +X, -Z, +Z, then its caps (a room lying on its side has walls
  * there), a cylinder's facets from the one nearest -X, then its caps, an outline's segments in order - and the one whose normal, in the Blockout's frame, is nearest to
@@ -1564,6 +1561,33 @@ bool Editor::blockout_stand_opening(GameObject &bo, GameObject &opening, const B
   const float own = finite_bits(rp->wall) ? std::max(0.0f, std::min(100.0f, rp->wall)) : 0.0f;
   const float thick = blockout_matter_behind(bo, wall.point, through, own);
   const Vec3 centre = wall.point - through * (0.5f * thick);  // (the wall's middle: the matter lies behind the face)
+  float feet = 0.0f;
+  if (!blockout_opening_feet(bo, wall, op->width, feet)) return false;
+  const Vec3 origin = centre + up * (feet - dot(centre, up));  // (feet: the floor's height, as dot(floor point, up) was)
+  if (!finite3_bits(origin)) return false;
+  op->depth = thick + 0.2f;
+  opening.set_local_position(origin);
+  opening.set_local_rotation(quat_from_axes(cross(up, through), up, through));
+  opening.set_local_scale(Vec3(1.0f));
+  return true;
+}
+
+/* The height, in the Blockout's frame, an opening `width` wide stands on in `wall`: blockout_stand_opening's feet, moved out
+ * unchanged (round 513) so Draw Piece measures a drawn door or window from the same floor - a room on its side has no floor
+ * line of its own, and the drag's sill and reach are checked against this. The rules are blockout_stand_opening's (above).
+ * False when the room is missing or flat-walled, or the numbers are not finite. */
+bool Editor::blockout_opening_feet(GameObject &bo, const BlockoutHit &wall, float width, float &feet_y) {
+  const GameObject *room = scene_->find(wall.piece);
+  const BlockoutPiece *rp = room ? room->get<BlockoutPiece>() : nullptr;
+  if (!rp || !finite3_bits(wall.point) || !finite3_bits(wall.normal)) return false;
+  const Mat4 m = blockout_piece_matrix(*room, bo);
+  const Vec3 up(0.0f, 1.0f, 0.0f);
+  Vec3 through = wall.normal - up * dot(wall.normal, up);
+  if (!(length(through) > 1e-4f)) return false;
+  through = normalize(through);
+  const float own = finite_bits(rp->wall) ? std::max(0.0f, std::min(100.0f, rp->wall)) : 0.0f;
+  const float thick = blockout_matter_behind(bo, wall.point, through, own);
+  const Vec3 centre = wall.point - through * (0.5f * thick);
   const float hy = blockout_floor_below_origin(*rp);
   Vec3 floor_point = m.point({0.0f, -hy, 0.0f});
   if (dot(normalize(m.dir({0, 1, 0})), up) < 0.9999f) {  // (not upright: no floor line of its own)
@@ -1575,7 +1599,7 @@ bool Editor::blockout_stand_opening(GameObject &bo, GameObject &opening, const B
     const Vec3 across = cross(up, through), room_centre = m.point(Vec3(0.0f));
     const float side = dot(room_centre - centre, through) > 0.0f ? 1.0f : -1.0f;
     const Vec3 air = centre + through * (side * (0.5f * thick + 0.05f));
-    const float half = 0.5f * (finite_bits(op->width) ? std::max(0.0f, op->width) : 0.0f);
+    const float half = 0.5f * (finite_bits(width) ? std::max(0.0f, width) : 0.0f);
     const Mat4 inv_room = m.inverse();
     float ya = 0.0f, yb = 0.0f, feet = low;
     const Vec3 a = air + across * half, b = air - across * half;
@@ -1589,13 +1613,8 @@ bool Editor::blockout_stand_opening(GameObject &bo, GameObject &opening, const B
     if (!finite_bits(feet)) return false;
     floor_point.y = feet;
   }
-  const Vec3 origin = centre + up * (dot(floor_point, up) - dot(centre, up));
-  if (!finite3_bits(origin)) return false;
-  op->depth = thick + 0.2f;
-  opening.set_local_position(origin);
-  opening.set_local_rotation(quat_from_axes(cross(up, through), up, through));
-  opening.set_local_scale(Vec3(1.0f));
-  return true;
+  feet_y = floor_point.y;
+  return finite_bits(feet_y);
 }
 
 /* ===================================================================== */

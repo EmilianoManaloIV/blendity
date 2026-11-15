@@ -4198,6 +4198,8 @@ class Editor {
   bool blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out);  // (round 478: a room's wall under the mouse in the Scene view)
   bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478; round 499: the middle of a room's most upright wall - -X of an upright room's air; false when none is within 2 degrees of vertical)
   bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall, std::string *why = nullptr);  // (round 478; round 499: a door or window upright in a wall that is vertical within 2 degrees, its feet on the floor under it; `why` names a refusal)
+  bool blockout_opening_feet(GameObject &bo, const BlockoutHit &wall, float width, float &feet_y);  // (round 513: the floor height an opening of that width stands on in the wall - blockout_stand_opening's feet, for Draw Piece's drawn doors and windows)
+  static constexpr float kOpeningWallLean = 0.0348995f;  // (how far from vertical a wall may lean for a door or window: 2 degrees, sin 2 deg; round 513 shares it with Draw Piece)
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   void draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::Layout &lay);  // (round 496: Apply Scale to Size)
