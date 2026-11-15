@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <exception>
+#include <tuple>
 #include <unordered_map>
 
 namespace bl::blockout {
@@ -94,6 +95,154 @@ V3 solve_planes(const Plane *const *pl, int count, V3 x0, double *residual) {
   return x;
 }
 
+/* ------------------------------------------------------- convex hull (round 500) */
+
+/* Every plane through three of the points with all the others on one side of it (to 2e-6 of the points' size, so the corners of a sloped quad that float
+ * rounding left a hair off one plane are one face) is a face; planes alike are one. 64 points at most: C(64,3) triples, each checked against 64 points. */
+static const char *convex_hull_build(const std::vector<Vec3> &in, Hull &out) {
+  out = Hull();
+  if (in.size() < 4) return "it has fewer than four corners";
+  if (in.size() > 64) return "it has more than 64 corners";
+  V3 lo, hi;
+  std::vector<V3> raw;
+  for (const Vec3 &v : in) {
+    if (!finite_bits(v.x) || !finite_bits(v.y) || !finite_bits(v.z)) return "a corner of it is not finite";
+    raw.push_back(V3(v.x, v.y, v.z));
+  }
+  lo = hi = raw[0];
+  for (const V3 &v : raw)
+    for (int a = 0; a < 3; a++) lo[a] = std::min(lo[a], v[a]), hi[a] = std::max(hi[a], v[a]);
+  const double scale = length(hi - lo);
+  if (!(scale > 0.0) || !std::isfinite(scale)) return "its corners are one place";
+  const double tol = 2e-6 * scale;
+  std::vector<V3> p;  // (corners within a millionth of the size of one another are one)
+  for (const V3 &v : raw) {
+    bool dup = false;
+    for (const V3 &q : p) dup = dup || length(v - q) <= 1e-6 * scale;
+    if (!dup) p.push_back(v);
+  }
+  const size_t n = p.size();
+  if (n < 4) return "it has no volume";
+  struct Face {
+    V3 n;
+    double d;
+    std::vector<uint32_t> idx;
+  };
+  std::vector<Face> faces;
+  bool flat = true;  // (every plane tried had all the points on it)
+  for (size_t i = 0; i < n; i++)
+    for (size_t j = i + 1; j < n; j++)
+      for (size_t k = j + 1; k < n; k++) {
+        V3 nr = cross(p[j] - p[i], p[k] - p[i]);
+        const double len = length(nr);
+        if (!(len > 1e-9 * scale * scale)) continue;
+        nr = nr * (1.0 / len);
+        double d = dot(nr, p[i]), up = 0.0, down = 0.0;
+        for (size_t m = 0; m < n && !(up > tol && down < -tol); m++) {  // (a plane with points on both sides is no face: stop at the first pair)
+          const double s = dot(nr, p[m]) - d;
+          up = std::max(up, s), down = std::min(down, s);
+        }
+        if (up > tol && down < -tol) continue;
+        if (up <= tol && down >= -tol) continue;  // (all on the plane: no volume - noticed below when no face is found)
+        flat = false;
+        if (up > tol) nr = -nr, d = -d;  // (outward: the points lie on its inner side)
+        bool same = false;
+        for (const Face &f : faces) same = same || (dot(f.n, nr) > 1.0 - 1e-8 && std::fabs(f.d - d) < 4.0 * tol);
+        if (same) continue;
+        Face f;
+        f.n = nr, f.d = d;
+        for (size_t m = 0; m < n; m++)
+          if (std::fabs(dot(nr, p[m]) - d) <= tol) f.idx.push_back((uint32_t)m);
+        faces.push_back(std::move(f));
+      }
+  if (flat || faces.size() < 4) return "its corners do not make a solid (they lie in one plane)";
+  /* Each face's corners in order round its normal; a corner on the line between its neighbours (the middle of an edge) is left out. */
+  for (Face &f : faces) {
+    V3 c;
+    for (uint32_t m : f.idx) c = c + p[m];
+    c = c * (1.0 / (double)f.idx.size());
+    V3 u = p[f.idx[0]] - c;
+    u = u - f.n * dot(u, f.n);
+    const double ul = length(u);
+    if (!(ul > 0.0)) return "its corners do not make a solid";
+    u = u * (1.0 / ul);
+    const V3 v = cross(f.n, u);
+    /* The face's own outline: the convex hull of its points in the face's plane (Andrew's monotone chain, anticlockwise seen from outside). A point in the middle of an edge or
+     * inside the face is not a corner of it and is left out, so a solid with a point in the middle of a face is the solid without it. */
+    struct Q {
+      double x, y;
+      uint32_t m;
+    };
+    std::vector<Q> q;
+    for (uint32_t m : f.idx) q.push_back({dot(p[m] - c, u), dot(p[m] - c, v), m});
+    std::sort(q.begin(), q.end(), [](const Q &a, const Q &b) { return a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.m < b.m; });
+    auto turn = [&](const Q &o, const Q &a, const Q &b) {  // (twice the triangle's area over |ob|: how far a lies left of the line o to b)
+      const double len = std::hypot(b.x - o.x, b.y - o.y);
+      return len > 0.0 ? ((a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)) / len : 0.0;
+    };
+    std::vector<Q> chain;
+    for (int pass = 0; pass < 2; pass++) {
+      const size_t base = chain.size();
+      for (size_t i = 0; i < q.size(); i++) {
+        const Q &pt = pass == 0 ? q[i] : q[q.size() - 1 - i];
+        while (chain.size() >= base + 2 && turn(chain[chain.size() - 2], chain.back(), pt) >= -tol) chain.pop_back();  // (a point on or right of the line to the new one is no corner)
+        chain.push_back(pt);
+      }
+      chain.pop_back();
+    }
+    std::vector<uint32_t> ring;
+    for (const Q &pt : chain) ring.push_back(pt.m);
+    if (ring.size() < 3) return "its corners do not make a solid";
+    f.idx = ring;
+  }
+  auto key = [](const Face &f) {
+    return std::make_tuple(-std::llround(f.n.y * 1e6), std::llround(f.n.x * 1e6), std::llround(f.n.z * 1e6), *std::min_element(f.idx.begin(), f.idx.end()));
+  };
+  std::sort(faces.begin(), faces.end(), [&](const Face &a, const Face &b) { return key(a) < key(b); });
+  std::vector<int64_t> used(n, -1);
+  size_t edges2 = 0;
+  for (const Face &f : faces) {
+    edges2 += f.idx.size();
+    for (uint32_t m : f.idx)
+      if (used[m] < 0) used[m] = (int64_t)out.verts.size(), out.verts.push_back(p[m]);
+  }
+  if ((int64_t)out.verts.size() - (int64_t)edges2 / 2 + (int64_t)faces.size() != 2 || edges2 % 2 != 0) {
+    out = Hull();
+    return "its corners do not make a closed solid";
+  }
+  for (const Face &f : faces) {
+    std::vector<uint32_t> ring;
+    for (uint32_t m : f.idx) ring.push_back((uint32_t)used[m]);
+    out.faces.push_back(std::move(ring));
+    out.normals.push_back(f.n);
+  }
+  return nullptr;
+}
+
+/* The hull of the same corners is asked for again and again (a piece's wire every frame, the kernel's build, a count of faces): the last 512 answers are kept per thread. */
+const char *convex_hull(const std::vector<Vec3> &in, Hull &out) {
+  struct Entry {
+    std::vector<Vec3> points;
+    Hull hull;
+    const char *why;
+  };
+  static thread_local std::unordered_map<uint64_t, Entry> cache;
+  const uint64_t key = mix_bytes(hash_mix(kFnvBasis, in.size()), in.data(), in.size() * sizeof(Vec3));
+  const auto at = cache.find(key);
+  if (at != cache.end() && at->second.points.size() == in.size() && (in.empty() || std::memcmp(at->second.points.data(), in.data(), in.size() * sizeof(Vec3)) == 0)) {
+    out = at->second.hull;
+    return at->second.why;
+  }
+  Entry e;
+  e.points = in;
+  e.why = convex_hull_build(in, e.hull);
+  out = e.hull;
+  if (cache.size() >= 512) cache.clear();
+  const char *why = e.why;
+  cache[key] = std::move(e);
+  return why;
+}
+
 /* ------------------------------------------------------- pieces as solids */
 
 namespace {
@@ -105,6 +254,8 @@ bool finite_piece(const Piece &p) {
     if (!finite_bits(f)) return false;
   for (const Vec2 &q : p.outline)
     if (!finite_bits(q.x) || !finite_bits(q.y)) return false;
+  for (const Vec3 &q : p.points)
+    if (!finite3(q)) return false;
   return finite3(p.size) && finite_bits(p.radius) && finite_bits(p.height) && finite_bits(p.blend) && finite_bits(p.inner_radius) && finite_bits(p.angle);
 }
 
@@ -613,10 +764,33 @@ const char *make_mesh(const Piece &p, std::vector<Solid> &out) {
   return nullptr;
 }
 
+/* A convex piece (round 500): the hull of its points as one solid, never a room, never rounded. */
+const char *make_convex(const Piece &p, std::vector<Solid> &out) {
+  Hull h;
+  if (const char *problem = convex_hull(p.points, h)) return problem;
+  double m[12], stretch[3], thick[3];
+  Solid s;
+  if (!placement(p, m, s.inv, stretch, thick)) return "its matrix flattens it";
+  s.verts = h.verts;
+  for (const std::vector<uint32_t> &f : h.faces) {
+    s.face_verts.insert(s.face_verts.end(), f.begin(), f.end());
+    s.face_offsets.push_back((uint32_t)s.face_verts.size());
+    s.face_side.push_back((uint32_t)(s.face_side.size()));
+  }
+  set_bounds(s);
+  s.half = (s.hi - s.lo) * 0.5;
+  if (const char *problem = place_solid(p, s, m, stretch, thick)) return problem;
+  s.role = p.op == Op::Subtract ? Role::Subtract : p.op == Op::Intersect ? Role::Intersect : Role::Add;
+  s.subtract = p.op == Op::Subtract;
+  out.push_back(std::move(s));
+  return nullptr;
+}
+
 const char *make_solids(const Piece &p, std::vector<Solid> &out, bool &bare) {
   bare = false;
   if (!finite_piece(p)) return "a number of it is not finite";
   if (p.shape == Shape::Mesh) return make_mesh(p, out);
+  if (p.shape == Shape::Convex) return make_convex(p, out);
   if (p.shape != Shape::Box && p.shape != Shape::Cylinder && p.shape != Shape::Sphere) return make_parts(p, out, bare);
   Solid s;
   const bool sized = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : local_sphere(p, s);
@@ -923,7 +1097,8 @@ bool same_piece(const Piece &a, const Piece &b) {
          a.room == b.room && a.keep_walls == b.keep_walls && a.open_top == b.open_top && std::memcmp(&a.wall, &b.wall, 4) == 0 &&
          std::memcmp(&a.floor, &b.floor, 4) == 0 && std::memcmp(&a.ceiling, &b.ceiling, 4) == 0 && a.steps == b.steps && a.fill_under == b.fill_under && a.mesh_key == b.mesh_key && !a.mesh == !b.mesh &&
          std::memcmp(&a.inner_radius, &b.inner_radius, 4) == 0 && std::memcmp(&a.angle, &b.angle, 4) == 0 && a.outline.size() == b.outline.size() &&
-         (a.outline.empty() || std::memcmp(a.outline.data(), b.outline.data(), a.outline.size() * sizeof(Vec2)) == 0);
+         (a.outline.empty() || std::memcmp(a.outline.data(), b.outline.data(), a.outline.size() * sizeof(Vec2)) == 0) && a.points.size() == b.points.size() &&
+         (a.points.empty() || std::memcmp(a.points.data(), b.points.data(), a.points.size() * sizeof(Vec3)) == 0);
 }
 
 uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
@@ -945,6 +1120,7 @@ uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
     for (float f : {p.inner_radius, p.angle}) h = mix_float(h, f);
     h = hash_mix(h, p.mesh ? p.mesh_key : 0x6e6f6d657368ull);
     for (const Vec2 &q : p.outline) h = mix_float(mix_float(h, q.x), q.y);
+    if (!p.points.empty()) h = mix_bytes(hash_mix(h, p.points.size()), p.points.data(), p.points.size() * sizeof(Vec3));
     h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
   }
   return h;
@@ -1374,8 +1550,28 @@ void run_jobs(std::vector<Job> &jobs, std::vector<Solid> &solids, const std::vec
 
 }  // namespace
 
+int convex_up_faces(const std::vector<Vec3> &points, float min_ny) {
+  detail::Hull h;
+  if (detail::convex_hull(points, h)) return -1;
+  int up = 0;
+  for (const detail::V3 &n : h.normals) up += n.y > (double)min_ny;
+  return up;
+}
+
+std::vector<Vec3> convex_edges(const std::vector<Vec3> &points) {
+  std::vector<Vec3> out;
+  detail::Hull h;
+  if (detail::convex_hull(points, h)) return out;
+  for (const std::vector<uint32_t> &f : h.faces)
+    for (size_t i = 0; i < f.size(); i++) {
+      const detail::V3 a = h.verts[f[i]], b = h.verts[f[(i + 1) % f.size()]];
+      if (f[i] < f[(i + 1) % f.size()]) out.push_back(Vec3((float)a.x, (float)a.y, (float)a.z)), out.push_back(Vec3((float)b.x, (float)b.y, (float)b.z));  // (each edge once: the other face has it the other way)
+    }
+  return out;
+}
+
 SideClass side_class(const Piece &piece, uint32_t side) {
-  const bool never_room = piece.shape == Shape::Stairs || piece.shape == Shape::Arch || piece.shape == Shape::Mesh;
+  const bool never_room = piece.shape == Shape::Stairs || piece.shape == Shape::Arch || piece.shape == Shape::Mesh || piece.shape == Shape::Convex;
   if (!piece.room || never_room) return piece.op == Op::Add ? SideClass::Outside : SideClass::Cut;
   if (side >= kSideShell) return SideClass::Outside;
   if (piece.shape == Shape::Wedge) return side == 2 ? SideClass::Floor : side == 3 ? SideClass::Ceiling : SideClass::Wall;

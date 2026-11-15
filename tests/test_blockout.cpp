@@ -2435,12 +2435,12 @@ static void tests_round477() {
     ed.record_buttons_for_test(true);
     r477_settle(ed, 4);
     Recti r;
-    CHECK(ed.button_rect_for_test("New Blockout", r));
-    if (!ed.button_rect_for_test("New Blockout", r)) return;
+    CHECK(ed.button_rect_for_test("Blockout", r));  // (round 499 shortened the panel's labels - "New Blockout" and "Subtract ..." were clipped; the tooltips keep the full names)
+    if (!ed.button_rect_for_test("Blockout", r)) return;
     r477_click(ed, r.x + r.w / 2, r.y + r.h / 2);
     r477_settle(ed);
     CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 1);
-    for (const char *label : {"Add Box", "Subtract Cylinder"}) {
+    for (const char *label : {"Add Box", "Cut Cyl"}) {
       ed.record_buttons_for_test(true);
       r477_settle(ed, 2);
       CHECK(ed.button_rect_for_test(label, r));
@@ -4564,7 +4564,7 @@ static void tests_round478_object() {
     tools.command("alltools on");
     tools.record_buttons_for_test(true);
     r477_settle(tools, 4);
-    for (const char *label : {"Room (Box)", "Door"}) {
+    for (const char *label : {"Room Box", "Door"}) {  // (round 499: the panel's labels are short - "Room (Box)" was clipped; the tooltip keeps the name)
       tools.record_buttons_for_test(true);
       r477_settle(tools, 2);
       Recti r;
@@ -4572,7 +4572,7 @@ static void tests_round478_object() {
       if (!tools.button_rect_for_test(label, r)) continue;
       r477_click(tools, r.x + r.w / 2, r.y + r.h / 2);
       r477_settle(tools);
-      if (std::string(label) == "Room (Box)") {
+      if (std::string(label) == "Room Box") {
         const BlockoutPiece *room = r477_active_piece(tools);
         CHECK(room && room->room && r477_count(tools, false) == 1);
       }
@@ -13216,7 +13216,8 @@ static void tests_round482() {
     ed.select_for_test(bo->id, false);
     r477_settle(ed);
     const size_t depth = ed.undo_depth_for_test();
-    for (const char *line : {"blockout set material", "blockout set material roof Assets/Materials/R482/R482Cmd.mat", "blockout set material floor", "blockout set material floor NoSuchMaterial482", "blockout set texscale",
+    /* (Round 500 made "roof" a class of its own, so the unknown class this names is now "chimney": the same refusal, a different word.) */
+    for (const char *line : {"blockout set material", "blockout set material chimney Assets/Materials/R482/R482Cmd.mat", "blockout set material floor", "blockout set material floor NoSuchMaterial482", "blockout set texscale",
                              "blockout set texscale 0", "blockout set texscale -2", "blockout set texscale abc", "blockout set texscale nan", "blockout set texscale inf", "blockout set texscale 1e999"}) {
       const size_t mark = r477_mark();
       size_t warnings = 0;
@@ -18961,6 +18962,7816 @@ static void tests_round497_te() {
   });
 }
 
+// r498-begin
+/* ===================================================================== */
+/* Round 498 (task 0482): window styles                                   */
+/* ===================================================================== */
+
+namespace {
+
+/* A room (4 x 3 x 4, walls 0.2) with a window on its first wall (-X) made by the console, built by `method` (0 Auto, 1 Exact, 2 Field). */
+struct R498Scene {
+  GameObject *bo = nullptr, *room = nullptr, *win = nullptr;
+};
+R498Scene r498_make(Editor &ed, const std::string &window_words, int method = 0) {
+  ed.init_headless(900, 600);
+  r477_empty_scene(ed);
+  R498Scene s;
+  s.bo = r477_blockout(ed);
+  s.bo->set_world_position({0.0f, 0.0f, 0.0f});
+  s.bo->get<Blockout>()->method = method;
+  s.room = r478_room_by_command(ed, *s.bo);
+  if (!s.room) return s;
+  s.room->set_local_position({0.0f, 0.0f, 0.0f});
+  r477_settle(ed, 2);
+  if (!window_words.empty()) ed.command("blockout add window " + window_words);
+  s.win = window_words.empty() ? nullptr : ed.active_object_for_test();
+  r495_built(ed);
+  return s;
+}
+
+/* The paths this build has, as the Blockout's Method says them: Field (2) always, Exact (1) with Blender's libraries. */
+std::vector<int> r498_methods() {
+  std::vector<int> m{2};
+  if (blockout::crisp_available()) m.insert(m.begin(), 1);
+  return m;
+}
+const char *r498_method_name(int m) { return m == 1 ? "exact" : m == 2 ? "field" : "auto"; }
+
+/* The style's console word. */
+std::string r498_word(int style) { return style == kWindowOpeningOnly ? "opening" : to_lower(kBlockoutWindowStyleNames[style]); }
+
+/* What the stress sweep calls a problem, of the Blockout's live mesh; "" when it is sound. `small` counts small faces on top of others. */
+std::string r498_judge(const GameObject &bo, size_t *small = nullptr) {
+  const Mesh *m = r495_mesh(bo);
+  const Blockout *b = bo.get<Blockout>();
+  if (!m || !b) return "no mesh";
+  R476Built built;
+  built.ok = b->state.status.refusal.empty();
+  built.mesh = *m;
+  built.faces = b->state.faces;
+  if (built.faces.piece.size() != m->face_count()) return "the faces' origins are not the mesh's";
+  return r480t_judge(built, small);
+}
+
+/* A wall 2.4 m square and 0.2 m thick in the XY plane with a window piece in it, made by hand: the opening stands from y = -1.2 (its floor line), 1.2 m wide, from a
+ * sill at 0.9 m to a head at 2 m, 0.4 m deep. Field Cell 0.01 so that the field path resolves a 6 cm frame. */
+struct R498Wall {
+  GameObject *bo = nullptr, *win = nullptr;
+};
+R498Wall r498_wall(Editor &ed, int style, int method, bool glass = true) {
+  ed.init_headless(900, 600);
+  r477_empty_scene(ed);
+  R498Wall w;
+  w.bo = r477_blockout(ed);
+  Blockout *b = w.bo->get<Blockout>();
+  b->method = method, b->cell = 0.01f;
+  r477_piece(ed, *w.bo, "Wall", 0, 0, {0, 0, 0}, {2.4f, 2.4f, 0.2f});
+  w.win = ed.scene().create("Window", w.bo);
+  BlockoutPiece *p = w.win->add<BlockoutPiece>();
+  p->shape = 0, p->operation = 1, p->opening = 2, p->width = 1.2f, p->head = 2.0f, p->sill = 0.9f, p->depth = 0.4f, p->style = style, p->glass = glass;
+  w.win->set_local_position({0.0f, -1.2f, 0.0f});
+  r495_built(ed);
+  return w;
+}
+
+/* Whether a point of the window's own space is inside the Blockout's matter: the parity of a ray's crossings of the mesh. */
+bool r498_matter(const GameObject &bo, const GameObject &win, Vec3 local) {
+  const Mesh *m = r495_mesh(bo);
+  if (!m) return false;
+  const Vec3 at = bo.world_matrix().inverse().point(win.world_matrix().point(local));
+  const Ray ray{at, normalize(Vec3(0.31f, 0.52f, 0.79f))};
+  const RenderMesh &rm = m->render_mesh();
+  int hits = 0;
+  for (size_t t = 0; t < rm.tri_count(); t++) hits += ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]) > 0.0f;
+  return (hits & 1) != 0;
+}
+
+struct R498Probe {
+  Vec3 at;       // in the window's own space: x across, y up from its floor line, z through the wall (the wall is z -0.1 to 0.1, the frame -0.05 to 0.05)
+  bool matter;
+  const char *what;
+};
+
+/* What the window of the rig must be, by style (1.2 m wide, sill 0.9, head 2.0; frame 6 cm wide and 10 cm deep, pane 3 cm). */
+std::vector<R498Probe> r498_probes(int style, bool glass) {
+  std::vector<R498Probe> p;
+  const float reveal = -0.075f;  // (in front of the frame, inside the wall's thickness: the hole is whole there)
+  p.push_back({{0.57f, 1.45f, reveal}, false, "the hole next to its right edge"});
+  p.push_back({{-0.57f, 1.45f, reveal}, false, "the hole next to its left edge"});
+  p.push_back({{0.63f, 1.45f, reveal}, true, "the wall beside the hole"});
+  p.push_back({{-0.63f, 1.45f, reveal}, true, "the wall beside the hole, left"});
+  p.push_back({{0.0f, 0.93f, reveal}, false, "the hole just above the sill"});
+  p.push_back({{0.0f, 1.97f, reveal}, false, "the hole just under the head"});
+  p.push_back({{0.0f, 2.03f, reveal}, true, "the wall over the head"});
+  p.push_back({{0.0f, 0.87f, reveal}, true, "the wall under the sill"});
+  p.push_back({{0.57f, 1.45f, 0.0f}, true, "the frame, right"});
+  p.push_back({{-0.57f, 1.45f, 0.0f}, true, "the frame, left"});
+  p.push_back({{0.3f, 1.45f, -0.045f}, false, "the light, in front of the pane"});
+  p.push_back({{0.3f, 1.45f, 0.045f}, false, "the light, behind the pane"});
+  p.push_back({{0.3f, 1.45f, 0.0f}, glass, glass ? "the pane" : "the open light"});
+  const bool board = style != kWindowFixed && style != kWindowRound;
+  p.push_back({{0.0f, 0.875f, 0.12f}, board, board ? "the sill board past the wall" : "no sill board"});
+  if (style == kWindowDouble) {
+    p.push_back({{0.0f, 1.45f, 0.045f}, true, "the mullion, behind"});
+    p.push_back({{0.0f, 1.45f, -0.045f}, true, "the mullion, in front"});
+  }
+  if (style == kWindowGrid) {
+    p.push_back({{0.185f, 1.45f, 0.045f}, true, "a vertical glazing bar"});
+    p.push_back({{0.0f, 1.2817f, -0.045f}, true, "a horizontal glazing bar"});
+    p.push_back({{0.0f, 1.45f, 0.045f}, false, "the middle light"});
+  }
+  if (style == kWindowArched) p.push_back({{0.55f, 1.9f, reveal}, true, "the wall in the corner the round head leaves"});
+  if (style == kWindowRound) {
+    p.push_back({{0.5f, 1.9f, reveal}, true, "the wall in the corner a circle leaves"});
+    p.push_back({{-0.5f, 1.0f, reveal}, true, "the wall in the lower corner a circle leaves"});
+  }
+  return p;
+}
+
+/* The faces of one class (by blockout_face_class, from the pieces the snapshot made): their number and how far along the window's Z they reach. */
+struct R498Class {
+  size_t faces = 0;
+  float z_lo = 1e30f, z_hi = -1e30f;
+};
+R498Class r498_class(const GameObject &bo, const GameObject &win, int cls) {
+  R498Class out;
+  const Mesh *m = r495_mesh(bo);
+  const Blockout *b = bo.get<Blockout>();
+  if (!m || !b || b->state.faces.piece.size() != m->face_count()) return out;
+  std::vector<blockout::Piece> pieces;
+  blockout::Settings settings;
+  blockout_snapshot(bo, pieces, settings);
+  const Mat4 to_win = win.world_matrix().inverse() * bo.world_matrix();
+  for (size_t f = 0; f < m->face_count(); f++) {
+    const blockout::Piece *piece = nullptr;
+    for (const blockout::Piece &p : pieces)
+      if (p.id == b->state.faces.piece[f]) piece = &p;
+    if (!piece || blockout_face_class(*piece, b->state.faces.side[f]) != cls) continue;
+    out.faces++;
+    for (uint32_t i = 0; i < m->face_size(f); i++) {
+      const float z = to_win.point(m->positions[m->face_verts(f)[i]]).z;
+      out.z_lo = std::min(out.z_lo, z), out.z_hi = std::max(out.z_hi, z);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+static void tests_round498_styles() {
+  /* ---- Criterion 1: the seven styles, by the console and by the panel ---- */
+  test("blockout window styles (498): each of the seven styles made by the console in a room's wall builds a closed, valid, outward-facing mesh with no flat faces lying on top of each other (small faces at unresolved places on the grid are counted, not failed), on each path this build has", [] {
+    for (int method : r498_methods())
+      for (int style = 0; style < kBlockoutWindowStyles; style++) {
+        Editor ed;
+        const R498Scene s = r498_make(ed, r498_word(style), method);
+        CHECK(s.win && s.win->get<BlockoutPiece>() && s.win->get<BlockoutPiece>()->style == style && s.win->get<BlockoutPiece>()->opening == 2);
+        if (!s.win) continue;
+        size_t small = 0;
+        const std::string why = r498_judge(*s.bo, &small);
+        std::printf("    %s, %s: %s (%zu faces, small faces on top of others %zu, %zu unresolved)\n", r498_method_name(method), kBlockoutWindowStyleNames[style],
+                    why.empty() ? "sound" : why.c_str(), r495_mesh(*s.bo)->face_count(), small, s.bo->get<Blockout>()->state.status.unresolved);
+        CHECK(why.empty());
+      }
+  });
+
+  test("blockout window styles (498): the wall has a hole of Width x (Head - Sill), the frame stands in it and, with Glass on, a pane thinner than the frame closes it - for every style, on each path, with a 6 cm frame resolved by a 1 cm Field Cell", [] {
+    for (int method : r498_methods())
+      for (int style = 1; style < kBlockoutWindowStyles; style++)
+        for (bool glass : {true, false}) {
+          Editor ed;
+          const R498Wall w = r498_wall(ed, style, method, glass);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style] + (glass ? " with glass" : " without glass");
+          CHECK(r498_judge(*w.bo).empty());
+          size_t wrong = 0;
+          for (const R498Probe &p : r498_probes(style, glass))
+            if (r498_matter(*w.bo, *w.win, p.at) != p.matter) wrong++, std::printf("    %s: %s is %s\n", label.c_str(), p.what, p.matter ? "empty" : "solid");
+          CHECK(wrong == 0);
+          const R498Class pane = r498_class(*w.bo, *w.win, kClassGlass);
+          if (!glass) CHECK(pane.faces == 0);
+          if (glass) {
+            CHECK(pane.faces >= 2);
+            CHECK(pane.z_hi - pane.z_lo > 0.0f && pane.z_hi - pane.z_lo < 0.1f - 1e-3f);  // (thinner than the frame's 10 cm)
+            CHECK_NEAR(pane.z_hi - pane.z_lo, 0.03f, 2e-3f);
+          }
+          const R498Class frame = r498_class(*w.bo, *w.win, kClassSolid);
+          CHECK(frame.faces >= 6 && frame.z_lo < -0.04f && frame.z_hi > 0.04f);
+        }
+  });
+
+  test("blockout window styles (498): the Style dropdown above Draw Piece in the Modeling Tools window sets the style of the next window - from its Window button and from the menu - and Opening Only makes today's plain window; real events", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Scene s = r498_make(ed, "", method);
+      CHECK(s.room != nullptr);
+      if (!s.room) continue;
+      r496_panel(ed);
+      CHECK(r496_has(ed, "tools:window_style"));
+      for (int style : {kWindowSingle, kWindowDouble, kWindowArched, kWindowFixed, kWindowGrid, kWindowRound, kWindowOpeningOnly}) {
+        ed.select_for_test(s.room->id, false);
+        r477_settle(ed, 2);
+        CHECK(r496_pick_combo(ed, "tools:window_style", kBlockoutWindowStyleNames[style]));
+        const size_t pieces = r477_all_pieces(*s.bo).size();
+        CHECK(r496_click_key(ed, "Window"));
+        r495_built(ed);
+        GameObject *win = ed.active_object_for_test();
+        const BlockoutPiece *wp = win ? win->get<BlockoutPiece>() : nullptr;
+        CHECK(r477_all_pieces(*s.bo).size() == pieces + 1 && wp && wp->opening == 2 && wp->style == style);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s, panel, %s: %s\n", r498_method_name(method), kBlockoutWindowStyleNames[style], why.c_str());
+        CHECK(why.empty());
+        if (win) ed.scene().destroy(std::vector<GameObject *>{win});
+        r495_built(ed);
+      }
+      /* The menu entry has the dropdown's style too, and `blockout add window` with no style word does not. Round 499 flipped what this pinned about the console: round 498
+       * had `create Blockout Piece: Window` follow the dropdown because the buttons could not be given the style (their row was not among that round's files); now the
+       * Window button and the GameObject > Blockout entry ask for the style (Editor::blockout_ui_kind) and the console's `create` makes Opening Only whatever the dropdown shows. */
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:window_style", "Grid"));
+      ed.command("create Blockout Piece: Window");
+      const BlockoutPiece *console = r477_active_piece(ed);
+      CHECK(console && console->opening == 2 && console->style == kWindowOpeningOnly);
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "menu:Window"}));
+      const BlockoutPiece *menu = r477_active_piece(ed);
+      CHECK(menu && menu->opening == 2 && menu->style == kWindowGrid);
+      ed.command("blockout add window");
+      const BlockoutPiece *plain = r477_active_piece(ed);
+      CHECK(plain && plain->opening == 2 && plain->style == kWindowOpeningOnly);
+    }
+    Editor other;  // (per editor: another editor starts at Opening Only)
+    const R498Scene s2 = r498_make(other, "");
+    other.command("create Blockout Piece: Window");
+    CHECK(s2.room && r477_active_piece(other) && r477_active_piece(other)->style == kWindowOpeningOnly);
+  });
+}
+
+static void tests_round498_numbers() {
+  /* ---- Criterion 3: changing the style, undo, F9 ---- */
+  test("blockout window styles (498): `blockout set style` on a made window keeps its Width, Head, Sill, Depth and frame numbers, is one undo step, and an undo gives the old style back", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "double 1.3 2.0 0.8");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    ed.command("blockout set frame 0.07 0.12");
+    ed.command("blockout set panes 4 2");
+    r495_built(ed);
+    const uint64_t id = s.win->id;
+    const BlockoutPiece before = *s.win->get<BlockoutPiece>();
+    CHECK(before.style == kWindowDouble && before.width == 1.3f && before.head == 2.0f && before.sill == 0.8f && before.frame_width == 0.07f && before.frame_depth == 0.12f);
+    const size_t depth = ed.undo_depth_for_test();
+    float head = before.head;  // (a window switched to Round becomes a circle - Head = Sill + Width, round 498's review - and keeps that Head afterwards)
+    int previous = kWindowDouble;
+    for (int style : {kWindowArched, kWindowGrid, kWindowRound, kWindowFixed, kWindowSingle, kWindowOpeningOnly}) {
+      const size_t steps = ed.undo_depth_for_test();
+      ed.command("blockout set style " + r498_word(style));
+      r495_built(ed);
+      if (style == kWindowRound && previous != kWindowRound) head = before.sill + before.width;
+      previous = style;
+      const BlockoutPiece *bp = ed.scene().find(id)->get<BlockoutPiece>();
+      CHECK(bp->style == style && bp->width == before.width && bp->head == head && bp->sill == before.sill && bp->depth == before.depth);
+      CHECK(bp->frame_width == before.frame_width && bp->frame_depth == before.frame_depth && bp->panes_across == 4 && bp->panes_up == 2 && bp->glass == before.glass);
+      CHECK(ed.undo_depth_for_test() == steps + 1);
+    }
+    const size_t steps = ed.undo_depth_for_test();
+    ed.command("blockout set style opening only");  // (the style it has: no step for nothing)
+    ed.command("blockout set style opening");
+    CHECK(ed.undo_depth_for_test() == steps);
+    ed.command("undo");
+    r495_built(ed);
+    const BlockoutPiece *back = ed.scene().find(id)->get<BlockoutPiece>();
+    CHECK(back->style == kWindowSingle && ed.undo_depth_for_test() + 1 == steps);  // (the last of the six steps undone: the style before it)
+    CHECK(depth + 6 == steps);
+  });
+
+  test("blockout window styles (498): F9 right after `blockout add window` shows the style and the numbers it reads as rows, each change re-runs from the state before it, and an undo takes the whole window back", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    const size_t pieces = r477_count(ed, true);
+    ed.command("blockout add window grid 1.4 2.1 0.8");
+    r477_settle(ed, 3);
+    GameObject *win = ed.active_object_for_test();
+    BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "blockout" && ed.obj_last_for_test().style == kWindowGrid && bp);
+    if (!bp) return;
+    for (const char *row : {"adjust:Style", "adjust:Width", "adjust:Head", "adjust:Sill", "adjust:Frame Width", "adjust:Frame Depth", "adjust:Panes Across", "adjust:Panes Up", "adjust:Glass", "adjust:Sill Board"})
+      CHECK(r496_has(ed, row));
+    CHECK(!r496_has(ed, "adjust:Arch Rise"));  // (Grid does not read it)
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r479_type(ed, "adjust:Panes Across", "5"));
+    CHECK(bp->panes_across == 5 && bp->width == 1.4f && bp->head == 2.1f);
+    CHECK(r479_type(ed, "adjust:Frame Width", "0.08"));
+    CHECK_NEAR(bp->frame_width, 0.08f, 1e-6f);
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Arched"));  // (a dropdown of words)
+    CHECK(bp->style == kWindowArched && bp->panes_across == 5 && bp->width == 1.4f && bp->frame_width == 0.08f);
+    CHECK(r496_has(ed, "adjust:Arch Rise") && !r496_has(ed, "adjust:Panes Across"));
+    CHECK(r479_type(ed, "adjust:Arch Rise", "0.4"));
+    CHECK_NEAR(bp->arch_rise, 0.4f, 1e-6f);
+    CHECK(r479_type(ed, "adjust:Width", "1.1"));
+    CHECK_NEAR(bp->width, 1.1f, 1e-5f);
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Round"));
+    CHECK(bp->style == kWindowRound && !r496_has(ed, "adjust:Arch Rise") && !r496_has(ed, "adjust:Sill Board"));  // (a porthole has no sill board)
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Opening Only"));
+    CHECK(bp->style == kWindowOpeningOnly && !r496_has(ed, "adjust:Frame Width") && r496_has(ed, "adjust:Width"));
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Single"));
+    CHECK(ed.undo_steps_for_test() == steps);  // (the same step, amended each time)
+    r495_built(ed);
+    CHECK(r477_matches(ed) && r498_judge(*bo).empty());
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == pieces);  // (one Ctrl+Z takes the window back)
+  });
+
+  /* ---- Criterion 4: materials, the Glass class and the UVs ---- */
+  test("blockout window styles (498): frame and bars are in the Solid class's slot, the pane in the Glass class's; a Blockout's Glass Material and a window's own override put a material on the panes only, and the UVs follow round 482's rule", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Wall w = r498_wall(ed, kWindowGrid, method);
+      const std::string solid = r482_material("R498Solid", Vec3(0.8f, 0.3f, 0.1f)), glass = r482_material("R498Glass", Vec3(0.2f, 0.5f, 0.9f)), own = r482_material("R498Own", Vec3(0.9f, 0.9f, 0.2f)),
+                        own_solid = r482_material("R498OwnSolid", Vec3(0.1f, 0.9f, 0.4f));
+      ed.select_for_test(w.bo->id, false);
+      ed.command("blockout set texscale 0.5");
+      ed.command("blockout set material solid " + solid);
+      ed.command("blockout set material glass " + glass);
+      r495_built(ed);
+      const Blockout *b = w.bo->get<Blockout>();
+      const MeshRenderer *mr = w.bo->get<MeshRenderer>();
+      const Mesh *m = r495_mesh(*w.bo);
+      CHECK(b->material[kClassGlass] == glass && b->material[kClassSolid] == solid && m && mr);
+      if (!m || !mr) return;
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      blockout_snapshot(*w.bo, pieces, settings);
+      /* Each face has the material its class says: from the pieces the faces name (the wall's own faces are Solid too). */
+      auto expect = [&](size_t f, const std::string &blockout_solid, const std::string &window_solid, const std::string &window_glass, int *cls_out) {
+        const blockout::Piece *piece = nullptr;
+        for (const blockout::Piece &p : pieces)
+          if (p.id == b->state.faces.piece[f]) piece = &p;
+        const int cls = piece ? blockout_face_class(*piece, b->state.faces.side[f]) : -1;
+        if (cls_out) *cls_out = cls;
+        const bool mine = piece && blockout_piece_owner(piece->id) == w.win->id;
+        if (cls == kClassGlass) return mine ? window_glass : glass;
+        if (cls == kClassSolid) return mine ? window_solid : blockout_solid;
+        return std::string();
+      };
+      size_t glass_faces = 0, solid_faces = 0, wrong = 0;
+      for (size_t f = 0; f < m->face_count(); f++) {
+        int cls = -1;
+        const std::string want = expect(f, solid, solid, glass, &cls);
+        glass_faces += cls == kClassGlass, solid_faces += cls == kClassSolid;
+        if (r482_face_material(*m, *mr, f) != want) wrong++;
+      }
+      CHECK(glass_faces >= 6 && solid_faces > 10 && wrong == 0);
+      /* The pane's faces and no others carry the Blockout's Glass Material. */
+      size_t on_glass = 0;
+      for (size_t f = 0; f < m->face_count(); f++) on_glass += r482_face_material(*m, *mr, f) == glass;
+      CHECK(on_glass == glass_faces);
+      CHECK(r482_scratch_same(*w.bo));
+      /* The window's own override of Glass: the panes change, nothing else does. */
+      std::vector<std::string> before;
+      for (size_t f = 0; f < m->face_count(); f++) before.push_back(r482_face_material(*m, *mr, f));
+      ed.select_for_test(w.win->id, false);
+      ed.command("blockout set material glass " + own);
+      r495_built(ed);
+      m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
+      size_t changed = 0, on_own = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) {
+        const std::string now = r482_face_material(*m, *mr, f);
+        changed += now != before[f], on_own += now == own;
+        if (now != before[f]) CHECK(before[f] == glass && now == own);
+      }
+      CHECK(changed == glass_faces && on_own == glass_faces);
+      /* The window's Solid override takes the frame's, bars' and sill board's faces and not the wall's. */
+      ed.command("blockout set material solid " + own_solid);
+      r495_built(ed);
+      m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
+      size_t on_frame = 0, bad_wall = 0, wall_faces = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) {
+        const std::string now = r482_face_material(*m, *mr, f);
+        const bool wall = b->state.faces.piece[f] != w.win->id && !blockout_id_generated(b->state.faces.piece[f]);
+        on_frame += now == own_solid;
+        wall_faces += wall;
+        if (wall && now == own_solid) bad_wall++;
+      }
+      CHECK(on_frame > 10 && bad_wall == 0 && wall_faces > 0);
+      CHECK(r482_scratch_same(*w.bo));
+      /* Round 482's UV rule: a face's coordinates are its corners' metres in its own plane over the Texture Scale (0.5 m a tile): on a face square to Z, U runs along
+       * X (turned by the normal's sign) and V up. */
+      size_t uv_faces = 0, uv_bad = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) {
+        const Vec3 n = m->face_normal(f);
+        if (std::fabs(n.z) < 0.9999f) continue;
+        uv_faces++;
+        const uint32_t first = m->face_offsets[f];
+        for (uint32_t i = 0; i < m->face_size(f); i++) {
+          const Vec3 p = m->positions[m->face_verts(f)[i]];
+          const Vec2 uv = m->uvs[first + i];
+          if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) uv_bad++;
+        }
+      }
+      CHECK(uv_faces > 10 && uv_bad == 0);
+    }
+  });
+
+  /* ---- Criterion 5: the handles ---- */
+  test("blockout window styles (498): the handles of a styled window change Width, Head and Sill with real mouse events, the frame follows, and the mesh stays sound", [] {
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowArched, kWindowGrid, kWindowRound}) {
+        Editor ed;
+        const R498Wall w = r498_wall(ed, style, method);
+        ed.select_for_test(w.win->id, false);
+        ed.mark_changed_for_test("test scene");
+        bool framed = false;
+        for (float yaw : {0.0f, 180.0f}) {
+          const Vec3 at = w.win->world_matrix().point({0.0f, 1.45f, 0.0f});
+          ed.command(strprintf("camera %g 0 6 %g %g %g", yaw, at.x, at.y, at.z));
+          r477_settle(ed, 3);
+          int x = 0, y = 0;
+          framed = ed.blockout_handle_pixel_for_test("+x", x, y) && ed.blockout_handle_pixel_for_test("-x", x, y) && ed.blockout_handle_pixel_for_test("head", x, y) &&
+                   ed.blockout_handle_pixel_for_test("sill", x, y);
+          if (framed) break;
+        }
+        CHECK(framed);
+        if (!framed) continue;
+        BlockoutPiece *bp = w.win->get<BlockoutPiece>();
+        const size_t depth = ed.undo_depth_for_test();
+        auto world = [&](Vec3 local) { return w.win->world_matrix().point(local); };
+        CHECK(r479_pull(ed, "+x", world({0.9f, 1.45f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->width > 1.7f && bp->width < 1.9f && bp->head == 2.0f && bp->sill == 0.9f);  // (the +X handle moved 0.3 m: both ends, 0.6 m)
+        CHECK(r479_pull(ed, "head", world({0.0f, 2.3f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->head > 2.2f && bp->head < 2.4f);
+        CHECK(r479_pull(ed, "sill", world({0.0f, 0.7f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->sill > 0.6f && bp->sill < 0.8f);
+        CHECK(ed.undo_depth_for_test() == depth + 3);
+        CHECK(bp->style == style && bp->frame_width == 0.06f && bp->depth == 0.4f);
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style];
+        const std::string why = r498_judge(*w.bo);
+        if (!why.empty()) std::printf("    %s after the handles: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        /* The frame follows: it stands at the new edges (a 6 cm frame), and the light inside is open of matter in front of the pane. */
+        const float half = bp->width * 0.5f, mid = 0.5f * (bp->head + bp->sill);
+        CHECK(r498_matter(*w.bo, *w.win, {half - 0.03f, mid, 0.0f}) && r498_matter(*w.bo, *w.win, {-half + 0.03f, mid, 0.0f}));
+        CHECK(!r498_matter(*w.bo, *w.win, {0.0f, mid + 0.01f, 0.045f}) || style == kWindowGrid);  // (a Grid's bar may stand there)
+        CHECK(!r498_matter(*w.bo, *w.win, {half - 0.03f, mid, -0.075f}));
+      }
+  });
+}
+
+static void tests_round498_more() {
+  /* ---- Criterion 6: hostile numbers ---- */
+  test("blockout window styles (498): a frame wider than half the window, 500 panes, a window larger than its wall, a negative width, NaN, infinity, depth 0 and an arch rise of 1e9 leave a valid mesh or a clean refusal, on each path (a sample on two styles: the stress row 'hostile numbers on styled windows' has all the cases on every style)", [] {
+    struct Case {
+      const char *what;
+      std::function<void(BlockoutPiece &)> set;
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const std::vector<Case> cases = {
+        {"frame 5 m wide (wider than half the window)", [](BlockoutPiece &p) { p.frame_width = 5.0f; }},
+        {"500 x 500 panes", [](BlockoutPiece &p) { p.panes_across = 500, p.panes_up = 500; }},
+        {"a window 9 m wide in a 4 m room", [](BlockoutPiece &p) { p.width = 9.0f; }},
+        {"width -1.2", [](BlockoutPiece &p) { p.width = -1.2f; }},
+        {"depth 0", [](BlockoutPiece &p) { p.depth = 0.0f; }},
+        {"width NaN", [nan](BlockoutPiece &p) { p.width = nan; }},
+        {"frame width infinite", [inf](BlockoutPiece &p) { p.frame_width = inf; }},
+        {"arch rise 1e9", [](BlockoutPiece &p) { p.arch_rise = 1e9f; }},
+    };
+    for (int method : r498_methods())
+      for (int style : {kWindowGrid, kWindowRound}) {
+        Editor ed;
+        const R498Scene s = r498_make(ed, r498_word(style) + " 1.2 2 0.9", method);
+        CHECK(s.win != nullptr);
+        if (!s.win) continue;
+        s.bo->get<Blockout>()->cell = 0.25f;  // (a coarse grid: the builds stay quick; what is judged is soundness)
+        const BlockoutPiece base = *s.win->get<BlockoutPiece>();
+        size_t bad = 0, refused = 0;
+        for (const Case &c : cases) {
+          BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+          *bp = base;
+          c.set(*bp);
+          const auto t0 = std::chrono::steady_clock::now();
+          r495_built(ed);
+          const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+          if (ms > 2000.0) std::printf("    (%s, %s, %s: %.0f ms)\n", r498_method_name(method), kBlockoutWindowStyleNames[style], c.what, ms);
+          const Mesh *m = r495_mesh(*s.bo);
+          const BlockoutStatus &st = s.bo->get<Blockout>()->state.status;
+          bool ok = m && structurally_valid(*m);
+          if (ok && st.refusal.empty()) ok = r498_judge(*s.bo).empty();
+          refused += !st.refusal.empty();
+          if (!ok) bad++, std::printf("    %s, %s, %s: not sound (%s)\n", r498_method_name(method), kBlockoutWindowStyleNames[style], c.what, r498_judge(*s.bo).c_str());
+        }
+        std::printf("    %s %s: %zu hostile cases, %zu refused, %zu not sound\n", r498_method_name(method), kBlockoutWindowStyleNames[style], cases.size(), refused, bad);
+        CHECK(bad == 0);
+      }
+  });
+
+  test("blockout window styles (498): the numbers are clamped as the other pieces' are - a window of 500 panes makes a bounded number of kernel pieces, a frame never fills the window, and Opening Only reads none of them", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid 1.2 2 0.9");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+    s.bo->get<Blockout>()->cell = 0.005f;  // (the grid at its default cell would hold the window as the plain hole: the pieces counted are the exact path's)
+    bp->panes_across = 500, bp->panes_up = 500, bp->frame_width = 1e9f;
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    blockout_snapshot(*s.bo, pieces, settings);
+    size_t made = 0;
+    for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
+    CHECK(made > 10 && made < 400);
+    for (const blockout::Piece &p : pieces)
+      if (blockout_id_generated(p.id)) {
+        const Vec3 half = p.size * 0.5f;
+        CHECK(finite_bits(p.size.x) && finite_bits(p.size.y) && finite_bits(p.size.z) && (p.shape != blockout::Shape::Box || (half.x > 0.0f && half.y > 0.0f && half.z > 0.0f)));
+      }
+    bp->style = kWindowOpeningOnly;  // (the same numbers, read by nothing: the hole alone)
+    pieces.clear();
+    blockout_snapshot(*s.bo, pieces, settings);
+    size_t plain = 0;
+    for (const blockout::Piece &p : pieces) plain += blockout_id_generated(p.id);
+    CHECK(plain == 0);
+  });
+
+  /* ---- Criterion 7: save and open, Bake to Mesh and Unbake, export ---- */
+  test("blockout window styles (498): a styled window and the Blockout's Glass Material survive save and open - every number, the same mesh - and an older scene without the fields loads as Opening Only", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid 1.5 2 0.9");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    const std::string glass = r482_material("R498Saved", Vec3(0.3f, 0.6f, 0.9f)), own = r482_material("R498SavedOwn", Vec3(0.9f, 0.6f, 0.3f));
+    ed.command("blockout set frame 0.07 0.12");
+    ed.command("blockout set panes 4 2");
+    ed.command("blockout set sillboard on 0.09");
+    ed.command("blockout set glass off");
+    ed.command("blockout set glass on");
+    ed.command("blockout set material glass " + own);
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout set material glass " + glass);
+    r495_built(ed);
+    const Mesh before = *r495_mesh(*s.bo);
+    const std::string text = save_scene_text(ed.scene());
+    for (const char *key : {"Style", "Frame_Width", "Frame_Depth", "Panes_Across", "Panes_Up", "Arch_Rise", "Glass", "Sill_Board", "Sill_Overhang", "Glass_Material"})
+      CHECK(text.find(std::string("  ") + key + " ") != std::string::npos);
+    const std::string path = te_scene_path(ed, "r498_window.scene");
+    CHECK(fs::write_file(path, text));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *bo = r477_find(ed);
+    GameObject *win = ed.scene().find_by_name("Window");
+    const BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bo && bp && bp->opening == 2 && bp->style == kWindowGrid && bp->width == 1.5f && bp->head == 2.0f && bp->sill == 0.9f && bp->frame_width == 0.07f && bp->frame_depth == 0.12f);
+    CHECK(bp && bp->panes_across == 4 && bp->panes_up == 2 && bp->glass && bp->sill_board && bp->sill_overhang == 0.09f && bp->material[kClassGlass] == own);
+    CHECK(bo && bo->get<Blockout>()->material[kClassGlass] == glass);
+    CHECK(bo && r495_mesh(*bo) && r477_same(before, *r495_mesh(*bo)) && r482_scratch_same(*bo));
+    fs::remove_file(path);
+    /* A scene from before the round: the new fields are not in it. */
+    Editor old_ed;
+    const R498Scene o = r498_make(old_ed, "opening");
+    const Mesh plain = *r495_mesh(*o.bo);
+    std::istringstream is(save_scene_text(old_ed.scene()));
+    std::string old;
+    for (std::string line; std::getline(is, line);) {
+      bool added = false;
+      for (const char *key : {"Style ", "Frame_Width ", "Frame_Depth ", "Panes_Across ", "Panes_Up ", "Arch_Rise ", "Glass ", "Sill_Board ", "Sill_Overhang ", "Glass_Material "})
+        added = added || line.rfind(std::string("  ") + key, 0) == 0;
+      if (!added) old += line + "\n";
+    }
+    CHECK(old.find("Frame_Width") == std::string::npos && old.find("Glass_Material") == std::string::npos);
+    const std::string old_path = te_scene_path(old_ed, "r498_old.scene");
+    CHECK(fs::write_file(old_path, old));
+    old_ed.command("newscene");
+    CHECK(old_ed.open_scene_for_test(old_path));
+    for (int i = 0; i < 400 && !r477_find(old_ed); i++) old_ed.step_frame_headless();
+    r495_built(old_ed);
+    GameObject *loaded = r477_find(old_ed);
+    GameObject *lw = old_ed.scene().find_by_name("Window");
+    const BlockoutPiece *lp = lw ? lw->get<BlockoutPiece>() : nullptr;
+    CHECK(loaded && lp && lp->opening == 2 && lp->style == kWindowOpeningOnly && lp->frame_width == 0.06f && lp->panes_across == 3 && lp->glass && loaded->get<Blockout>()->material[kClassGlass].empty());
+    CHECK(loaded && r495_mesh(*loaded) && r477_same(plain, *r495_mesh(*loaded)));
+    fs::remove_file(old_path);
+  });
+
+  test("blockout window styles (498): Bake to Mesh keeps the styled window's mesh and the window's numbers under the disabled child, Unbake gives the same mesh and numbers back, and OBJ, FBX and GLB export the glass in a material of its own", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Wall s = r498_wall(ed, kWindowArched, method);  // (a 1 cm Field Cell: the pane is resolved on the field path)
+      CHECK(s.win != nullptr);
+      if (!s.win) continue;
+      const std::string glass = r482_material("R498Pane", Vec3(0.4f, 0.7f, 0.9f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout set material glass " + glass);
+      r495_built(ed);
+      const uint64_t bo_id = s.bo->id, win_id = s.win->id;
+      const Mesh live = *r495_mesh(*s.bo);
+      const BlockoutPiece numbers = *s.win->get<BlockoutPiece>();
+      const std::map<std::string, size_t> want = r482_triangles(*s.bo);
+      std::string pane_name;  // (the only material of the mesh with a name: the others are the default material)
+      size_t pane_triangles = 0;
+      for (const auto &w : want)
+        if (!w.first.empty()) pane_name = w.first, pane_triangles = w.second;
+      CHECK(want.size() == 2 && pane_triangles > 0);
+      for (const char *format : {"fbx", "glb", "obj"}) {
+        const std::string name = std::string("r498_live.") + format;
+        const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
+        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs);
+        if (std::string(format) == "obj") continue;
+        size_t got = 0;
+        for (const auto &t : back.triangles)
+          if (!pane_name.empty() && t.first.find(pane_name) != std::string::npos) got += t.second;
+        CHECK(got == pane_triangles);
+      }
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<BlockoutBaked>() && !baked->get<Blockout>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      GameObject *held = ed.scene().find(win_id);
+      CHECK(held && held->get<BlockoutPiece>() && held->get<BlockoutPiece>()->style == kWindowArched && held->get<BlockoutPiece>()->frame_width == numbers.frame_width);
+      const R482Back after = r482_read(r482_export(ed, "glb", "r498_baked.glb"));
+      size_t got = 0;
+      for (const auto &t : after.triangles)
+        if (!pane_name.empty() && t.first.find(pane_name) != std::string::npos) got += t.second;
+      CHECK(after.ok && got == pane_triangles);
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(bo_id);
+      held = ed.scene().find(win_id);
+      CHECK(baked && baked->get<Blockout>() && !baked->get<BlockoutBaked>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      const BlockoutPiece *back = held ? held->get<BlockoutPiece>() : nullptr;
+      CHECK(back && back->style == numbers.style && back->width == numbers.width && back->head == numbers.head && back->sill == numbers.sill && back->depth == numbers.depth &&
+            back->frame_width == numbers.frame_width && back->frame_depth == numbers.frame_depth && back->arch_rise == numbers.arch_rise && back->glass == numbers.glass &&
+            back->sill_board == numbers.sill_board && back->sill_overhang == numbers.sill_overhang);
+      CHECK(baked && baked->get<Blockout>()->material[kClassGlass] == glass);
+    }
+  });
+
+  /* ---- The console ---- */
+  test("blockout window styles (498): blockout set style, frame, panes, glass and sillboard change the selected windows by one undo step each; a bad argument warns and changes nothing", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "single");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    const uint64_t id = s.win->id;
+    auto piece = [&]() -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+    /* The good ones. */
+    size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout set style arched");
+    r495_built(ed);
+    CHECK(piece().style == kWindowArched && ed.undo_depth_for_test() == depth + 1);
+    ed.command("blockout set style Grid");
+    CHECK(piece().style == kWindowGrid);
+    ed.command("blockout set frame 0.1");
+    CHECK(piece().frame_width == 0.1f && piece().frame_depth == 0.1f);
+    ed.command("blockout set frame 0.05 0.2");
+    CHECK(piece().frame_width == 0.05f && piece().frame_depth == 0.2f);
+    ed.command("blockout set panes 2 5");
+    CHECK(piece().panes_across == 2 && piece().panes_up == 5);
+    ed.command("blockout set panes 0 500");
+    CHECK(piece().panes_across == 1 && piece().panes_up == 12);  // (held to 1 to 12)
+    ed.command("blockout set glass off");
+    CHECK(!piece().glass);
+    ed.command("blockout set glass on");
+    CHECK(piece().glass);
+    ed.command("blockout set sillboard off");
+    CHECK(!piece().sill_board && piece().sill_overhang == 0.04f);
+    ed.command("blockout set sillboard on 0.1");
+    CHECK(piece().sill_board && piece().sill_overhang == 0.1f);
+    ed.command("blockout set frame 1e9");
+    CHECK(piece().frame_width == kBlockoutMaxSize);
+    r495_built(ed);
+    /* No step for nothing. */
+    depth = ed.undo_depth_for_test();
+    for (const char *same : {"blockout set style grid", "blockout set glass on", "blockout set sillboard on 0.1", "blockout set panes 1 12"}) ed.command(same);
+    CHECK(ed.undo_depth_for_test() == depth);
+    /* The bad ones. */
+    const BlockoutPiece before = piece();
+    for (const char *bad : {"blockout set style", "blockout set style nonsense", "blockout set style grid extra", "blockout set style opening only more", "blockout set frame", "blockout set frame -1",
+                            "blockout set frame 0", "blockout set frame nan", "blockout set frame abc", "blockout set frame 1 2 3", "blockout set frame 0.1 -2", "blockout set frame 0.1 0",
+                            "blockout set panes", "blockout set panes 2", "blockout set panes 2.5 3", "blockout set panes a b", "blockout set panes nan 3", "blockout set panes 2 3 4",
+                            "blockout set glass", "blockout set glass maybe", "blockout set glass on off", "blockout set sillboard", "blockout set sillboard maybe", "blockout set sillboard on -1",
+                            "blockout set sillboard on x", "blockout set sillboard on 1 2"}) {
+      const size_t mark = r477_mark();
+      ed.command(bad);
+      const size_t warnings = te_warnings_since(mark);
+      if (warnings == 0) std::printf("    '%s' did not warn\n", bad);
+      CHECK(warnings >= 1);
+    }
+    const BlockoutPiece &after = piece();
+    CHECK(after.style == before.style && after.frame_width == before.frame_width && after.frame_depth == before.frame_depth && after.panes_across == before.panes_across &&
+          after.panes_up == before.panes_up && after.glass == before.glass && after.sill_board == before.sill_board && after.sill_overhang == before.sill_overhang &&
+          ed.undo_depth_for_test() == depth);
+    /* Not a window: a room, a door, nothing selected. */
+    for (const char *line : {"blockout set style grid", "blockout set frame 0.1", "blockout set panes 2 2", "blockout set glass off", "blockout set sillboard off"}) {
+      ed.select_for_test(s.room->id, false);
+      size_t mark = r477_mark();
+      ed.command(line);
+      CHECK(te_warnings_since(mark) >= 1);
+      ed.clear_selection_for_test();
+      mark = r477_mark();
+      ed.command(line);
+      CHECK(te_warnings_since(mark) >= 1);
+    }
+    CHECK(ed.undo_depth_for_test() == depth);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door");
+    const size_t mark = r477_mark();
+    ed.command("blockout set style round");
+    CHECK(te_warnings_since(mark) >= 1 && r477_active_piece(ed)->opening == 1 && r477_active_piece(ed)->style == kWindowOpeningOnly);
+    /* `blockout add window` with a bad style word or number changes nothing. */
+    const size_t pieces = r477_all_pieces(*s.bo).size();
+    for (const char *bad : {"blockout add window grid -1 2 0.9", "blockout add window grid nan", "blockout add window grid grid", "blockout add window fancy"}) {
+      const size_t m = r477_mark();
+      ed.command(bad);
+      CHECK(te_warnings_since(m) >= 1);
+    }
+    CHECK(r477_all_pieces(*s.bo).size() == pieces + 0);
+  });
+
+  /* ---- The Inspector, the classes, the hash ---- */
+  test("blockout window styles (498): the Inspector shows a window's Style and only the rows its style reads; the material rows follow the classes it makes", [] {
+    auto rows = [](int opening, int style, bool glass, int shape = 0) {
+      BlockoutPiece p;
+      p.opening = opening, p.style = style, p.glass = glass, p.shape = shape;
+      if (opening) p.operation = 1;
+      R478Probe probe;
+      p.reflect(probe);
+      std::string out;
+      for (const R478Probe::Seen &s : probe.seen) out += s.name + "|";
+      return out;
+    };
+    auto has = [](const std::string &r, const char *name) { return r.find(std::string(name) + "|") != std::string::npos && (r.find(std::string(name) + "|") == 0 || r[r.find(std::string(name) + "|") - 1] == '|'); };
+    const std::string plain = rows(2, kWindowOpeningOnly, true);
+    CHECK(has(plain, "Style") && has(plain, "Width") && has(plain, "Head") && has(plain, "Sill") && has(plain, "Depth") && has(plain, "Cut Material"));
+    for (const char *no : {"Frame Width", "Frame Depth", "Panes Across", "Panes Up", "Arch Rise", "Glass", "Sill Board", "Sill Overhang", "Solid Material", "Glass Material"}) CHECK(!has(plain, no));
+    struct Want {
+      int style;
+      bool panes, rise, board;
+    };
+    for (const Want &w : {Want{kWindowSingle, false, false, true}, {kWindowDouble, false, false, true}, {kWindowArched, false, true, true}, {kWindowFixed, false, false, false},
+                          {kWindowGrid, true, false, true}, {kWindowRound, false, false, false}}) {
+      const std::string r = rows(2, w.style, true);
+      CHECK(has(r, "Style") && has(r, "Frame Width") && has(r, "Frame Depth") && has(r, "Glass") && has(r, "Width") && has(r, "Cut Material") && has(r, "Solid Material") && has(r, "Glass Material"));
+      CHECK(has(r, "Panes Across") == w.panes && has(r, "Panes Up") == w.panes && has(r, "Arch Rise") == w.rise && has(r, "Sill Board") == w.board && has(r, "Sill Overhang") == w.board);
+    }
+    CHECK(!has(rows(2, kWindowGrid, false), "Glass Material") && has(rows(2, kWindowGrid, false), "Solid Material"));  // (an open light has no pane to give a material)
+    /* Round 499 flipped this: round 498 said a door has no Style ("round 499 gives doors their meaning"). A door has a Style with its own words and only the rows its style
+     * reads: Opening Only none, Revolving (5, which a window style number would also be) the Drum Radius and no frame. */
+    CHECK(has(rows(1, kDoorOpeningOnly, true), "Style") && !has(rows(1, kDoorOpeningOnly, true), "Frame Width") && !has(rows(1, kDoorOpeningOnly, true), "Leaf"));
+    CHECK(has(rows(1, kDoorSingle, true), "Style") && has(rows(1, kDoorSingle, true), "Frame Width") && has(rows(1, kDoorSingle, true), "Leaf") && !has(rows(1, kDoorSingle, true), "Panes Across"));
+    CHECK(has(rows(1, kDoorRevolving, true), "Drum Radius") && !has(rows(1, kDoorRevolving, true), "Frame Width") && !has(rows(1, kDoorRevolving, true), "Leaf"));
+    CHECK(!has(rows(0, kWindowGrid, true), "Style") && !has(rows(0, kWindowGrid, true), "Glass"));
+    Blockout b;
+    R478Probe probe;
+    b.reflect(probe);
+    CHECK(probe.find("Glass Material") && probe.find("Solid Material") && probe.find("Cut Material"));
+    /* All fields, as a scene file lists them. */
+    struct All : R478Probe {
+      bool all_fields() const override { return true; }
+    } all;
+    BlockoutPiece p;
+    p.reflect(all);
+    for (const char *key : {"Style", "Frame Width", "Frame Depth", "Panes Across", "Panes Up", "Arch Rise", "Glass", "Sill Board", "Sill Overhang", "Glass Material"}) CHECK(all.find(key));
+  });
+
+  test("blockout window styles (498): the Glass class comes after the six of round 482 - their names and order unchanged - and a window's glass, its numbers and the Blockout's Glass Material each change the snapshot's hash", [] {
+    /* Round 499 added the Leaf class after Glass: eight classes now (this said seven), Glass still the seventh slot's number 6 and the six before it unchanged. */
+    CHECK(kBlockoutClasses == 9 && kClassGlass == 6 && kClassLeaf == 7 && kClassRoof == 8);  // (round 500 added Roof after Leaf: nine classes; the eight before it keep their numbers)
+    const char *const want[7] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass"};
+    for (int k = 0; k < 7; k++) CHECK(std::string(kBlockoutClassNames[k]) == want[k]);
+    CHECK(kClassFloor == 0 && kClassWalls == 1 && kClassCeiling == 2 && kClassOutside == 3 && kClassCut == 4 && kClassSolid == 5);
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+    auto hash = [&] {
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      BlockoutSnapshotNotes notes;
+      blockout_snapshot(*s.bo, pieces, settings, &notes);
+      return blockout_snapshot_hash(pieces, settings, &notes);
+    };
+    s.bo->get<Blockout>()->cell = 0.005f;  // (fine enough that the grid shows every part: a number of the window then changes its pieces on every path)
+    const uint64_t h0 = hash();
+    CHECK(h0 == hash());
+    struct Edit {
+      const char *what;
+      std::function<void()> apply, undo;
+    };
+    const BlockoutPiece base = *bp;
+    const std::vector<Edit> edits = {
+        {"the Blockout's Glass Material", [&] { s.bo->get<Blockout>()->material[kClassGlass] = "Assets/Materials/X.mat"; }, [&] { s.bo->get<Blockout>()->material[kClassGlass].clear(); }},
+        {"the window's own Glass Material", [&] { bp->material[kClassGlass] = "Assets/Materials/X.mat"; }, [&] { bp->material[kClassGlass].clear(); }},
+        {"the style", [&] { bp->style = kWindowArched; }, [&] { bp->style = base.style; }},
+        {"the frame width", [&] { bp->frame_width = 0.09f; }, [&] { bp->frame_width = base.frame_width; }},
+        {"the frame depth", [&] { bp->frame_depth = 0.15f; }, [&] { bp->frame_depth = base.frame_depth; }},
+        {"the panes across", [&] { bp->panes_across = 4; }, [&] { bp->panes_across = base.panes_across; }},
+        {"the panes up", [&] { bp->panes_up = 2; }, [&] { bp->panes_up = base.panes_up; }},
+        {"the glass", [&] { bp->glass = false; }, [&] { bp->glass = base.glass; }},
+        {"the sill board", [&] { bp->sill_board = false; }, [&] { bp->sill_board = base.sill_board; }},
+        {"the sill overhang", [&] { bp->sill_overhang = 0.1f; }, [&] { bp->sill_overhang = base.sill_overhang; }},
+        {"the width", [&] { bp->width = 1.3f; }, [&] { bp->width = base.width; }},
+    };
+    for (const Edit &e : edits) {
+      e.apply();
+      const uint64_t h = hash();
+      if (h == h0) std::printf("    %s did not change the hash\n", e.what);
+      CHECK(h != h0);
+      e.undo();
+      CHECK(hash() == h0);
+    }
+    bp->style = kWindowArched;  // (the arch rise is read by an Arched window only)
+    const uint64_t arched = hash();
+    bp->arch_rise = 0.4f;
+    CHECK(hash() != arched);
+    bp->style = kWindowOpeningOnly;  // (Opening Only reads none of them: the same hole whatever they hold)
+    const uint64_t plain = hash();
+    bp->frame_width = 0.2f, bp->panes_across = 7, bp->glass = false, bp->sill_overhang = 0.5f, bp->arch_rise = 0.3f;
+    CHECK(hash() == plain);
+  });
+
+  test("blockout window styles (498): `blockout set material glass` sets the Glass Material of the Blockout, or of the selected windows that have a pane; a piece with no pane warns", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "single");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    const std::string mat = r482_material("R498Cmd", Vec3(0.5f, 0.5f, 0.9f));
+    BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+    ed.command("blockout set material glass " + mat);  // (the window is selected: its own)
+    CHECK(bp->material[kClassGlass] == mat && s.bo->get<Blockout>()->material[kClassGlass].empty());
+    ed.command("blockout set material glass none");
+    CHECK(bp->material[kClassGlass].empty());
+    ed.command("blockout set glass off");
+    size_t mark = r477_mark();
+    ed.command("blockout set material glass " + mat);  // (an open light has no pane)
+    CHECK(te_warnings_since(mark) >= 1 && bp->material[kClassGlass].empty());
+    ed.command("blockout set glass on");
+    ed.command("blockout set style opening");
+    mark = r477_mark();
+    ed.command("blockout set material glass " + mat);  // (Opening Only makes no glass either)
+    CHECK(te_warnings_since(mark) >= 1 && bp->material[kClassGlass].empty());
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout set material glass " + mat);
+    CHECK(s.bo->get<Blockout>()->material[kClassGlass] == mat);
+  });
+}
+
+static void tests_round498_origins() {
+  /* ---- Criterion 2: Opening Only is today's window ---- */
+  test("blockout window styles (498): Opening Only gives the same mesh bytes as a window made before the round - pinned by hashes computed on the head of round 497, before the change - and the old snapshot's one box, on every path", [] {
+    /* blockout_mesh_hash of a room 4 x 3 x 4 with `blockout add window <numbers>` on the field path, built by the head of round 497 (22 faces each). */
+    struct Pre {
+      const char *numbers;
+      uint64_t hash;
+    };
+    const Pre pre[] = {{"", 1264068252307204924ull}, {"1.4 1.8 0.6", 1801705153314521834ull}, {"2 1.6 0.5", 8743032637589142465ull}};
+    for (const Pre &p : pre) {
+      Editor ed;
+      const R498Scene s = r498_make(ed, std::string("opening ") + p.numbers, 2);
+      const Mesh *m = s.win ? r495_mesh(*s.bo) : nullptr;
+      CHECK(m && m->face_count() == 22);
+      if (m && blockout_mesh_hash(*m) != p.hash) std::printf("    [%s]: hash %llu, was %llu before the round\n", p.numbers, (unsigned long long)blockout_mesh_hash(*m), (unsigned long long)p.hash);
+      CHECK(m && blockout_mesh_hash(*m) == p.hash);
+    }
+    /* On every path the kernel is given what the old snapshot gave it - each piece by `to_piece`, the window one box that cuts - and its mesh is what the pieces make. */
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Scene s = r498_make(ed, "opening 1.3 2 0.8", method);
+      CHECK(s.win != nullptr);
+      if (!s.win) continue;
+      std::vector<blockout::Piece> now, old;
+      blockout::Settings settings;
+      BlockoutSnapshotNotes notes;
+      blockout_snapshot(*s.bo, now, settings, &notes);
+      for (GameObject *g : r477_all_pieces(*s.bo)) old.push_back(g->get<BlockoutPiece>()->to_piece(g->id, blockout_piece_matrix(*g, *s.bo)));
+      CHECK(now.size() == old.size() && now.size() == 2);
+      for (size_t i = 0; i < std::min(now.size(), old.size()); i++) {
+        const blockout::Piece &a = now[i], &b = old[i];
+        CHECK(!blockout_id_generated(a.id) && a.id == b.id && a.shape == b.shape && a.op == b.op && a.segments == b.segments && a.blend == b.blend && a.room == b.room);
+        CHECK(std::memcmp(&a.size, &b.size, sizeof(Vec3)) == 0 && std::memcmp(a.to_blockout.m, b.to_blockout.m, sizeof(a.to_blockout.m)) == 0);
+      }
+      CHECK(r482_scratch_same(*s.bo));
+    }
+  });
+
+  /* ---- A face of the frame or the pane is the window's ---- */
+  test("blockout window styles (498): a click on a frame face, a bar or the pane selects the window - the object - and a click on the wall beside it selects the wall's piece; box select over the frame too", [] {
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowGrid, kWindowArched}) {
+        Editor ed;
+        const R498Wall w = r498_wall(ed, style, method);
+        ed.command("camera 0 0 6 0 0.25 0");
+        r477_settle(ed, 3);
+        const GameObject *wall = ed.scene().find_by_name("Wall");
+        const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style];
+        auto at = [&](Vec3 local) { return w.win->world_matrix().point(local); };
+        GameObject *frame = r479p_click(ed, at({0.57f, 1.45f, 0.0f}));
+        GameObject *pane = r479p_click(ed, at({0.3f, 1.45f, 0.0f}));
+        GameObject *beside = r479p_click(ed, at({0.9f, 1.45f, 0.0f}));
+        if (frame != w.win || pane != w.win || beside != wall) std::printf("    %s: frame %s, pane %s, wall %s\n", label.c_str(), frame ? frame->name.c_str() : "-", pane ? pane->name.c_str() : "-", beside ? beside->name.c_str() : "-");
+        CHECK(frame == w.win && pane == w.win && beside == wall && wall != nullptr);
+        if (style == kWindowGrid) CHECK(r479p_click(ed, at({0.185f, 1.45f, 0.0f})) == w.win);  // (a glazing bar)
+        /* The faces name the made pieces, and no object has their ids: what a face reports is mapped to the window. */
+        const Blockout *b = w.bo->get<Blockout>();
+        size_t named_by_made = 0;
+        for (uint64_t id : b->state.faces.piece) named_by_made += blockout_id_generated(id) && blockout_piece_owner(id) == w.win->id;
+        CHECK(named_by_made > 10 && ed.scene().find(w.win->id | kBlockoutGeneratedBit) == nullptr);
+      }
+  });
+
+  test("blockout window styles (498): a styled window counts as one piece in the Blockout's status, and one name when the kernel skips it", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    const BlockoutStatus &st = s.bo->get<Blockout>()->state.status;
+    CHECK(st.pieces == 2 && st.used == 2 && st.skipped.empty());
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    blockout_snapshot(*s.bo, pieces, settings);
+    CHECK(pieces.size() > 4 && blockout_user_piece_count(pieces) == 2);
+    /* A hostile window is a plain hole the kernel names - once. */
+    s.win->get<BlockoutPiece>()->width = std::numeric_limits<float>::quiet_NaN();
+    r495_built(ed);
+    const BlockoutStatus &after = s.bo->get<Blockout>()->state.status;
+    size_t naming = 0;
+    for (const auto &k : after.skipped) naming += k.first == s.win->id;
+    CHECK(after.pieces == 2 && naming == 1);
+    CHECK(ed.scene().find(s.win->id)->get<BlockoutPiece>() && !blockout_id_generated(s.win->id));
+  });
+
+  test("blockout window styles (498): scaling a styled window scales its numbers, a duplicate has the same style and numbers and builds, and a window in a copied Blockout keeps its style", [] {
+    BlockoutPiece p;
+    p.opening = 2, p.operation = 1, p.style = kWindowArched, p.width = 1.2f, p.head = 2.0f, p.sill = 0.9f, p.depth = 0.4f, p.frame_width = 0.06f, p.frame_depth = 0.1f, p.arch_rise = 0.5f,
+    p.sill_overhang = 0.04f, p.panes_across = 4, p.panes_up = 3;
+    CHECK(blockout_piece_scale(p, Vec3(2.0f, 1.5f, 3.0f)));
+    CHECK_NEAR(p.width, 2.4f, 1e-5f);
+    CHECK_NEAR(p.head, 3.0f, 1e-5f);
+    CHECK_NEAR(p.sill, 1.35f, 1e-5f);
+    CHECK_NEAR(p.depth, 0.8f, 1e-5f);  // (changed on review: Depth = wall + 0.2, so the scale grows the wall part: (0.4 - 0.2) * 3 + 0.2)
+    CHECK_NEAR(p.frame_width, 0.12f, 1e-5f);   // (the factor of the window's plane that is farthest from 1)
+    CHECK_NEAR(p.frame_depth, 0.3f, 1e-5f);
+    CHECK_NEAR(p.arch_rise, 0.75f, 1e-5f);
+    CHECK_NEAR(p.sill_overhang, 0.12f, 1e-5f);
+    CHECK(p.panes_across == 4 && p.panes_up == 3 && p.style == kWindowArched);
+    BlockoutPiece zero = p;
+    zero.arch_rise = 0.0f, zero.sill_overhang = 0.0f;
+    blockout_piece_scale(zero, Vec3(2.0f, 2.0f, 2.0f));
+    CHECK(zero.arch_rise == 0.0f && zero.sill_overhang == 0.0f);  // (0: a half circle, and no overhang, stay)
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid 1.4 2 0.9");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    ed.command("blockout set frame 0.07 0.12");
+    ed.command("blockout set panes 2 4");
+    ed.select_for_test(s.win->id, false);
+    const size_t pieces = r477_all_pieces(*s.bo).size();
+    ed.command("duplicate");
+    r495_built(ed);
+    CHECK(r477_all_pieces(*s.bo).size() == pieces + 1);
+    GameObject *copy = ed.active_object_for_test();
+    const BlockoutPiece *cp = copy ? copy->get<BlockoutPiece>() : nullptr;
+    CHECK(copy && copy != s.win && cp && cp->style == kWindowGrid && cp->width == 1.4f && cp->frame_width == 0.07f && cp->frame_depth == 0.12f && cp->panes_across == 2 && cp->panes_up == 4);
+    CHECK(r482_scratch_same(*s.bo));
+    CHECK(r498_judge(*s.bo).empty());
+    /* The whole Blockout duplicated: its window is styled the same. */
+    ed.select_for_test(s.bo->id, false);
+    ed.command("duplicate");
+    r495_built(ed);
+    size_t styled = 0, blockouts = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      blockouts += g.get<Blockout>() != nullptr;
+      const BlockoutPiece *bp = g.get<BlockoutPiece>();
+      styled += bp && bp->opening == 2 && bp->style == kWindowGrid && bp->frame_width == 0.07f;
+    });
+    CHECK(blockouts == 2 && styled == 4);
+  });
+
+  /* ---- The Learn tab ---- */
+  test("learn: \"Windows with a style\" comes after \"Building rooms with Blockout\"; its Try-its, run in order on the selection, make a Grid window and change it through two more styles without a warning; every question has an answer", [] {
+    int rooms = -1, windows = -1;
+    for (int i = 0; i < lesson_count(); i++) {
+      if (std::string(lesson(i).title) == "Building rooms with Blockout") rooms = i;
+      if (std::string(lesson(i).title) == "Windows with a style") windows = i;
+    }
+    CHECK(rooms >= 0 && windows == rooms + 1);
+    if (windows < 0) return;
+    const std::string body = lesson(windows).body;
+    size_t questions = 0, answered = 0, tries = 0, named = 0;
+    std::vector<std::string> cmds;
+    std::istringstream is(body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++, answered += line.find(" | ") != std::string::npos && line.size() > line.find(" | ") + 20;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      tries++;
+      const std::string c = line.substr(6, line.find(" | ") - 6);
+      named += c.find("Window") != std::string::npos;  // (a Try-it acts on the selection, not on a name)
+      std::string one = c;
+      while (!one.empty() && one.front() == ' ') one.erase(one.begin());
+      cmds.push_back(one);
+    }
+    CHECK(tries >= 8 && questions >= 3 && answered == questions && named == 0);
+    CHECK(body.find("Glass") != std::string::npos && body.find("Solid") != std::string::npos);
+    {  // (once: the lesson's Try-its in a fresh editor; the second, busier run is the next test's)
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      const size_t mark = r477_mark();
+      std::vector<int> styles;
+      for (const std::string &c : cmds) {
+        ed.command(c);
+        r495_built(ed);
+        if (c.rfind("blockout add window", 0) == 0 || c.rfind("blockout set style", 0) == 0) {
+          const BlockoutPiece *bp = r477_active_piece(ed);
+          if (bp) styles.push_back(bp->style);
+        }
+      }
+      size_t warnings = 99;
+      const std::string log = r477_log_since(mark, &warnings);
+      if (warnings) std::printf("%s", log.c_str());
+      CHECK(warnings == 0);
+      CHECK(styles.size() == 3 && styles[0] == kWindowGrid && styles[1] == kWindowArched && styles[2] == kWindowRound);
+      GameObject *bo = r477_find(ed, "Blockout");
+      CHECK(bo && r495_mesh(*bo) && r498_judge(*bo).empty());
+      const BlockoutPiece *last = r477_active_piece(ed);
+      CHECK(last && last->opening == 2 && last->style == kWindowRound && !last->material[kClassGlass].empty() && !last->sill_board);
+    }
+  });
+}
+
+static void tests_round498() {
+  tests_round498_styles();
+  tests_round498_numbers();
+  tests_round498_more();
+  tests_round498_origins();
+}
+// r498-end
+
+// r498te-begin
+/* ===================================================================== */
+/* Round 498, the test engineer's (task 0482): placement on every kind of wall, rays through the lights, the numbers a style reads, round trips, clicks, */
+/* scale, duplicates, materials, hostile input, the lesson twice. Written from the acceptance criteria.                                              */
+/* ===================================================================== */
+
+namespace {
+
+struct T498Rig {
+  GameObject *bo = nullptr, *wall = nullptr, *win = nullptr;
+};
+
+GameObject *t498_window(Editor &ed, GameObject &parent, int style, Vec3 at, float yaw, bool glass = true, float depth = 0.4f, const char *name = "Window") {
+  GameObject *g = ed.scene().create(name, &parent);
+  BlockoutPiece *p = g->add<BlockoutPiece>();
+  p->shape = 0, p->operation = 1, p->opening = 2, p->width = 1.2f, p->head = 2.0f, p->sill = 0.9f, p->depth = depth, p->style = style, p->glass = glass;
+  g->set_local_position(at);
+  g->set_local_rotation(Quat::euler({0.0f, yaw, 0.0f}));
+  return g;
+}
+
+/* The rig of the implementer's r498_wall, generalised: the wall (2.4 x 2.4, `thick` deep) turned by `yaw` about Y, the window on its floor line `dx` along the wall; `cell` the
+ * Field Cell, `method` the Blockout's path. */
+T498Rig t498_rig(Editor &ed, int method, float cell, int style, float yaw = 0.0f, float thick = 0.2f, bool glass = true, float dx = 0.0f, bool with_wall = true) {
+  ed.init_headless(900, 600);
+  r477_empty_scene(ed);
+  T498Rig r;
+  r.bo = r477_blockout(ed);
+  Blockout *b = r.bo->get<Blockout>();
+  b->method = method, b->cell = cell;
+  const Quat q = Quat::euler({0.0f, yaw, 0.0f});
+  if (with_wall) {
+    r.wall = r477_piece(ed, *r.bo, "Wall", 0, 0, {0, 0, 0}, {2.4f, 2.4f, thick});
+    r.wall->set_local_rotation(q);
+  }
+  r.win = t498_window(ed, *r.bo, style, q.rotate({dx, -1.2f, 0.0f}), yaw, glass);
+  r495_built(ed);
+  return r;
+}
+
+/* "" when the Blockout's mesh is sound or the Blockout refused cleanly (the mesh shown then still valid); else what is wrong. `refused` says which. */
+std::string t498_verdict(const GameObject &bo, bool *refused = nullptr) {
+  const Blockout *b = bo.get<Blockout>();
+  const Mesh *m = r495_mesh(bo);
+  if (refused) *refused = false;
+  if (!b) return "no Blockout";
+  if (!b->state.status.refusal.empty()) {
+    if (refused) *refused = true;
+    return m && !structurally_valid(*m) ? "refused, but the mesh shown is not valid" : "";
+  }
+  return r498_judge(bo);
+}
+
+size_t t498_wrong(const GameObject &bo, const GameObject &win, const std::vector<R498Probe> &probes, const std::string &label) {
+  size_t wrong = 0;
+  for (const R498Probe &p : probes)
+    if (r498_matter(bo, win, p.at) != p.matter) wrong++, std::printf("    %s: %s is %s\n", label.c_str(), p.what, p.matter ? "empty" : "solid");
+  return wrong;
+}
+
+/* How many triangles of the Blockout's mesh a ray crosses: from `from` along `dir`, both in the window's own space. */
+int t498_hits(const GameObject &bo, const GameObject &win, Vec3 from, Vec3 dir) {
+  const Mesh *m = r495_mesh(bo);
+  if (!m) return -1;
+  const Mat4 inv = bo.world_matrix().inverse();
+  const Ray ray{inv.point(win.world_matrix().point(from)), normalize(inv.dir(win.world_matrix().dir(dir)))};
+  const RenderMesh &rm = m->render_mesh();
+  int hits = 0;
+  for (size_t t = 0; t < rm.tri_count(); t++) hits += ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]) > 0.0f;
+  return hits;
+}
+/* A ray along the window's Z through (x, y) of its plane (a little off any diagonal of the triangulation). */
+int t498_through(const GameObject &bo, const GameObject &win, float x, float y) { return t498_hits(bo, win, {x + 0.0137f, y + 0.0071f, -1.0f}, {0, 0, 1}); }
+
+/* A checkbox row of the Adjust Last panel clicked: the box sits at the left end of the row's recorded rect. */
+bool t498_click_box(Editor &ed, const char *key) {
+  ed.record_buttons_for_test(true);
+  r477_settle(ed, 2);
+  Recti r;
+  if (!ed.button_rect_for_test(key, r)) return false;
+  r477_click(ed, r.x + r.h / 2, r.y + r.h / 2);
+  r477_settle(ed, 2);
+  return true;
+}
+
+size_t t498_faces(const GameObject &bo) {
+  const Mesh *m = r495_mesh(bo);
+  return m ? m->face_count() : 0;
+}
+
+bool t498_finite(const BlockoutPiece &p) {
+  for (float v : {p.width, p.head, p.sill, p.depth, p.frame_width, p.frame_depth, p.arch_rise, p.sill_overhang})
+    if (!finite_bits(v)) return false;
+  return true;
+}
+
+/* A mesh built from the Blockout's snapshot with no editor (bytes: positions and faces). */
+bool t498_scratch(const GameObject &bo, Mesh &out) {
+  std::vector<blockout::Piece> pieces;
+  blockout::Settings st;
+  blockout_snapshot(bo, pieces, st);
+  return blockout::build(pieces, st, out);
+}
+
+/* A room 4 x 3 x 4 (air), walls, floor, ceiling 0.2 m, on the floor line at `at`. */
+GameObject *t498_room(Editor &ed, GameObject &bo, const char *name, Vec3 at, bool keep = false) {
+  GameObject *room = r482_room(ed, bo, name, at, {4.0f, 3.0f, 4.0f}, false);
+  if (keep) room->get<BlockoutPiece>()->walls = 1;
+  return room;
+}
+
+}  // namespace
+
+static void tests_round498_te_more() {
+  /* ---- A wall tilted any way ---- */
+  test("blockout window styles (498 te): a window in a floor (pitch +-90), in a wall rolled 45 degrees and in walls turned about all three axes has its hole and frame where the numbers say, on each path", [] {
+    const Vec3 turns[] = {{90, 0, 0}, {-90, 0, 0}, {0, 0, 45}, {30, 20, 10}, {0, 45, 90}};
+    /* Three styles of the six, every turn (the stress sweep has every style at many turns of a whole building). */
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowArched, kWindowRound})
+        for (const Vec3 &turn : turns) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->get<Blockout>()->method = method, bo->get<Blockout>()->cell = 0.01f;
+          const Quat q = Quat::euler(turn);
+          GameObject *wall = r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2.4f, 2.4f, 0.2f});
+          wall->set_local_rotation(q);
+          GameObject *win = t498_window(ed, *bo, style, q.rotate({0.0f, -1.2f, 0.0f}), 0.0f);
+          win->set_local_rotation(q);
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style] + strprintf(" turned %g %g %g", turn.x, turn.y, turn.z);
+          const std::string why = t498_verdict(*bo);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          /* A tilted wall is resolved by the Field Cell on a slant: the hole's middle and the wall beside it, the frame's side - the pane and the bars are held to the straight rigs. */
+          const std::vector<R498Probe> probes = {{{0.3f, 1.45f, -0.075f}, false, "the hole in front of the frame"}, {{0.3f, 1.45f, 0.075f}, false, "the hole behind the frame"},
+                                                 {{0.9f, 1.45f, -0.075f}, true, "the wall beside the hole"}, {{0.57f, 1.45f, 0.0f}, true, "the frame, right"},
+                                                 {{0.0f, 2.1f, 0.0f}, true, "the wall over the head"}};
+          CHECK(t498_wrong(*bo, *win, probes, label) == 0);
+        }
+  });
+
+  test("blockout window styles (498 te): a window under a folder, under the wall piece itself, with a scale of its own or under a sheared parent is sound or cleanly refused; a disabled window or one in an inactive object leaves the wall as if it were gone", [] {
+    /* Three styles of the six; the stress sweep has every style at many places. */
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowArched, kWindowGrid}) {
+        const std::string name = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style];
+        /* Under a folder that is moved: the same window, the same probes. */
+        {
+          Editor ed;
+          T498Rig r = t498_rig(ed, method, 0.01f, style);
+          GameObject *folder = ed.scene().create("Folder", r.bo);
+          folder->set_local_position({0.5f, 0.0f, 0.0f});
+          ed.scene().set_parent(r.win, folder, -1, false);
+          r.win->set_local_position({-0.5f, -1.2f, 0.0f});
+          r495_built(ed);
+          const std::string why = t498_verdict(*r.bo);
+          if (!why.empty()) std::printf("    %s under a folder: %s\n", name.c_str(), why.c_str());
+          CHECK(why.empty());
+          CHECK(t498_wrong(*r.bo, *r.win, r498_probes(style, true), name + " under a folder") == 0);
+          CHECK(r.bo->get<Blockout>()->state.status.pieces == 2);
+        }
+        /* Under the wall piece itself (a piece's child is a piece of the Blockout). */
+        {
+          Editor ed;
+          T498Rig r = t498_rig(ed, method, 0.01f, style);
+          ed.scene().set_parent(r.win, r.wall, -1, false);
+          r.win->set_local_position({0.0f, -1.2f, 0.0f});
+          r495_built(ed);
+          const std::string why = t498_verdict(*r.bo);
+          if (!why.empty()) std::printf("    %s under the wall piece: %s\n", name.c_str(), why.c_str());
+          CHECK(why.empty());
+          CHECK(t498_wrong(*r.bo, *r.win, r498_probes(style, true), name + " under the wall piece") == 0);
+        }
+        /* Scales: the window's own, and a parent scaled unevenly and turned (a shear). Sound, or a clean refusal. */
+        for (int v = 0; v < 3; v++) {
+          Editor ed;
+          T498Rig r = t498_rig(ed, method, 0.02f, style);
+          if (v == 0) r.win->set_local_scale({1.5f, 1.0f, 0.5f});
+          if (v == 1) r.win->set_local_scale({0.5f, 2.0f, 3.0f});
+          if (v == 2) {
+            GameObject *folder = ed.scene().create("Skew", r.bo);
+            folder->set_local_scale({2.0f, 1.0f, 1.0f});
+            folder->set_local_rotation(Quat::euler({0.0f, 30.0f, 0.0f}));
+            ed.scene().set_parent(r.win, folder, -1, false);
+            r.win->set_local_rotation(Quat::euler({0.0f, 20.0f, 10.0f}));
+          }
+          r495_built(ed);
+          bool refused = false;
+          const std::string why = t498_verdict(*r.bo, &refused);
+          if (!why.empty()) std::printf("    %s scale case %d: %s\n", name.c_str(), v, why.c_str());
+          CHECK(why.empty());
+        }
+        /* Disabled, or in an inactive object: the wall alone, byte for byte. */
+        {
+          Editor ed;
+          T498Rig r = t498_rig(ed, method, 0.02f, style);
+          const uint64_t win_id = r.win->id;
+          r.win->get<BlockoutPiece>()->enabled = false;
+          Mesh off;
+          CHECK(t498_scratch(*r.bo, off));
+          r.win->get<BlockoutPiece>()->enabled = true;
+          r.win->active = false;
+          Mesh inactive;
+          CHECK(t498_scratch(*r.bo, inactive));
+          r.win->active = true;
+          Mesh on;
+          CHECK(t498_scratch(*r.bo, on));
+          ed.scene().destroy(std::vector<GameObject *>{ed.scene().find(win_id)});
+          Mesh gone;
+          CHECK(t498_scratch(*r.bo, gone));
+          CHECK(r477_same(off, gone) && r477_same(inactive, gone) && !r477_same(on, gone));
+        }
+      }
+  });
+
+  /* ---- The Inspector, typed ---- */
+  /* A sample, about a second: five of the nine fields and four of the seven words. (The numbers on the piece, every hostile value on every style and path, are
+   * the stress row 'hostile numbers on styled windows'.) */
+  test("blockout window styles (498 te): hostile words typed into the Inspector's own fields (Frame Width, Panes, Sill Overhang, Width, Depth) leave the window's numbers finite and in range and the mesh valid (a sample)", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 10 70 14 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.1f;
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    ed.command("blockout add window grid");
+    r477_settle(ed, 3);
+    GameObject *win = ed.active_object_for_test();
+    CHECK(win && win->get<BlockoutPiece>());
+    if (!win || !win->get<BlockoutPiece>()) return;
+    const uint64_t id = win->id;
+    ed.command("layout Default");
+    ed.command("window Inspector");
+    ed.record_buttons_for_test(true);
+    ed.select_for_test(id, false);
+    r477_settle(ed, 4);
+    const char *rows[] = {"field:Frame Width", "field:Panes Across", "field:Sill Overhang", "field:Width", "field:Depth"};
+    const char *texts[] = {"nan", "-5", "1e30", "abc"};
+    size_t typed = 0;
+    for (const char *row : rows) {
+      Recti probe;
+      if (!ed.button_rect_for_test(row, probe)) {
+        std::printf("    %s is not in the Inspector's view: skipped\n", row);
+        continue;
+      }
+      for (const char *text : texts) {
+        if (!r479_type(ed, row, text)) break;
+        typed++;
+        r495_built(ed);
+        const BlockoutPiece *bp = ed.scene().find(id)->get<BlockoutPiece>();
+        const bool fine = t498_finite(*bp) && bp->panes_across >= 1 && bp->panes_across <= 12 && bp->panes_up >= 1 && bp->panes_up <= 12;
+        const std::string why = t498_verdict(*bo);
+        if (!fine || !why.empty()) std::printf("    %s typed '%s': %s\n", row, text, fine ? why.c_str() : "numbers not finite or panes out of range");
+        CHECK(fine && why.empty());
+      }
+    }
+    std::printf("    %zu words typed into the Inspector's fields\n", typed);
+    CHECK(typed > 0);
+  });
+
+  /* ---- The console's other windows-aware verbs, and determinism ---- */
+  test("blockout window styles (498 te): blockout info and blockout rebuild with styled windows in the Blockout warn about nothing, and a rebuild gives the same bytes; two editors build the same styled window to the same bytes", [] {
+    for (int method : r498_methods()) {
+      Mesh built[2];
+      for (int e = 0; e < 2; e++) {
+        Editor ed;
+        const T498Rig r = t498_rig(ed, method, 0.02f, kWindowGrid);
+        t498_window(ed, *r.bo, kWindowArched, r.win->local().position + Vec3(1.5f, 0, 0), 0.0f, true, 0.4f, "Second");
+        t498_window(ed, *r.bo, kWindowRound, r.win->local().position + Vec3(-1.4f, 0, 0), 0.0f, false, 0.4f, "Third");
+        r495_built(ed);
+        built[e] = *r495_mesh(*r.bo);
+        if (e == 1) break;
+        const size_t mark = r477_mark();
+        ed.select_for_test(r.bo->id, false);
+        ed.command("blockout info");
+        ed.command("blockout rebuild");
+        r495_built(ed);
+        CHECK(te_warnings_since(mark) == 0);
+        CHECK(r477_same(built[0], *r495_mesh(*r.bo)));
+        CHECK(t498_verdict(*r.bo).empty() && r477_matches(ed));
+      }
+      CHECK(r477_same(built[0], built[1]));
+    }
+  });
+
+}
+
+static void tests_round498_te() {
+  tests_round498_te_more();
+  /* ---- Placement: every wall the Blockout can have ---- */
+  test("blockout window styles (498 te): each style in a wall facing +Z, +X, -Z and -X, and in a turned (30 degrees) and a scaled (1.5) Blockout, has its hole, frame, bars and pane where the numbers say and a sound mesh, on each path", [] {
+    struct Variant {
+      const char *name;
+      float yaw;
+      bool turned, scaled;
+    };
+    const Variant variants[] = {{"facing +Z", 0, false, false},  {"facing +X", 90, false, false},  {"facing -Z", 180, false, false}, {"facing -X", 270, false, false},
+                                {"+Z in a turned Blockout", 0, true, false}, {"+X in a turned Blockout", 90, true, false}, {"+Z in a scaled Blockout", 0, false, true},
+                                {"+X in a scaled Blockout", 90, false, true}};
+    /* Two styles of the six (a curved head, bars) in every facing: the stress sweep has every style at many turns. */
+    for (int method : r498_methods())
+      for (int style : {kWindowArched, kWindowGrid})
+        for (const Variant &v : variants) {
+          Editor ed;
+          const T498Rig r = t498_rig(ed, method, 0.01f, style, v.yaw);
+          if (v.turned) r.bo->set_local_rotation(Quat::euler({0.0f, 30.0f, 0.0f}));
+          if (v.scaled) r.bo->set_local_scale(Vec3(1.5f));
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style] + " " + v.name;
+          const std::string why = t498_verdict(*r.bo);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          CHECK(t498_wrong(*r.bo, *r.win, r498_probes(style, true), label) == 0);
+        }
+  });
+
+  test("blockout window styles (498 te): a window in the wall of a Keep-walls double wall, on the upper storey, in a round room's curved wall, in an outline room's diagonal wall and across two rooms' shared corner - every style sound, its hole open", [] {
+    struct Scene {
+      const char *name;
+      std::function<GameObject *(Editor &, GameObject &)> make;  // the pieces; the window
+    };
+    const std::vector<Scene> scenes = {
+        {"Keep-walls double wall",
+         [](Editor &ed, GameObject &bo) {
+           t498_room(ed, bo, "A", {0, 0, 0}, true);
+           t498_room(ed, bo, "B", {4.4f, 0, 0}, true);
+           return t498_window(ed, bo, 1, {2.2f, 0.0f, 0.0f}, 90.0f, true, 0.7f);
+         }},
+        {"upper storey",
+         [](Editor &ed, GameObject &bo) {
+           t498_room(ed, bo, "Ground", {0, 0, 0});
+           t498_room(ed, bo, "Upper", {0, 3.4f, 0});
+           return t498_window(ed, bo, 1, {-2.1f, 3.4f, 0.0f}, 90.0f);
+         }},
+        {"round room, 0 degrees",
+         [](Editor &ed, GameObject &bo) {
+           GameObject *room = r477_piece(ed, bo, "Round", 1, 0, {0, 1.5f, 0}, Vec3(1.0f), 2.0f, 3.0f);
+           BlockoutPiece *rp = room->get<BlockoutPiece>();
+           rp->room = true, rp->wall = rp->floor = rp->ceiling = 0.2f;
+           return t498_window(ed, bo, 1, {-2.1f, 0.0f, 0.0f}, 90.0f);
+         }},
+        {"round room, 40 degrees round",
+         [](Editor &ed, GameObject &bo) {
+           GameObject *room = r477_piece(ed, bo, "Round", 1, 0, {0, 1.5f, 0}, Vec3(1.0f), 2.0f, 3.0f);
+           BlockoutPiece *rp = room->get<BlockoutPiece>();
+           rp->room = true, rp->wall = rp->floor = rp->ceiling = 0.2f;
+           const float a = 40.0f * kDeg2Rad;
+           const Vec3 n(-std::cos(a), 0.0f, std::sin(a));
+           return t498_window(ed, bo, 1, n * 2.1f, std::atan2(n.x, n.z) / kDeg2Rad);
+         }},
+        {"outline room's diagonal wall",
+         [](Editor &ed, GameObject &bo) {
+           GameObject *room = r477_piece(ed, bo, "Outline", 6, 0, {0, 0, 0});
+           BlockoutPiece *rp = room->get<BlockoutPiece>();
+           rp->outline = {{-2, -2}, {2, -2}, {2, 0}, {0, 2}, {-2, 2}};
+           rp->height = 3.0f, rp->room = true, rp->wall = rp->floor = rp->ceiling = 0.2f;
+           const Vec3 n = normalize(Vec3(1.0f, 0.0f, 1.0f));
+           return t498_window(ed, bo, 1, Vec3(1.0f, 0.0f, 1.0f) + n * 0.1f, 45.0f);
+         }},
+        {"two rooms' shared corner",
+         [](Editor &ed, GameObject &bo) {
+           t498_room(ed, bo, "A", {0, 0, 0});
+           t498_room(ed, bo, "B", {4.4f, 0, 4.4f});
+           return t498_window(ed, bo, 1, {2.1f, 0.0f, 1.9f}, 90.0f);
+         }},
+    };
+    for (int method : r498_methods())
+      for (const Scene &sc : scenes) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        Blockout *b = bo->get<Blockout>();
+        b->method = method, b->cell = method == 1 ? 0.1f : 0.06f;  // (the coarse Field Cell keeps the time down; the 1 cm rigs above resolve the frame and pane)
+        GameObject *win = sc.make(ed, *bo);
+        BlockoutPiece *wp = win->get<BlockoutPiece>();
+        const std::string where = std::string(r498_method_name(method)) + ", " + sc.name;
+        struct Timed {
+          std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+          std::string what;
+          ~Timed() { std::printf("    (%s: %.0f ms)\n", what.c_str(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count()); }
+        } timed;
+        timed.what = where;
+        /* Control: Opening Only cuts a hole in this wall (more faces than the same scene with the window off), so what follows stands in a wall. */
+        wp->style = kWindowOpeningOnly;
+        r495_built(ed);
+        const size_t with_hole = t498_faces(*bo);
+        wp->enabled = false;
+        r495_built(ed);
+        const size_t without = t498_faces(*bo);
+        wp->enabled = true;
+        std::printf("    %s: the plain hole adds %zd faces\n", where.c_str(), (ptrdiff_t)with_hole - (ptrdiff_t)without);
+        CHECK(with_hole > without);
+        /* Two styles of the six (a box light, a curved head) in every wall: the stress sweep has every style at many places. */
+        for (int style : {kWindowSingle, kWindowArched}) {
+          wp->style = style;
+          r495_built(ed);
+          const std::string label = where + " " + kBlockoutWindowStyleNames[style];
+          const std::string why = t498_verdict(*bo);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          std::vector<R498Probe> probes = {{{0.3f, 1.45f, -0.075f}, false, "the hole in front of the frame"}};
+          if (method == 1 && style != kWindowDouble) probes.push_back({{0.3f, 1.45f, 0.0f}, true, "the pane"});
+          CHECK(t498_wrong(*bo, *win, probes, label) == 0);
+        }
+      }
+  });
+
+  test("blockout window styles (498 te): a frame over the wall's end, a head above the wall's top, a sill below its foot, two windows overlapping, a window across a door, a wall thinner and thicker than the window's Depth and Frame Depth, a Depth smaller than the Frame Depth and no wall at all are sound or cleanly refused", [] {
+    struct Case {
+      const char *name;
+      float dx, thick;
+      std::function<void(Editor &, T498Rig &)> more;
+    };
+    const std::vector<Case> cases = {
+        {"frame over the wall's end", 1.0f, 0.2f, nullptr},
+        {"frame over the wall's end, on the other side", -1.1f, 0.2f, nullptr},
+        {"head above the wall's top", 0.0f, 0.2f, [](Editor &, T498Rig &r) { r.win->get<BlockoutPiece>()->head = 2.7f; }},
+        {"sill below the wall's foot", 0.0f, 0.2f, [](Editor &, T498Rig &r) { r.win->get<BlockoutPiece>()->sill = -0.3f, r.win->get<BlockoutPiece>()->head = 1.0f; }},
+        {"two windows overlapping (another style, 0.3 m along)", 0.0f, 0.2f,
+         [](Editor &ed, T498Rig &r) {
+           GameObject *w = t498_window(ed, *r.bo, kWindowGrid, r.win->local().position + Vec3(0.3f, 0, 0), 0.0f, true, 0.4f, "Window 2");
+           (void)w;
+         }},
+        {"two windows of the same style one on the other", 0.0f, 0.2f,
+         [](Editor &ed, T498Rig &r) { t498_window(ed, *r.bo, r.win->get<BlockoutPiece>()->style, r.win->local().position, 0.0f, true, 0.4f, "Window 2"); }},
+        {"a door across the window", 0.0f, 0.2f,
+         [](Editor &ed, T498Rig &r) {
+           GameObject *d = r477_piece(ed, *r.bo, "Door", 0, 1, r.win->local().position + Vec3(0.4f, 0, 0));
+           BlockoutPiece *dp = d->get<BlockoutPiece>();
+           dp->opening = 1, dp->width = 0.9f, dp->head = 2.1f, dp->sill = 0.0f, dp->depth = 0.4f;
+         }},
+        {"wall 5 cm thin", 0.0f, 0.05f, nullptr},
+        {"wall 0.6 m thick", 0.0f, 0.6f, nullptr},
+        {"wall 1.5 m thick", 0.0f, 1.5f, nullptr},
+        {"Depth 0.05 under the default Frame Depth 0.1", 0.0f, 0.2f, [](Editor &, T498Rig &r) { r.win->get<BlockoutPiece>()->depth = 0.05f; }},
+        {"Frame Depth 0.5 over the Depth 0.4", 0.0f, 0.2f, [](Editor &, T498Rig &r) { r.win->get<BlockoutPiece>()->frame_depth = 0.5f; }},
+        {"Depth 0.4 in a wall of 5 cm with a frame of 0.4", 0.0f, 0.05f, [](Editor &, T498Rig &r) { r.win->get<BlockoutPiece>()->frame_depth = 0.4f; }},
+    };
+    /* Two styles of the six (a box light, a ring): every case on each. The sweep of the stress section covers every style at many places. */
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowRound})
+        for (int ci = 0; ci < (int)cases.size() + 1; ci++) {
+          const bool no_wall = ci == (int)cases.size();
+          Editor ed;
+          T498Rig r = t498_rig(ed, method, 0.02f, style, 0.0f, no_wall ? 0.2f : cases[(size_t)ci].thick, true, no_wall ? 0.0f : cases[(size_t)ci].dx, !no_wall);
+          if (!no_wall && cases[(size_t)ci].more) cases[(size_t)ci].more(ed, r);
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style] + " " + (no_wall ? "no wall at all" : cases[(size_t)ci].name);
+          bool refused = false;
+          const std::string why = t498_verdict(*r.bo, &refused);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          else if (refused) std::printf("    (%s: refused: %s)\n", label.c_str(), r.bo->get<Blockout>()->state.status.refusal.c_str());
+          CHECK(why.empty());
+          if (no_wall && !refused) CHECK(t498_faces(*r.bo) > 0);  // (a window in the air stands as its blank: the frame and pane)
+        }
+  });
+
+  /* ---- The hole really is a hole ---- */
+  test("blockout window styles (498 te): a ray through the middle of every light passes with Glass off and hits only the pane with Glass on; a ray through the frame, a mullion or a glazing bar is blocked", [] {
+    for (int method : r498_methods())
+      for (int style = 1; style < kBlockoutWindowStyles; style++)
+        for (bool glass : {false, true}) {
+          Editor ed;
+          const T498Rig r = t498_rig(ed, method, 0.01f, style, 0.0f, 0.2f, glass);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutWindowStyleNames[style] + (glass ? " glass on" : " glass off");
+          std::vector<Vec2> lights = {{0.0f, 1.45f}};
+          std::vector<Vec2> solid = {{0.57f, 1.45f}, {-0.57f, 1.45f}, {0.0f, 0.93f}};
+          if (style != kWindowArched && style != kWindowRound) solid.push_back({0.0f, 1.97f});
+          if (style == kWindowDouble) lights = {{-0.285f, 1.45f}, {0.285f, 1.45f}}, solid.push_back({0.0f, 1.45f});
+          if (style == kWindowGrid) {
+            lights.clear();
+            const float xs[3] = {-0.37f, 0.0f, 0.37f}, ys[3] = {0.96f + 0.15333f, 1.45f, 0.96f + 0.15333f + 2.0f * 0.33667f};
+            for (float x : xs)
+              for (float y : ys) lights.push_back({x, y});
+            for (float x : {-0.185f, 0.185f}) solid.push_back({x, 1.45f});
+            for (float y : {1.2817f, 1.6183f}) solid.push_back({0.0f, y});
+          }
+          size_t wrong = 0;
+          for (const Vec2 &l : lights) {
+            const int hits = t498_through(*r.bo, *r.win, l.x, l.y);
+            const int want = glass ? 2 : 0;
+            if (hits != want) wrong++, std::printf("    %s: a ray through the light at (%.3f, %.3f) crosses %d faces, want %d\n", label.c_str(), l.x, l.y, hits, want);
+          }
+          for (const Vec2 &s : solid) {
+            const int hits = t498_through(*r.bo, *r.win, s.x, s.y);
+            if (hits < 2) wrong++, std::printf("    %s: a ray through the frame or a bar at (%.3f, %.3f) crosses %d faces\n", label.c_str(), s.x, s.y, hits);
+          }
+          CHECK(wrong == 0);
+        }
+  });
+
+  test("blockout window styles (498 te): an Arched window's head is round - a ray above the spring line near the corner is blocked, at the centre it passes; a Round window is a circle - rays on its radius pass inside the light and are blocked in the frame, at eight angles", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      T498Rig r = t498_rig(ed, method, 0.01f, kWindowArched, 0.0f, 0.2f, false);
+      const std::string label = std::string(r498_method_name(method)) + " arched";
+      CHECK(t498_through(*r.bo, *r.win, 0.0f, 1.9f) == 0);       // (the centre of the head, under the round top)
+      CHECK(t498_through(*r.bo, *r.win, 0.0f, 1.2f) == 0);       // (the square part's light)
+      CHECK(t498_through(*r.bo, *r.win, 0.5f, 1.9f) >= 2);       // (the corner a box head would have left open)
+      CHECK(t498_through(*r.bo, *r.win, -0.55f, 1.95f) >= 2);
+      CHECK(t498_through(*r.bo, *r.win, 0.5f, 1.3f) == 0);       // (the same x under the spring line (1.4): open)
+      /* A taller rise: the round head is tall, the corner is higher up. */
+      r.win->get<BlockoutPiece>()->arch_rise = 0.3f;  // (a flatter head: it springs at 1.7)
+      r495_built(ed);
+      CHECK(t498_through(*r.bo, *r.win, 0.0f, 1.9f) == 0);
+      CHECK(t498_through(*r.bo, *r.win, 0.45f, 1.85f) >= 2);
+      CHECK(t498_through(*r.bo, *r.win, 0.45f, 1.6f) == 0);      // (below the spring line: still the box's light)
+      const std::string why = t498_verdict(*r.bo);
+      if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+      CHECK(why.empty());
+      /* Round: width = height, so a circle. */
+      BlockoutPiece *p = r.win->get<BlockoutPiece>();
+      p->style = kWindowRound, p->head = 2.1f, p->glass = false;
+      r495_built(ed);
+      const float cy = 1.5f;
+      size_t wrong = 0;
+      for (int k = 0; k < 8; k++) {
+        const float a = (float)k * 0.785398f + 0.2f;
+        const float inside = 0.50f, frame = 0.575f, outside = 0.66f;
+        if (t498_through(*r.bo, *r.win, inside * std::cos(a), cy + inside * std::sin(a)) != 0) wrong++, std::printf("    round: angle %d inside the light is blocked\n", k);
+        if (t498_through(*r.bo, *r.win, frame * std::cos(a), cy + frame * std::sin(a)) < 2) wrong++, std::printf("    round: angle %d in the frame is open\n", k);
+        if (t498_through(*r.bo, *r.win, outside * std::cos(a), cy + outside * std::sin(a)) < 2) wrong++, std::printf("    round: angle %d outside the circle is open\n", k);
+      }
+      CHECK(wrong == 0);
+      CHECK(t498_verdict(*r.bo).empty());
+    }
+  });
+
+  /* ---- Numbers ---- */
+  test("blockout window styles (498 te): panes from 1 x 1 to 12 x 12, frame widths from tiny to more than the window, sill overhang 0 and large, an arch rise of 0, small, the whole window and far more, a Depth beside the Frame Depth - each builds sound", [] {
+    struct Knob {
+      const char *name;
+      std::function<void(BlockoutPiece &)> set;
+      std::vector<int> styles;
+    };
+    const std::vector<int> all = {1, 2, 3, 4, 5, 6};
+    std::vector<Knob> knobs;
+    for (int a : {1, 12, 2, 7})
+      for (int u : {1, 12, 3, 5}) knobs.push_back({"panes", [a, u](BlockoutPiece &p) { p.panes_across = a, p.panes_up = u; }, {kWindowGrid}});
+    for (float fw : {0.001f, 0.01f, 0.3f, 0.55f, 0.65f, 2.0f}) knobs.push_back({"frame width", [fw](BlockoutPiece &p) { p.frame_width = fw; }, all});
+    for (float oh : {0.0f, 0.5f, 3.0f}) knobs.push_back({"overhang", [oh](BlockoutPiece &p) { p.sill_overhang = oh; }, {1, 2, 3, 5}});
+    for (float rise : {0.0f, 0.01f, 0.3f, 0.6f, 1.1f, 6.0f}) knobs.push_back({"arch rise", [rise](BlockoutPiece &p) { p.arch_rise = rise; }, {kWindowArched}});
+    for (float fd : {0.01f, 0.2f, 0.4f, 3.0f}) knobs.push_back({"frame depth", [fd](BlockoutPiece &p) { p.frame_depth = fd; }, all});
+    /* Two styles of the six (bars, a curved head); the stress row 'hostile numbers on styled windows' has these numbers on every style. */
+    for (int method : r498_methods())
+      for (int style : {kWindowGrid, kWindowArched}) {
+        Editor ed;
+        const T498Rig r = t498_rig(ed, method, 0.03f, style);
+        size_t bad = 0, n = 0;
+        const BlockoutPiece base = *r.win->get<BlockoutPiece>();
+        for (const Knob &k : knobs) {
+          if (std::find(k.styles.begin(), k.styles.end(), style) == k.styles.end()) continue;
+          BlockoutPiece *p = r.win->get<BlockoutPiece>();
+          *p = base;
+          k.set(*p);
+          r495_built(ed);
+          n++;
+          const std::string why = t498_verdict(*r.bo);
+          if (!why.empty()) bad++, std::printf("    %s %s (case %zu): %s\n", r498_method_name(method), kBlockoutWindowStyleNames[style], n, why.c_str());
+          else if (!r495_mesh(*r.bo) || structurally_valid(*r495_mesh(*r.bo)) == false) bad++;
+        }
+        CHECK(bad == 0);
+      }
+  });
+
+  test("blockout window styles (498 te): a number a style does not read leaves the mesh's bytes alone, a number it reads changes them - every style, every number", [] {
+    struct Knob {
+      const char *name;
+      std::function<void(BlockoutPiece &)> set;
+      // which styles read it (index = style)
+      bool reads[kBlockoutWindowStyles];
+    };
+    const std::vector<Knob> knobs = {
+        {"frame width", [](BlockoutPiece &p) { p.frame_width = 0.09f; }, {false, true, true, true, true, true, true}},
+        {"frame depth", [](BlockoutPiece &p) { p.frame_depth = 0.2f; }, {false, true, true, true, true, true, true}},
+        {"panes across", [](BlockoutPiece &p) { p.panes_across = 4; }, {false, false, false, false, false, true, false}},
+        {"panes up", [](BlockoutPiece &p) { p.panes_up = 4; }, {false, false, false, false, false, true, false}},
+        {"arch rise", [](BlockoutPiece &p) { p.arch_rise = 0.3f; }, {false, false, false, true, false, false, false}},
+        {"glass", [](BlockoutPiece &p) { p.glass = false; }, {false, true, true, true, true, true, true}},
+        {"sill board", [](BlockoutPiece &p) { p.sill_board = false; }, {false, true, true, true, false, true, false}},
+        {"sill overhang", [](BlockoutPiece &p) { p.sill_overhang = 0.12f; }, {false, true, true, true, false, true, false}},
+    };
+    /* Four styles that between them have every column of the table (Opening Only reads nothing, Fixed has no sill board, Arched has the rise, Grid the panes): the other
+     * three read what one of these reads. */
+    for (int method : r498_methods())
+      for (int style : {kWindowOpeningOnly, kWindowArched, kWindowFixed, kWindowGrid}) {
+        Editor ed;
+        const T498Rig r = t498_rig(ed, method, 0.01f, style);
+        Mesh first;
+        CHECK(t498_scratch(*r.bo, first));
+        const BlockoutPiece base = *r.win->get<BlockoutPiece>();
+        size_t wrong = 0;
+        for (const Knob &k : knobs) {
+          BlockoutPiece *p = r.win->get<BlockoutPiece>();
+          *p = base;
+          k.set(*p);
+          Mesh changed;
+          CHECK(t498_scratch(*r.bo, changed));
+          const bool same = r477_same(first, changed);
+          if (same == k.reads[style]) wrong++, std::printf("    %s %s: %s %s the mesh%s\n", r498_method_name(method), kBlockoutWindowStyleNames[style], k.name, same ? "did not change" : "changed",
+                                                         k.reads[style] ? " (the style reads it)" : " (the style does not read it)");
+        }
+        CHECK(wrong == 0);
+      }
+  });
+
+  /* ---- Round trips, undo, F9 ---- */
+  test("blockout window styles (498 te): every style to every other and back gives the first style's mesh bytes and the window's numbers unchanged; a chain of changes undone and redone gives each step's mesh again", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const T498Rig r = t498_rig(ed, method, 0.05f, 1);
+      ed.select_for_test(r.win->id, false);
+      const uint64_t id = r.win->id;
+      auto piece = [&]() -> BlockoutPiece * { return ed.scene().find(id)->get<BlockoutPiece>(); };
+      const uint64_t bo_id = r.bo->id;  // (an undo makes the objects again: found by id)
+      auto mesh_now = [&]() {
+        r495_built(ed);
+        return *r495_mesh(*ed.scene().find(bo_id));
+      };
+      ed.command("blockout set frame 0.07 0.12");
+      ed.command("blockout set panes 4 2");
+      ed.command("blockout set sillboard on 0.07");
+      piece()->head = piece()->sill + piece()->width;  // (a circle already: a switch to Round sets Head = Sill + Width, which would change this Head on the way)
+      size_t bad = 0;
+      /* Three first styles (Opening Only, a box light, a ring), each to every other and back. */
+      for (int s : {kWindowOpeningOnly, kWindowSingle, kWindowRound}) {
+        ed.command("blockout set style " + r498_word(s));
+        const Mesh first = mesh_now();
+        const BlockoutPiece numbers = *piece();
+        for (int t = 0; t < kBlockoutWindowStyles; t++) {
+          if (t == s) continue;
+          ed.command("blockout set style " + r498_word(t));
+          mesh_now();
+          ed.command("blockout set style " + r498_word(s));
+          const Mesh back = mesh_now();
+          const BlockoutPiece &now = *piece();
+          const bool same_numbers = now.style == numbers.style && std::memcmp(&now.width, &numbers.width, sizeof(float) * 4) == 0 && now.frame_width == numbers.frame_width &&
+                                    now.frame_depth == numbers.frame_depth && now.panes_across == numbers.panes_across && now.panes_up == numbers.panes_up &&
+                                    now.arch_rise == numbers.arch_rise && now.glass == numbers.glass && now.sill_board == numbers.sill_board && now.sill_overhang == numbers.sill_overhang;
+          if (!r477_same(first, back) || !same_numbers) bad++, std::printf("    %s: %s -> %s -> %s: %s\n", r498_method_name(method), kBlockoutWindowStyleNames[s], kBlockoutWindowStyleNames[t],
+                                                                           kBlockoutWindowStyleNames[s], same_numbers ? "mesh bytes differ" : "numbers differ");
+        }
+      }
+      CHECK(bad == 0);
+      /* A chain: each step's mesh, undone back and redone forward. */
+      ed.command("blockout set style opening");
+      std::vector<Mesh> steps{mesh_now()};
+      const int chain[] = {kWindowGrid, kWindowArched, kWindowRound, kWindowDouble, kWindowFixed, kWindowSingle};
+      for (int s : chain) {
+        ed.command("blockout set style " + r498_word(s));
+        steps.push_back(mesh_now());
+      }
+      for (size_t i = steps.size() - 1; i-- > 0;) {
+        ed.command("undo");
+        CHECK(r477_same(steps[i], mesh_now()));
+      }
+      for (size_t i = 1; i < steps.size(); i++) {
+        ed.command("redo");
+        CHECK(r477_same(steps[i], mesh_now()));
+      }
+      CHECK(piece()->style == kWindowSingle);
+    }
+  });
+
+  test("blockout window styles (498 te): F9 after `blockout add window grid` - each row (Head, Sill, Frame Depth, Panes Up, Sill Overhang by typing, Glass and Sill Board by a click) changes the window, and all of it is still one undo step", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    const size_t pieces = r477_count(ed, true);
+    ed.command("blockout add window grid");
+    r477_settle(ed, 3);
+    GameObject *win = ed.active_object_for_test();
+    BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp != nullptr);
+    if (!bp) return;
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r479_type(ed, "adjust:Head", "2.2"));
+    CHECK_NEAR(bp->head, 2.2f, 1e-5f);
+    CHECK(r479_type(ed, "adjust:Sill", "0.7"));
+    CHECK_NEAR(bp->sill, 0.7f, 1e-5f);
+    CHECK(r479_type(ed, "adjust:Frame Depth", "0.15"));
+    CHECK_NEAR(bp->frame_depth, 0.15f, 1e-5f);
+    CHECK(r479_type(ed, "adjust:Panes Up", "4"));
+    CHECK(bp->panes_up == 4);
+    CHECK(r479_type(ed, "adjust:Sill Overhang", "0.1"));
+    CHECK_NEAR(bp->sill_overhang, 0.1f, 1e-5f);
+    const bool glass = bp->glass, board = bp->sill_board;
+    CHECK(t498_click_box(ed, "adjust:Glass"));
+    CHECK(bp->glass == !glass);
+    CHECK(t498_click_box(ed, "adjust:Glass"));
+    CHECK(bp->glass == glass);
+    CHECK(t498_click_box(ed, "adjust:Glass"));
+    CHECK(t498_click_box(ed, "adjust:Sill Board"));
+    CHECK(bp->sill_board == !board);
+    CHECK(!r496_has(ed, "adjust:Sill Overhang"));  // (no board: no overhang row)
+    CHECK(ed.undo_steps_for_test() == steps);
+    r495_built(ed);
+    CHECK(r477_matches(ed) && t498_verdict(*bo).empty());
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == pieces);
+  });
+
+  /* ---- Clicking ---- */
+  test("blockout window styles (498 te): a click on the sill board - on the part of its top that stands out past the wall - selects the window, and no click lands on a made piece that has no object", [] {
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowGrid}) {
+        Editor ed;
+        const R498Wall w = r498_wall(ed, style, method);
+        size_t got = 0;
+        for (float yaw : {0.0f, 180.0f}) {
+          ed.command(strprintf("camera %g 50 6 0 0 0", yaw));
+          r477_settle(ed, 3);
+          for (float side : {-1.0f, 1.0f}) {
+            const Vec3 at = w.win->world_matrix().point({0.0f, 0.9f, 0.12f * side});
+            GameObject *hit = r479p_click(ed, at);
+            if (hit == w.win) got++;
+            CHECK(hit == nullptr || ed.scene().find(hit->id) == hit);
+          }
+        }
+        std::printf("    %s %s: %zu of the 4 clicks on the board's top selected the window\n", r498_method_name(method), kBlockoutWindowStyleNames[style], got);
+        CHECK(got >= 1);
+      }
+  });
+
+  test("blockout window styles (498 te): the face handles of a Double and a Fixed window drag their Width and Sill with real mouse events and the mesh stays sound", [] {
+    for (int method : r498_methods())
+      for (int style : {kWindowDouble, kWindowFixed}) {
+        Editor ed;
+        const R498Wall w = r498_wall(ed, style, method);
+        ed.select_for_test(w.win->id, false);
+        ed.mark_changed_for_test("test scene");
+        bool framed = false;
+        for (float yaw : {0.0f, 180.0f}) {
+          const Vec3 at = w.win->world_matrix().point({0.0f, 1.45f, 0.0f});
+          ed.command(strprintf("camera %g 0 6 %g %g %g", yaw, at.x, at.y, at.z));
+          r477_settle(ed, 3);
+          int x = 0, y = 0;
+          framed = ed.blockout_handle_pixel_for_test("-x", x, y) && ed.blockout_handle_pixel_for_test("sill", x, y);
+          if (framed) break;
+        }
+        CHECK(framed);
+        if (!framed) continue;
+        BlockoutPiece *bp = w.win->get<BlockoutPiece>();
+        auto world = [&](Vec3 local) { return w.win->world_matrix().point(local); };
+        CHECK(r479_pull(ed, "-x", world({-0.9f, 1.45f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->width > 1.7f && bp->width < 1.9f);
+        CHECK(r479_pull(ed, "sill", world({0.0f, 0.6f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->sill > 0.5f && bp->sill < 0.7f);
+        r495_built(ed);
+        const std::string why = t498_verdict(*w.bo);
+        if (!why.empty()) std::printf("    %s %s after the handles: %s\n", r498_method_name(method), kBlockoutWindowStyleNames[style], why.c_str());
+        CHECK(why.empty() && bp->style == style);
+      }
+  });
+
+  test("blockout window styles (498 te): the Draw Piece command drawn on a window's pane, on its frame and on its sill board does something sane - a piece is added or a clean refusal, the mesh stays sound", [] {
+    for (int method : r498_methods())
+      for (const char *op : {"subtract", "add", "auto"}) {
+        Editor ed;
+        const R498Wall w = r498_wall(ed, kWindowGrid, method);
+        const Mat4 to_bo = w.bo->world_matrix().inverse() * w.win->world_matrix();
+        const struct { const char *what; Vec3 at, n; } spots[] = {{"pane", {0.0f, 1.45f, -0.015f}, {0, 0, -1}},
+                                                                 {"frame", {0.57f, 1.45f, -0.05f}, {0, 0, -1}},
+                                                                 {"glazing bar", {0.185f, 1.45f, -0.025f}, {0, 0, -1}},
+                                                                 {"sill board top", {0.0f, 0.9f, -0.12f}, {0, 1, 0}}};
+        for (const auto &s : spots) {
+          const size_t pieces = r477_all_pieces(*w.bo).size(), mark = r477_mark();
+          r495_draw(ed, *w.bo, "box", op, to_bo.point(s.at), normalize(to_bo.dir(s.n)), 0.3f, 0.3f, 0.1f);
+          const std::string why = t498_verdict(*w.bo);
+          size_t warnings = 0;
+          r477_log_since(mark, &warnings);
+          std::printf("    %s %s %s: %zu -> %zu pieces, %zu warning(s), %s\n", r498_method_name(method), op, s.what, pieces, r477_all_pieces(*w.bo).size(), warnings, why.empty() ? "sound" : why.c_str());
+          CHECK(why.empty());
+          CHECK(r477_all_pieces(*w.bo).size() <= pieces + 1);
+          CHECK(ed.scene().find(w.win->id) != nullptr && t498_finite(*w.win->get<BlockoutPiece>()));
+        }
+      }
+  });
+
+  /* ---- Scale, duplicate, delete, turn, selections ---- */
+  test("blockout window styles (498 te): the Scale gizmo's X handle on a styled window (perf drag gizmo sx) widens it, the frame grows with it, the style stays, the mesh is sound and it is one undo step", [] {
+    for (int method : r498_methods())
+      for (int style : {kWindowSingle, kWindowGrid}) {
+        Editor ed;
+        const R498Wall w = r498_wall(ed, style, method);
+        ed.select_for_test(w.win->id, false);
+        ed.command("tool scale");
+        ed.mark_changed_for_test("test scene");
+        const Vec3 at = w.win->world_matrix().point({0.0f, 1.45f, 0.0f});
+        ed.command(strprintf("camera 25 20 8 %g %g %g", at.x, at.y, at.z));
+        r477_settle(ed, 3);
+        BlockoutPiece *bp = w.win->get<BlockoutPiece>();
+        const BlockoutPiece before = *bp;
+        const size_t steps = ed.undo_steps_for_test();
+        r496s_drag(ed, "sx", 60);
+        std::printf("    %s %s: width %.3f -> %.3f, frame %.3f -> %.3f, %zu undo step(s)\n", r498_method_name(method), kBlockoutWindowStyleNames[style], before.width, bp->width,
+                    before.frame_width, bp->frame_width, ed.undo_steps_for_test() - steps);
+        CHECK(bp->width > before.width * 1.1f);
+        CHECK(bp->frame_width > before.frame_width * 1.05f);
+        CHECK(bp->style == style && bp->panes_across == before.panes_across && w.win->local().scale.x == 1.0f);
+        CHECK(ed.undo_steps_for_test() == steps + 1);
+        CHECK(t498_verdict(*w.bo).empty() && r477_matches(ed));
+      }
+  });
+
+  test("blockout window styles (498 te): the Blockout scaled with the Scale gizmo (perf drag gizmo sx) takes its windows' numbers along - the styles stay, the frame grows, the mesh is sound", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Wall w = r498_wall(ed, kWindowGrid, method);
+      ed.select_for_test(w.bo->id, false);
+      ed.command("tool scale");
+      ed.mark_changed_for_test("test scene");
+      ed.command("camera 25 20 9 0 0 0");
+      r477_settle(ed, 3);
+      const BlockoutPiece before = *w.win->get<BlockoutPiece>();
+      const size_t steps = ed.undo_steps_for_test();
+      r496s_drag(ed, "sx", 60);
+      const BlockoutPiece *bp = w.win->get<BlockoutPiece>();
+      std::printf("    %s: width %.3f -> %.3f, frame %.3f -> %.3f, Blockout scale %.3f, %zu undo step(s)\n", r498_method_name(method), before.width, bp->width, before.frame_width,
+                  bp->frame_width, w.bo->local().scale.x, ed.undo_steps_for_test() - steps);
+      CHECK(bp->style == kWindowGrid && bp->width > before.width * 1.1f && bp->frame_width > before.frame_width * 1.05f && w.bo->local().scale.x == 1.0f);
+      CHECK(ed.undo_steps_for_test() == steps + 1);
+      CHECK(t498_verdict(*w.bo).empty() && r477_matches(ed));
+    }
+  });
+
+  test("blockout window styles (498 te): deleting a styled window and undoing it gives the same mesh bytes; `blockout turn` on a window changes nothing and adds no undo step", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Wall w = r498_wall(ed, kWindowArched, method);
+      const Mesh with = *r495_mesh(*w.bo);
+      const uint64_t id = w.win->id;
+      ed.select_for_test(id, false);
+      size_t steps = ed.undo_steps_for_test();
+      ed.command("blockout turn");
+      ed.command("blockout turn 2");
+      r495_built(ed);
+      CHECK(ed.undo_steps_for_test() == steps && r477_same(with, *r495_mesh(*w.bo)) && ed.scene().find(id) != nullptr);
+      ed.mark_changed_for_test("test scene");
+      r477_settle(ed, 3);  // (the hand-made scene committed as the step to go back to)
+      const uint64_t bo_id = w.bo->id;  // (an undo makes the objects again: found by id)
+      auto bo = [&]() -> GameObject & { return *ed.scene().find(bo_id); };
+      steps = ed.undo_steps_for_test();
+      ed.command("delete");
+      r495_built(ed);
+      CHECK(ed.scene().find(id) == nullptr);
+      CHECK(!r477_same(with, *r495_mesh(bo())));
+      CHECK(t498_verdict(bo()).empty());
+      ed.command("undo");
+      r495_built(ed);
+      const GameObject *back = ed.scene().find(id);
+      CHECK(back && back->get<BlockoutPiece>() && back->get<BlockoutPiece>()->style == kWindowArched);
+      CHECK(r477_same(with, *r495_mesh(bo())));
+      ed.command("redo");
+      r495_built(ed);
+      CHECK(ed.scene().find(id) == nullptr);
+      ed.command("undo");
+      r495_built(ed);
+      CHECK(r477_same(with, *r495_mesh(bo())));
+    }
+  });
+
+  test("blockout window styles (498 te): `blockout set style|frame|panes|glass|sillboard` over several windows, and over a window, a door and a box together, changes only the windows - in one undo step that restores each one's old style", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "single");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    GameObject *w2o = t498_window(ed, *s.bo, kWindowDouble, {0.0f, 0.0f, 1.0f}, 90.0f, true, 0.4f, "W2");
+    GameObject *w3o = t498_window(ed, *s.bo, kWindowRound, {0.0f, 0.0f, -1.0f}, 90.0f, true, 0.4f, "W3");
+    GameObject *dooro = r477_piece(ed, *s.bo, "Door", 0, 1, {0.0f, 0.0f, 0.0f});
+    dooro->get<BlockoutPiece>()->opening = 1;
+    GameObject *boxo = r477_piece(ed, *s.bo, "Box", 0, 0, {9.0f, 0.0f, 9.0f});
+    r495_built(ed);
+    const BlockoutPiece door0 = *dooro->get<BlockoutPiece>(), box0 = *boxo->get<BlockoutPiece>();
+    const uint64_t bo_id = s.bo->id, i1 = s.win->id, i2 = w2o->id, i3 = w3o->id, id_door = dooro->id, id_box = boxo->id;
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);  // (the hand-made scene committed as the step to go back to; an undo makes the objects again: found by id)
+    auto obj = [&](uint64_t id) -> GameObject & { return *ed.scene().find(id); };
+    auto select_all = [&] {
+      ed.select_for_test(i1, false);
+      for (uint64_t id : {i2, i3, id_door, id_box}) ed.select_for_test(id, true);
+    };
+    const char *lines[] = {"blockout set style grid", "blockout set frame 0.09 0.15", "blockout set panes 2 5", "blockout set glass off", "blockout set sillboard off"};
+    for (const char *line : lines) {
+      select_all();
+      const int styles_before[3] = {obj(i1).get<BlockoutPiece>()->style, obj(i2).get<BlockoutPiece>()->style, obj(i3).get<BlockoutPiece>()->style};
+      const BlockoutPiece first = *obj(i1).get<BlockoutPiece>();
+      const float door_frame_before = obj(id_door).get<BlockoutPiece>()->frame_width;  // (the loop redoes each line: a door's Frame Width from `set frame` stays for the lines after it)
+      const size_t steps = ed.undo_steps_for_test(), mark = r477_mark();
+      ed.command(line);
+      r495_built(ed);
+      CHECK(te_warnings_since(mark) == 0);
+      CHECK(ed.undo_steps_for_test() == steps + 1);
+      for (uint64_t gid : {i1, i2, i3}) {
+        const BlockoutPiece &p = *obj(gid).get<BlockoutPiece>();
+        const std::string l = line;
+        if (l.find("style") != std::string::npos) CHECK(p.style == kWindowGrid);
+        if (l.find("frame") != std::string::npos) CHECK(p.frame_width == 0.09f && p.frame_depth == 0.15f);
+        if (l.find("panes") != std::string::npos) CHECK(p.panes_across == 2 && p.panes_up == 5);
+        if (l.find("glass") != std::string::npos) CHECK(!p.glass);
+        if (l.find("sillboard") != std::string::npos) CHECK(!p.sill_board);
+      }
+      const BlockoutPiece &d = *obj(id_door).get<BlockoutPiece>(), &b = *obj(id_box).get<BlockoutPiece>();
+      /* Round 499 review: `set frame` changes every selected opening, a door too; every other line leaves the door as it was. */
+      const bool frame_line = std::string(line).find("frame") != std::string::npos;
+      const bool door_ok = d.style == door0.style && (frame_line ? d.frame_width == 0.09f : d.frame_width == door_frame_before) && d.panes_across == door0.panes_across && d.glass == door0.glass && d.sill_board == door0.sill_board;
+      if (!door_ok) std::printf("    '%s': door style %d (was %d), frame %g (was %g), panes %d (was %d), glass %d (was %d), board %d (was %d)\n", line, d.style, door0.style, d.frame_width, door0.frame_width, d.panes_across, door0.panes_across, (int)d.glass, (int)door0.glass, (int)d.sill_board, (int)door0.sill_board);
+      CHECK(door_ok);
+      CHECK(b.style == box0.style && b.frame_width == box0.frame_width && b.panes_up == box0.panes_up && b.glass == box0.glass);
+      CHECK(d.width == door0.width && d.depth == door0.depth && b.size.x == box0.size.x);
+      CHECK(t498_verdict(obj(bo_id)).empty());
+      ed.command("undo");
+      r495_built(ed);
+      if (std::string(line).find("style") != std::string::npos) {
+        CHECK(obj(i1).get<BlockoutPiece>()->style == styles_before[0] && obj(i2).get<BlockoutPiece>()->style == styles_before[1] && obj(i3).get<BlockoutPiece>()->style == styles_before[2]);
+      }
+      CHECK(obj(i1).get<BlockoutPiece>()->frame_width == first.frame_width && obj(i1).get<BlockoutPiece>()->panes_across == first.panes_across);
+      ed.command("redo");
+      r495_built(ed);
+    }
+  });
+
+  /* ---- Materials ---- */
+  test("blockout window styles (498 te): Glass Material - none falls back to the Blockout's, Glass off leaves no face with it, and the renderer's slots are the same after Bake to Mesh and Unbake", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R498Wall w = r498_wall(ed, kWindowGrid, method);
+      const std::string glass = r482_material("R498teGlass", Vec3(0.2f, 0.5f, 0.9f)), own = r482_material("R498teOwn", Vec3(0.9f, 0.3f, 0.3f));
+      ed.select_for_test(w.bo->id, false);
+      ed.command("blockout set material glass " + glass);
+      r495_built(ed);
+      auto faces_with = [&](const std::string &mat) {
+        const Mesh *m = r495_mesh(*w.bo);
+        const MeshRenderer *mr = w.bo->get<MeshRenderer>();
+        size_t n = 0;
+        for (size_t f = 0; m && mr && f < m->face_count(); f++) n += r482_face_material(*m, *mr, f) == mat;
+        return n;
+      };
+      const size_t panes = faces_with(glass);
+      CHECK(panes >= 6);
+      ed.select_for_test(w.win->id, false);
+      ed.command("blockout set material glass " + own);
+      r495_built(ed);
+      CHECK(faces_with(own) == panes && faces_with(glass) == 0);
+      ed.command("blockout set material glass none");
+      r495_built(ed);
+      CHECK(faces_with(own) == 0 && faces_with(glass) == panes);  // (back to the Blockout's)
+      ed.command("blockout set glass off");
+      r495_built(ed);
+      CHECK(faces_with(glass) == 0 && faces_with(own) == 0);
+      CHECK(r482_scratch_same(*w.bo));
+      ed.command("blockout set glass on");
+      r495_built(ed);
+      CHECK(faces_with(glass) == panes);
+      const size_t slots = w.bo->get<MeshRenderer>()->materials.size();
+      const Mesh live = *r495_mesh(*w.bo);
+      const uint64_t id = w.bo->id;
+      ed.select_for_test(id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(id);
+      CHECK(baked && baked->get<MeshRenderer>() && baked->get<MeshRenderer>()->materials.size() == slots);
+      ed.select_for_test(id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(id);
+      CHECK(baked && baked->get<MeshRenderer>() && baked->get<MeshRenderer>()->materials.size() == slots && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+    }
+  });
+
+  test("blockout window styles (498 te): a door is the kernel's plain Subtract box, byte for byte - a room with a door and the same room with a Subtract box of the door's size and place build the same mesh; and a styled window next to it leaves the door's own faces alone", [] {
+    for (int method : r498_methods()) {
+      Mesh with_door, with_box;
+      for (bool as_door : {true, false}) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->get<Blockout>()->method = method;
+        bo->get<Blockout>()->cell = 0.1f;
+        t498_room(ed, *bo, "Room", {0, 0, 0});
+        if (as_door) {
+          GameObject *d = r477_piece(ed, *bo, "Door", 0, 1, {0.3f, 0.0f, -2.1f});
+          BlockoutPiece *dp = d->get<BlockoutPiece>();
+          dp->opening = 1, dp->width = 0.9f, dp->head = 2.1f, dp->sill = 0.0f, dp->depth = 0.5f;
+        }
+        else r477_piece(ed, *bo, "Box", 0, 1, {0.3f, 1.05f, -2.1f}, {0.9f, 2.1f, 0.5f});
+        r495_built(ed);
+        CHECK(t498_verdict(*bo).empty());
+        (as_door ? with_door : with_box) = *r495_mesh(*bo);
+      }
+      const bool same = r477_same(with_door, with_box);
+      if (!same) std::printf("    %s: door %zu faces / %zu vertices, plain Subtract box %zu faces / %zu vertices\n", r498_method_name(method), with_door.face_count(), with_door.positions.size(),
+                             with_box.face_count(), with_box.positions.size());
+      std::printf("    %s: the room with its door has %zu faces\n", r498_method_name(method), with_door.face_count());
+      CHECK(with_door.face_count() > 12 && same);  // (a room without the door has 12: a shell and an air box)
+    }
+  });
+
+  test("blockout window styles (498 te): a scene saved with a styled window and its new fields taken out of the file, as an older build wrote it, loads that window as Opening Only with the same Width, Head and Sill and the mesh of a plain window", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid 1.4 2.1 0.8", 2);
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    BlockoutPiece *sp = s.win->get<BlockoutPiece>();
+    sp->style = kWindowOpeningOnly;  // (the mesh of the plain window of these numbers, to compare with)
+    r495_built(ed);
+    const Mesh plain = *r495_mesh(*s.bo);
+    sp->style = kWindowGrid;
+    r495_built(ed);
+    CHECK(!r477_same(plain, *r495_mesh(*s.bo)));
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("  Style ") != std::string::npos);
+    std::istringstream is(text);
+    std::string old;
+    for (std::string line; std::getline(is, line);) {
+      bool added = false;
+      for (const char *key : {"Style ", "Frame_Width ", "Frame_Depth ", "Panes_Across ", "Panes_Up ", "Arch_Rise ", "Glass ", "Sill_Board ", "Sill_Overhang ", "Glass_Material "})
+        added = added || line.rfind(std::string("  ") + key, 0) == 0;
+      if (!added) old += line + "\n";
+    }
+    const std::string path = te_scene_path(ed, "r498te_old.scene");
+    CHECK(fs::write_file(path, old));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *bo = r477_find(ed);
+    GameObject *win = ed.scene().find_by_name("Window");
+    const BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bo && bp && bp->opening == 2 && bp->style == kWindowOpeningOnly && bp->width == 1.4f && bp->head == 2.1f && bp->sill == 0.8f);
+    CHECK(bo && r495_mesh(*bo) && r477_same(plain, *r495_mesh(*bo)));
+    fs::remove_file(path);
+  });
+
+  /* ---- Hostile ---- */
+  /* A sample of the hostile words, about a second: one of each kind through each console command and a few typed into F9's rows. (The numbers on the piece itself,
+   * every kind of hostile value on every style and path, are the stress row 'hostile numbers on styled windows'.) */
+  test("blockout window styles (498 te): NaN, infinity, negative and huge numbers through every new console command and through F9's typed fields leave the window's numbers finite, in range or unchanged, and the mesh valid (a sample)", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2;
+    bo->get<Blockout>()->cell = 0.1f;
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    ed.command("blockout add window arched");
+    r477_settle(ed, 3);
+    GameObject *win = ed.active_object_for_test();
+    BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp != nullptr);
+    if (!bp) return;
+    const uint64_t id = win->id;
+    const char *lines[] = {"blockout set frame nan", "blockout set frame -inf", "blockout set frame 0.1 inf", "blockout set panes inf inf", "blockout set panes 500 500",
+                           "blockout set sillboard on nan", "blockout set sillboard on 1e30", "blockout set glass nan", "blockout set style nan", "blockout set material glass",
+                           "blockout add window grid nan nan nan", "blockout add window arched -1 -1 -1", "blockout add window fixed 0.001 0.002 0.001"};
+    for (const char *line : lines) {
+      const auto t0 = std::chrono::steady_clock::now();
+      ed.select_for_test(win->id, false);
+      ed.command(line);
+      r495_built(ed);
+      const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      if (ms > 300.0) std::printf("    ('%s': %.0f ms)\n", line, ms);
+      GameObject *g = ed.scene().find(id);
+      CHECK(g != nullptr);
+      if (!g) return;
+      bool all_ok = true;
+      ed.scene().for_each([&](GameObject &o) {
+        const BlockoutPiece *p = o.get<BlockoutPiece>();
+        if (p && p->opening == 2) all_ok = all_ok && t498_finite(*p) && p->panes_across >= 1 && p->panes_across <= 12 && p->panes_up >= 1 && p->panes_up <= 12;
+      });
+      const std::string why = t498_verdict(*bo);
+      if (!all_ok || !why.empty()) std::printf("    '%s': %s\n", line, all_ok ? why.c_str() : "a window's numbers are not finite or its panes out of range");
+      CHECK(all_ok && why.empty());
+    }
+    /* Typed into F9's fields of a window just made. */
+    ed.command("blockout add window arched");
+    r477_settle(ed, 3);
+    win = ed.active_object_for_test();
+    bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp != nullptr);
+    if (!bp) return;
+    const char *rows[] = {"adjust:Frame Width", "adjust:Arch Rise", "adjust:Sill"};  // (the Inspector's own fields get their own test after)
+    const char *texts[] = {"nan", "-5", "1e30", "abc"};
+    for (const char *row : rows)
+      for (const char *text : texts) {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!r479_type(ed, row, text)) {
+          std::printf("    row %s is not showing: skipped\n", row);
+          break;
+        }
+        r495_built(ed);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ms > 300.0) std::printf("    (%s typed '%s': %.0f ms)\n", row, text, ms);
+        const std::string why = t498_verdict(*bo);
+        const bool fine = t498_finite(*bp);
+        if (!fine || !why.empty()) std::printf("    %s typed '%s': %s\n", row, text, fine ? why.c_str() : "numbers not finite");
+        CHECK(fine && why.empty());
+      }
+  });
+
+  test("blockout window styles (498 te): 500 x 500 panes, frame 0 and a frame wider than the window - set by hand on the piece - are held: the snapshot's made pieces stay few, finite and positive", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "grid");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+    for (int variant = 0; variant < 4; variant++) {
+      s.bo->get<Blockout>()->cell = 0.005f;  // (the grid at its default cell would hold the window as the plain hole: the pieces counted are the exact path's)
+      bp->panes_across = variant == 0 ? 500 : variant == 1 ? -9 : variant == 2 ? 0 : 12;
+      bp->panes_up = bp->panes_across;
+      bp->frame_width = variant == 3 ? 0.0f : variant == 1 ? -1.0f : 50.0f;
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      blockout_snapshot(*s.bo, pieces, settings);
+      size_t made = 0;
+      for (const blockout::Piece &p : pieces) {
+        if (!blockout_id_generated(p.id)) continue;
+        made++;
+        CHECK(finite_bits(p.size.x) && finite_bits(p.size.y) && finite_bits(p.size.z));
+        for (int k = 0; k < 16; k++) CHECK(finite_bits(p.to_blockout.m[k]));
+      }
+      CHECK(made >= 6 && made < 700);
+      s.bo->get<Blockout>()->cell = 0.1f;  // (the build, at the default cell: a fine grid over 12 x 12 lights is a measurement, not a check)
+      r495_built(ed);
+      const std::string why = t498_verdict(*s.bo);
+      if (!why.empty()) std::printf("    variant %d: %s\n", variant, why.c_str());
+      CHECK(why.empty());
+    }
+  });
+
+  /* ---- The lesson, twice, from a busy scene ---- */
+  test("learn: \"Windows with a style\" - its Try-its run twice in a row in one editor, from the default scene and then beside another Blockout, give no warning and a sound window each time", [] {
+    int windows = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Windows with a style") windows = i;
+    CHECK(windows >= 0);
+    if (windows < 0) return;
+    std::vector<std::string> cmds;
+    std::istringstream is(lesson(windows).body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      std::string c = line.substr(6, line.find(" | ") - 6);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      cmds.push_back(c);
+    }
+    CHECK(cmds.size() >= 8);
+    for (const bool busy : {false, true}) {
+      Editor ed;
+      ed.init_headless(900, 600);  // (the default scene stays: a plane, a cube, a teapot, a light)
+      if (busy) {
+        GameObject *other = r477_blockout(ed, "Other Blockout");
+        other->get<Blockout>()->method = 2;
+        r478_room_by_command(ed, *other);
+        r495_built(ed);
+      }
+      for (int run = 0; run < 2; run++) {
+        const size_t mark = r477_mark();
+        std::vector<int> styles;
+        for (const std::string &c : cmds) {
+          ed.command(c);
+          r495_built(ed);
+          if (c.rfind("blockout add window", 0) == 0 || c.rfind("blockout set style", 0) == 0) {
+            const BlockoutPiece *bp = r477_active_piece(ed);
+            if (bp) styles.push_back(bp->style);
+          }
+        }
+        size_t warnings = 0;
+        const std::string log = r477_log_since(mark, &warnings);
+        if (warnings) std::printf("    %s run %d:\n%s", busy ? "beside another Blockout" : "default scene", run + 1, log.c_str());
+        CHECK(warnings == 0);
+        CHECK(styles.size() == 3 && styles[0] == kWindowGrid && styles[1] == kWindowArched && styles[2] == kWindowRound);
+        size_t bad = 0;
+        ed.scene().for_each([&](GameObject &g) {
+          if (!g.get<Blockout>() || !r495_mesh(g)) return;
+          const std::string why = t498_verdict(g);
+          if (!why.empty()) bad++, std::printf("    %s run %d: %s: %s\n", busy ? "busy" : "default", run + 1, g.name.c_str(), why.c_str());
+        });
+        CHECK(bad == 0);
+      }
+    }
+  });
+}
+// r498te-end
+
+// r498fix-begin
+/* ===================================================================== */
+/* Round 498, the code review's fixes (task 0482): the grid's window, arches, the board's reach, the cutters' planes, circles, the status */
+/* ===================================================================== */
+
+namespace {
+
+/* The window's status lines as the Inspector shows them under the Blockout (the keys the panel records, "shown:" removed). */
+std::vector<std::string> r498fix_status(Editor &ed, GameObject &bo) {
+  ed.command("window Inspector");
+  ed.record_buttons_for_test(true);
+  ed.select_for_test(bo.id, false);
+  r477_settle(ed, 4);
+  std::vector<std::string> lines;
+  for (const auto &kv : ed.ui_for_test().button_rects)
+    if (kv.first.rfind("shown:", 0) == 0) lines.push_back(kv.first.substr(6));
+  return lines;
+}
+
+/* The Inspector's Style dropdown (its row records no key: it is the row above Frame Width) opened and an item clicked. */
+bool r498fix_pick_style(Editor &ed, const char *item) {
+  ed.record_buttons_for_test(true);
+  r477_settle(ed, 2);
+  Recti width, depth;
+  if (!ed.button_rect_for_test("field:Frame Width", width) || !ed.button_rect_for_test("field:Frame Depth", depth)) return false;
+  r477_click(ed, width.x + width.w / 2, width.y - (depth.y - width.y) + width.h / 2);
+  r477_settle(ed, 2);
+  return r496_click_key(ed, std::string("menu:") + item);
+}
+
+bool r498fix_has(const std::vector<std::string> &lines, const std::string &text) {
+  for (const std::string &l : lines)
+    if (l.find(text) != std::string::npos) return true;
+  return false;
+}
+
+/* The generated Add / Subtract box pieces of a window made with no grid, in the window's own space (identity matrix): z0, z1 and the op. */
+struct R498Slab {
+  float z0, z1;
+  bool subtract;
+};
+std::vector<R498Slab> r498fix_slabs(const BlockoutPiece &bp) {
+  std::vector<blockout::Piece> pieces;
+  CHECK(blockout_window_pieces(bp, 1, Mat4::identity(), pieces));
+  std::vector<R498Slab> out;
+  for (const blockout::Piece &p : pieces)
+    if (p.shape == blockout::Shape::Box) out.push_back({p.to_blockout.translation().z - 0.5f * p.size.z, p.to_blockout.translation().z + 0.5f * p.size.z, p.op == blockout::Op::Subtract});
+  return out;
+}
+
+BlockoutPiece r498fix_window(int style) {
+  BlockoutPiece bp;
+  bp.opening = 2, bp.operation = 1, bp.style = style, bp.width = 1.2f, bp.head = 2.0f, bp.sill = 0.9f, bp.depth = 0.4f;
+  return bp;
+}
+
+}  // namespace
+
+static void tests_round498_fix() {
+  /* ---- M1: the grid shows a window as it can ---- */
+  test("blockout window styles (498 fix): on the grid at the default Field Cell a Single window gets a real hole, a frame a cell wide and no pane - sound, no more unresolved places than the plain hole, and the status says what Field Cell shows it", [] {
+    Editor ed;
+    const T498Rig r = t498_rig(ed, 2, 0.1f, kWindowSingle);
+    CHECK(t498_verdict(*r.bo).empty());
+    const size_t unresolved = r.bo->get<Blockout>()->state.status.unresolved;
+    Editor plain_ed;
+    const T498Rig plain = t498_rig(plain_ed, 2, 0.1f, kWindowOpeningOnly);
+    const size_t plain_unresolved = plain.bo->get<Blockout>()->state.status.unresolved;
+    std::printf("    field, cell 0.1: Single %zu unresolved places, the plain hole %zu, %zu faces\n", unresolved, plain_unresolved, t498_faces(*r.bo));
+    CHECK(unresolved <= plain_unresolved);
+    CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 1.45f, -0.075f}) && !r498_matter(*r.bo, *r.win, {0.0f, 1.45f, 0.0f}));  // (the hole is open - and has no pane)
+    CHECK(r498_matter(*r.bo, *r.win, {0.65f, 1.45f, -0.075f}) && r498_matter(*r.bo, *r.win, {0.0f, 0.6f, 0.0f}));      // (the wall round it is there)
+    CHECK(r498_matter(*r.bo, *r.win, {0.555f, 1.45f, 0.0f}) && r498_matter(*r.bo, *r.win, {0.52f, 1.45f, 0.0f}));      // (the frame is at least a cell: 0.1 m of the 0.6 m half-width)
+    CHECK(!r498_matter(*r.bo, *r.win, {0.47f, 1.45f, 0.0f}));
+    CHECK(r498_class(*r.bo, *r.win, kClassGlass).faces == 0 && r498_class(*r.bo, *r.win, kClassSolid).faces > 0);
+    const std::vector<BlockoutWindowFit> &fits = r.bo->get<Blockout>()->state.window_fits;
+    CHECK(fits.size() == 1 && fits[0].coarse && !fits[0].plain && fits[0].id == r.win->id && std::fabs(fits[0].frame - 0.06f) < 1e-6f);
+    const std::vector<std::string> lines = r498fix_status(ed, *r.bo);
+    CHECK(r498fix_has(lines, "Window 'Window': its frame is finer than Field Cell 0.10 m - lower Field Cell to 0.02 m to see it"));
+    /* Counted once for many windows. */
+    t498_window(ed, *r.bo, kWindowDouble, r.win->local().position + Vec3(-0.0f, 0.0f, 0.0f), 90.0f, true, 0.4f, "Second");
+    r.bo->get<Blockout>()->cell = 0.1f;
+    r495_built(ed);
+    size_t notes = 0;
+    for (const std::string &l : r498fix_status(ed, *r.bo)) notes += l.find("finer than Field Cell") != std::string::npos;
+    CHECK(notes == 1);
+  });
+
+  test("blockout window styles (498 fix): at a Field Cell of 0.02 m a Single window has its true 6 cm frame and its pane and the status has no note; on the exact path the Field Cell changes nothing", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const T498Rig r = t498_rig(ed, method, method == 1 ? 0.1f : 0.02f, kWindowSingle);
+      const std::string label = std::string(r498_method_name(method)) + " Single";
+      CHECK(t498_verdict(*r.bo).empty());
+      CHECK(t498_wrong(*r.bo, *r.win, r498_probes(kWindowSingle, true), label) == 0);
+      CHECK(r498_matter(*r.bo, *r.win, {0.57f, 1.45f, 0.0f}) && !r498_matter(*r.bo, *r.win, {0.52f, 1.45f, -0.045f}));  // (the frame is 0.54 to 0.6, not a cell)
+      CHECK(r498_class(*r.bo, *r.win, kClassGlass).faces > 0);
+      CHECK(r.bo->get<Blockout>()->state.window_fits.empty());
+      CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "finer than Field Cell"));
+    }
+    /* The pieces on the exact path (Method Exact) are the generator's with no grid: bit for bit, whatever the Field Cell. */
+    Editor ed;
+    const T498Rig r = t498_rig(ed, 1, 0.1f, kWindowGrid);
+    std::vector<blockout::Piece> got;
+    blockout::Settings st;
+    BlockoutSnapshotNotes notes;
+    blockout_snapshot(*r.bo, got, st, &notes);
+    const BlockoutPiece *bp = r.win->get<BlockoutPiece>();
+    CHECK(notes.window_fits.empty());
+    size_t first = 0;
+    while (first < got.size() && !blockout_id_generated(got[first].id)) first++;
+    std::vector<blockout::Piece> made;
+    const Mat4 m = r.bo->world_matrix().inverse() * r.win->world_matrix();
+    CHECK(blockout_window_pieces(*bp, r.win->id, m, made));
+    size_t made_in_snapshot = 0;
+    for (const blockout::Piece &p : got) made_in_snapshot += blockout_id_generated(p.id);
+    CHECK(made_in_snapshot == made.size());
+    for (size_t i = 0; i < made.size() && first + i < got.size(); i++)
+      CHECK(got[first + i].id == made[i].id && std::memcmp(got[first + i].to_blockout.m, made[i].to_blockout.m, sizeof(made[i].to_blockout.m)) == 0 && got[first + i].size == made[i].size);
+  });
+
+  test("blockout window styles (498 fix): a window the grid cannot hold at all (a Grid of 12 x 12 lights on 1.2 m at a Field Cell of 0.1 m) is the plain hole, and the status says so", [] {
+    Editor ed;
+    const T498Rig r = t498_rig(ed, 2, 0.1f, kWindowGrid);
+    BlockoutPiece *bp = r.win->get<BlockoutPiece>();
+    bp->panes_across = 12, bp->panes_up = 12;
+    r495_built(ed);
+    CHECK(t498_verdict(*r.bo).empty());
+    const std::vector<BlockoutWindowFit> &fits = r.bo->get<Blockout>()->state.window_fits;
+    CHECK(fits.size() == 1 && fits[0].plain);
+    CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 1.45f, 0.0f}) && !r498_matter(*r.bo, *r.win, {0.3f, 1.2f, 0.0f}));  // (a hole, no bars)
+    CHECK(r498fix_has(r498fix_status(ed, *r.bo), "its parts are finer than Field Cell 0.10 m - made as the plain hole; lower Field Cell to"));
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings st;
+    blockout_snapshot(*r.bo, pieces, st);
+    size_t made = 0;
+    for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
+    CHECK(made == 0);
+  });
+
+  /* ---- M2: an arched head that rises more than the window leaves keeps its bottom rail ---- */
+  test("blockout window styles (498 fix): an Arched window whose Arch Rise is more than the window has left under the frame keeps its bottom rail - a ray through the rail is blocked, through the light's middle it passes", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const T498Rig r = t498_rig(ed, method, 0.01f, kWindowArched);
+      BlockoutPiece *bp = r.win->get<BlockoutPiece>();
+      bp->width = 2.0f, bp->sill = 1.0f, bp->head = 2.0f, bp->arch_rise = 1.0f, bp->glass = false;  // (rise = the whole height: the old light sprang from the sill)
+      r495_built(ed);
+      CHECK(t498_verdict(*r.bo).empty());
+      const std::string label = std::string(r498_method_name(method)) + " tall arch";
+      CHECK(r498_matter(*r.bo, *r.win, {0.0f, 1.03f, 0.0f}));    // (the bottom rail, 6 cm from the sill up)
+      CHECK(r498_matter(*r.bo, *r.win, {0.5f, 1.03f, 0.0f}));
+      CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 1.3f, 0.0f}));    // (the light's middle)
+      CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 1.9f, 0.0f}));    // (and its top, under the head)
+      CHECK(t498_through(*r.bo, *r.win, 0.0f, 1.03f) >= 2);     // (a ray along Z through the rail is blocked)
+      CHECK(t498_through(*r.bo, *r.win, 0.0f, 1.4f) == 0);      // (through the light: nothing, the wall is not there)
+      std::printf("    %s: rail kept, light open\n", label.c_str());
+    }
+  });
+
+  /* ---- 4: the sill board's reach counts from the wall's faces ---- */
+  test("blockout window styles (498 fix): the sill board reaches Sill Overhang past the wall's faces (not past the opening's 0.1 m overshoot), a negative Overhang is none, and a window in a thicker wall keeps the same reach", [] {
+    for (float overhang : {0.04f, 0.1f, 0.0f, -2.0f}) {
+      for (float depth : {0.4f, 0.8f}) {  // (a wall of 0.2 and 0.6 m: Depth is the thickness + 0.2)
+        BlockoutPiece bp = r498fix_window(kWindowSingle);
+        bp.depth = depth, bp.sill_overhang = overhang;
+        float reach = -1.0f;
+        for (const R498Slab &s : r498fix_slabs(bp))
+          if (!s.subtract && s.z1 - s.z0 > 0.15f && std::fabs(s.z1 + s.z0) < 1e-5f) reach = std::max(reach, s.z1);  // (the board: deeper than the 10 cm frame, centred)
+        const float wall_half = 0.5f * depth - 0.1f, want = wall_half + std::max(0.0f, overhang);
+        if (std::fabs(reach - want) > 1e-5f) std::printf("    overhang %g, depth %g: the board reaches z = %g, wanted %g\n", overhang, depth, reach, want);
+        CHECK_NEAR(reach, want, 1e-5f);
+      }
+    }
+    /* In a wall: the board stands 4 cm out of a 20 cm wall's face and not 14. */
+    for (int method : r498_methods()) {
+      Editor ed;
+      const T498Rig r = t498_rig(ed, method, 0.01f, kWindowSingle);
+      CHECK(r498_matter(*r.bo, *r.win, {0.0f, 0.875f, 0.12f}) && !r498_matter(*r.bo, *r.win, {0.0f, 0.875f, 0.17f}));
+      r.win->get<BlockoutPiece>()->sill_overhang = -2.0f;
+      r495_built(ed);
+      CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 0.875f, 0.12f}) && t498_verdict(*r.bo).empty());  // (flush with the wall's face: nothing stands out)
+    }
+  });
+
+  /* ---- 6: Round starts as a circle ---- */
+  test("blockout window styles (498 fix): a Round window made or switched to is a circle (Head = Sill + Width) unless a Head was typed, and a later Width or Head makes it an ellipse - one undo step with the style change", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "round");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    const uint64_t id = s.win->id;
+    auto piece = [&]() -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+    CHECK(piece().style == kWindowRound && piece().head == piece().sill + piece().width);  // (1.2 wide, from 0.9 to 2.1)
+    ed.command("blockout add window round 1.2 1.1");  // (a Head typed: an ellipse as asked)
+    const BlockoutPiece *typed = r477_active_piece(ed);
+    CHECK(typed && typed->style == kWindowRound && typed->head == 1.1f && typed->width == 1.2f);
+    ed.select_for_test(id, false);
+    ed.command("blockout set style single");
+    r495_built(ed);
+    const size_t steps = ed.undo_depth_for_test();
+    CHECK(piece().style == kWindowSingle && piece().head == 2.1f);  // (the circle's Head stays when the style goes)
+    ed.scene().find(id)->get<BlockoutPiece>()->width = 1.4f;
+    ed.command("blockout set style round");
+    r495_built(ed);
+    CHECK(piece().style == kWindowRound && piece().head == piece().sill + 1.4f && ed.undo_depth_for_test() == steps + 1);
+    ed.command("undo");
+    CHECK(piece().style == kWindowSingle && piece().head == 2.1f);  // (the head the window had: the same undo step)
+    /* Typed afterwards, an ellipse stays one; Round to Round changes nothing. */
+    ed.command("blockout set style round");
+    ed.scene().find(id)->get<BlockoutPiece>()->head = 2.0f;
+    ed.command("blockout set style round");
+    CHECK(piece().head == 2.0f);
+    /* F9 and the Inspector, with real events. */
+    Editor f9;
+    f9.init_headless(1600, 1000);
+    r477_empty_scene(f9);
+    GameObject *bo = r477_blockout(f9);
+    GameObject *room = r478_room_by_command(f9, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    f9.command("camera 10 70 14 0 0 0");
+    r477_settle(f9, 3);
+    f9.command("blockout add window single 1.4 2.1 0.8");
+    r477_settle(f9, 3);
+    BlockoutPiece *bp = f9.active_object_for_test() ? f9.active_object_for_test()->get<BlockoutPiece>() : nullptr;
+    CHECK(bp != nullptr);
+    if (!bp) return;
+    CHECK(r496_pick_combo(f9, "adjust:Style", "Round"));
+    CHECK(bp->style == kWindowRound && bp->head == bp->sill + bp->width);
+    f9.record_buttons_for_test(true);
+    f9.command("window Inspector");
+    f9.select_for_test(f9.active_object_for_test()->id, false);
+    r477_settle(f9, 3);
+    CHECK(r498fix_pick_style(f9, "Single"));
+    bp->head = 2.2f;
+    CHECK(r498fix_pick_style(f9, "Round"));
+    CHECK(bp->style == kWindowRound && bp->head == bp->sill + bp->width);  // (the Inspector's dropdown too)
+  });
+
+  /* ---- 9, nits: the status, a door has no style, the warnings ---- */
+  test("blockout window styles (498 fix): a part of a window the kernel leaves out is a note on the window, not a skipped piece - the window stays used", [] {
+    Editor ed;
+    const T498Rig r = t498_rig(ed, 0, 0.01f, kWindowSingle, 0.0f, 0.2f, true, 0.0f, false);  // (no wall: the window stands in the air)
+    BlockoutPiece *bp = r.win->get<BlockoutPiece>();
+    bp->frame_depth = 0.2f;
+    r.win->set_local_position({1e5f, -1.2f, 0.0f});  // (a piece 5 cm thick is too small for where it lies, 1e5 m out: the sill board)
+    r495_built(ed);
+    const BlockoutStatus &st = r.bo->get<Blockout>()->state.status;
+    size_t noted = 0;
+    for (const auto &n : st.notes) noted += n.first == r.win->id && n.second.rfind("a part of it was left out: ", 0) == 0;
+    size_t skipped = 0;
+    for (const auto &k : st.skipped) skipped += k.first == r.win->id;
+    std::printf("    pieces %zu, used %zu, %zu skipped, %zu notes (%zu on the window)\n", st.pieces, st.used, st.skipped.size(), st.notes.size(), noted);
+    CHECK(noted >= 1 && skipped == 0 && st.used == st.pieces);
+    const std::vector<std::string> lines = r498fix_status(ed, *r.bo);
+    CHECK(r498fix_has(lines, "'Window': a part of it was left out: "));
+  });
+
+  test("blockout window styles (498 fix): an opening that is no window has no style - a window switched to Door starts at Opening Only - and `blockout set material` names a styled window's classes in its warning", [] {
+    BlockoutPiece p = r498fix_window(kWindowGrid);
+    p.opening = 1;  // (what the Inspector's Opening row does)
+    blockout_piece_edited(p, kWindowGrid, 2);  // (round 499: every caller says the opening it had)
+    CHECK(p.style == kWindowOpeningOnly && !p.is_styled_window());
+    BlockoutPiece q = r498fix_window(kWindowArched);
+    blockout_piece_edited(q, kWindowArched, 2);
+    CHECK(q.style == kWindowArched);
+    Editor ed;
+    const R498Scene s = r498_make(ed, "single");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    ed.command("blockout set glass off");
+    const std::string mat = r482_material("R498FixMat", Vec3(0.5f, 0.5f, 0.9f));
+    ed.select_for_test(s.win->id, false);
+    const size_t mark = r477_mark();
+    ed.command("blockout set material floor " + mat);  // (a window makes no Floor faces)
+    const std::string log = r477_log_since(mark);
+    CHECK(log.find("a styled window: Cut, Solid and Glass") != std::string::npos);
+  });
+  /* ---- The second review's fixes ---- */
+  test("blockout window styles (498 fix): `blockout add window 1.0 0.8` (a Head under the default Sill) is a low window - Sill 0.4 - plain and with a style word, and builds", [] {
+    for (const char *words : {"1.0 0.8", "single 1.0 0.8", "round 1.0 0.8"}) {
+      Editor ed;
+      const R498Scene s = r498_make(ed, words);
+      CHECK(s.win != nullptr);
+      if (!s.win) continue;
+      const BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+      std::printf("    add window %s: width %g head %g sill %g\n", words, bp->width, bp->head, bp->sill);
+      CHECK(bp->width == 1.0f && bp->head == 0.8f && bp->sill == 0.4f);
+      CHECK(t498_verdict(*s.bo).empty() && t498_faces(*s.bo) > 0);
+    }
+  });
+
+  test("blockout window styles (498 fix): the Field Cell the status advises makes the note go away - also with a Sill Overhang of 0.1 m, where the board ends with the cutters", [] {
+    for (float overhang : {0.04f, 0.1f, 0.2f}) {
+      Editor ed;
+      const T498Rig r = t498_rig(ed, 2, 0.1f, kWindowSingle);
+      r.win->get<BlockoutPiece>()->sill_overhang = overhang;
+      r495_built(ed);
+      std::string note;
+      for (const std::string &l : r498fix_status(ed, *r.bo))
+        if (l.find("finer than Field Cell") != std::string::npos) note = l;
+      CHECK(!note.empty());
+      const size_t at = note.find("lower Field Cell to ");
+      const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
+      std::printf("    overhang %g: %s\n", overhang, note.c_str());
+      CHECK(advised > 0.0f && advised < 0.1f);
+      r.bo->get<Blockout>()->cell = advised;
+      r495_built(ed);
+      CHECK(r.bo->get<Blockout>()->state.window_fits.empty());
+      CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "finer than Field Cell"));
+    }
+  });
+
+  test("blockout window styles (498 fix): lights under the limit are the plain hole with its note even when nothing else is too fine - a Grid of 12 x 12 on 0.6 m at a Field Cell of 0.02 m", [] {
+    Editor ed;
+    const T498Rig r = t498_rig(ed, 2, 0.02f, kWindowGrid);
+    BlockoutPiece *bp = r.win->get<BlockoutPiece>();
+    bp->width = 0.6f, bp->panes_across = 12, bp->panes_up = 12;
+    r495_built(ed);
+    const std::vector<BlockoutWindowFit> &fits = r.bo->get<Blockout>()->state.window_fits;
+    CHECK(fits.size() == 1 && fits[0].plain);
+    CHECK(t498_verdict(*r.bo).empty());
+    CHECK(r498fix_has(r498fix_status(ed, *r.bo), "its parts are finer than Field Cell 0.02 m - made as the plain hole"));
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings st;
+    blockout_snapshot(*r.bo, pieces, st);
+    size_t made = 0;
+    for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
+    CHECK(made == 0);
+  });
+
+  test("blockout window styles (498 fix): a Blockout scaled 2 and Apply Scale to Pieces grows the window's wall part of Depth, not its 0.2 m overshoot - the sill board stands out the scaled overhang from the wall's face", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "single");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    BlockoutPiece before = *s.win->get<BlockoutPiece>();
+    s.bo->set_local_scale(Vec3(2.0f));
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout applyscale");
+    r495_built(ed);
+    const BlockoutPiece *bp = s.win->get<BlockoutPiece>();
+    const float wall = before.depth - 0.2f;
+    CHECK_NEAR(bp->depth, 2.0f * wall + 0.2f, 1e-5f);
+    CHECK_NEAR(bp->sill_overhang, 2.0f * before.sill_overhang, 1e-6f);
+    float reach = -1.0f;
+    for (const R498Slab &sl : r498fix_slabs(*bp))
+      if (!sl.subtract && sl.z1 - sl.z0 > 0.3f && std::fabs(sl.z1 + sl.z0) < 1e-5f) reach = std::max(reach, sl.z1);
+    CHECK_NEAR(reach, wall + bp->sill_overhang, 1e-5f);  // (the wall's half thickness, 2 x 0.1, plus the scaled overhang)
+    CHECK(t498_verdict(*s.bo).empty());
+  });
+
+  test("blockout window styles (498 fix): the Inspector's Style set to Round with two windows selected makes both circles in one undo step", [] {
+    Editor ed;
+    const R498Scene s = r498_make(ed, "single");
+    CHECK(s.win != nullptr);
+    if (!s.win) return;
+    ed.command("blockout add window single 1.4 2.1 0.8");
+    GameObject *second = ed.active_object_for_test();
+    CHECK(second != nullptr && second != s.win);
+    if (!second) return;
+    ed.command("window Inspector");
+    ed.select_for_test(s.win->id, false);
+    ed.select_for_test(second->id, true);
+    r477_settle(ed, 3);
+    const size_t steps = ed.undo_depth_for_test();
+    CHECK(r498fix_pick_style(ed, "Round"));
+    for (GameObject *w : {s.win, second}) {
+      const BlockoutPiece *bp = w->get<BlockoutPiece>();
+      std::printf("    %s: style %d width %g sill %g head %g\n", w->name.c_str(), bp->style, bp->width, bp->sill, bp->head);
+      CHECK(bp->style == kWindowRound && bp->head == bp->sill + bp->width);
+    }
+    CHECK(ed.undo_depth_for_test() == steps + 1);
+  });
+}
+// r498fix-end
+
+// r499-begin
+/* ===================================================================== */
+/* Round 499 (task 0483): door styles                                     */
+/* ===================================================================== */
+
+namespace {
+
+/* A room (4 x 3 x 4, walls 0.2) with a door on its first wall (-X) made by the console, built by `method` (0 Auto, 1 Exact, 2 Field). The door's own space: x across,
+ * y up from the floor line, z through the wall and out into the room (+Z faces the room). */
+struct R499Scene {
+  GameObject *bo = nullptr, *room = nullptr, *door = nullptr;
+};
+R499Scene r499_make(Editor &ed, const std::string &door_words, int method = 0, float cell = 0.0f) {
+  ed.init_headless(900, 600);
+  r477_empty_scene(ed);
+  R499Scene s;
+  s.bo = r477_blockout(ed);
+  s.bo->set_world_position({0.0f, 0.0f, 0.0f});
+  s.bo->get<Blockout>()->method = method;
+  if (cell > 0.0f) s.bo->get<Blockout>()->cell = cell;
+  s.room = r478_room_by_command(ed, *s.bo);
+  if (!s.room) return s;
+  s.room->set_local_position({0.0f, 0.0f, 0.0f});
+  r477_settle(ed, 2);
+  ed.command("blockout add door " + door_words);
+  s.door = ed.active_object_for_test();
+  r495_built(ed);
+  return s;
+}
+
+/* The style's console word. */
+std::string r499_word(int style) { return style == kDoorOpeningOnly ? "opening" : to_lower(kBlockoutDoorStyleNames[style]); }
+
+/* A wall 3 m wide, 2.4 m high and 0.2 m thick in the XY plane with a door piece in it made by hand: its floor line is the wall's bottom (y = -1.2), 0.9 m wide to a head
+ * at 2.1 m, 0.4 m deep (the wall and 0.1 m each side). The door faces +Z. Field Cell 0.01 so that the field path resolves a 4 cm leaf and a 6 cm frame. */
+struct R499Wall {
+  GameObject *bo = nullptr, *door = nullptr;
+};
+R499Wall r499_wall(Editor &ed, int style, int method, float cell = 0.01f) {
+  ed.init_headless(900, 600);
+  r477_empty_scene(ed);
+  R499Wall w;
+  w.bo = r477_blockout(ed);
+  Blockout *b = w.bo->get<Blockout>();
+  b->method = method, b->cell = cell;
+  r477_piece(ed, *w.bo, "Wall", 0, 0, {0, 0, 0}, {3.0f, 2.4f, 0.2f});
+  w.door = ed.scene().create("Door", w.bo);
+  BlockoutPiece *p = w.door->add<BlockoutPiece>();
+  p->shape = 0, p->operation = 1, p->opening = 1, p->width = 0.9f, p->head = 2.1f, p->sill = 0.0f, p->depth = 0.4f, p->style = style;
+  w.door->set_local_position({0.0f, -1.2f, 0.0f});
+  r495_built(ed);
+  return w;
+}
+
+/* What the door of the rig must be: a point of the door's own space (x across, y up from its floor line, z through the wall, the wall -0.1 to 0.1, the frame -0.05 to 0.05)
+ * and whether there is matter there. Defaults: 0.9 m wide so a clear opening of 0.78 (a 6 cm frame), a leaf 4 cm thick, a Revolving drum of 1 m. */
+struct R499Probe {
+  Vec3 at;
+  bool matter;
+  const char *what;
+};
+struct R499Variant {
+  const char *what;
+  int style;
+  float open;
+  int hinge, slide;
+};
+const R499Variant kR499Variants[] = {{"Single closed", kDoorSingle, 0.0f, 0, 0},       {"Single open, hinged left", kDoorSingle, 1.0f, 0, 0}, {"Single open, hinged right", kDoorSingle, 1.0f, 1, 0},
+                                     {"Single half open, hinged right", kDoorSingle, 0.5f, 1, 0}, {"Double closed", kDoorDouble, 0.0f, 0, 0},   {"Double open", kDoorDouble, 1.0f, 0, 0},
+                                     {"Sliding closed", kDoorSliding, 0.0f, 0, 0},     {"Sliding open, to the left", kDoorSliding, 1.0f, 0, 0}, {"Sliding open, to the right", kDoorSliding, 1.0f, 0, 1},
+                                     {"Arched closed", kDoorArched, 0.0f, 0, 0},       {"Revolving", kDoorRevolving, 0.0f, 0, 0}};
+
+std::vector<R499Probe> r499_probes(const R499Variant &v) {
+  std::vector<R499Probe> p;
+  const float front = -0.075f;  // (in front of the frame, inside the wall's thickness: the hole is whole there)
+  if (v.style == kDoorRevolving) {
+    p.push_back({{0.0f, 1.0f, 0.0f}, false, "the middle of the drum"});
+    p.push_back({{0.9f, 1.0f, 0.0f}, false, "the drum's side, where the wall was"});
+    p.push_back({{0.3f, 1.0f, 0.5f}, false, "inside the drum, in front of the wall"});
+    p.push_back({{-0.3f, 1.0f, -0.5f}, false, "inside the drum, behind the wall"});
+    p.push_back({{1.1f, 1.0f, 0.0f}, true, "the ring, in the wall"});
+    p.push_back({{0.7f, 1.0f, 0.8f}, true, "the ring standing out in front of the wall, beside the entry"});
+    p.push_back({{0.0f, 1.0f, 1.1f}, false, "the entry through the ring, in front"});
+    p.push_back({{0.7f, 1.0f, -0.8f}, true, "the ring standing out behind the wall, beside the entry"});
+    p.push_back({{0.0f, 1.0f, -1.1f}, false, "the entry through the ring, behind"});
+    p.push_back({{0.0f, 2.15f, 0.0f}, true, "the wall over the drum"});
+    p.push_back({{0.0f, 1.0f, 1.3f}, false, "outside the ring"});
+    return p;
+  }
+  p.push_back({{0.0f, 1.0f, front}, false, "the doorway in front of the frame"});
+  p.push_back({{0.42f, 1.0f, front}, false, "the reveal beside the frame, in front"});
+  p.push_back({{0.5f, 1.0f, front}, true, "the wall beside the door"});
+  p.push_back({{-0.5f, 1.0f, front}, true, "the wall beside the door, left"});
+  p.push_back({{0.0f, 2.15f, front}, true, "the wall over the head"});
+  p.push_back({{0.42f, 1.0f, 0.0f}, true, "the right jamb"});
+  p.push_back({{-0.42f, 1.0f, 0.0f}, true, "the left jamb"});
+  p.push_back({{0.0f, 2.07f, 0.0f}, true, "the head of the frame"});
+  const float h = v.hinge == 1 ? -1.0f : 1.0f;  // (the hinged jamb's side: Left is +X - the engine is left-handed, so on your left when you stand in the room the door opens into, facing it)
+  if (v.style == kDoorSingle && v.open == 0.0f) {
+    p.push_back({{0.0f, 1.0f, 0.0f}, true, "the closed leaf"});
+    p.push_back({{0.0f, 1.0f, 0.035f}, false, "behind the leaf, inside the frame"});
+    p.push_back({{0.0f, 1.0f, -0.035f}, false, "in front of the leaf, inside the frame"});
+    p.push_back({{0.0f, 1.0f, 0.075f}, false, "the reveal behind the frame"});
+  }
+  if (v.style == kDoorSingle && v.open == 1.0f) {
+    p.push_back({{h * 0.39f, 1.0f, 0.1f}, true, "the swung leaf, still in the back reveal"});
+    p.push_back({{h * 0.39f, 1.0f, 0.5f}, true, "the swung leaf, standing out in the room"});
+    p.push_back({{h * 0.39f, 1.0f, 0.7f}, true, "the swung leaf, near its free end"});
+    p.push_back({{h * 0.39f, 1.0f, 0.85f}, false, "past the swung leaf's free end"});
+    p.push_back({{0.0f, 1.0f, 0.0f}, false, "the doorway, open"});
+    p.push_back({{-h * 0.3f, 1.0f, 0.4f}, false, "the room where the leaf has swung away from"});
+  }
+  if (v.style == kDoorSingle && v.open == 0.5f) {  // (45 degrees: the leaf's centre line from the hinge at (h * 0.39, 0) runs along (-h, 1) / 1.414)
+    p.push_back({{h * 0.249f, 1.0f, 0.141f}, true, "the half-open leaf in the back reveal"});
+    p.push_back({{h * 0.036f, 1.0f, 0.354f}, true, "the half-open leaf past the wall"});
+    p.push_back({{-h * 0.2f, 1.0f, 0.2f}, false, "the doorway beside the half-open leaf"});
+  }
+  if (v.style == kDoorDouble && v.open == 0.0f) {
+    p.push_back({{0.0f, 1.0f, 0.0f}, true, "the leaves meet with no slit when closed"});
+    p.push_back({{0.2f, 1.0f, 0.0f}, true, "the right leaf, closed"});
+    p.push_back({{-0.2f, 1.0f, 0.0f}, true, "the left leaf, closed"});
+    p.push_back({{0.2f, 1.0f, 0.035f}, false, "behind the right leaf, inside the frame"});
+  }
+  if (v.style == kDoorDouble && v.open == 1.0f) {
+    p.push_back({{0.39f, 1.0f, 0.3f}, true, "the right leaf, open"});
+    p.push_back({{-0.39f, 1.0f, 0.3f}, true, "the left leaf, open"});
+    p.push_back({{0.0f, 1.0f, 0.0f}, false, "the doorway, open"});
+    p.push_back({{0.0f, 1.0f, 0.3f}, false, "between the open leaves"});
+  }
+  if (v.style == kDoorSliding) {
+    p.push_back({{0.0f, 1.0f, 0.0f}, false, "inside the frame (the leaf is on the wall's face)"});
+    p.push_back({{0.0f, 1.0f, 0.075f}, false, "the reveal behind the frame"});
+    if (v.open == 0.0f) p.push_back({{0.0f, 1.0f, 0.12f}, true, "the closed leaf, on the wall's face"});
+    if (v.open == 1.0f) {
+      const float s = v.slide == 1 ? -1.0f : 1.0f;  // (Left is +X, as the hinge)
+      p.push_back({{0.0f, 1.0f, 0.12f}, false, "the doorway, the leaf slid away"});
+      p.push_back({{s * 1.0f, 1.0f, 0.12f}, true, "the leaf, slid along the wall"});
+      p.push_back({{-s * 1.0f, 1.0f, 0.12f}, false, "the wall's face on the other side"});
+    }
+  }
+  if (v.style == kDoorArched) {
+    p.push_back({{0.0f, 1.0f, 0.0f}, true, "the closed leaf"});
+    p.push_back({{0.0f, 1.0f, 0.035f}, false, "behind the leaf, inside the frame"});
+    p.push_back({{0.4f, 2.05f, front}, true, "the wall in the corner the round head leaves"});
+    p.push_back({{0.0f, 2.05f, front}, false, "the doorway under the round head"});
+  }
+  return p;
+}
+
+size_t r499_wrong(const GameObject &bo, const GameObject &door, const std::vector<R499Probe> &probes, const std::string &label) {
+  size_t wrong = 0;
+  for (const R499Probe &p : probes)
+    if (r498_matter(bo, door, p.at) != p.matter) wrong++, std::printf("    %s: %s is %s\n", label.c_str(), p.what, p.matter ? "empty" : "solid");
+  return wrong;
+}
+
+void r499_set(BlockoutPiece &p, const R499Variant &v) {
+  p.style = v.style, p.open_amount = v.open, p.hinge_side = v.hinge, p.slide_direction = v.slide;
+}
+
+/* Two rooms side by side (4 x 3 x 4, walls 0.2, B 4.2 m from A: they share one wall 0.2 m thick) with a door on B's first wall (-X, the wall they share). */
+R499Scene r499_pair(Editor &ed, const std::string &door_words, int method = 0, float cell = 0.0f) {
+  R499Scene s = r499_make(ed, "", method, cell);
+  if (!s.room) return s;
+  ed.select_for_test(s.bo->id, false);
+  ed.command("blockout add room box 4 3 4");
+  GameObject *b = ed.active_object_for_test();
+  if (!b) return s;
+  b->set_local_position({4.2f, 0.0f, 0.0f});
+  r477_settle(ed, 2);
+  ed.command("blockout add door " + door_words);
+  s.door = ed.active_object_for_test();
+  r495_built(ed);
+  return s;
+}
+
+}  // namespace
+
+static void tests_round499_styles() {
+  /* ---- Criterion 1, 3: what each style builds ---- */
+  test("blockout door styles (499): every style and swing of a door in a wall - the frame, the leaf closed, swung half way and open, hinged either side, slid either way, the arched head, the revolving drum and its ring - is where it should be, on each path (field at a 1 cm Field Cell)", [] {
+    for (int method : r498_methods())
+      for (const R499Variant &v : kR499Variants) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, v.style, method);
+        BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+        r499_set(*bp, v);
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + " " + v.what;
+        size_t small = 0;
+        const std::string why = r498_judge(*w.bo, &small);
+        if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        CHECK(r499_wrong(*w.bo, *w.door, r499_probes(v), label) == 0);
+        const BlockoutStatus &st = w.bo->get<Blockout>()->state.status;
+        CHECK(st.skipped.empty() && st.notes.empty() && st.used == st.pieces);
+        std::printf("    %s: %zu faces, small faces on top of others %zu, %zu unresolved\n", label.c_str(), r495_mesh(*w.bo)->face_count(), small, st.unresolved);
+      }
+  });
+
+  test("blockout door styles (499): a closed leaf is the Leaf class's faces, standing between the frame's - Solid - and a hole's reveal - Cut - and a door with its Leaf off has no Leaf faces and is an open doorway", [] {
+    for (int method : r498_methods())
+      for (int style : {kDoorSingle, kDoorDouble, kDoorSliding, kDoorArched}) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, style, method);
+        const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
+        const R498Class leaf = r498_class(*w.bo, *w.door, kClassLeaf), frame = r498_class(*w.bo, *w.door, kClassSolid), cut = r498_class(*w.bo, *w.door, kClassCut);
+        std::printf("    %s: %zu Leaf faces, %zu Solid, %zu Cut\n", label.c_str(), leaf.faces, frame.faces, cut.faces);
+        CHECK(leaf.faces >= 2 && frame.faces >= 4 && cut.faces >= 4);
+        if (style == kDoorSingle || style == kDoorArched) CHECK(leaf.z_lo > -0.05f && leaf.z_hi < 0.05f);  // (inside the frame's 10 cm)
+        CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));  // (a Double closed is one slab: its leaves meet with no slit)
+        w.door->get<BlockoutPiece>()->leaf = false;
+        r495_built(ed);
+        CHECK(r498_judge(*w.bo).empty());
+        CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces == 0);
+        CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}) && r498_matter(*w.bo, *w.door, {0.42f, 1.0f, 0.0f}));
+      }
+  });
+
+  test("blockout door styles (499): in a wall between two rooms the doors are sound on each path, a door with its leaf off joins the rooms and a closed leaf separates them (the exact path: the field path at the default Field Cell leaves a 4 cm leaf out, and says so)", [] {
+    for (int method : r498_methods())
+      for (int style = 1; style < kBlockoutDoorStyles; style++) {
+        Editor ed;
+        const R499Scene s = r499_pair(ed, r499_word(style), method);
+        CHECK(s.door && s.door->get<BlockoutPiece>() && s.door->get<BlockoutPiece>()->style == style && s.door->get<BlockoutPiece>()->opening == 1);
+        if (!s.door) continue;
+        size_t small = 0;
+        const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
+        const std::string why = r498_judge(*s.bo, &small);
+        std::printf("    %s: %s (%zu faces, small %zu, %zu unresolved)\n", label.c_str(), why.empty() ? "sound" : why.c_str(), r495_mesh(*s.bo)->face_count(), small, s.bo->get<Blockout>()->state.status.unresolved);
+        CHECK(why.empty());
+        const bool joined_with_leaf = style == kDoorRevolving || method == 2;  // (no leaf on the grid at this Field Cell: the Revolving door has none)
+        const float z = style == kDoorSliding ? 0.12f : 0.0f;
+        const float x = style == kDoorDouble ? 0.2f : 0.0f;
+        CHECK(r498_matter(*s.bo, *s.door, {x, 1.0f, z}) == !joined_with_leaf);
+        if (style == kDoorRevolving) continue;
+        s.door->get<BlockoutPiece>()->leaf = false;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK(!r498_matter(*s.bo, *s.door, {0.0f, 1.0f, 0.0f}) && !r498_matter(*s.bo, *s.door, {0.0f, 1.0f, 0.3f}) && !r498_matter(*s.bo, *s.door, {0.0f, 1.0f, -0.3f}));
+        if (method == 1) {  // (and the leaf's own class is there when it is on)
+          s.door->get<BlockoutPiece>()->leaf = true;
+          r495_built(ed);
+          CHECK(r498_class(*s.bo, *s.door, kClassLeaf).faces >= 2);
+        }
+      }
+  });
+}
+
+static void tests_round499_numbers() {
+  /* ---- Criterion 2: Opening Only is today's door ---- */
+  test("blockout door styles (499): Opening Only gives the same mesh bytes as a door made before the round - the kernel is given the old snapshot's one box and none of the new numbers is read - and an older scene without the fields loads as Opening Only with the same mesh", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Scene s = r499_make(ed, "opening 1.1 2.0", method);
+      CHECK(s.door != nullptr);
+      if (!s.door) continue;
+      BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+      CHECK(bp->opening == 1 && bp->style == kDoorOpeningOnly);
+      const Mesh plain = *r495_mesh(*s.bo);
+      /* The kernel is given what the old snapshot gave it: each piece by `to_piece`, the door one box that cuts. */
+      std::vector<blockout::Piece> now, old;
+      blockout::Settings settings;
+      BlockoutSnapshotNotes notes;
+      blockout_snapshot(*s.bo, now, settings, &notes);
+      for (GameObject *g : r477_all_pieces(*s.bo)) old.push_back(g->get<BlockoutPiece>()->to_piece(g->id, blockout_piece_matrix(*g, *s.bo)));
+      CHECK(now.size() == old.size() && now.size() == 2);
+      for (size_t i = 0; i < std::min(now.size(), old.size()); i++) {
+        const blockout::Piece &a = now[i], &b = old[i];
+        CHECK(!blockout_id_generated(a.id) && a.id == b.id && a.shape == b.shape && a.op == b.op && a.segments == b.segments && a.blend == b.blend && a.room == b.room);
+        CHECK(std::memcmp(&a.size, &b.size, sizeof(Vec3)) == 0 && std::memcmp(a.to_blockout.m, b.to_blockout.m, sizeof(a.to_blockout.m)) == 0);
+      }
+      /* Every number the styles read, hostile, changes no bit of it. */
+      bp->leaf = false, bp->leaf_thickness = 7.0f, bp->open_amount = std::numeric_limits<float>::quiet_NaN(), bp->hinge_side = 1, bp->slide_direction = 1, bp->drum_radius = 50.0f;
+      bp->frame_width = 0.3f, bp->frame_depth = 0.02f, bp->arch_rise = 1.0f;
+      r495_built(ed);
+      CHECK(r477_same(plain, *r495_mesh(*s.bo)) && blockout_mesh_hash(plain) == blockout_mesh_hash(*r495_mesh(*s.bo)));
+      CHECK(r482_scratch_same(*s.bo));
+      /* The same door made before the round: a scene file without a single one of the numbers of rounds 498 and 499. */
+      Editor old_ed;
+      const R499Scene o = r499_make(old_ed, "opening 1.1 2.0", method);
+      CHECK(o.door != nullptr);
+      std::istringstream is(save_scene_text(old_ed.scene()));
+      std::string text;
+      for (std::string line; std::getline(is, line);) {
+        bool added = false;
+        for (const char *key : {"Style ", "Frame_Width ", "Frame_Depth ", "Panes_Across ", "Panes_Up ", "Arch_Rise ", "Glass ", "Sill_Board ", "Sill_Overhang ", "Leaf ", "Leaf_Thickness ", "Open_Amount ",
+                                "Hinge_Side ", "Slide_Direction ", "Drum_Radius ", "Glass_Material ", "Leaf_Material "})
+          added = added || line.rfind(std::string("  ") + key, 0) == 0;
+        if (!added) text += line + "\n";
+      }
+      CHECK(text.find("Drum_Radius") == std::string::npos && text.find("Leaf_Material") == std::string::npos);
+      const std::string path = te_scene_path(old_ed, "r499_old.scene");
+      CHECK(fs::write_file(path, text));
+      old_ed.command("newscene");
+      CHECK(old_ed.open_scene_for_test(path));
+      for (int i = 0; i < 400 && !r477_find(old_ed); i++) old_ed.step_frame_headless();
+      r495_built(old_ed);
+      GameObject *loaded = r477_find(old_ed), *door = old_ed.scene().find_by_name("Door");
+      const BlockoutPiece *lp = door ? door->get<BlockoutPiece>() : nullptr;
+      CHECK(loaded && lp && lp->opening == 1 && lp->style == kDoorOpeningOnly && lp->leaf && lp->leaf_thickness == 0.04f && lp->open_amount == 0.0f && lp->drum_radius == 1.0f);
+      CHECK(loaded && r495_mesh(*loaded) && r477_same(plain, *r495_mesh(*loaded)));
+      fs::remove_file(path);
+    }
+  });
+
+  /* ---- Criterion 4: Open Amount swept 0 to 1 ---- */
+  test("blockout door styles (499): Open Amount swept from 0 to 1 in twenty steps for Single (hinged either side), Double and Sliding (either way) gives a sound mesh, and on the exact path no unresolved place - the leaf never leaves a sliver against the frame (a sample: every fourth step on the exact path, every tenth at a 2 cm Field Cell on the grid; the stress row has all twenty-one steps)", [] {
+    struct Run {
+      int style, hinge, slide;
+      const char *what;
+    };
+    const Run runs[] = {{kDoorSingle, 0, 0, "Single, hinged left"}, {kDoorSingle, 1, 0, "Single, hinged right"}, {kDoorDouble, 0, 0, "Double"},
+                        {kDoorSliding, 0, 0, "Sliding, to the left"}, {kDoorSliding, 0, 1, "Sliding, to the right"}};
+    for (int method : r498_methods())
+      for (const Run &r : runs) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, r.style, method, 0.02f);
+        BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+        bp->hinge_side = r.hinge, bp->slide_direction = r.slide;
+        size_t bad = 0, unresolved = 0, small_total = 0;
+        for (int step = 0; step <= 20; step += method == 1 ? 4 : 10) {
+          bp->open_amount = (float)step / 20.0f;
+          r495_built(ed);
+          size_t small = 0;
+          const std::string why = r498_judge(*w.bo, &small);
+          small_total += small;
+          unresolved += w.bo->get<Blockout>()->state.status.unresolved;
+          if (!why.empty()) bad++, std::printf("    %s %s at %.2f: %s\n", r498_method_name(method), r.what, bp->open_amount, why.c_str());
+          if (method == 1 && w.bo->get<Blockout>()->state.status.unresolved) std::printf("    %s %s at %.2f: %zu unresolved places\n", r498_method_name(method), r.what, bp->open_amount, w.bo->get<Blockout>()->state.status.unresolved);
+        }
+        std::printf("    %s %s: %zu steps not sound, %zu unresolved places in all, %zu small faces on top of others\n", r498_method_name(method), r.what, bad, unresolved, small_total);
+        CHECK(bad == 0);
+        if (method == 1) CHECK(unresolved == 0);
+      }
+  });
+
+  /* ---- Criterion 5: the style changes keep the numbers; undo; F9 ---- */
+  test("blockout door styles (499): `blockout set style` on a made door keeps its Width, Head, Depth, frame and leaf numbers through every style, is one undo step each, a style word that is a window's is refused with the words that fit, and an undo gives the old style back", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single 1.0 2.2");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    ed.command("blockout set frame 0.07 0.12");
+    ed.command("blockout set leaf on 0.05");
+    ed.command("blockout set open 0.5");
+    ed.command("blockout set hinge right");
+    ed.command("blockout set slide right");
+    ed.command("blockout set drum 0.8");
+    r495_built(ed);
+    const uint64_t id = s.door->id;
+    const BlockoutPiece before = *s.door->get<BlockoutPiece>();
+    CHECK(before.style == kDoorSingle && before.width == 1.0f && before.head == 2.2f && before.frame_width == 0.07f && before.frame_depth == 0.12f && before.leaf &&
+          before.leaf_thickness == 0.05f && before.open_amount == 0.5f && before.hinge_side == 1 && before.slide_direction == 1 && before.drum_radius == 0.8f);
+    const size_t depth = ed.undo_depth_for_test();
+    int count = 0;
+    for (int style : {kDoorDouble, kDoorSliding, kDoorArched, kDoorRevolving, kDoorOpeningOnly, kDoorSingle}) {
+      const size_t steps = ed.undo_depth_for_test();
+      ed.command("blockout set style " + r499_word(style));
+      r495_built(ed);
+      const BlockoutPiece *bp = ed.scene().find(id)->get<BlockoutPiece>();
+      CHECK(bp->style == style && bp->width == before.width && bp->head == before.head && bp->sill == before.sill && bp->depth == before.depth);
+      CHECK(bp->frame_width == before.frame_width && bp->frame_depth == before.frame_depth && bp->leaf == before.leaf && bp->leaf_thickness == before.leaf_thickness &&
+            bp->open_amount == before.open_amount && bp->hinge_side == before.hinge_side && bp->slide_direction == before.slide_direction && bp->drum_radius == before.drum_radius);
+      CHECK(ed.undo_depth_for_test() == steps + 1);
+      CHECK(r498_judge(*s.bo).empty());
+      count++;
+    }
+    CHECK(depth + (size_t)count == ed.undo_depth_for_test());
+    const size_t steps = ed.undo_depth_for_test();
+    ed.command("blockout set style single");  // (the style it has: no step for nothing)
+    CHECK(ed.undo_depth_for_test() == steps);
+    for (const char *wrong : {"blockout set style grid", "blockout set style fixed", "blockout set style round", "blockout set style nonsense"}) {
+      const size_t mark = r477_mark();
+      ed.command(wrong);
+      const std::string log = r477_log_since(mark);
+      CHECK(te_warnings_since(mark) >= 1);
+      if (std::string(wrong) != "blockout set style nonsense") CHECK(log.find("opening|single|double|sliding|arched|revolving") != std::string::npos);
+      CHECK(ed.scene().find(id)->get<BlockoutPiece>()->style == kDoorSingle && ed.undo_depth_for_test() == steps);
+    }
+    ed.command("undo");
+    r495_built(ed);
+    CHECK(ed.scene().find(id)->get<BlockoutPiece>()->style == kDoorOpeningOnly);  // (the last of the six steps undone: the style before it)
+  });
+
+  test("blockout door styles (499): F9 right after `blockout add door single` shows the style and the rows it reads, each change re-runs from the state before it, the dropdown swaps the rows for another style's, and an undo takes the whole door back", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    const size_t pieces = r477_count(ed, true);
+    ed.command("blockout add door single 1.0 2.1");
+    r477_settle(ed, 3);
+    GameObject *door = ed.active_object_for_test();
+    BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "blockout" && ed.obj_last_for_test().style == kDoorSingle && ed.obj_last_for_test().opening == 1 && bp);
+    if (!bp) return;
+    for (const char *row : {"adjust:Style", "adjust:Width", "adjust:Head", "adjust:Sill", "adjust:Frame Width", "adjust:Frame Depth", "adjust:Leaf", "adjust:Leaf Thickness", "adjust:Open Amount", "adjust:Hinge Side"})
+      CHECK(r496_has(ed, row));
+    for (const char *row : {"adjust:Slide Direction", "adjust:Drum Radius", "adjust:Arch Rise", "adjust:Panes Across", "adjust:Glass", "adjust:Sill Board"}) CHECK(!r496_has(ed, row));
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r479_type(ed, "adjust:Open Amount", "0.5"));
+    CHECK_NEAR(bp->open_amount, 0.5f, 1e-6f);
+    CHECK(bp->width == 1.0f && bp->head == 2.1f);
+    CHECK(r496_pick_combo(ed, "adjust:Hinge Side", "Right"));
+    CHECK(bp->hinge_side == 1 && bp->open_amount == 0.5f);
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Sliding"));  // (a dropdown of the door's words)
+    CHECK(bp->style == kDoorSliding && bp->open_amount == 0.5f && bp->width == 1.0f);
+    CHECK(r496_has(ed, "adjust:Slide Direction") && !r496_has(ed, "adjust:Hinge Side") && r496_has(ed, "adjust:Open Amount"));
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Arched"));
+    CHECK(bp->style == kDoorArched && r496_has(ed, "adjust:Arch Rise") && !r496_has(ed, "adjust:Open Amount") && r496_has(ed, "adjust:Leaf Thickness"));
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Revolving"));
+    CHECK(bp->style == kDoorRevolving && r496_has(ed, "adjust:Drum Radius") && !r496_has(ed, "adjust:Frame Width") && !r496_has(ed, "adjust:Leaf"));
+    CHECK(r479_type(ed, "adjust:Drum Radius", "1.4"));
+    CHECK_NEAR(bp->drum_radius, 1.4f, 1e-6f);
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Opening Only"));
+    CHECK(bp->style == kDoorOpeningOnly && !r496_has(ed, "adjust:Frame Width") && r496_has(ed, "adjust:Width"));
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Single"));
+    CHECK(ed.undo_steps_for_test() == steps);  // (the same step, amended each time)
+    r495_built(ed);
+    CHECK(r477_matches(ed) && r498_judge(*bo).empty());
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == pieces);  // (one Ctrl+Z takes the door back)
+  });
+
+  test("blockout door styles (499): the Inspector shows a door's Style and only the rows its style reads, takes a typed Open Amount, and an Opening changed between Door and Window starts at Opening Only", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+    ed.command("window Inspector");
+    ed.record_buttons_for_test(true);
+    ed.select_for_test(s.door->id, false);
+    r477_settle(ed, 3);
+    for (const char *row : {"field:Frame Width", "field:Frame Depth", "field:Leaf Thickness", "field:Open Amount"}) CHECK(r496_has(ed, row));
+    for (const char *row : {"field:Drum Radius", "field:Sill Overhang"}) CHECK(!r496_has(ed, row));
+    CHECK(r479_type(ed, "field:Open Amount", "0.75"));
+    CHECK_NEAR(bp->open_amount, 0.75f, 1e-6f);
+    CHECK(r498fix_pick_style(ed, "Revolving"));  // (the Style dropdown is the row above Frame Width: a door's words)
+    CHECK(bp->style == kDoorRevolving);
+    r477_settle(ed, 2);
+    CHECK(r496_has(ed, "field:Drum Radius") && !r496_has(ed, "field:Frame Width") && !r496_has(ed, "field:Leaf Thickness") && !r496_has(ed, "field:Open Amount"));
+    CHECK(r479_type(ed, "field:Drum Radius", "1.3"));
+    CHECK_NEAR(bp->drum_radius, 1.3f, 1e-6f);
+    /* Door to Window: the Opening row (above Width) - the style numbers mean something else on a window, so it starts at Opening Only. */
+    const size_t steps = ed.undo_depth_for_test();
+    Recti width, head;
+    CHECK(ed.button_rect_for_test("field:Width", width) && ed.button_rect_for_test("field:Head", head));
+    r477_click(ed, width.x + width.w / 2, width.y - (head.y - width.y) + width.h / 2);
+    r477_settle(ed, 2);
+    CHECK(r496_click_key(ed, "menu:Window"));
+    CHECK(bp->opening == 2 && bp->style == kWindowOpeningOnly);
+    CHECK(ed.undo_depth_for_test() == steps + 1);
+    r495_built(ed);
+    CHECK(r498_judge(*s.bo).empty());
+    BlockoutPiece p;  // (and by the rule itself)
+    p.opening = 2, p.style = kWindowGrid;
+    p.opening = 1;
+    blockout_piece_edited(p, kWindowGrid, 2);
+    CHECK(p.style == kDoorOpeningOnly);
+    p.style = kDoorSliding;
+    blockout_piece_edited(p, kDoorSliding, 1);  // (a door that stays one keeps its style)
+    CHECK(p.style == kDoorSliding);
+    p.opening = 0;
+    blockout_piece_edited(p, kDoorSliding, 1);
+    CHECK(p.style == 0);
+    p.opening = 1;
+    blockout_opening_set_style(p, 99);
+    CHECK(p.style == kBlockoutDoorStyles - 1);
+    blockout_opening_set_style(p, -3);
+    CHECK(p.style == 0);
+    p.opening = 2;
+    blockout_opening_set_style(p, 99);
+    CHECK(p.style == kBlockoutWindowStyles - 1);
+  });
+
+  /* ---- Criterion 5: the handles ---- */
+  test("blockout door styles (499): the handles of a styled door change Width and Head with real mouse events, the frame and the leaf follow, and the mesh stays sound", [] {
+    for (int method : r498_methods())
+      for (int style : {kDoorSingle, kDoorArched}) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, style, method);
+        ed.select_for_test(w.door->id, false);
+        ed.mark_changed_for_test("test scene");
+        bool framed = false;
+        for (float yaw : {0.0f, 180.0f}) {
+          const Vec3 at = w.door->world_matrix().point({0.0f, 1.05f, 0.0f});
+          ed.command(strprintf("camera %g 0 6 %g %g %g", yaw, at.x, at.y, at.z));
+          r477_settle(ed, 3);
+          int x = 0, y = 0;
+          framed = ed.blockout_handle_pixel_for_test("+x", x, y) && ed.blockout_handle_pixel_for_test("-x", x, y) && ed.blockout_handle_pixel_for_test("head", x, y);
+          if (framed) break;
+        }
+        CHECK(framed);
+        if (!framed) continue;
+        BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+        const size_t depth = ed.undo_depth_for_test();
+        auto world = [&](Vec3 local) { return w.door->world_matrix().point(local); };
+        CHECK(r479_pull(ed, "+x", world({0.9f, 1.05f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->width > 1.6f && bp->width < 2.0f && bp->head == 2.1f);  // (the +X handle moved 0.45 m: both ends, 0.9 m)
+        CHECK(r479_pull(ed, "head", world({0.0f, 2.3f, 0.0f}), platform::MOD_CTRL));
+        CHECK(bp->head > 2.2f && bp->head < 2.4f);
+        CHECK(ed.undo_depth_for_test() == depth + 2);
+        CHECK(bp->style == style && bp->frame_width == 0.06f && bp->depth == 0.4f);
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
+        const std::string why = r498_judge(*w.bo);
+        if (!why.empty()) std::printf("    %s after the handles: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        /* The frame follows: it stands at the new edges (a 6 cm frame), and the leaf is still in the doorway. */
+        const float half = bp->width * 0.5f;
+        CHECK(r498_matter(*w.bo, *w.door, {half - 0.03f, 1.0f, 0.0f}) && r498_matter(*w.bo, *w.door, {-half + 0.03f, 1.0f, 0.0f}));
+        CHECK(!r498_matter(*w.bo, *w.door, {half - 0.03f, 1.0f, -0.075f}));
+        CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));
+        CHECK(r498_matter(*w.bo, *w.door, {0.0f, bp->head - 0.03f, 0.0f}));  // (the head of the frame, at the new head)
+      }
+  });
+}
+
+static void tests_round499_more() {
+  /* ---- Criterion 6: the Leaf class ---- */
+  test("blockout door styles (499): the leaf is in the Leaf class's slot, the frame in Solid's; a Blockout's Leaf Material and a door's own override put a material on the leaf only, and the UVs follow round 482's rule", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorSingle, method);
+      const std::string solid = r482_material("R499Solid", Vec3(0.8f, 0.3f, 0.1f)), leaf = r482_material("R499Leaf", Vec3(0.2f, 0.5f, 0.9f)), own = r482_material("R499Own", Vec3(0.9f, 0.9f, 0.2f)),
+                        own_solid = r482_material("R499OwnSolid", Vec3(0.1f, 0.9f, 0.4f));
+      ed.select_for_test(w.bo->id, false);
+      ed.command("blockout set texscale 0.5");
+      ed.command("blockout set material solid " + solid);
+      ed.command("blockout set material leaf " + leaf);
+      r495_built(ed);
+      const Blockout *b = w.bo->get<Blockout>();
+      const MeshRenderer *mr = w.bo->get<MeshRenderer>();
+      const Mesh *m = r495_mesh(*w.bo);
+      CHECK(b->material[kClassLeaf] == leaf && b->material[kClassSolid] == solid && m && mr);
+      if (!m || !mr) return;
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      blockout_snapshot(*w.bo, pieces, settings);
+      auto expect = [&](size_t f, const std::string &door_solid, const std::string &door_leaf, int *cls_out) {
+        const blockout::Piece *piece = nullptr;
+        for (const blockout::Piece &p : pieces)
+          if (p.id == b->state.faces.piece[f]) piece = &p;
+        const int cls = piece ? blockout_face_class(*piece, b->state.faces.side[f]) : -1;
+        if (cls_out) *cls_out = cls;
+        const bool mine = piece && blockout_piece_owner(piece->id) == w.door->id;
+        if (cls == kClassLeaf) return mine ? door_leaf : leaf;
+        if (cls == kClassSolid) return mine ? door_solid : solid;
+        return std::string();
+      };
+      size_t leaf_faces = 0, solid_faces = 0, wrong = 0;
+      for (size_t f = 0; f < m->face_count(); f++) {
+        int cls = -1;
+        const std::string want = expect(f, solid, leaf, &cls);
+        leaf_faces += cls == kClassLeaf, solid_faces += cls == kClassSolid;
+        if (r482_face_material(*m, *mr, f) != want) wrong++;
+      }
+      CHECK(leaf_faces >= 2 && solid_faces > 10 && wrong == 0);
+      size_t on_leaf = 0;
+      for (size_t f = 0; f < m->face_count(); f++) on_leaf += r482_face_material(*m, *mr, f) == leaf;
+      CHECK(on_leaf == leaf_faces);
+      CHECK(r482_scratch_same(*w.bo));
+      /* The door's own override of Leaf: the leaf changes, nothing else does. */
+      std::vector<std::string> before;
+      for (size_t f = 0; f < m->face_count(); f++) before.push_back(r482_face_material(*m, *mr, f));
+      ed.select_for_test(w.door->id, false);
+      ed.command("blockout set material leaf " + own);
+      r495_built(ed);
+      m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
+      size_t changed = 0, on_own = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) {
+        const std::string now = r482_face_material(*m, *mr, f);
+        changed += now != before[f], on_own += now == own;
+        if (now != before[f]) CHECK(before[f] == leaf && now == own);
+      }
+      CHECK(changed == leaf_faces && on_own == leaf_faces);
+      /* The door's Solid override takes the frame's faces and not the wall's. */
+      ed.command("blockout set material solid " + own_solid);
+      r495_built(ed);
+      m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
+      size_t on_frame = 0, bad_wall = 0, wall_faces = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) {
+        const std::string now = r482_face_material(*m, *mr, f);
+        const bool wall = b->state.faces.piece[f] != w.door->id && !blockout_id_generated(b->state.faces.piece[f]);
+        on_frame += now == own_solid;
+        wall_faces += wall;
+        if (wall && now == own_solid) bad_wall++;
+      }
+      CHECK(on_frame >= 6 && bad_wall == 0 && wall_faces > 0);  // (a door's frame is two jambs and a head: fewer faces than a window's)
+      CHECK(r482_scratch_same(*w.bo));
+      /* A door with its Leaf off, and a Revolving one, has no Leaf class: the console says so. */
+      ed.command("blockout set leaf off");
+      const size_t mark = r477_mark();
+      ed.command("blockout set material leaf " + leaf);
+      CHECK(r477_log_since(mark).find("a styled door: Cut, Solid and Leaf") != std::string::npos && te_warnings_since(mark) >= 1);
+      /* Round 482's UV rule: metres in the face's own plane over the Texture Scale (0.5 m a tile): on a face square to Z, U runs along X and V up. */
+      size_t uv_faces = 0, uv_bad = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) {
+        const Vec3 n = m->face_normal(f);
+        if (std::fabs(n.z) < 0.9999f) continue;
+        uv_faces++;
+        const uint32_t first = m->face_offsets[f];
+        for (uint32_t i = 0; i < m->face_size(f); i++) {
+          const Vec3 p = m->positions[m->face_verts(f)[i]];
+          const Vec2 uv = m->uvs[first + i];
+          if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) uv_bad++;
+        }
+      }
+      CHECK(uv_faces >= 6 && uv_bad == 0);
+    }
+  });
+
+  test("blockout door styles (499): the Leaf class is the eighth - the seven before it keep their names and numbers - and a door's leaf, its numbers and the Blockout's Leaf Material each change the snapshot's hash", [] {
+    CHECK(kBlockoutClasses == 9 && kClassLeaf == 7 && std::string(kBlockoutClassNames[kClassLeaf]) == "Leaf");  // (round 500 added Roof as the ninth: Leaf is still the eighth class, number 7)
+    const char *const want[8] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass", "Leaf"};
+    for (int k = 0; k < 8; k++) CHECK(std::string(kBlockoutClassNames[k]) == want[k]);
+    Editor ed;
+    const R499Wall w = r499_wall(ed, kDoorSingle, 1, 0.005f);
+    BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+    auto hash = [&] {
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      BlockoutSnapshotNotes notes;
+      blockout_snapshot(*w.bo, pieces, settings, &notes);
+      return blockout_snapshot_hash(pieces, settings, &notes);
+    };
+    const uint64_t h0 = hash();
+    CHECK(h0 == hash());
+    struct Edit {
+      const char *what;
+      std::function<void()> apply, undo;
+    };
+    const BlockoutPiece base = *bp;
+    const std::vector<Edit> edits = {
+        {"the Blockout's Leaf Material", [&] { w.bo->get<Blockout>()->material[kClassLeaf] = "Assets/Materials/X.mat"; }, [&] { w.bo->get<Blockout>()->material[kClassLeaf].clear(); }},
+        {"the door's own Leaf Material", [&] { bp->material[kClassLeaf] = "Assets/Materials/X.mat"; }, [&] { bp->material[kClassLeaf].clear(); }},
+        {"the style", [&] { bp->style = kDoorSliding; }, [&] { bp->style = base.style; }},
+        {"the Leaf switch", [&] { bp->leaf = false; }, [&] { bp->leaf = base.leaf; }},
+        {"the Leaf Thickness", [&] { bp->leaf_thickness = 0.05f; }, [&] { bp->leaf_thickness = base.leaf_thickness; }},
+        {"the Open Amount", [&] { bp->open_amount = 0.4f; }, [&] { bp->open_amount = base.open_amount; }},
+        {"the Hinge Side", [&] { bp->open_amount = 0.4f, bp->hinge_side = 1; }, [&] { bp->open_amount = base.open_amount, bp->hinge_side = base.hinge_side; }},
+        {"the Frame Width", [&] { bp->frame_width = 0.08f; }, [&] { bp->frame_width = base.frame_width; }},
+    };
+    for (const Edit &e : edits) {
+      e.apply();
+      CHECK(hash() != h0);
+      e.undo();
+      CHECK(hash() == h0);
+    }
+  });
+
+  /* ---- Criterion 7: hostile numbers ---- */
+  test("blockout door styles (499): a leaf thicker than the wall, a drum wider than the wall is long, Open Amount -1, 2, NaN and infinity, a negative width, NaN, depth 0 and an arch rise of 1e9 leave a valid mesh or a clean refusal, on each path (a sample on three styles: the stress row has every case on every style)", [] {
+    struct Case {
+      const char *what;
+      std::function<void(BlockoutPiece &)> set;
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const std::vector<Case> cases = {
+        {"a leaf 5 m thick (the wall is 0.2 m)", [](BlockoutPiece &p) { p.leaf_thickness = 5.0f; }},
+        {"a drum of radius 50 (the wall is 3 m long)", [](BlockoutPiece &p) { p.drum_radius = 50.0f; }},
+        {"a drum of radius 1e9", [](BlockoutPiece &p) { p.drum_radius = 1e9f; }},
+        {"Open Amount -1", [](BlockoutPiece &p) { p.open_amount = -1.0f; }},
+        {"Open Amount 2", [](BlockoutPiece &p) { p.open_amount = 2.0f; }},
+        {"Open Amount NaN", [nan](BlockoutPiece &p) { p.open_amount = nan; }},
+        {"Open Amount infinite", [inf](BlockoutPiece &p) { p.open_amount = inf; }},
+        {"width -1", [](BlockoutPiece &p) { p.width = -1.0f; }},
+        {"width NaN", [nan](BlockoutPiece &p) { p.width = nan; }},
+        {"width 1e9", [](BlockoutPiece &p) { p.width = 1e9f; }},
+        {"depth 0", [](BlockoutPiece &p) { p.depth = 0.0f; }},
+        {"leaf thickness NaN", [nan](BlockoutPiece &p) { p.leaf_thickness = nan; }},
+        {"leaf thickness 0", [](BlockoutPiece &p) { p.leaf_thickness = 0.0f; }},
+        {"drum radius NaN", [nan](BlockoutPiece &p) { p.drum_radius = nan; }},
+        {"frame 5 m wide, 0 deep", [](BlockoutPiece &p) { p.frame_width = 5.0f, p.frame_depth = 0.0f; }},
+        {"arch rise 1e9", [](BlockoutPiece &p) { p.arch_rise = 1e9f; }},
+        {"a head under the floor line", [](BlockoutPiece &p) { p.head = -1.0f; }},
+    };
+    for (int method : r498_methods())
+      for (int style : {kDoorSingle, kDoorRevolving}) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, style, method, 0.25f);  // (a coarse grid: the builds stay quick; what is judged is soundness)
+        const BlockoutPiece base = *w.door->get<BlockoutPiece>();
+        size_t bad = 0, refused = 0;
+        for (const Case &c : cases) {
+          BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+          *bp = base;
+          c.set(*bp);
+          r495_built(ed);
+          const Mesh *m = r495_mesh(*w.bo);
+          const BlockoutStatus &st = w.bo->get<Blockout>()->state.status;
+          bool ok = m && structurally_valid(*m);
+          if (ok && st.refusal.empty()) ok = r498_judge(*w.bo).empty();
+          refused += !st.refusal.empty();
+          if (!ok) bad++, std::printf("    %s, %s, %s: not sound (%s)\n", r498_method_name(method), kBlockoutDoorStyleNames[style], c.what, r498_judge(*w.bo).c_str());
+        }
+        std::printf("    %s %s: %zu hostile cases, %zu refused, %zu not sound\n", r498_method_name(method), kBlockoutDoorStyleNames[style], cases.size(), refused, bad);
+        CHECK(bad == 0);
+      }
+  });
+
+  test("blockout door styles (499): the numbers are held to what a leaf can be - a swung leaf at most six tenths of the frame's depth, the pieces stay finite and few, the Open Amount outside 0 to 1 is held to it, and a Sliding leaf may be as thick as it likes", [] {
+    Editor ed;
+    const R499Wall w = r499_wall(ed, kDoorSingle, 1, 0.005f);
+    BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+    bp->leaf_thickness = 5.0f, bp->open_amount = 1.0f;
+    auto made = [&](std::vector<blockout::Piece> &pieces) {
+      pieces.clear();
+      blockout::Settings settings;
+      blockout_snapshot(*w.bo, pieces, settings);
+      size_t n = 0;
+      for (const blockout::Piece &p : pieces) n += blockout_id_generated(p.id);
+      return n;
+    };
+    std::vector<blockout::Piece> pieces;
+    CHECK(made(pieces) > 4 && made(pieces) < 30);
+    for (const blockout::Piece &p : pieces)
+      if (blockout_id_generated(p.id))
+        for (const Vec2 &q : p.outline) CHECK(finite_bits(q.x) && finite_bits(q.y) && std::fabs(q.x) < 100.0f && std::fabs(q.y) < 100.0f);  // (a leaf 5 m thick would be 100 m of plan)
+    bp->open_amount = 5.0f;  // (held to 1: the same pieces as 1)
+    std::vector<blockout::Piece> again;
+    made(again);
+    CHECK(again.size() == pieces.size());
+    bool same = again.size() == pieces.size();
+    for (size_t i = 0; same && i < again.size(); i++) same = again[i].id == pieces[i].id && std::memcmp(again[i].to_blockout.m, pieces[i].to_blockout.m, sizeof(again[i].to_blockout.m)) == 0 && again[i].outline.size() == pieces[i].outline.size();
+    CHECK(same);
+    bp->style = kDoorSliding, bp->open_amount = 0.0f;
+    std::vector<blockout::Piece> slid;
+    made(slid);
+    float deepest = 0.0f;
+    for (const blockout::Piece &p : slid)
+      if (blockout_id_generated(p.id) && p.shape == blockout::Shape::Box) deepest = std::max(deepest, p.size.z);
+    CHECK(deepest > 4.9f && deepest < 5.1f);  // (a Sliding leaf stands on the wall's face: its thickness is its own)
+  });
+}
+
+static void tests_round499_console() {
+  /* ---- The console ---- */
+  test("blockout door styles (499): `blockout add door [style] [width head]` makes each style with the numbers it is given, a Revolving door has entries 1.2 m wide in a drum of 1 m (a wider Width, a wider drum), and a word that is no door style makes nothing", [] {
+    struct Want {
+      const char *words;
+      int style;
+      float width, head;
+    };
+    const Want wants[] = {{"", kDoorOpeningOnly, 0.9f, 2.1f}, {"opening", kDoorOpeningOnly, 0.9f, 2.1f}, {"opening only 1.0 2.0", kDoorOpeningOnly, 1.0f, 2.0f}, {"single", kDoorSingle, 0.9f, 2.1f},
+                          {"double 1.6 2.2", kDoorDouble, 1.6f, 2.2f}, {"sliding 1.8 2.1", kDoorSliding, 1.8f, 2.1f}, {"arched 1.0 2.3", kDoorArched, 1.0f, 2.3f},
+                          {"arch", kDoorArched, 0.9f, 2.1f}, {"revolving", kDoorRevolving, 1.2f, 2.1f}, {"revolving 3 2.4", kDoorRevolving, 3.0f, 2.4f}, {"1.0 2.0", kDoorOpeningOnly, 1.0f, 2.0f}};
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    for (const Want &w : wants) {
+      ed.select_for_test(s.room->id, false);
+      const size_t n = r477_all_pieces(*s.bo).size();
+      ed.command(std::string("blockout add door ") + w.words);
+      r495_built(ed);
+      const BlockoutPiece *bp = r477_active_piece(ed);
+      CHECK(r477_all_pieces(*s.bo).size() == n + 1 && bp && bp->opening == 1 && bp->style == w.style && bp->width == w.width && bp->head == w.head);
+      if (bp && w.style == kDoorRevolving) CHECK_NEAR(bp->drum_radius, std::max(1.0f, 0.625f * w.width), 1e-6f);  // (Width is the entries: 1.2 m in a drum of 1 m, a wider one a drum of 0.625 of it)
+      CHECK(r498_judge(*s.bo).empty());
+      CHECK(ed.obj_last_valid() && ed.obj_last_for_test().style == w.style);
+      if (GameObject *made = ed.active_object_for_test()) ed.scene().destroy(std::vector<GameObject *>{made});  // (the next door stands alone on the wall)
+      r495_built(ed);
+    }
+    for (const char *wrong : {"grid", "fixed", "round", "swing", "single single"}) {
+      ed.select_for_test(s.room->id, false);
+      const size_t n = r477_all_pieces(*s.bo).size(), mark = r477_mark();
+      ed.command(std::string("blockout add door ") + wrong);
+      CHECK(te_warnings_since(mark) >= 1 && r477_all_pieces(*s.bo).size() == n);
+    }
+  });
+
+  test("blockout door styles (499): blockout set leaf, open, hinge, slide and drum change the selected doors by one undo step each - a bad argument warns and changes nothing - and they are a door's: a window or a room selected gets a warning", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "double");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const uint64_t id = s.door->id;
+    auto piece = [&]() -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+    auto run = [&](const std::string &line) {  // (a step is committed with the frame)
+      ed.command(line);
+      r495_built(ed);
+    };
+    size_t depth = ed.undo_depth_for_test();
+    run("blockout set leaf off");
+    CHECK(!piece().leaf && piece().leaf_thickness == 0.04f && ed.undo_depth_for_test() == ++depth);
+    run("blockout set leaf on 0.05");
+    CHECK(piece().leaf && piece().leaf_thickness == 0.05f && ed.undo_depth_for_test() == ++depth);
+    run("blockout set open 0.25");
+    CHECK(piece().open_amount == 0.25f && ed.undo_depth_for_test() == ++depth);
+    run("blockout set hinge right");
+    CHECK(piece().hinge_side == 1 && ed.undo_depth_for_test() == ++depth);
+    run("blockout set hinge l");
+    CHECK(piece().hinge_side == 0 && ed.undo_depth_for_test() == ++depth);
+    run("blockout set slide right");
+    CHECK(piece().slide_direction == 1 && ed.undo_depth_for_test() == ++depth);
+    run("blockout set drum 1.25");
+    CHECK(piece().drum_radius == 1.25f && ed.undo_depth_for_test() == ++depth);
+    CHECK(r498_judge(*s.bo).empty());
+    for (const char *same : {"blockout set leaf on 0.05", "blockout set open 0.25", "blockout set hinge left", "blockout set slide right", "blockout set drum 1.25"}) run(same);
+    CHECK(ed.undo_depth_for_test() == depth);  // (no step for nothing)
+    const BlockoutPiece keep = piece();
+    for (const char *bad : {"blockout set leaf", "blockout set leaf maybe", "blockout set leaf on 0", "blockout set leaf on -1", "blockout set leaf on x", "blockout set leaf on 1 2", "blockout set open",
+                            "blockout set open -0.1", "blockout set open 1.5", "blockout set open nan", "blockout set open abc", "blockout set open 0.1 0.2", "blockout set hinge", "blockout set hinge up",
+                            "blockout set hinge left right", "blockout set slide", "blockout set slide middle", "blockout set drum", "blockout set drum 0", "blockout set drum -1", "blockout set drum nan",
+                            "blockout set drum 1 2"}) {
+      const size_t mark = r477_mark();
+      run(bad);
+      if (te_warnings_since(mark) == 0) std::printf("    '%s' did not warn\n", bad);
+      CHECK(te_warnings_since(mark) >= 1);
+    }
+    CHECK(piece().leaf == keep.leaf && piece().leaf_thickness == keep.leaf_thickness && piece().open_amount == keep.open_amount && piece().hinge_side == keep.hinge_side &&
+          piece().slide_direction == keep.slide_direction && piece().drum_radius == keep.drum_radius && ed.undo_depth_for_test() == depth);
+    /* Not a door: a room, a window, nothing selected. */
+    run("blockout add window single");
+    const uint64_t window = ed.active_object_for_test()->id;
+    const size_t depth_with_window = ed.undo_depth_for_test();
+    for (const char *line : {"blockout set leaf off", "blockout set open 0.5", "blockout set hinge right", "blockout set slide left", "blockout set drum 2"}) {
+      for (uint64_t pick : {s.room->id, window}) {
+        ed.select_for_test(pick, false);
+        const size_t mark = r477_mark();
+        ed.command(line);
+        CHECK(te_warnings_since(mark) >= 1);
+      }
+      ed.clear_selection_for_test();
+      const size_t mark = r477_mark();
+      ed.command(line);
+      CHECK(te_warnings_since(mark) >= 1);
+    }
+    CHECK(ed.undo_depth_for_test() == depth_with_window);  // (the warnings changed nothing: the window's own creation is the only step since)
+    CHECK(piece().leaf == keep.leaf && piece().open_amount == keep.open_amount);
+    /* The words that are a window's and a door's both, on a window and a door together: the windows' (round 498's tests pin that a door is left alone). */
+    ed.select_for_test(window, false);
+    ed.select_for_test(id, true);
+    ed.command("blockout set style arched");
+    CHECK(ed.scene().find(window)->get<BlockoutPiece>()->style == kWindowArched && piece().style == kDoorArched);  // (both know the word: round 499 review - a word changes every selected opening that has it)
+    ed.select_for_test(window, false);
+    ed.select_for_test(id, true);
+    ed.command("blockout set style grid");  // (a window word: the door keeps its style)
+    CHECK(ed.scene().find(window)->get<BlockoutPiece>()->style == kWindowGrid && piece().style == kDoorArched);
+    ed.select_for_test(id, false);
+    ed.command("blockout set style arched");
+    CHECK(piece().style == kDoorArched);
+    ed.command("blockout set frame 0.09 0.15");
+    CHECK(piece().frame_width == 0.09f && piece().frame_depth == 0.15f);
+  });
+
+  test("blockout door styles (499): a door's window words and a window's door words are refused with the words that fit the piece, and the help lists the door's console words", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    for (const char *word : {"sliding", "revolving"}) {
+      ed.command("blockout add window");
+      const size_t mark = r477_mark();
+      ed.command(std::string("blockout set style ") + word);
+      const std::string log = r477_log_since(mark);
+      CHECK(te_warnings_since(mark) >= 1 && log.find("opening|single|double|arched|fixed|grid|round") != std::string::npos);
+      CHECK(r477_active_piece(ed) && r477_active_piece(ed)->style == kWindowOpeningOnly);
+    }
+    const size_t mark = r477_mark();
+    ed.command("blockout help");
+    ed.command("blockout set");
+    const std::string log = r477_log_since(mark);
+    for (const char *word : {"add door [opening|single|double|sliding|arched|revolving]", "set style|frame|leaf|open|hinge|slide|drum", "leaf on|off [thickness]", "hinge left|right", "drum <radius>"})
+      CHECK(log.find(word) != std::string::npos);
+  });
+}
+
+static void tests_round499_ui() {
+  /* ---- Criterion 1: by the panel, with real events ---- */
+  test("blockout door styles (499): the Door Style dropdown beside the Door button in the Modeling Tools window sets the style of the next door - from its Door button and from the GameObject menu - while the console's `create Blockout Piece: Door` and `blockout add door` make Opening Only; the Window Style dropdown beside it is its own; real events", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Scene s = r499_make(ed, "", method);
+      CHECK(s.room != nullptr);
+      if (!s.room) continue;
+      r496_panel(ed);
+      CHECK(r496_has(ed, "tools:door_style") && r496_has(ed, "tools:window_style") && r496_has(ed, "tools:draw_piece"));
+      for (int style : {kDoorSingle, kDoorDouble, kDoorSliding, kDoorArched, kDoorRevolving, kDoorOpeningOnly}) {
+        ed.select_for_test(s.room->id, false);
+        r477_settle(ed, 2);
+        CHECK(r496_pick_combo(ed, "tools:door_style", kBlockoutDoorStyleNames[style]));
+        const size_t pieces = r477_all_pieces(*s.bo).size();
+        CHECK(r496_click_key(ed, "Door"));
+        r495_built(ed);
+        GameObject *door = ed.active_object_for_test();
+        const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+        CHECK(r477_all_pieces(*s.bo).size() == pieces + 1 && bp && bp->opening == 1 && bp->style == style);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s, panel, %s: %s\n", r498_method_name(method), kBlockoutDoorStyleNames[style], why.c_str());
+        CHECK(why.empty());
+        if (door) ed.scene().destroy(std::vector<GameObject *>{door});
+        r495_built(ed);
+      }
+      /* The menu entry has the dropdown's style; the console's `create` and `blockout add door` do not. */
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:door_style", "Revolving"));
+      ed.command("create Blockout Piece: Door");
+      const BlockoutPiece *console = r477_active_piece(ed);
+      CHECK(console && console->opening == 1 && console->style == kDoorOpeningOnly);
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "menu:Door"}));
+      const BlockoutPiece *menu = r477_active_piece(ed);
+      CHECK(menu && menu->opening == 1 && menu->style == kDoorRevolving);
+      ed.command("blockout add door");
+      const BlockoutPiece *plain = r477_active_piece(ed);
+      CHECK(plain && plain->opening == 1 && plain->style == kDoorOpeningOnly);
+      /* The two dropdowns are independent: a Window made now has the window dropdown's style. */
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:window_style", "Grid"));
+      CHECK(r496_click_key(ed, "Window"));
+      const BlockoutPiece *window = r477_active_piece(ed);
+      CHECK(window && window->opening == 2 && window->style == kWindowGrid);
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_click_key(ed, "Door"));
+      const BlockoutPiece *again = r477_active_piece(ed);
+      CHECK(again && again->opening == 1 && again->style == kDoorRevolving);  // (the Door Style dropdown still says Revolving)
+    }
+    Editor other;  // (per editor: another editor starts at Opening Only)
+    const R499Scene s2 = r499_make(other, "");
+    other.command("create Blockout Piece: Door");
+    CHECK(s2.room && r477_active_piece(other) && r477_active_piece(other)->style == kDoorOpeningOnly);
+  });
+
+  /* ---- Scale (ADR 0135) ---- */
+  test("blockout door styles (499): scaling a styled door grows its Leaf Thickness through the wall and its Drum Radius with the width, the frame as a window's - Open Amount, the sides and the style stay", [] {
+    BlockoutPiece p;
+    p.opening = 1, p.operation = 1, p.style = kDoorSingle, p.width = 0.9f, p.head = 2.1f, p.sill = 0.0f, p.depth = 0.4f, p.frame_width = 0.06f, p.frame_depth = 0.1f, p.arch_rise = 0.5f;
+    p.leaf_thickness = 0.04f, p.drum_radius = 1.0f, p.open_amount = 0.5f, p.hinge_side = 1, p.slide_direction = 1;
+    CHECK(blockout_piece_scale(p, Vec3(2.0f, 1.5f, 3.0f)));
+    CHECK_NEAR(p.width, 1.8f, 1e-5f);
+    CHECK_NEAR(p.head, 3.15f, 1e-5f);
+    CHECK_NEAR(p.depth, 0.8f, 1e-5f);  // (the wall's part: (0.4 - 0.2) * 3 + 0.2)
+    CHECK_NEAR(p.leaf_thickness, 0.12f, 1e-5f);
+    CHECK_NEAR(p.drum_radius, 2.0f, 1e-5f);
+    CHECK_NEAR(p.frame_width, 0.12f, 1e-5f);
+    CHECK_NEAR(p.frame_depth, 0.3f, 1e-5f);
+    CHECK_NEAR(p.arch_rise, 0.75f, 1e-5f);
+    CHECK(p.open_amount == 0.5f && p.hinge_side == 1 && p.slide_direction == 1 && p.style == kDoorSingle);
+    BlockoutPiece q = p;
+    CHECK(blockout_piece_scale(q, Vec3(1.0f)));
+    CHECK(std::memcmp(&q.leaf_thickness, &p.leaf_thickness, sizeof(float)) == 0 && std::memcmp(&q.drum_radius, &p.drum_radius, sizeof(float)) == 0);  // (a scale of 1 changes no bit)
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const BlockoutPiece before = *s.door->get<BlockoutPiece>();
+    s.bo->set_local_scale(Vec3(2.0f));
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout applyscale");
+    r495_built(ed);
+    const BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+    CHECK_NEAR(bp->width, 2.0f * before.width, 1e-5f);
+    CHECK_NEAR(bp->leaf_thickness, 2.0f * before.leaf_thickness, 1e-6f);
+    CHECK_NEAR(bp->depth, 2.0f * (before.depth - 0.2f) + 0.2f, 1e-5f);
+    CHECK(bp->open_amount == before.open_amount && bp->style == kDoorSingle && r498_judge(*s.bo).empty());
+  });
+
+  /* ---- Criterion 8: save and open, Bake and Unbake, exports ---- */
+  test("blockout door styles (499): a styled door and the Blockout's Leaf Material survive save and open - every number, the same mesh", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "double 1.4 2.2");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const std::string leaf = r482_material("R499Saved", Vec3(0.3f, 0.6f, 0.9f)), own = r482_material("R499SavedOwn", Vec3(0.9f, 0.6f, 0.3f));
+    ed.command("blockout set frame 0.07 0.12");
+    ed.command("blockout set leaf on 0.05");
+    ed.command("blockout set open 0.4");
+    ed.command("blockout set hinge right");
+    ed.command("blockout set slide right");
+    ed.command("blockout set drum 0.7");
+    ed.command("blockout set material leaf " + own);
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout set material leaf " + leaf);
+    r495_built(ed);
+    const Mesh before = *r495_mesh(*s.bo);
+    const std::string text = save_scene_text(ed.scene());
+    for (const char *key : {"Style", "Frame_Width", "Leaf", "Leaf_Thickness", "Open_Amount", "Hinge_Side", "Slide_Direction", "Drum_Radius", "Leaf_Material"})
+      CHECK(text.find(std::string("  ") + key + " ") != std::string::npos);
+    const std::string path = te_scene_path(ed, "r499_door.scene");
+    CHECK(fs::write_file(path, text));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *bo = r477_find(ed);
+    GameObject *door = ed.scene().find_by_name("Door");
+    const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(bo && bp && bp->opening == 1 && bp->style == kDoorDouble && bp->width == 1.4f && bp->head == 2.2f && bp->frame_width == 0.07f && bp->frame_depth == 0.12f);
+    CHECK(bp && bp->leaf && bp->leaf_thickness == 0.05f && bp->open_amount == 0.4f && bp->hinge_side == 1 && bp->slide_direction == 1 && bp->drum_radius == 0.7f && bp->material[kClassLeaf] == own);
+    CHECK(bo && bo->get<Blockout>()->material[kClassLeaf] == leaf);
+    CHECK(bo && r495_mesh(*bo) && r477_same(before, *r495_mesh(*bo)) && r482_scratch_same(*bo));
+    fs::remove_file(path);
+  });
+
+  test("blockout door styles (499): Bake to Mesh keeps the styled door's mesh and the door's numbers under the disabled child, Unbake gives the same mesh and numbers back, and OBJ, FBX and GLB export the leaf in a material of its own", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall s = r499_wall(ed, kDoorSingle, method);
+      const std::string leaf = r482_material("R499Door", Vec3(0.4f, 0.7f, 0.9f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout set material leaf " + leaf);
+      r495_built(ed);
+      const uint64_t bo_id = s.bo->id, door_id = s.door->id;
+      const Mesh live = *r495_mesh(*s.bo);
+      const BlockoutPiece numbers = *s.door->get<BlockoutPiece>();
+      const std::map<std::string, size_t> want = r482_triangles(*s.bo);
+      std::string leaf_name;  // (the only material of the mesh with a name: the others are the default material)
+      size_t leaf_triangles = 0;
+      for (const auto &w : want)
+        if (!w.first.empty()) leaf_name = w.first, leaf_triangles = w.second;
+      CHECK(want.size() == 2 && leaf_triangles > 0);
+      for (const char *format : {"fbx", "glb", "obj"}) {
+        const std::string name = std::string("r499_live.") + format;
+        const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
+        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs);
+        if (std::string(format) == "obj") continue;
+        size_t got = 0;
+        for (const auto &t : back.triangles)
+          if (!leaf_name.empty() && t.first.find(leaf_name) != std::string::npos) got += t.second;
+        CHECK(got == leaf_triangles);
+      }
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<BlockoutBaked>() && !baked->get<Blockout>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      GameObject *held = ed.scene().find(door_id);
+      CHECK(held && held->get<BlockoutPiece>() && held->get<BlockoutPiece>()->style == kDoorSingle && held->get<BlockoutPiece>()->leaf_thickness == numbers.leaf_thickness);
+      const R482Back after = r482_read(r482_export(ed, "glb", "r499_baked.glb"));
+      size_t got = 0;
+      for (const auto &t : after.triangles)
+        if (!leaf_name.empty() && t.first.find(leaf_name) != std::string::npos) got += t.second;
+      CHECK(after.ok && got == leaf_triangles);
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(bo_id);
+      held = ed.scene().find(door_id);
+      CHECK(baked && baked->get<Blockout>() && !baked->get<BlockoutBaked>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      const BlockoutPiece *back = held ? held->get<BlockoutPiece>() : nullptr;
+      CHECK(back && back->style == numbers.style && back->width == numbers.width && back->head == numbers.head && back->depth == numbers.depth && back->frame_width == numbers.frame_width &&
+            back->leaf == numbers.leaf && back->leaf_thickness == numbers.leaf_thickness && back->open_amount == numbers.open_amount && back->hinge_side == numbers.hinge_side &&
+            back->drum_radius == numbers.drum_radius);
+      CHECK(baked && baked->get<Blockout>()->material[kClassLeaf] == leaf);
+    }
+  });
+
+  /* ---- The grid path ---- */
+  test("blockout door styles (499): on the grid at the default Field Cell a door's leaf (4 cm) is left out and the frame held at a cell - sound - and the status names the Door and the Field Cell that shows it; a Revolving door's thin ring is held at a cell and its drum under a cell and a half is the plain hole", [] {
+    Editor ed;
+    const R499Wall w = r499_wall(ed, kDoorSingle, 2, 0.1f);
+    CHECK(r498_judge(*w.bo).empty());
+    const std::vector<BlockoutWindowFit> &fits = w.bo->get<Blockout>()->state.window_fits;
+    CHECK(fits.size() == 1 && fits[0].coarse && !fits[0].plain && fits[0].door && fits[0].id == w.door->id);
+    CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces == 0 && r498_class(*w.bo, *w.door, kClassSolid).faces > 0);
+    const std::vector<std::string> lines = r498fix_status(ed, *w.bo);
+    std::string note;
+    for (const std::string &l : lines)
+      if (l.find("Door 'Door'") != std::string::npos) note = l;
+    std::printf("    %s\n", note.c_str());
+    CHECK(note.find("its frame, leaf or ring is finer than Field Cell 0.10 m - lower Field Cell to ") != std::string::npos);
+    const size_t at = note.find("lower Field Cell to ");
+    const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
+    CHECK(advised > 0.0f && advised < 0.1f);
+    w.bo->get<Blockout>()->cell = advised;
+    r495_built(ed);
+    CHECK(w.bo->get<Blockout>()->state.window_fits.empty() && r498_class(*w.bo, *w.door, kClassLeaf).faces > 0);  // (the Field Cell the status advises shows the leaf)
+    CHECK(!r498fix_has(r498fix_status(ed, *w.bo), "Door 'Door'"));
+    /* A Revolving door. */
+    Editor rev;
+    const R499Wall r = r499_wall(rev, kDoorRevolving, 2, 0.2f);
+    CHECK(r498_judge(*r.bo).empty() && r.bo->get<Blockout>()->state.window_fits.size() == 1 && r.bo->get<Blockout>()->state.window_fits[0].coarse && r.bo->get<Blockout>()->state.window_fits[0].door);
+    r.bo->get<Blockout>()->cell = 1.0f;
+    r495_built(rev);
+    CHECK(r498_judge(*r.bo).empty() && r.bo->get<Blockout>()->state.window_fits.size() == 1 && r.bo->get<Blockout>()->state.window_fits[0].plain);
+    CHECK(r498fix_has(r498fix_status(rev, *r.bo), "Door 'Door': its parts are finer than Field Cell 1.00 m - made as the plain hole; lower Field Cell to "));
+    /* The exact path's pieces do not depend on the Field Cell. */
+    for (int style : {kDoorSingle, kDoorDouble, kDoorSliding, kDoorArched, kDoorRevolving}) {
+      Editor ex;
+      const R499Wall e = r499_wall(ex, style, 1, 0.1f);
+      std::vector<blockout::Piece> a, b;
+      blockout::Settings st;
+      blockout_snapshot(*e.bo, a, st);
+      e.bo->get<Blockout>()->cell = 0.02f;
+      blockout_snapshot(*e.bo, b, st);
+      bool same = a.size() == b.size() && a.size() > 2;
+      for (size_t i = 0; same && i < a.size(); i++)
+        same = a[i].id == b[i].id && a[i].shape == b[i].shape && a[i].op == b[i].op && a[i].outline.size() == b[i].outline.size() &&
+               std::memcmp(a[i].to_blockout.m, b[i].to_blockout.m, sizeof(a[i].to_blockout.m)) == 0 && std::memcmp(&a[i].size, &b[i].size, sizeof(Vec3)) == 0;
+      CHECK(same);
+    }
+  });
+
+  /* ---- Handles and the pieces' ids ---- */
+  test("blockout door styles (499): a click on a frame face, the leaf or the revolving ring selects the door - the object - and a click on the wall beside it selects the wall's piece; the faces name made pieces no object has", [] {
+    for (int method : r498_methods())
+      for (int style : {kDoorSingle, kDoorRevolving}) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, style, method);
+        ed.command("camera 0 0 6 0 0.25 0");
+        r477_settle(ed, 3);
+        const GameObject *wall = ed.scene().find_by_name("Wall");
+        auto at = [&](Vec3 local) { return w.door->world_matrix().point(local); };
+        GameObject *thing = style == kDoorRevolving ? r479p_click(ed, at({0.7f, 1.0f, 0.8f})) : r479p_click(ed, at({0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}));
+        GameObject *beside = r479p_click(ed, at({1.4f, 1.0f, 0.0f}));
+        const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
+        if (thing != w.door || beside != wall) std::printf("    %s: door part %s, wall %s\n", label.c_str(), thing ? thing->name.c_str() : "-", beside ? beside->name.c_str() : "-");
+        CHECK(thing == w.door && beside == wall && wall != nullptr);
+        const Blockout *b = w.bo->get<Blockout>();
+        size_t named_by_made = 0;
+        for (uint64_t id : b->state.faces.piece) named_by_made += blockout_id_generated(id) && blockout_piece_owner(id) == w.door->id;
+        CHECK(named_by_made > 4 && ed.scene().find(w.door->id | kBlockoutGeneratedBit) == nullptr);
+      }
+  });
+}
+
+static void tests_round499_labels() {
+  test("blockout door styles (499, HCI): the Blockout buttons of the Modeling Tools window - short labels, as many to a row as fit, the whole name in the tooltip - are not clipped at 1366 x 768, at 1024 x 640, and at UI scale 1.5, measured as the HCI sweep measures a label", [] {
+    struct Config {
+      int w, h;
+      float scale;
+    };
+    for (const Config &c : {Config{1366, 768, 1.0f}, Config{1024, 640, 1.0f}, Config{1920, 1080, 1.5f}, Config{1366, 768, 1.5f}}) {
+      Editor ed;
+      ed.init_headless(c.w, c.h);
+      ed.set_ui_scale_for_test(c.scale);
+      r496_panel(ed);
+      const auto &u = ed.ui_for_test();
+      size_t found = 0, clipped = 0;
+      for (const char *label : {"Blockout", "Door", "Window", "Add Box", "Add Cyl", "Add Sph", "Cut Box", "Cut Cyl", "Cut Sph", "Room Box", "Room Cyl"}) {
+        Recti r;
+        if (!ed.button_rect_for_test(label, r)) continue;
+        found++;
+        const int room = r.w - u.px(8), tw = ed.text_width_for_test(label);  // (a button's own padding: Context::button)
+        if (tw > room) clipped++, std::printf("    %dx%d x%g: '%s' is %d px in %d px\n", c.w, c.h, c.scale, label, tw, room);
+      }
+      CHECK(found == 11 && clipped == 0);
+      Recti a, b;
+      CHECK(ed.button_rect_for_test("tools:door_style", a) && ed.button_rect_for_test("tools:window_style", b) && a.w > 0 && b.w > 0);
+    }
+  });
+}
+
+static void tests_round499_review() {
+  /* ---- The review's fixes (round 499): what a swing cuts, and what the status says of it ---- */
+  /* Part 2 measured the Add variant (the leaf past the Depth as an Add solid, no cutter past the Depth): 414 of 2,000 door arrangements with problems on the exact path against 2 with
+   * the strip, so the cutters reach as far as the leaf does over the doorway's width (kSwingAddsBeyondDepth false) and the status names every piece that cut overlaps. */
+  test("blockout door styles (499 review): a swung leaf clears the doorway's width as far into the room as it reaches - a column, a raised floor and another wall in front of a Single door are cut there at Open Amount 0.5 and 1, a column beside the strip is not - and the status names each cut piece; the leaf is there in the Leaf class", [] {
+    struct Thing {
+      const char *what;
+      Vec3 centre, size, probe;  // (the door's own space: z in front of the wall; the rig's door stands at world y -1.2)
+    };
+    const Thing things[] = {{"a column", {0.1f, 1.0f, 0.4f}, {0.2f, 1.0f, 0.2f}, {0.1f, 1.0f, 0.4f}},
+                            {"a raised floor", {0.0f, 0.15f, 1.2f}, {2.0f, 0.3f, 1.9f}, {0.1f, 0.15f, 0.5f}},
+                            {"another wall 0.5 m in front", {0.0f, 1.2f, 0.55f}, {3.0f, 2.4f, 0.2f}, {0.1f, 1.0f, 0.55f}}};
+    for (int method : r498_methods())
+      for (const Thing &t : things)
+        for (float open : {0.5f, 1.0f}) {
+          Editor ed;
+          const R499Wall w = r499_wall(ed, kDoorSingle, method, 0.02f);
+          w.door->get<BlockoutPiece>()->open_amount = open;
+          r477_piece(ed, *w.bo, "Thing", 0, 0, {t.centre.x, t.centre.y - 1.2f, t.centre.z}, t.size);
+          const bool column = &t == &things[0];
+          if (column) r477_piece(ed, *w.bo, "Beside", 0, 0, {t.centre.x + 0.9f, t.centre.y - 1.2f, t.centre.z}, t.size);  // (0.9 m along: outside the doorway's width)
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + " " + t.what + " at " + (open == 1.0f ? "1" : "0.5");
+          const std::string why = r498_judge(*w.bo);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          CHECK(!r498_matter(*w.bo, *w.door, t.probe));  // (cut: the strip the leaf swings through)
+          if (column) CHECK(r498_matter(*w.bo, *w.door, {t.probe.x + 0.9f, t.probe.y, t.probe.z}));
+          CHECK(r498_matter(*w.bo, *w.door, open == 1.0f ? Vec3(0.39f, 1.0f, 0.3f) : Vec3(0.249f, 1.0f, 0.141f)));  // (the leaf, hinged on the +X jamb)
+          CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces > 0);
+          size_t named = 0, wrongly = 0;
+          for (const std::string &c : w.bo->get<Blockout>()->state.swing_cuts) {
+            named += c == "Door 'Door': its open leaf cuts 'Thing'";
+            wrongly += c.find("'Beside'") != std::string::npos || c.find("'Wall'") != std::string::npos;
+          }
+          CHECK(named == 1 && wrongly == 0);
+        }
+    /* A closed door, and a Sliding or an Opening Only one, cut nothing past the Depth and say nothing. */
+    for (int style : {kDoorOpeningOnly, kDoorSingle, kDoorSliding}) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, style, r498_methods()[0], 0.02f);
+      r477_piece(ed, *w.bo, "Thing", 0, 0, {0.1f, -0.2f, 0.4f}, {0.2f, 1.0f, 0.2f});
+      r495_built(ed);
+      CHECK(r498_matter(*w.bo, *w.door, {0.1f, 1.0f, 0.4f}) && w.bo->get<Blockout>()->state.swing_cuts.empty());
+    }
+  });
+
+  test("blockout door styles (499 review): Hinge Side Left is the jamb on your left when you stand in the room the door opens into, facing it - local +X - and Slide Direction Left slides that way", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorSingle, method, 0.02f);
+      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+      bp->open_amount = 1.0f;
+      for (int hinge : {0, 1}) {
+        bp->hinge_side = hinge;
+        r495_built(ed);
+        const float x = hinge == 0 ? 0.39f : -0.39f;
+        CHECK(r498_matter(*w.bo, *w.door, {x, 1.0f, 0.5f}) && !r498_matter(*w.bo, *w.door, {-x, 1.0f, 0.5f}));
+      }
+      bp->style = kDoorSliding;
+      for (int slide : {0, 1}) {
+        bp->slide_direction = slide;
+        r495_built(ed);
+        const float x = slide == 0 ? 1.0f : -1.0f;
+        CHECK(r498_matter(*w.bo, *w.door, {x, 1.0f, 0.12f}) && !r498_matter(*w.bo, *w.door, {-x, 1.0f, 0.12f}));
+      }
+    }
+  });
+
+  /* ---- A Revolving door joins what it stands between ---- */
+  test("blockout door styles (499 review): a Revolving door's two entries are cut through its ring along the door's Z - a walk through the drum's middle is air at every height, a line just outside the entry hits the ring, and Width is the entries (held to eight tenths of the drum's width)", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorRevolving, method, 0.02f);
+      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+      size_t blocked = 0, ring_hits = 0;
+      for (float y : {0.3f, 1.0f, 2.0f})
+        for (float z = -1.5f; z <= 1.501f; z += 0.1f) blocked += r498_matter(*w.bo, *w.door, {0.0f, y, z});
+      CHECK(blocked == 0);
+      for (float y : {0.3f, 1.0f, 2.0f}) ring_hits += r498_matter(*w.bo, *w.door, {0.6f, y, 0.9f}) && r498_matter(*w.bo, *w.door, {0.6f, y, -0.9f});
+      CHECK(ring_hits == 3);  // (just outside the entry's 0.45: the ring, proud of both faces of the wall, 0.8 m from its middle)
+      bp->width = 1.4f;  // (entries 1.4 m wide: the same line is now in one)
+      r495_built(ed);
+      CHECK(!r498_matter(*w.bo, *w.door, {0.6f, 1.0f, 0.9f}) && r498_matter(*w.bo, *w.door, {0.9f, 1.0f, 0.5f}));
+      bp->width = 5.0f;  // (held to 1.6 drum radii: a line at x = 0.9 still meets the ring)
+      r495_built(ed);
+      CHECK(r498_judge(*w.bo).empty() && r498_matter(*w.bo, *w.door, {0.9f, 1.0f, 0.5f}) && !r498_matter(*w.bo, *w.door, {0.7f, 1.0f, 0.9f}));
+    }
+  });
+
+  /* ---- A Double door closed is one slab; its slit is where it is open ---- */
+  test("blockout door styles (499 review): a Double door closed has no slit - a line through x = 0 meets the leaves - and open has one; the grid path makes a slit under a cell and a half as one slab and says so", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorDouble, method, 0.01f);
+      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+      for (float z : {-0.01f, 0.0f, 0.01f}) CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, z}));
+      CHECK(r498_judge(*w.bo).empty());
+      bp->open_amount = 0.5f;
+      r495_built(ed);
+      CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && r498_judge(*w.bo).empty());
+    }
+    Editor ed;
+    const R499Wall w = r499_wall(ed, kDoorDouble, 2, 0.02f);
+    w.door->get<BlockoutPiece>()->open_amount = 0.3f;
+    r495_built(ed);
+    const std::vector<BlockoutWindowFit> &fits = w.bo->get<Blockout>()->state.window_fits;
+    CHECK(fits.size() == 1 && fits[0].coarse && fits[0].door && fits[0].narrowest <= 0.0201f);  // (the 2 cm slit under 1.5 cells of 2 cm)
+    CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces > 0 && r498_judge(*w.bo).empty());
+  });
+
+  /* ---- Numbers a style does not read, and numbers too large ---- */
+  test("blockout door styles (499 review): a NaN in a number the style does not read (Drum Radius on a Single, Leaf Thickness with the Leaf off, Frame Width on a Revolving door) does not make the plain hole; a Double narrower than its pins has no leaf, not a polygon turned inside out; a door over 100 m is left out and named", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    auto made = [](const R499Wall &w) {
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings st;
+      blockout_snapshot(*w.bo, pieces, st);
+      size_t n = 0;
+      for (const blockout::Piece &p : pieces) n += blockout_id_generated(p.id);
+      return n;
+    };
+    {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorSingle, 1, 0.05f);
+      w.door->get<BlockoutPiece>()->drum_radius = nan;
+      CHECK(made(w) > 4);
+      w.door->get<BlockoutPiece>()->leaf = false, w.door->get<BlockoutPiece>()->leaf_thickness = nan;
+      CHECK(made(w) > 2);
+      w.door->get<BlockoutPiece>()->style = kDoorRevolving, w.door->get<BlockoutPiece>()->frame_width = nan, w.door->get<BlockoutPiece>()->arch_rise = nan, w.door->get<BlockoutPiece>()->drum_radius = 1.0f;  // (a Revolving door reads the Drum Radius: the earlier NaN is put right)
+      CHECK(made(w) == 3);  // (the ring, the drum and the entries)
+      w.door->get<BlockoutPiece>()->drum_radius = nan;
+      CHECK(made(w) == 0);  // (a number it reads: the plain hole)
+    }
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorDouble, method, 0.25f);
+      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+      bp->width = 0.1f, bp->frame_width = 0.06f;
+      r495_built(ed);
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings st;
+      blockout_snapshot(*w.bo, pieces, st);
+      size_t leaves = 0;
+      for (const blockout::Piece &p : pieces) leaves += blockout_id_generated(p.id) && p.op == blockout::Op::Add && p.shape == blockout::Shape::Outline;
+      CHECK((method != 1 || made(w) > 0) && leaves == 0 && r498_judge(*w.bo).empty());
+    }
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorArched, method, 0.25f);
+      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+      for (const char *what : {"arched 1e9 x 1e9", "single 1e9 high", "frame 1e9", "leaf 1e9", "drum 1e9", "drum 0.0001"}) {
+        bp->style = kDoorArched, bp->width = 0.9f, bp->head = 2.1f, bp->frame_width = 0.06f, bp->leaf_thickness = 0.04f, bp->drum_radius = 1.0f;
+        const std::string w_what = what;
+        if (w_what == "arched 1e9 x 1e9") bp->width = 1e9f, bp->head = 1e9f;
+        if (w_what == "single 1e9 high") bp->style = kDoorSingle, bp->head = 1e9f;
+        if (w_what == "frame 1e9") bp->frame_width = 1e9f;
+        if (w_what == "leaf 1e9") bp->style = kDoorSliding, bp->leaf_thickness = 1e9f;
+        if (w_what.rfind("drum", 0) == 0) bp->style = kDoorRevolving, bp->drum_radius = w_what == "drum 1e9" ? 1e9f : 0.0001f;
+        r495_built(ed);
+        const Mesh *m = r495_mesh(*w.bo);
+        const std::string why = r498_judge(*w.bo);
+        if (!why.empty()) std::printf("    %s, %s: %s\n", r498_method_name(method), what, why.c_str());
+        CHECK(m && structurally_valid(*m) && why.empty());
+        if (w_what == "arched 1e9 x 1e9" || w_what == "single 1e9 high") {
+          const BlockoutStatus &st = w.bo->get<Blockout>()->state.status;
+          size_t named = 0;
+          for (const auto &k : st.skipped) named += k.first == w.door->id && k.second.find("over 100 m") != std::string::npos;
+          CHECK(named == 1 && made(w) == 0);
+        }
+      }
+      bp->style = kDoorSingle, bp->width = 0.9f, bp->head = 2.1f;  // (and the next build is as sound as any)
+      r495_built(ed);
+      CHECK(r498_judge(*w.bo).empty());
+    }
+  });
+
+  test("blockout door styles (499 review): a swung leaf thicker than the frame is wide (a 10 cm leaf in a 3 cm frame) is held to the frame's width and builds sound, with no unresolved place on the exact path, near Open Amount 1", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R499Wall w = r499_wall(ed, kDoorSingle, method, 0.02f);
+      BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+      bp->frame_width = 0.03f, bp->leaf_thickness = 0.1f, bp->frame_depth = 0.2f;
+      for (float open : {0.85f, 0.95f, 1.0f}) {
+        bp->open_amount = open;
+        r495_built(ed);
+        const std::string why = r498_judge(*w.bo);
+        const size_t unresolved = w.bo->get<Blockout>()->state.status.unresolved;
+        if (!why.empty() || (method == 1 && unresolved)) std::printf("    %s at %.2f: %s, %zu unresolved\n", r498_method_name(method), open, why.c_str(), unresolved);
+        CHECK(why.empty());
+        if (method == 1) CHECK(unresolved == 0);
+      }
+    }
+  });
+
+  /* ---- A style word changes every selected opening that has it ---- */
+  test("blockout door styles (499 review): `blockout set style` over a door and a window changes each that has the word - a word both have, both; a window's word the window; a door's the door - and the Inspector's multi-object Style leaves a piece of the other kind alone", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    ed.command("blockout add window single");
+    GameObject *win = ed.active_object_for_test();
+    CHECK(win && win->get<BlockoutPiece>() && win->get<BlockoutPiece>()->opening == 2);
+    if (!win) return;
+    const uint64_t wid = win->id, did = s.door->id;
+    auto piece = [&](uint64_t id) -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+    auto run = [&](const char *line) {
+      ed.select_for_test(did, false);
+      ed.select_for_test(wid, true);
+      const size_t mark = r477_mark();
+      ed.command(line);
+      r495_built(ed);
+      return te_warnings_since(mark);
+    };
+    CHECK(run("blockout set style double") == 0 && piece(did).style == kDoorDouble && piece(wid).style == kWindowDouble);
+    CHECK(run("blockout set style grid") == 0 && piece(did).style == kDoorDouble && piece(wid).style == kWindowGrid);
+    CHECK(run("blockout set style sliding") == 0 && piece(did).style == kDoorSliding && piece(wid).style == kWindowGrid);
+    CHECK(run("blockout set frame 0.08 0.12") == 0 && piece(did).frame_width == 0.08f && piece(wid).frame_width == 0.08f);
+    CHECK(run("blockout set style nonsense") >= 1 && piece(did).style == kDoorSliding && piece(wid).style == kWindowGrid);
+    CHECK(r498_judge(*s.bo).empty());
+    /* The Inspector: the edited piece's Style goes to the others of its own kind only. */
+    ed.command("window Inspector");
+    ed.record_buttons_for_test(true);
+    ed.select_for_test(did, false);
+    ed.select_for_test(wid, true);
+    r477_settle(ed, 3);
+    if (r496_has(ed, "field:Frame Width") && r498fix_pick_style(ed, "Round")) CHECK(piece(wid).style == kWindowRound && piece(did).style == kDoorSliding);  // (the window's Round does not reach the door: a door's style is its own list's)
+    CHECK(piece(wid).style >= 0 && piece(wid).style < kBlockoutWindowStyles);
+  });
+
+  /* ---- The strip reaches another wall: the status names the room ---- */
+  test("blockout door styles (499 review): an open leaf whose strip reaches another room's wall - a 1.2 m door at Open 1 into a room 0.7 m deep - is named in the status (\"its open leaf cuts into room\"); a door between two rooms 4 m deep at Open 0.5 and 1 names none, and Open 0 names nothing", [] {
+    {
+      Editor ed;
+      const R499Scene s = r499_pair(ed, "single", 2);
+      CHECK(s.door != nullptr);
+      if (!s.door) return;
+      for (const char *open : {"0.5", "1"}) {
+        ed.select_for_test(s.door->id, false);
+        ed.command(std::string("blockout set open ") + open);
+        r495_built(ed);
+        CHECK(s.bo->get<Blockout>()->state.swing_cuts.empty());  // (the strip is in the room the door opens into, which holds it in its air; the other room is behind the wall)
+      }
+    }
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.1f;
+    GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 0.7 3 4");
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 2);
+    ed.command("blockout add door single 1.2 2.1");
+    GameObject *door = ed.active_object_for_test();
+    CHECK(door && door->get<BlockoutPiece>() && door->get<BlockoutPiece>()->opening == 1);
+    if (!door) return;
+    auto cuts = [&] {
+      r495_built(ed);
+      return bo->get<Blockout>()->state.swing_cuts;
+    };
+    CHECK(cuts().empty());  // (closed)
+    ed.command("blockout set open 1");
+    const std::vector<std::string> named = cuts();
+    size_t into = 0;
+    for (const std::string &c : named) into += c == "Door '" + door->name + "': its open leaf cuts into room '" + room->name + "'";
+    CHECK(into == 1 && named.size() == 1);
+    CHECK(r498_judge(*bo).empty());
+    ed.command("blockout set open 0");
+    CHECK(cuts().empty());  // (Open Amount 0 cuts nothing)
+  });
+}
+
+static void tests_round499_lesson() {
+  /* ---- The Learn tab: its Try-its run, twice in a row ---- */
+  test("learn: \"Doors with a style\" comes after \"Windows with a style\"; its Try-its, run in order on the selection - twice in a row, from the default scene and then beside another Blockout - give no warning and a sound door each time through four styles; every question has an answer", [] {
+    int windows = -1, doors = -1;
+    for (int i = 0; i < lesson_count(); i++) {
+      if (std::string(lesson(i).title) == "Windows with a style") windows = i;
+      if (std::string(lesson(i).title) == "Doors with a style") doors = i;
+    }
+    CHECK(windows >= 0 && doors == windows + 1);
+    if (doors < 0) return;
+    const std::string body = lesson(doors).body;
+    size_t questions = 0, answered = 0, tries = 0, named = 0;
+    std::vector<std::string> cmds;
+    std::istringstream is(body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++, answered += line.find(" | ") != std::string::npos && line.size() > line.find(" | ") + 20;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      tries++;
+      std::string c = line.substr(6, line.find(" | ") - 6);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      named += c.find("Door") != std::string::npos;  // (a Try-it acts on the selection, not on a name)
+      cmds.push_back(c);
+    }
+    CHECK(tries >= 8 && questions >= 3 && answered == questions && named == 0);
+    CHECK(body.find("Leaf") != std::string::npos && body.find("Solid") != std::string::npos && body.find("Revolving") != std::string::npos);
+    for (const bool busy : {false, true}) {
+      Editor ed;
+      ed.init_headless(900, 600);  // (the default scene stays: a plane, a cube, a teapot, a light)
+      if (busy) {
+        GameObject *other = r477_blockout(ed, "Other Blockout");
+        other->get<Blockout>()->method = 2;
+        r478_room_by_command(ed, *other);
+        r495_built(ed);
+      }
+      for (int run = 0; run < (busy ? 1 : 2); run++) {
+        const size_t mark = r477_mark();
+        std::vector<int> styles;
+        for (const std::string &c : cmds) {
+          ed.command(c);
+          r495_built(ed);
+          if (c.rfind("blockout add door", 0) == 0 || c.rfind("blockout set style", 0) == 0) {
+            const BlockoutPiece *bp = r477_active_piece(ed);
+            if (bp) styles.push_back(bp->style);
+          }
+        }
+        size_t warnings = 0;
+        const std::string log = r477_log_since(mark, &warnings);
+        if (warnings) std::printf("    %s run %d:\n%s", busy ? "beside another Blockout" : "default scene", run + 1, log.c_str());
+        CHECK(warnings == 0);
+        CHECK(styles.size() == 4 && styles[0] == kDoorSingle && styles[1] == kDoorDouble && styles[2] == kDoorSliding && styles[3] == kDoorRevolving);
+        size_t bad = 0;
+        ed.scene().for_each([&](GameObject &g) {
+          if (!g.get<Blockout>() || !r495_mesh(g)) return;
+          const std::string why = r498_judge(g);
+          if (!why.empty()) bad++, std::printf("    %s run %d: %s: %s\n", busy ? "busy" : "default", run + 1, g.name.c_str(), why.c_str());
+        });
+        CHECK(bad == 0);
+      }
+    }
+  });
+}
+
+static void tests_round499() {
+  tests_round499_styles();
+  tests_round499_numbers();
+  tests_round499_more();
+  tests_round499_console();
+  tests_round499_ui();
+  tests_round499_labels();
+  tests_round499_review();
+  tests_round499_lesson();
+}
+// r499-end
+
+// r499te-begin
+/* ===================================================================== */
+/* Round 499, the test engineer's (task 0483): doors in odd walls, what a swung leaf does to the things near it, the revolving drum measured, rays through the   */
+/* doorway, odd Open Amounts, undo and redo of the Inspector's Style, hostile words, every style saved and exported, UVs in a scaled Blockout. From the criteria. */
+/* ===================================================================== */
+
+namespace {
+
+struct T499Rig {
+  GameObject *bo = nullptr, *wall = nullptr, *door = nullptr;
+};
+
+/* A wall (`wall_w` x 2.4 x `thick`) with a door piece in it, made by hand; the door's floor line is the wall's bottom; Depth the wall and 0.1 m each side unless given. */
+T499Rig t499_rig(Editor &ed, int style, int method, float cell, float thick = 0.2f, float depth = 0.0f, float dx = 0.0f, float wall_w = 3.0f) {
+  ed.init_headless(900, 600);
+  r477_empty_scene(ed);
+  T499Rig r;
+  r.bo = r477_blockout(ed);
+  Blockout *b = r.bo->get<Blockout>();
+  b->method = method, b->cell = cell;
+  r.wall = r477_piece(ed, *r.bo, "Wall", 0, 0, {0, 0, 0}, {wall_w, 2.4f, thick});
+  r.door = ed.scene().create("Door", r.bo);
+  BlockoutPiece *p = r.door->add<BlockoutPiece>();
+  p->shape = 0, p->operation = 1, p->opening = 1, p->width = 0.9f, p->head = 2.1f, p->sill = 0.0f, p->depth = depth > 0.0f ? depth : thick + 0.2f, p->style = style;
+  r.door->set_local_position({dx, -1.2f, 0.0f});
+  r495_built(ed);
+  return r;
+}
+
+bool t499_finite(const BlockoutPiece &p) {
+  for (float v : {p.width, p.head, p.sill, p.depth, p.frame_width, p.frame_depth, p.arch_rise, p.leaf_thickness, p.open_amount, p.drum_radius})
+    if (!finite_bits(v)) return false;
+  return true;
+}
+
+/* How many triangles of the Blockout's mesh the segment from `from` to `to` (the door's own space) crosses. */
+int t499_walk(const GameObject &bo, const GameObject &door, Vec3 from, Vec3 to) {
+  const Mesh *m = r495_mesh(bo);
+  if (!m) return -1;
+  const Mat4 inv = bo.world_matrix().inverse();
+  const Vec3 a = inv.point(door.world_matrix().point(from)), b = inv.point(door.world_matrix().point(to));
+  const float len = length(b - a);
+  const Ray ray{a, normalize(b - a)};
+  const RenderMesh &rm = m->render_mesh();
+  int hits = 0;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const float d = ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    hits += d > 0.0f && d < len;
+  }
+  return hits;
+}
+
+std::string t499_name(int method, int style, const char *extra = "") { return std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style] + extra; }
+
+struct T499Odd {
+  const char *what;
+  float thick, depth, dx;
+  std::function<void(Editor &, T499Rig &)> setup;
+  bool clean;  // nothing else stands in the doorway
+};
+
+}  // namespace
+
+static void tests_round499_te() {
+  /* ---- Criterion 1, 7: doors in odd walls ---- */
+  test("blockout door styles (499 te): a door in a wall thinner than its frame, a 0.6 m wall, a turned and a scaled Blockout (2 1 1, and after Apply Scale), at a wall's end, in a corner, over a window and over another door is sound or cleanly refused, on each path, closed, half open and open", [] {
+    const std::vector<T499Odd> cases = {
+        {"wall 0.05 m, thinner than the frame depth", 0.05f, 0.0f, 0.0f, nullptr, true},
+        {"wall 0.6 m thick, door Depth 0.8", 0.6f, 0.0f, 0.0f, nullptr, true},
+        {"wall 0.6 m thick, door Depth 0.4 (shorter than the wall: the hole does not go through)", 0.6f, 0.4f, 0.0f, nullptr, true},
+        {"Blockout turned 30 degrees", 0.2f, 0.0f, 0.0f, [](Editor &, T499Rig &r) { r.bo->set_local_rotation(Quat::euler({0.0f, 30.0f, 0.0f})); }, true},
+        {"Blockout scaled 2 1 1", 0.2f, 0.0f, 0.0f, [](Editor &, T499Rig &r) { r.bo->set_local_scale({2.0f, 1.0f, 1.0f}); }, true},
+        {"Blockout scaled 2 1 1, Apply Scale to Pieces", 0.2f, 0.0f, 0.0f,
+         [](Editor &ed, T499Rig &r) {
+           r.bo->set_local_scale({2.0f, 1.0f, 1.0f});
+           ed.select_for_test(r.bo->id, false);
+           ed.command("blockout applyscale");
+         },
+         true},
+        {"Blockout scaled 1.5", 0.2f, 0.0f, 0.0f, [](Editor &, T499Rig &r) { r.bo->set_local_scale(Vec3(1.5f)); }, true},
+        {"door at the wall's end (spills 0.25 m past it)", 0.2f, 0.0f, 1.3f, nullptr, true},
+        {"door in a corner: a wall at right angles runs into the room from the door's side", 0.2f, 0.0f, 1.3f,
+         [](Editor &ed, T499Rig &r) { r477_piece(ed, *r.bo, "Side", 0, 0, {1.4f, 0.0f, 1.0f}, {0.2f, 2.4f, 1.8f}); }, true},
+        {"door overlapping a window", 0.2f, 0.0f, 0.0f,
+         [](Editor &ed, T499Rig &r) {
+           GameObject *w = ed.scene().create("Window", r.bo);
+           BlockoutPiece *p = w->add<BlockoutPiece>();
+           p->shape = 0, p->operation = 1, p->opening = 2, p->width = 1.0f, p->head = 1.8f, p->sill = 0.8f, p->depth = 0.4f, p->style = kWindowSingle;
+           w->set_local_position({0.5f, -1.2f, 0.0f});
+         },
+         false},
+        {"door overlapping another door", 0.2f, 0.0f, 0.0f,
+         [](Editor &ed, T499Rig &r) {
+           GameObject *d = ed.scene().create("Door 2", r.bo);
+           BlockoutPiece *p = d->add<BlockoutPiece>();
+           p->shape = 0, p->operation = 1, p->opening = 1, p->width = 0.9f, p->head = 2.1f, p->depth = 0.4f, p->style = kDoorSingle, p->hinge_side = 1;
+           d->set_local_position({0.5f, -1.2f, 0.0f});
+         },
+         false},
+    };
+    struct Run {
+      int style;
+      float open;
+    };
+    const Run runs[] = {{kDoorSingle, 0.0f}, {kDoorSingle, 1.0f}, {kDoorDouble, 1.0f}, {kDoorRevolving, 0.0f}};  // (a sample of four: Single closed and open, Double open, Revolving)
+    for (int method : r498_methods())
+      for (const T499Odd &c : cases) {
+        size_t bad = 0, refused_n = 0;
+        for (const Run &run : runs) {
+          Editor ed;
+          T499Rig r = t499_rig(ed, run.style, method, 0.02f, c.thick, c.depth, c.dx);
+          if (c.setup) c.setup(ed, r);
+          r.door->get<BlockoutPiece>()->open_amount = run.open;
+          r495_built(ed);
+          bool refused = false;
+          const std::string why = t498_verdict(*r.bo, &refused);
+          refused_n += refused;
+          const BlockoutStatus &st = r.bo->get<Blockout>()->state.status;
+          if (!why.empty()) bad++, std::printf("    %s, %s open %.1f: %s\n", r498_method_name(method), kBlockoutDoorStyleNames[run.style], run.open, why.c_str());
+          /* What the numbers say, where the mesh was built and nothing else stands there: the wall beside the door is wall, and an open Single's doorway is air. */
+          if (!refused && why.empty() && c.clean && r.bo->get<Blockout>()->state.window_fits.empty()) {
+            const BlockoutPiece *dp = r.door->get<BlockoutPiece>();  // (its numbers as they are now: Apply Scale doubled them)
+            const float side = -((run.style == kDoorRevolving ? dp->drum_radius + 0.5f : 0.5f * dp->width + 0.3f));
+            if (!r498_matter(*r.bo, *r.door, {side, 1.0f, 0.0f})) bad++, std::printf("    %s | %s, %s open %.1f: the wall beside the door (at %.2f) is empty\n", r498_method_name(method), c.what, kBlockoutDoorStyleNames[run.style], run.open, side);
+            if (run.style == kDoorSingle && run.open == 1.0f && r498_matter(*r.bo, *r.door, {0.0f, 1.0f, 0.0f})) bad++, std::printf("    %s open Single: the doorway is solid\n", r498_method_name(method));
+          }
+          if (run.style == kDoorSingle && run.open == 1.0f) std::printf("    %s | %s: %zu faces, %zu unresolved, %s\n", r498_method_name(method), c.what, r495_mesh(*r.bo) ? r495_mesh(*r.bo)->face_count() : 0, st.unresolved, refused ? "REFUSED" : "built");
+        }
+        CHECK(bad == 0);
+        (void)refused_n;
+      }
+  });
+
+  test("blockout door styles (499 te): a door in a cylinder room, in a Keep-walls room and in two overlapping rooms is sound (or cleanly refused) on each path, closed and open; where the console puts it is printed", [] {
+    for (int method : r498_methods())
+      for (int kind = 0; kind < 3; kind++) {
+        size_t bad = 0;
+        struct StyleOpen {
+          int style;
+          float open;
+        };
+        for (const StyleOpen &so : {StyleOpen{kDoorSingle, 0.0f}, StyleOpen{kDoorSingle, 1.0f}, StyleOpen{kDoorDouble, 1.0f}, StyleOpen{kDoorRevolving, 0.0f}})  // (a sample of four: the stress sweep has the rest)
+          {
+            const int style = so.style;
+            const float open = so.open;
+            Editor ed;
+            ed.init_headless(900, 600);
+            r477_empty_scene(ed);
+            GameObject *bo = r477_blockout(ed);
+            bo->set_world_position({0, 0, 0});
+            bo->get<Blockout>()->method = method, bo->get<Blockout>()->cell = 0.05f;
+            GameObject *room = r478_room_by_command(ed, *bo, kind == 0 ? "blockout add room cylinder 2 3" : "blockout add room box 4 3 4");
+            CHECK(room != nullptr);
+            if (!room) return;
+            room->set_local_position({0, 0, 0});
+            GameObject *host = room;
+            if (kind > 0) {
+              ed.select_for_test(bo->id, false);
+              ed.command("blockout add room box 4 3 4");
+              host = ed.active_object_for_test();
+              CHECK(host != nullptr);
+              if (!host) return;
+              host->set_local_position({kind == 1 ? 4.2f : 2.0f, 0.0f, 0.0f});
+              if (kind == 1) host->get<BlockoutPiece>()->walls = 1;
+            }
+            r477_settle(ed, 2);
+            ed.select_for_test(host->id, false);
+            ed.command(std::string("blockout add door ") + r499_word(style));
+            GameObject *door = ed.active_object_for_test();
+            BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+            CHECK(bp && bp->opening == 1 && bp->style == style);
+            if (!bp) return;
+            bp->open_amount = open;
+            r495_built(ed);
+            const std::string why = t498_verdict(*bo);
+            if (!why.empty()) bad++, std::printf("    %s %s %s open %.0f: %s\n", r498_method_name(method), kind == 0 ? "cylinder" : kind == 1 ? "keep" : "overlap", kBlockoutDoorStyleNames[style], open, why.c_str());
+            if (style == kDoorSingle && open == 1.0f) {
+              const Vec3 at = door->world_matrix().point({0, 0, 0});
+              std::printf("    %s %s: door at (%.2f %.2f %.2f), %zu faces\n", r498_method_name(method), kind == 0 ? "cylinder room" : kind == 1 ? "keep-walls room" : "overlapping rooms", at.x, at.y, at.z, r495_mesh(*bo) ? r495_mesh(*bo)->face_count() : 0);
+            }
+          }
+        CHECK(bad == 0);
+      }
+  });
+
+  /* ---- What a swung leaf does to what stands near it ---- */
+  test("blockout door styles (499 te): the strip a swung door clears into the room - a column, a floor slab (a raised room) and another wall standing in it are cut by the swing and only by the swing, and the status names them; a closed or Opening Only door leaves them be, and things beside or beyond the strip stay (the numbers are printed)", [] {
+    struct Var {
+      const char *what;
+      int style;
+      float open;
+    };
+    const Var vars[] = {{"Opening Only", kDoorOpeningOnly, 0.0f}, {"Single closed", kDoorSingle, 0.0f}, {"Single 0.5", kDoorSingle, 0.5f}, {"Single open", kDoorSingle, 1.0f}, {"Double open", kDoorDouble, 1.0f}, {"Sliding open", kDoorSliding, 1.0f}};
+    for (int method : r498_methods())
+      for (int scenario = 0; scenario < 3; scenario++)
+        for (int order = 0; order < (scenario == 0 ? 2 : 1); order++)  // (door first and last for the column only: the pieces are the same for the others)
+          for (const Var &v : vars) {
+            Editor ed;
+            T499Rig r = t499_rig(ed, v.style, method, 0.02f);
+            r.door->get<BlockoutPiece>()->open_amount = v.open;
+            /* Door space: x across, y up, z into the room. The Blockout's: y - 1.2. */
+            Vec3 in_strip, beside, far;
+            if (scenario == 0) {  // a column 0.3 m square, 0.35 m from the wall's face, 1 m high; one beside the strip, one beyond the leaf's reach
+              r477_piece(ed, *r.bo, "Column", 0, 0, {0.0f, -0.7f, 0.5f}, {0.3f, 1.0f, 0.3f});
+              r477_piece(ed, *r.bo, "Column beside", 0, 0, {0.8f, -0.7f, 0.5f}, {0.3f, 1.0f, 0.3f});
+              r477_piece(ed, *r.bo, "Column far", 0, 0, {0.0f, -0.7f, 1.2f}, {0.3f, 1.0f, 0.3f});
+              in_strip = {0.0f, 0.5f, 0.5f}, beside = {0.8f, 0.5f, 0.5f}, far = {0.0f, 0.5f, 1.2f};
+            }
+            if (scenario == 1) {  // the floor of a raised room: a slab whose top is 0.3 m above the door's floor line
+              r477_piece(ed, *r.bo, "Raised floor", 0, 0, {0.0f, -1.3f, 1.1f}, {4.0f, 0.8f, 2.0f});
+              in_strip = {0.0f, 0.15f, 0.6f}, beside = {1.0f, 0.15f, 0.6f}, far = {0.0f, 0.15f, 1.6f};
+            }
+            if (scenario == 2) {  // another room's wall, 0.5 m from this one
+              r477_piece(ed, *r.bo, "Other wall", 0, 0, {0.0f, 0.0f, 0.6f}, {4.0f, 2.4f, 0.2f});
+              in_strip = {0.0f, 1.0f, 0.6f}, beside = {1.0f, 1.0f, 0.6f}, far = {0.0f, 1.0f, 0.6f};
+            }
+            if (order == 1) ed.scene().set_parent(r.door, r.bo, -1, false);  // (the door last among the pieces)
+            r495_built(ed);
+            const std::string label = std::string(r498_method_name(method)) + (scenario == 0 ? " column" : scenario == 1 ? " raised floor" : " other wall") + (order ? " (door last) " : " (door first) ") + v.what;
+            const std::string why = t498_verdict(*r.bo);
+            if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+            CHECK(why.empty());
+            const bool a = r498_matter(*r.bo, *r.door, in_strip), b = r498_matter(*r.bo, *r.door, beside), f = scenario == 2 ? true : r498_matter(*r.bo, *r.door, far);
+            std::printf("    %s: in the strip %s, beside it %s, beyond it %s\n", label.c_str(), a ? "kept" : "CUT", b ? "kept" : "CUT", f ? "kept" : "CUT");
+            CHECK(b);  // (a door is one doorway wide: what stands beside the strip is never cut)
+            if (scenario != 2) CHECK(f);  // (and what stands beyond the leaf's reach)
+            const bool swung = (v.style == kDoorSingle || v.style == kDoorDouble) && v.open > 0.0f;
+            if (v.style == kDoorOpeningOnly || (v.style == kDoorSingle && v.open == 0.0f) || v.style == kDoorSliding) CHECK(a);  // (no swing: the old reach of the door's Depth, 0.2 m into the room)
+            /* (A Double's leaves reach only 0.38 m: the probe at 0.5 m is past them, so only a Single is held to cut it.) */
+            if (swung && v.open == 1.0f && scenario == 0 && v.style == kDoorSingle) CHECK(!a);  // (the claim: the width of the doorway cleared as far as the leaf reaches)
+            /* Round 499 review (part 2): the Add variant that would have kept them was measured and dropped (414 problems in 2,000 door arrangements); the strip stays, and the status names what the swing cuts. */
+            const std::vector<std::string> &cuts = r.bo->get<Blockout>()->state.swing_cuts;
+            if (swung) CHECK(r498_class(*r.bo, *r.door, kClassLeaf).faces > 0 && (a || !cuts.empty()));  // (what the leaf does not reach is not cut and not named)
+            else CHECK(cuts.empty());
+          }
+  });
+
+  /* ---- Criterion 3: the drum, measured ---- */
+  test("blockout door styles (499 te): a Revolving door is air at every height of its drum, its ring stands out of each wall face by the ring's thickness, from the floor line to the head, and nothing of it is below the floor line; a smaller drum is a smaller passage", [] {
+    for (int method : r498_methods())
+      for (float radius : {1.0f, 0.6f}) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, kDoorRevolving, method, 0.01f);
+        w.door->get<BlockoutPiece>()->drum_radius = radius;
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" drum %.1f", radius);
+        CHECK(r498_judge(*w.bo).empty());
+        size_t air_bad = 0;
+        for (float y : {0.01f, 0.5f, 1.0f, 2.0f, 2.09f})
+          for (Vec3 p : {Vec3(0, y, 0), Vec3(0.6f * radius, y, 0.5f * radius), Vec3(-0.6f * radius, y, -0.5f * radius), Vec3(0.0f, y, 0.9f * radius), Vec3(0.0f, y, -0.9f * radius), Vec3(0.9f * radius, y, 0.0f)})
+            if (r498_matter(*w.bo, *w.door, p)) air_bad++;
+        CHECK(air_bad == 0);
+        if (air_bad) std::printf("    %s: %zu points inside the drum are solid\n", label.c_str(), air_bad);
+        /* The ring along the door's Z just outside the entry (x = 0.5; the entry is the door's 0.9 m wide), y = 1: where the matter starts and ends on each side. Round 499 review: the
+         * line along x = 0 is now the entry - air from one side to the other (the rooms are joined) - so the ring is measured beside it. */
+        float blocked_mid = 0.0f;
+        for (int i = -320; i <= 320; i++) blocked_mid += r498_matter(*w.bo, *w.door, {0.0f, 1.0f, (float)i * 0.005f}) ? 1.0f : 0.0f;
+        CHECK(blocked_mid == 0.0f);
+        const float xs = 0.5f, want_in = std::sqrt(radius * radius - xs * xs), want_out = std::sqrt((radius + 0.2f) * (radius + 0.2f) - xs * xs);
+        float in_f = -1, out_f = -1, in_b = -1, out_b = -1;
+        for (int i = 11; i <= 320; i++) {
+          const float z = (float)i * 0.005f;
+          if (r498_matter(*w.bo, *w.door, {xs, 1.0f, z})) out_f = z, in_f = in_f < 0 ? z : in_f;
+          if (r498_matter(*w.bo, *w.door, {xs, 1.0f, -z})) out_b = z, in_b = in_b < 0 ? z : in_b;
+        }
+        std::printf("    %s: ring in front %.3f..%.3f, behind %.3f..%.3f (the wall's faces at 0.1; expected %.3f..%.3f)\n", label.c_str(), in_f, out_f, in_b, out_b, want_in, want_out);
+        CHECK_NEAR(in_f, want_in, 0.02f);
+        CHECK_NEAR(in_b, want_in, 0.02f);
+        CHECK_NEAR(out_f, want_out, 0.02f);
+        CHECK_NEAR(out_b, want_out, 0.02f);
+        CHECK(out_f > 0.1f + 0.05f && out_b > 0.1f + 0.05f && std::fabs(out_f - out_b) < 0.011f);
+        /* Its height. */
+        float low = 9, high = -9;
+        for (int i = -20; i <= 480; i++) {
+          const float y = (float)i * 0.005f;
+          if (r498_matter(*w.bo, *w.door, {0.5f, y, std::sqrt((radius + 0.1f) * (radius + 0.1f) - 0.25f)})) low = std::min(low, y), high = std::max(high, y);
+        }
+        std::printf("    %s: ring from y %.3f to %.3f\n", label.c_str(), low, high);
+        CHECK(low > -0.011f && low < 0.011f && high > 2.08f && high < 2.12f);
+        /* Nothing below the floor line (the wall's own bottom is the line). */
+        const Mesh *m = r495_mesh(*w.bo);
+        float lowest = 1e9f;
+        for (size_t i = 0; m && i < m->positions.size(); i++) lowest = std::min(lowest, w.door->world_matrix().inverse().point(w.bo->world_matrix().point(m->positions[i])).y);
+        CHECK(lowest > -0.002f);
+      }
+  });
+
+  /* ---- Criterion 1, with a walk through the doorway ---- */
+  test("blockout door styles (499 te): a walk along the door's Z at several heights is stopped by a closed leaf (twice: in and out of it) from the floor line to the head, and passes an open door, a slid leaf and a door with its Leaf off (the Revolving ring's crossings and a Double's slit are printed)", [] {
+    for (int method : r498_methods())
+      for (int style = 1; style < kBlockoutDoorStyles; style++) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, style, method, 0.01f);
+        BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+        const std::string name = t499_name(method, style);
+        const float reach = style == kDoorRevolving ? 1.5f : 1.0f;  // (the ring stands 1.2 m out of the wall's middle)
+        auto walk = [&](float x, float y) { return t499_walk(*w.bo, *w.door, {x, y, -reach}, {x, y, reach}); };
+        const float x = style == kDoorDouble ? 0.2f : 0.0f;
+        for (float y : {0.01f, 0.5f, 1.0f, 1.5f, 2.03f}) {
+          const int hits = walk(x, y);
+          if (style == kDoorRevolving) {
+            if (hits != 0) std::printf("    %s at y %.2f: the walk crosses %d triangles\n", name.c_str(), y, hits);
+            CHECK(hits == 0);  // (round 499 review: the ring has two entries along the door's Z - one walks in, through the drum and out; this printed a closed tube's crossings)
+            continue;
+          }
+          if (hits != 2) std::printf("    %s closed leaf at y %.2f: %d crossings\n", name.c_str(), y, hits);
+          CHECK(hits == 2);
+        }
+        if (style == kDoorDouble) std::printf("    %s: a walk through the middle of the closed leaves (the slit) crosses %d triangles\n", name.c_str(), walk(0.0f, 1.0f));
+        if (style == kDoorRevolving) continue;
+        bp->leaf = false;
+        r495_built(ed);
+        for (float y : {0.01f, 1.0f, 2.03f}) {
+          const int hits = walk(0.0f, y), side = style == kDoorArched && y > 2.0f ? 0 : walk(0.2f, y);  // (an Arched head's corner is wall at 0.2 m, 2.03 m)
+          if (hits != 0 || side != 0) std::printf("    %s leaf off at y %.2f: %d, %d crossings\n", name.c_str(), y, hits, side);
+          CHECK(hits == 0 && side == 0);
+        }
+        bp->leaf = true;
+        if (style == kDoorSingle || style == kDoorDouble || style == kDoorSliding) {
+          bp->open_amount = 1.0f;
+          r495_built(ed);
+          for (float y : {0.01f, 1.0f, 2.03f}) {
+            const int hits = walk(0.0f, y);
+            if (hits != 0) std::printf("    %s open at y %.2f: %d crossings\n", name.c_str(), y, hits);
+            CHECK(hits == 0);
+          }
+          if (style == kDoorSingle) CHECK(t499_walk(*w.bo, *w.door, {-0.39f, 1.0f, -0.3f}, {-0.39f, 1.0f, 1.2f}) >= 2);  // (the swung leaf is in the room: a walk along it crosses it)
+        }
+      }
+  });
+
+  /* ---- Criterion 4, odd amounts ---- */
+  test("blockout door styles (499 te): Open Amount at 1e-6, 0.05, 0.95 and 0.999999 for Single (either hinge), Double and Sliding (either way) is sound on each path, with no unresolved place on the exact path, and a hair off closed is closed and a hair off open is open", [] {
+    struct Run {
+      int style, hinge, slide;
+      const char *what;
+    };
+    const Run runs[] = {{kDoorSingle, 0, 0, "Single, hinged left"}, {kDoorSingle, 1, 0, "Single, hinged right"}, {kDoorDouble, 0, 0, "Double"},
+                        {kDoorSliding, 0, 0, "Sliding, left"}, {kDoorSliding, 0, 1, "Sliding, right"}};
+    for (int method : r498_methods())
+      for (const Run &r : runs) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, r.style, method, 0.01f);
+        BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+        bp->hinge_side = r.hinge, bp->slide_direction = r.slide;
+        const float h = r.hinge == 1 ? -1.0f : 1.0f, s = r.slide == 1 ? -1.0f : 1.0f;  // (round 499 review: Left is +X - on your left when you stand in the room the door opens into, facing it; this had Left as -X)
+        for (float open : {1e-6f, 0.05f, 0.95f, 0.999999f}) {
+          bp->open_amount = open;
+          r495_built(ed);
+          size_t small = 0;
+          const std::string why = r498_judge(*w.bo, &small);
+          const size_t unresolved = w.bo->get<Blockout>()->state.status.unresolved;
+          if (!why.empty() || (method == 1 && unresolved)) std::printf("    %s %s at %g: %s (%zu unresolved, %zu small)\n", r498_method_name(method), r.what, (double)open, why.c_str(), unresolved, small);
+          CHECK(why.empty());
+          if (method == 1) CHECK(unresolved == 0);
+          if (r.style == kDoorSingle) {
+            if (open == 1e-6f) CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}));
+            if (open == 0.999999f) CHECK(r498_matter(*w.bo, *w.door, {h * 0.39f, 1.0f, 0.5f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}));
+          }
+          if (r.style == kDoorSliding) {
+            if (open == 1e-6f) CHECK(r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}));
+            if (open == 0.999999f) CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.12f}) && r498_matter(*w.bo, *w.door, {s * 1.0f, 1.0f, 0.12f}));
+          }
+          if (r.style == kDoorDouble) {
+            if (open == 1e-6f) CHECK(r498_matter(*w.bo, *w.door, {0.2f, 1.0f, 0.0f}));
+            if (open == 0.999999f) CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}) && r498_matter(*w.bo, *w.door, {0.39f, 1.0f, 0.3f}));
+          }
+        }
+      }
+  });
+
+  /* ---- Criterion 5: Inspector, undo, redo ---- */
+  test("blockout door styles (499 te): the Inspector's Style dropdown on a door is one undo step that keeps the shared numbers, undo gives the old style and redo the new one, and a Door-to-Window change undone gives the door and its style back", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single 1.1 2.2");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const uint64_t id = s.door->id;
+    ed.command("blockout set frame 0.07 0.12");
+    ed.command("blockout set open 0.5");
+    ed.command("blockout set hinge right");
+    ed.command("window Inspector");
+    ed.record_buttons_for_test(true);
+    ed.select_for_test(id, false);
+    r477_settle(ed, 3);
+    auto piece = [&]() -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+    const BlockoutPiece before = piece();
+    const size_t depth = ed.undo_depth_for_test();
+    CHECK(r498fix_pick_style(ed, "Double"));
+    r495_built(ed);
+    CHECK(piece().style == kDoorDouble && ed.undo_depth_for_test() == depth + 1);
+    CHECK(piece().width == before.width && piece().head == before.head && piece().frame_width == before.frame_width && piece().frame_depth == before.frame_depth && piece().open_amount == before.open_amount && piece().hinge_side == before.hinge_side);
+    CHECK(r498_judge(*s.bo).empty());
+    ed.command("undo");
+    r495_built(ed);
+    CHECK(piece().style == kDoorSingle && piece().width == before.width && piece().open_amount == 0.5f && piece().hinge_side == 1);
+    CHECK(r498_judge(*s.bo).empty());
+    ed.command("redo");
+    r495_built(ed);
+    CHECK(piece().style == kDoorDouble && piece().open_amount == 0.5f);
+    CHECK(r498_judge(*s.bo).empty());
+    /* Door -> Window (the Opening row sits above Width), then undo. */
+    Recti width, head;
+    CHECK(ed.button_rect_for_test("field:Width", width) && ed.button_rect_for_test("field:Head", head));
+    const size_t steps = ed.undo_depth_for_test();
+    r477_click(ed, width.x + width.w / 2, width.y - (head.y - width.y) + width.h / 2);
+    r477_settle(ed, 2);
+    CHECK(r496_click_key(ed, "menu:Window"));
+    CHECK(piece().opening == 2 && piece().style == kWindowOpeningOnly && ed.undo_depth_for_test() == steps + 1);
+    r495_built(ed);
+    CHECK(r498_judge(*s.bo).empty());
+    ed.command("undo");
+    r495_built(ed);
+    std::printf("    after undoing Door -> Window: opening %d, style %d (a Double door is opening 1, style %d)\n", piece().opening, piece().style, kDoorDouble);
+    CHECK(piece().opening == 1 && piece().style == kDoorDouble);
+    ed.command("redo");
+    r495_built(ed);
+    CHECK(piece().opening == 2 && piece().style == kWindowOpeningOnly);
+    CHECK(r498_judge(*s.bo).empty());
+  });
+
+  test("blockout door styles (499 te): a door and a window selected together with the Inspector's Style changed, or `blockout set style` run, leave every piece's style in its own list and the mesh sound", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    ed.command("blockout add window single");
+    GameObject *win = ed.active_object_for_test();
+    CHECK(win && win->get<BlockoutPiece>() && win->get<BlockoutPiece>()->opening == 2);
+    if (!win) return;
+    const uint64_t wid = win->id, did = s.door->id;
+    ed.command("window Inspector");
+    ed.record_buttons_for_test(true);
+    ed.select_for_test(did, false);
+    ed.select_for_test(wid, true);
+    r477_settle(ed, 3);
+    const bool rows = r496_has(ed, "field:Frame Width");
+    std::printf("    Inspector with a door and a window selected: %s\n", rows ? "the piece rows are shown" : "no piece rows are shown");
+    if (rows) r498fix_pick_style(ed, "Arched");
+    for (const char *word : {"sliding", "revolving", "arched", "grid", "single", "opening"}) {
+      ed.select_for_test(did, false);
+      ed.select_for_test(wid, true);
+      ed.command(std::string("blockout set style ") + word);
+      r495_built(ed);
+      const BlockoutPiece *d = ed.scene().find(did)->get<BlockoutPiece>(), *w = ed.scene().find(wid)->get<BlockoutPiece>();
+      CHECK(d->style >= 0 && d->style < kBlockoutDoorStyles && w->style >= 0 && w->style < kBlockoutWindowStyles && d->opening == 1 && w->opening == 2);
+      const std::string why = r498_judge(*s.bo);
+      if (!why.empty()) std::printf("    after '%s': %s\n", word, why.c_str());
+      CHECK(why.empty());
+    }
+  });
+
+  /* ---- Criterion 7: hostile words ---- */
+  test("blockout door styles (499 te): hostile numbers by the console's words (a door of NaN, infinite, negative, 1e9 and zero size, a frame wider than half the door, a leaf 1e9 thick, an Open Amount of 1e-9) and typed into the Inspector's fields leave finite numbers and a valid mesh or a clean refusal", [] {
+    const char *const lines[] = {"blockout add door single nan 2", "blockout add door single 1 nan", "blockout add door double inf inf", "blockout add door sliding -1 -1", "blockout add door arched 1e9 1e9",
+                                 "blockout add door single 0 0", "blockout add door revolving 1e9 2", "blockout add door revolving 0.001 2", "blockout add door arched 0.1 0.1",
+                                 "blockout set frame nan nan", "blockout set frame -1 5", "blockout set frame 0.6 0.1", "blockout set frame 1e9 1e9", "blockout set leaf on 1e9",
+                                 "blockout set leaf on nan", "blockout set open 1e-9", "blockout set drum 1e9", "blockout set drum 0.0001", "blockout set style revolving", "blockout set style double"};
+    /* Round 499 review: a fresh Editor for every line, so that one bad piece (a door 1e9 wide) cannot make every later line report its own faults. */
+    for (int method : r498_methods()) {
+      size_t bad = 0, nth = 0;
+      for (const char *line : lines) {
+        if (method == 2 && r498_methods().size() > 1 && (nth++ % 3) != 0) continue;  // (with both paths: the grid every third line - the exact path has them all)
+        Editor ed;
+        const R499Scene s = r499_make(ed, "single", method, 0.2f);
+        CHECK(s.door != nullptr);
+        if (!s.door) return;
+        ed.select_for_test(std::string(line).rfind("blockout set", 0) == 0 ? s.door->id : s.room->id, false);
+        ed.command(line);
+        r495_built(ed);
+        bool refused = false;
+        const std::string why = t498_verdict(*s.bo, &refused);
+        bool fine = true;
+        for (GameObject *g : r477_all_pieces(*s.bo)) fine = fine && t499_finite(*g->get<BlockoutPiece>());
+        if (!why.empty() || !fine) bad++, std::printf("    %s '%s': %s\n", r498_method_name(method), line, fine ? why.c_str() : "a number is not finite");
+      }
+      CHECK(bad == 0);
+    }
+  });
+
+  test("blockout door styles (499 te): hostile words typed into the Inspector's own fields (Frame Width, Frame Depth, Leaf Thickness, Open Amount, Drum Radius) leave the door's numbers finite and the mesh valid (a sample)", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single", 2, 0.1f);
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const uint64_t id = s.door->id;
+    ed.command("window Inspector");
+    ed.record_buttons_for_test(true);
+    size_t typed = 0;
+    for (int style : {kDoorSingle, kDoorRevolving}) {
+      ed.scene().find(id)->get<BlockoutPiece>()->style = style;
+      ed.select_for_test(s.room->id, false);
+      ed.select_for_test(id, false);
+      r477_settle(ed, 4);
+      const std::vector<const char *> rows = style == kDoorSingle ? std::vector<const char *>{"field:Frame Width", "field:Frame Depth", "field:Leaf Thickness", "field:Open Amount"} : std::vector<const char *>{"field:Drum Radius"};
+      for (const char *row : rows)
+        for (const char *text : {"nan", "-5", "1e30", "abc", "inf", "0"}) {
+          if (!r479_type(ed, row, text)) {
+            std::printf("    %s is not in the Inspector's view\n", row);
+            break;
+          }
+          typed++;
+          r495_built(ed);
+          const bool fine = t499_finite(*ed.scene().find(id)->get<BlockoutPiece>());
+          const std::string why = t498_verdict(*s.bo);
+          if (!fine || !why.empty()) std::printf("    %s typed '%s': %s\n", row, text, fine ? why.c_str() : "a number is not finite");
+          CHECK(fine && why.empty());
+        }
+    }
+    std::printf("    %zu words typed\n", typed);
+    CHECK(typed > 0);
+  });
+
+  /* ---- Criterion 8: every style saved, opened, exported ---- */
+  test("blockout door styles (499 te): each of the six styles, swung or slid a little, keeps its numbers and its mesh bytes through save and open, and a GLB export has the leaf in the Leaf Material's slot (and none where the style has no leaf)", [] {
+    const std::string leaf_mat = r482_material("R499TeLeaf", Vec3(0.2f, 0.6f, 0.9f));
+    for (int method : r498_methods())
+      for (int style = 0; style < kBlockoutDoorStyles; style++) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, style, method, 0.01f);
+        BlockoutPiece *bp = w.door->get<BlockoutPiece>();
+        bp->open_amount = 0.3f, bp->hinge_side = 1, bp->slide_direction = 1, bp->frame_width = 0.07f;
+        ed.select_for_test(w.bo->id, false);
+        ed.command("blockout set material leaf " + leaf_mat);
+        r495_built(ed);
+        const std::string name = t499_name(method, style);
+        const Mesh before = *r495_mesh(*w.bo);
+        const BlockoutPiece numbers = *bp;
+        const std::map<std::string, size_t> tris = r482_triangles(*w.bo);
+        size_t leaf_tris = 0;
+        for (const auto &t : tris)
+          if (!t.first.empty()) leaf_tris += t.second;
+        const bool has_leaf = style != kDoorOpeningOnly && style != kDoorRevolving;
+        std::printf("    %s: %zu leaf triangles\n", name.c_str(), leaf_tris);
+        if (has_leaf) CHECK(leaf_tris > 0);
+        else CHECK(leaf_tris == 0);
+        const R482Back back = r482_read(r482_export(ed, "glb", "r499te.glb"));
+        size_t got = 0;
+        for (const auto &t : back.triangles)
+          if (t.first.find("R499TeLeaf") != std::string::npos) got += t.second;
+        CHECK(back.ok && got == leaf_tris);
+        const std::string path = te_scene_path(ed, "r499te_style.scene");
+        CHECK(fs::write_file(path, save_scene_text(ed.scene())));
+        ed.command("newscene");
+        CHECK(ed.open_scene_for_test(path));
+        for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+        r495_built(ed);
+        GameObject *bo = r477_find(ed), *door = ed.scene().find_by_name("Door");
+        const BlockoutPiece *lp = door ? door->get<BlockoutPiece>() : nullptr;
+        CHECK(bo && lp && lp->style == style && lp->opening == 1 && lp->open_amount == numbers.open_amount && lp->hinge_side == 1 && lp->slide_direction == 1 && lp->frame_width == numbers.frame_width && lp->drum_radius == numbers.drum_radius);
+        CHECK(bo && r495_mesh(*bo) && r477_same(before, *r495_mesh(*bo)) && blockout_mesh_hash(before) == blockout_mesh_hash(*r495_mesh(*bo)));
+        fs::remove_file(path);
+      }
+  });
+
+  /* ---- Criterion 6: UVs in a scaled Blockout ---- */
+  test("blockout door styles (499 te): the UVs of a Single door's leaf follow the same rule as the wall's faces beside it, in a Blockout of scale 1 and of scale 2 (the ratio of U to X is printed)", [] {
+    for (int method : r498_methods())
+      for (float scale : {1.0f, 2.0f}) {
+        Editor ed;
+        const R499Wall w = r499_wall(ed, kDoorSingle, method);
+        w.bo->set_local_scale(Vec3(scale));
+        ed.select_for_test(w.bo->id, false);
+        ed.command("blockout set texscale 0.5");
+        r495_built(ed);
+        const Mesh *m = r495_mesh(*w.bo);
+        const Blockout *b = w.bo->get<Blockout>();
+        CHECK(m != nullptr && b->state.faces.piece.size() == (m ? m->face_count() : 0) && b->state.status.refusal.empty());
+        if (!m) continue;
+        std::vector<blockout::Piece> pieces;
+        blockout::Settings settings;
+        blockout_snapshot(*w.bo, pieces, settings);
+        double leaf_sum = 0, other_sum = 0;
+        size_t leaf_n = 0, other_n = 0, leaf_off = 0, other_off = 0;
+        std::vector<float> leaf_r, other_r;
+        for (size_t f = 0; f < m->face_count(); f++) {
+          const Vec3 n = m->face_normal(f);
+          if (std::fabs(n.z) < 0.9999f) continue;
+          const blockout::Piece *piece = nullptr;
+          for (const blockout::Piece &p : pieces)
+            if (p.id == b->state.faces.piece[f]) piece = &p;
+          const bool leaf = piece && blockout_face_class(*piece, b->state.faces.side[f]) == kClassLeaf;
+          const uint32_t first = m->face_offsets[f];
+          for (uint32_t i = 0; i < m->face_size(f); i++) {
+            const Vec3 p = m->positions[m->face_verts(f)[i]];
+            if (std::fabs(p.x) < 0.05f) continue;
+            const float ratio = m->uvs[first + i].x / (p.x * (n.z > 0 ? 1.0f : -1.0f));
+            (leaf ? leaf_r : other_r).push_back(ratio);
+          }
+        }
+        for (float r : leaf_r) leaf_sum += r, leaf_n++;
+        for (float r : other_r) other_sum += r, other_n++;
+        const float lm = leaf_n ? (float)(leaf_sum / (double)leaf_n) : 0.0f, om = other_n ? (float)(other_sum / (double)other_n) : 0.0f;
+        for (float r : leaf_r) leaf_off += std::fabs(r - lm) > 1e-3f;
+        for (float r : other_r) other_off += std::fabs(r - om) > 1e-3f;
+        std::printf("    %s scale %.0f: U/X on the leaf %.4f (%zu corners), on the other faces %.4f (%zu corners)\n", r498_method_name(method), (double)scale, (double)lm, leaf_n, (double)om, other_n);
+        CHECK(leaf_n >= 4 && other_n >= 4 && leaf_off == 0 && other_off == 0 && std::fabs(lm - om) < 1e-3f);
+      }
+  });
+}
+// r499te-end
+
+// r499f-begin
+/* ===================================================================== */
+/* Round 499 fix (task 0483): a door or a window is upright when it is added. A room drawn onto a wall or a slope is turned onto its side, and its own up used to be  */
+/* the opening's: the door lay flat. The opening's up is now the Blockout's, whatever the room's turn.                                                              */
+/* ===================================================================== */
+
+namespace {
+
+struct R499fRoom {
+  const char *what;
+  const char *line;
+  Vec3 euler;
+  bool wall;     // a side within 2 degrees of vertical exists: an opening must be made
+  int segments;  // a cylinder's (0: as the command made it)
+};
+
+/* The opening made by `cmd`, or nullptr when it made none (a refusal); the Blockout's children before are the ones to tell it from. */
+GameObject *r499f_added(Editor &ed, GameObject &bo, const char *cmd) {
+  std::vector<const GameObject *> before(bo.children.begin(), bo.children.end());
+  ed.command(cmd);
+  r477_settle(ed, 2);
+  for (GameObject *c : bo.children)
+    if (std::find(before.begin(), before.end(), c) == before.end() && c->get<BlockoutPiece>() && c->get<BlockoutPiece>()->opening) return c;
+  return nullptr;
+}
+
+/* Whether `g` (a child of the Blockout, so its local frame is the Blockout's) stands upright: its Y is the Blockout's up and its Z (the way it faces) is horizontal. */
+bool r499f_upright(const GameObject &g) {
+  const Quat q = g.local().rotation;
+  const Vec3 up = q.rotate({0.0f, 1.0f, 0.0f}), fwd = q.rotate({0.0f, 0.0f, 1.0f});
+  return up.y > 0.9999f && std::fabs(fwd.y) < 1e-3f;
+}
+
+void r499f_remove(Editor &ed, GameObject *g) {
+  ed.scene().destroy(std::vector<GameObject *>{g});
+  r477_settle(ed, 2);
+}
+
+}  // namespace
+
+static void tests_round499_upright() {
+  /* Which rooms have an upright wall: a box turned about one axis keeps four sides, two of them (or, rolled about Z, the caps) vertical; a cylinder on its side has its two end caps
+   * for walls (its facets lean 7.5 degrees or more; a 5-sided one has a vertical facet as well); a room leaning on two axes has none. */
+  const R499fRoom rooms[] = {{"a room turned 0", "blockout add room box 4 3 4", {0, 0, 0}, true, 0},
+                             {"a room turned 30 about Y", "blockout add room box 4 3 4", {0, 30, 0}, true, 0},
+                             {"a room turned 90 about Y", "blockout add room box 4 3 4", {0, 90, 0}, true, 0},
+                             {"a room on its side (90 about X)", "blockout add room box 4 3 4", {90, 0, 0}, true, 0},
+                             {"a room on its side (90 about Z)", "blockout add room box 4 3 4", {0, 0, 90}, true, 0},
+                             {"a room upside down (180 about X)", "blockout add room box 4 3 4", {180, 0, 0}, true, 0},
+                             {"a room leaning 30 about X", "blockout add room box 4 3 4", {30, 0, 0}, true, 0},
+                             {"a room leaning 45 about Z and turned 20", "blockout add room box 4 3 4", {0, 20, 45}, true, 0},
+                             {"a room leaning 30 about X and 30 about Z", "blockout add room box 4 3 4", {30, 0, 30}, false, 0},
+                             {"a cylinder room on its side", "blockout add room cylinder 2 3", {90, 0, 0}, true, 0},
+                             {"a 5-sided cylinder room on its side", "blockout add room cylinder 2 3", {90, 0, 0}, true, 5},
+                             {"a cylinder room", "blockout add room cylinder 2 3", {0, 0, 0}, true, 0}};
+  struct Holder {
+    const char *what;
+    Vec3 euler, scale;
+  };
+  const Holder holders[] = {{"upright Blockout", {0, 0, 0}, {1, 1, 1}}, {"Blockout turned 40", {0, 40, 0}, {1, 1, 1}}, {"Blockout turned and scaled", {0, 40, 0}, {2, 1, 0.5f}}};
+
+  /* With the room selected and the mouse away from the view (the Door and Window buttons, the menu, the console): the first wall, or a refusal - never a door lying down. */
+  for (int opening = 1; opening <= 2; opening++) {
+    const char *word = opening == 1 ? "door" : "window";
+    test((std::string("blockout ") + word + "s added to a selected room stand upright in its first wall, however the room is turned, in an upright, a turned or a scaled Blockout").c_str(), [=] {
+      for (const Holder &h : holders)
+        for (const R499fRoom &r : rooms) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->set_world_position({0.0f, 0.0f, 0.0f});
+          bo->set_local_rotation(Quat::euler(h.euler));
+          bo->set_local_scale(h.scale);
+          GameObject *room = r478_room_by_command(ed, *bo, r.line);
+          CHECK(room != nullptr);
+          if (!room) continue;
+          room->set_local_rotation(Quat::euler(r.euler));
+          if (r.segments) room->get<BlockoutPiece>()->segments = r.segments;
+          r477_settle(ed, 2);
+          ed.select_for_test(room->id, false);
+          const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, hier.x + hier.w / 2, hier.y + hier.h - 10)});
+          ed.step_frame_headless();
+          const size_t mark = r477_mark();
+          GameObject *op = r499f_added(ed, *bo, opening == 1 ? "blockout add door" : "blockout add window");
+          if (!op) {  // (only a room with no upright wall may be refused, and it says so)
+            std::printf("    %s, %s: refused\n", h.what, r.what);
+            CHECK(!r.wall);
+            CHECK(r477_log_since(mark).find("no upright wall") != std::string::npos);
+            continue;
+          }
+          CHECK(r.wall);
+          const Vec3 fwd = op->local().rotation.rotate({0, 0, 1}), up = op->local().rotation.rotate({0, 1, 0});
+          std::printf("    %s, %s: up (%.2f %.2f %.2f) facing (%.2f %.2f %.2f)\n", h.what, r.what, (double)up.x, (double)up.y, (double)up.z, (double)fwd.x, (double)fwd.y, (double)fwd.z);
+          CHECK(r499f_upright(*op));
+          CHECK(op->get<BlockoutPiece>()->opening == opening && op->local().scale == Vec3(1.0f));
+        }
+    });
+
+    /* A sample of the clicks (a third of the 9 spots - a wall, a ceiling, a corner at the ceiling's edge - of every room in every Blockout; the whole 3 x 9 x 9 sweep took
+     * minutes): a wall gets an upright opening, a floor, a ceiling or a leaning face gets the room's most upright wall or a refusal - never a lying opening. */
+    test((std::string("blockout ") + word + "s added with the mouse over the room's faces (walls, floor, ceiling, corners) stand upright in a wall").c_str(), [=] {
+      for (const Holder &h : holders)
+        for (const R499fRoom &r : rooms) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->set_world_position({0.0f, 0.0f, 0.0f});
+          bo->set_local_rotation(Quat::euler(h.euler));
+          bo->set_local_scale(h.scale);
+          GameObject *room = r478_room_by_command(ed, *bo, r.line);
+          if (!room) continue;
+          room->set_local_rotation(Quat::euler(r.euler));
+          if (r.segments) room->get<BlockoutPiece>()->segments = r.segments;
+          r477_settle(ed, 3);
+          const Mat4 rm = blockout_piece_matrix(*room, *bo), world = bo->world_matrix();
+          const Vec3 spots[] = {{-2.2f, 0.3f, 0.4f}, {0.5f, 1.7f, 0.5f}, {-2.2f, 1.6f, -2.1f}};  // (a wall; the ceiling; near a corner and the ceiling's edge)
+          for (const Vec3 &s : spots) {
+            int px = 0, py = 0;
+            if (!ed.project_to_window(world.point(rm.point(s)), px, py)) continue;
+            ed.select_for_test(bo->id, false);
+            ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+            ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+            const bool on_wall = ed.blockout_wall_under_mouse_for_test(*bo);  // (the pick itself says whether the pixel is a room's wall)
+            const size_t mark = r477_mark();
+            GameObject *op = r499f_added(ed, *bo, opening == 1 ? "blockout add door" : "blockout add window");
+            if (!op) {  // (a refusal is for a wall that leans, or a room with no upright wall to fall back on - and it says so)
+              const std::string said = r477_log_since(mark);
+              if (on_wall) CHECK(said.find("leans") != std::string::npos);
+              else CHECK(!r.wall && said.find("no upright wall") != std::string::npos);
+              continue;
+            }
+            CHECK(r.wall);
+            if (!r499f_upright(*op)) std::printf("    LYING: %s, %s, spot (%.1f %.1f %.1f): up (%.2f %.2f %.2f)\n", h.what, r.what, (double)s.x, (double)s.y, (double)s.z,
+                                                 (double)op->local().rotation.rotate({0, 1, 0}).x, (double)op->local().rotation.rotate({0, 1, 0}).y, (double)op->local().rotation.rotate({0, 1, 0}).z);
+            CHECK(r499f_upright(*op));
+            r499f_remove(ed, op);
+          }
+        }
+    });
+  }
+  test("blockout doors and windows added with the mouse over a floor or ceiling go in the room's first wall, upright, and the status says the mouse was not on a wall and where they went; over a wall nothing is said", [] {
+    for (const char *line : {"blockout add door", "blockout add window"}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+      CHECK(room != nullptr);
+      if (!room) return;
+      r477_settle(ed, 3);
+      /* Two pixels of the Scene view found by the wall pick itself (which face the camera sees at a point depends on the view): one where the mouse is on a
+       * room's wall, one over the Blockout where it is not (the roof, a floor, nothing). */
+      int at[2][2] = {{-1, -1}, {-1, -1}};
+      ed.select_for_test(bo->id, false);
+      const Recti view = ed.scene_view_rect();  // (the pixels are the window's: only the Scene view itself counts as pointing at the scene)
+      for (int py = view.y + 20; py < view.bottom() - 20 && (at[0][0] < 0 || at[1][0] < 0); py += 20)
+        for (int px = view.x + 20; px < view.right() - 20 && (at[0][0] < 0 || at[1][0] < 0); px += 20) {
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+          const int k = ed.blockout_wall_under_mouse_for_test(*bo) ? 1 : 0;
+          if (at[k][0] < 0) at[k][0] = px, at[k][1] = py;
+        }
+      CHECK(at[0][0] >= 0 && at[1][0] >= 0);
+      for (int k = 0; k < 2; k++) {
+        if (at[k][0] < 0) continue;
+        const int px = at[k][0], py = at[k][1];
+        ed.select_for_test(bo->id, false);
+        ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+        ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+        const size_t mark = r477_mark();
+        GameObject *op = r499f_added(ed, *bo, line);
+        CHECK(op != nullptr && r499f_upright(*op));
+        const bool said = r477_log_since(mark).find("the mouse is not on a wall") != std::string::npos;
+        if (said != (k == 0)) std::printf("    %s over the %s: said %d\n", line, k == 0 ? "floor" : "wall", (int)said);
+        CHECK(said == (k == 0));
+        if (op) r499f_remove(ed, op);
+      }
+    }
+  });
+
+  /* Where the opening goes, measured on the built mesh: open at the middle of the doorway, solid beside it, the feet on the floor under it. */
+  test("blockout doors and windows: in a turned Blockout, in rooms turned 30 about Y, 90 about Z and 180 about X, the doorway is open through the wall at its middle and solid beside it, and the feet stand within 1 cm of the floor under it", [] {
+    struct Case {
+      Vec3 holder, room;
+    };
+    for (const Case &c : {Case{{0, 0, 0}, {0, 30, 0}}, Case{{0, 40, 0}, {0, 30, 0}}, Case{{0, 40, 0}, {0, 0, 90}}, Case{{0, 0, 0}, {0, 0, 90}}, Case{{0, 40, 0}, {180, 0, 0}}, Case{{0, 40, 0}, {90, 0, 0}}})
+      for (int opening = 1; opening <= 2; opening++) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->set_world_position({0.0f, 0.0f, 0.0f});
+        bo->set_local_rotation(Quat::euler(c.holder));
+        GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+        CHECK(room != nullptr);
+        if (!room) continue;
+        room->set_local_rotation(Quat::euler(c.room));
+        r477_settle(ed, 2);
+        ed.select_for_test(room->id, false);
+        const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+        ed.step_frame_headless({r477_ev(R477ET::MouseMove, hier.x + hier.w / 2, hier.y + hier.h - 10)});
+        ed.step_frame_headless();
+        GameObject *op = r499f_added(ed, *bo, opening == 1 ? "blockout add door" : "blockout add window");
+        CHECK(op != nullptr);
+        if (!op) continue;
+        r477_settle(ed, 3);
+        const BlockoutPiece &bp = *op->get<BlockoutPiece>();
+        const float half = 0.5f * (bp.depth - 0.2f) + 0.05f, mid = bp.sill + 0.5f * (bp.head - bp.sill), beside = 0.5f * bp.width + 0.4f;
+        const int through = t499_walk(*bo, *op, {0.0f, mid, -half}, {0.0f, mid, half}), solid = t499_walk(*bo, *op, {beside, mid, -half}, {beside, mid, half});
+        const Mesh *mesh = r495_mesh(*bo);
+        float floor_y = -1e30f;
+        if (mesh) {
+          const Vec3 fwd = op->local().rotation.rotate({0, 0, 1}), start = op->local().position + fwd * 0.5f + Vec3(0.0f, 1.0f, 0.0f);
+          const Ray down{start, Vec3(0.0f, -1.0f, 0.0f)};
+          const RenderMesh &rm = mesh->render_mesh();
+          float best = 1e30f;
+          for (size_t t = 0; t < rm.tri_count(); t++) {
+            const float d = ray_triangle(down, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+            if (d > 0.0f && d < best) best = d;
+          }
+          floor_y = start.y - best;
+        }
+        const float off = std::fabs(floor_y - op->local().position.y);
+        if (through != 0 || solid < 2 || off > 0.01f) std::printf("    %s, holder (%.0f %.0f %.0f), room (%.0f %.0f %.0f): through %d, beside %d, feet off the floor by %.3f m\n", opening == 1 ? "door" : "window",
+                                                                  (double)c.holder.x, (double)c.holder.y, (double)c.holder.z, (double)c.room.x, (double)c.room.y, (double)c.room.z, through, solid, (double)off);
+        CHECK(through == 0);  // (nothing of the mesh across the doorway: the hole goes through the wall)
+        CHECK(solid >= 2);    // (beside it the wall is there: its two faces)
+        CHECK(off <= 0.01f);
+      }
+  });
+
+  /* A room leaning 30 about X keeps one pair of upright walls but its floor slopes along them: the feet stand on the HIGHER jamb's floor (a small step of wall at the low
+   * one), whether the mouse is on the wall's outer face (the click's normal points out of the room: the floor rays must start on the room's side) or the fallback chose it. */
+  test("blockout doors and windows: in a room leaning 30 about X the feet stand on the higher jamb's floor within 1 cm, with the mouse on the upright wall's OUTER face and through the fallback, and the doorway's middle is air on both faces", [] {
+    for (int opening = 1; opening <= 2; opening++)
+      for (int mode = 0; mode < 2; mode++) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->set_world_position({0.0f, 0.0f, 0.0f});
+        GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+        CHECK(room != nullptr);
+        if (!room) return;
+        room->set_local_rotation(Quat::euler({30, 180, 0}));  // (its -X wall is the world's +X side, which the default camera sees from outside)
+        r477_settle(ed, 3);
+        const Mat4 rm = blockout_piece_matrix(*room, *bo);
+        const char *line = opening == 1 ? "blockout add door" : "blockout add window";
+        if (mode == 0) {
+          int px = 0, py = 0;
+          CHECK(ed.project_to_window(bo->world_matrix().point(rm.point(Vec3(-2.2f, 0.3f, 0.4f))), px, py));
+          ed.select_for_test(bo->id, false);
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+          CHECK(ed.blockout_wall_under_mouse_for_test(*bo));  // (the click is on the wall's outer face)
+        }
+        else {
+          ed.select_for_test(room->id, false);
+          const Recti hier = ed.window_rect_for_test(WindowKind::Hierarchy);
+          ed.step_frame_headless({r477_ev(R477ET::MouseMove, hier.x + hier.w / 2, hier.y + hier.h - 10)});
+          ed.step_frame_headless();
+        }
+        GameObject *op = r499f_added(ed, *bo, line);
+        CHECK(op != nullptr);
+        if (!op) continue;
+        r477_settle(ed, 3);
+        CHECK(r499f_upright(*op));
+        const BlockoutPiece &bp = *op->get<BlockoutPiece>();
+        const Mesh *mesh = r495_mesh(*bo);
+        CHECK(mesh != nullptr);
+        if (!mesh) continue;
+        /* The floor under each jamb, found here on the room's side of the wall from the room's middle height. */
+        const Vec3 fwd = op->local().rotation.rotate({0, 0, 1}), at = op->local().position, centre = rm.point(Vec3(0.0f));
+        const float thick = bp.depth - 0.2f, s = dot(centre - at, fwd) > 0.0f ? 1.0f : -1.0f;
+        const Mat4 om = op->local_matrix();
+        const RenderMesh &mr = mesh->render_mesh();
+        float floors[2] = {-1e30f, -1e30f};
+        for (int k = 0; k < 2; k++) {
+          const Vec3 jamb = om.point(Vec3((k ? -0.5f : 0.5f) * bp.width, 0.0f, s * (0.5f * thick + 0.05f)));
+          const Ray down{Vec3(jamb.x, centre.y, jamb.z), Vec3(0.0f, -1.0f, 0.0f)};
+          float best = 1e30f;
+          for (size_t t = 0; t < mr.tri_count(); t++) {
+            const float d = ray_triangle(down, mr.positions[mr.indices[t * 3]], mr.positions[mr.indices[t * 3 + 1]], mr.positions[mr.indices[t * 3 + 2]]);
+            if (d > 0.0f && d < best) best = d;
+          }
+          floors[k] = centre.y - best;
+        }
+        const float higher = std::max(floors[0], floors[1]), off = std::fabs(higher - at.y);
+        const float half = 0.5f * thick + 0.05f, mid = bp.sill + 0.5f * (bp.head - bp.sill);
+        const int through = t499_walk(*bo, *op, {0.0f, mid, -half}, {0.0f, mid, half});
+        if (off > 0.01f || through != 0) std::printf("    %s, %s: floors %.3f / %.3f, feet %.3f, through %d\n", opening == 1 ? "door" : "window", mode == 0 ? "outer face" : "fallback", (double)floors[0], (double)floors[1], (double)at.y, through);
+        CHECK(std::fabs(floors[0] - floors[1]) > 0.1f);  // (the floor does slope across the doorway: the rule is tested)
+        CHECK(off <= 0.01f);
+        CHECK(through == 0);
+        r499f_remove(ed, op);
+      }
+  });
+
+  test("blockout windows: a Round window with Sill 0.8 and Width 1.2 (Head exactly 2.0) switched to Double keeps its 1.2 m, by the console and by the piece rule; Single to Double still takes 1.5", [] {
+    BlockoutPiece p;
+    p.opening = 2, p.style = kWindowRound, p.width = 1.2f, p.sill = 0.8f, p.head = 2.0f;
+    p.style = kWindowDouble;
+    blockout_piece_edited(p, kWindowRound, 2);
+    CHECK(p.width == 1.2f && p.head == 2.0f);
+    BlockoutPiece q;
+    q.opening = 2, q.style = kWindowSingle, q.width = 1.2f, q.sill = 0.9f, q.head = 2.0f;
+    q.style = kWindowDouble;
+    blockout_piece_edited(q, kWindowSingle, 2);
+    CHECK(q.width == 1.5f);
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window round 1.2 2.0 0.8");
+    GameObject *win = ed.active_object_for_test();
+    const BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->style == kWindowRound && bp->width == 1.2f && bp->head == 2.0f && bp->sill == 0.8f);
+    ed.command("blockout set style double");
+    CHECK(bp && bp->style == kWindowDouble && bp->width == 1.2f);
+  });
+
+  test("blockout doors and windows: the mouse on a wall that leans (a room turned 20 about Z: two sides lean 20 degrees) is refused and the status says how much it leans; a click that lands elsewhere gets an upright opening", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_rotation(Quat::euler({0, 0, 20}));
+    r477_settle(ed, 3);
+    const Mat4 rm = blockout_piece_matrix(*room, *bo), world = bo->world_matrix();
+    int said = 0;
+    for (const Vec3 spot : {Vec3(-2.2f, 0.3f, 0.4f), Vec3(2.2f, 0.3f, 0.4f)}) {
+      int px = 0, py = 0;
+      if (!ed.project_to_window(world.point(rm.point(spot)), px, py)) continue;
+      ed.select_for_test(bo->id, false);
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+      const size_t mark = r477_mark();
+      GameObject *op = r499f_added(ed, *bo, "blockout add door");
+      const bool lean = r477_log_since(mark).find("leans 20 degrees") != std::string::npos;
+      said += lean;
+      CHECK(lean == (op == nullptr));  // (a refusal says why; whatever was made is upright)
+      if (op) {
+        CHECK(r499f_upright(*op));
+        r499f_remove(ed, op);
+      }
+    }
+    CHECK(said >= 1);
+  });
+
+  test("blockout doors and windows: a room flattened to nothing in an axis refuses a door and a window with a status line and makes nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *room = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_scale({1.0f, 0.0f, 1.0f});
+    r477_settle(ed, 2);
+    ed.select_for_test(room->id, false);
+    for (const char *line : {"blockout add door", "blockout add window"}) {
+      const size_t mark = r477_mark();
+      CHECK(r499f_added(ed, *bo, line) == nullptr);
+      CHECK(!r477_log_since(mark).empty());
+    }
+  });
+}
+
+/* The size a style is a preset of: a new Double door is 1.8 m wide (two 0.9 m leaves) against a Single's 0.9; a typed size wins; switching takes the preset only over the old one. */
+static void tests_round499_presets() {
+  test("blockout door styles: a new Double door is twice a Single's width (1.8 m against 0.9) by the Door button, the GameObject menu and the console; a size typed in the console wins", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    r496_panel(ed);
+    float widths[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:door_style", k == 0 ? "Single" : "Double"));
+      CHECK(r496_click_key(ed, "Door"));
+      const BlockoutPiece *bp = r477_active_piece(ed);
+      CHECK(bp && bp->opening == 1 && bp->style == (k == 0 ? kDoorSingle : kDoorDouble));
+      if (bp) widths[k] = bp->width;
+      CHECK(bp && bp->head == 2.1f);
+    }
+    CHECK(widths[0] == 0.9f && widths[1] == 1.8f);
+    ed.select_for_test(s.room->id, false);
+    r477_settle(ed, 2);
+    CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "menu:Door"}));
+    const BlockoutPiece *menu = r477_active_piece(ed);
+    CHECK(menu && menu->style == kDoorDouble && menu->width == 1.8f);
+    for (const char *word : {"single", "sliding", "arched"}) {
+      ed.select_for_test(s.room->id, false);
+      ed.command(std::string("blockout add door ") + word);
+      const BlockoutPiece *p = r477_active_piece(ed);
+      CHECK(p && p->width == 0.9f && p->head == 2.1f);
+    }
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door revolving");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.2f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door double");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.8f && r477_active_piece(ed)->head == 2.1f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door double 1.4 2.2");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.4f && r477_active_piece(ed)->head == 2.2f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add door double 0.9 2.1");  // (a size that is another style's preset is still the typed one)
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 0.9f);
+  });
+
+  test("blockout door styles: switching a default Single to Double (the Inspector's row, `blockout set style`, F9) makes it 1.8 m wide about the same centre, and back; a typed width stays; one undo step each", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const Vec3 at = s.door->local().position;
+    const size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout set style double");
+    const BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+    CHECK(bp->style == kDoorDouble && bp->width == 1.8f && bp->head == 2.1f && s.door->local().position == at);
+    r477_settle(ed, 2);  // (the undo step is recorded at the end of the frame)
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    ed.command("blockout set style single");
+    CHECK(bp->style == kDoorSingle && bp->width == 0.9f);
+    ed.command("blockout set style revolving");
+    CHECK(bp->style == kDoorRevolving && bp->width == 1.2f);
+    ed.command("blockout set style opening");
+    CHECK(bp->style == kDoorOpeningOnly && bp->width == 0.9f);
+    /* A width of the user's own is theirs. */
+    s.door->get<BlockoutPiece>()->width = 1.1f;
+    ed.command("blockout set style double");
+    CHECK(bp->style == kDoorDouble && bp->width == 1.1f);
+    s.door->get<BlockoutPiece>()->head = 2.4f;
+    s.door->get<BlockoutPiece>()->width = 1.8f;
+    ed.command("blockout set style single");  // (a typed head keeps the pair: the size is no longer the old style's preset)
+    CHECK(bp->width == 1.8f && bp->head == 2.4f);
+    /* The Inspector's own edit path (round 499's rule for any edit of Style). */
+    BlockoutPiece p;
+    p.opening = 1, p.style = kDoorSingle, p.width = 0.9f, p.head = 2.1f;
+    p.style = kDoorDouble;
+    blockout_piece_edited(p, kDoorSingle, 1);
+    CHECK(p.width == 1.8f);
+    p.width = 1.0f, p.style = kDoorSliding;
+    blockout_piece_edited(p, kDoorDouble, 1);
+    CHECK(p.width == 1.0f);
+  });
+
+  test("blockout door styles: F9 right after a Single door is made - the Style row set to Double - makes it 1.8 m wide", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "single");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    r477_settle(ed, 2);
+    CHECK(r496_pick_combo(ed, "adjust:Style", "Double"));
+    r495_built(ed);
+    const BlockoutPiece *bp = s.door->get<BlockoutPiece>();
+    CHECK(bp && bp->style == kDoorDouble && bp->width == 1.8f);
+  });
+
+  test("blockout window styles: a new Double window is wider than a Single one (1.5 m against 1.2) by the Window button and the console; a typed size wins; switching takes the preset only over the old one", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "");
+    CHECK(s.room != nullptr);
+    if (!s.room) return;
+    r496_panel(ed);
+    float widths[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+      ed.select_for_test(s.room->id, false);
+      r477_settle(ed, 2);
+      CHECK(r496_pick_combo(ed, "tools:window_style", k == 0 ? "Single" : "Double"));
+      CHECK(r496_click_key(ed, "Window"));
+      const BlockoutPiece *bp = r477_active_piece(ed);
+      CHECK(bp && bp->opening == 2);
+      if (bp) widths[k] = bp->width;
+    }
+    CHECK(widths[0] == 1.2f && widths[1] == 1.5f && widths[1] > widths[0]);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window double");
+    GameObject *win = ed.active_object_for_test();
+    const BlockoutPiece *bp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->width == 1.5f && bp->head == 2.0f && bp->sill == 0.9f);
+    if (!bp) return;
+    ed.command("blockout set style single");
+    CHECK(bp->width == 1.2f);
+    ed.command("blockout set style double");
+    CHECK(bp->width == 1.5f);
+    win->get<BlockoutPiece>()->width = 1.0f;
+    ed.command("blockout set style grid");
+    CHECK(bp->width == 1.0f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window double 1.2 1.6 0.8");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->width == 1.2f);
+    ed.select_for_test(s.room->id, false);
+    ed.command("blockout add window round");  // (a circle: Head = Sill + Width, as before)
+    const BlockoutPiece *round = r477_active_piece(ed);
+    CHECK(round && round->width == 1.2f && std::fabs(round->head - (round->sill + round->width)) < 1e-5f);
+  });
+
+  test("blockout door styles: a scene saved with a Double door 0.9 m wide (before the presets) loads to the same door and the same mesh - a load changes no number", [] {
+    Editor ed;
+    const R499Scene s = r499_make(ed, "double 0.9 2.1");
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const Mesh before = *r495_mesh(*s.bo);
+    const std::string path = te_scene_path(ed, "r499_old_double.scene");
+    CHECK(fs::write_file(path, save_scene_text(ed.scene())));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *bo = r477_find(ed);
+    GameObject *door = ed.scene().find_by_name("Door");
+    const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(bo && bp && bp->style == kDoorDouble && bp->width == 0.9f && bp->head == 2.1f && bp->hinge_side == 0);
+    CHECK(bo && r495_mesh(*bo) && r477_same(before, *r495_mesh(*bo)));
+    fs::remove_file(path);
+  });
+}
+
+/* The Door and Window buttons, the menu and the console put an opening upright even in a room drawn onto a slope or a wall. */
+static void tests_round499_upright_console() {
+  test("blockout doors and windows: `create Blockout Piece: Door|Window` and the GameObject menu on a room lying on its side stand upright or are refused with a status line", [] {
+    for (const char *kind : {"Door", "Window"})
+      for (const Vec3 turn : {Vec3(0, 0, 90), Vec3(90, 0, 0), Vec3(0, 0, 45), Vec3(0, 30, 0)}) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        GameObject *room = r478_room_by_command(ed, *bo);
+        if (!room) continue;
+        room->set_local_rotation(Quat::euler(turn));
+        r477_settle(ed, 2);
+        ed.select_for_test(room->id, false);
+        const size_t mark = r477_mark();
+        GameObject *op = r499f_added(ed, *bo, (std::string("create Blockout Piece: ") + kind).c_str());
+        if (op) CHECK(r499f_upright(*op));
+        else CHECK(r477_log_since(mark).find("upright wall") != std::string::npos);  // (nothing made: the status line says why)
+        if (turn.x == 0 && turn.z == 0) CHECK(op != nullptr);  // (a room that only turns about Y always has a wall)
+      }
+  });
+}
+// r499f-end
+
+/* ===================================================================== */
+/* Round 500 (task 0484): architectural pieces                            */
+/* ===================================================================== */
+
+namespace {
+
+struct R500Scene {
+  GameObject *bo = nullptr, *piece = nullptr;
+};
+
+/* An empty Blockout and `blockout add <words>` into it by the console (method 0 Auto, 1 Exact, 2 Field; a cell above 0 is the Field Cell). */
+R500Scene r500_make(Editor &ed, const std::string &words, int method = 0, float cell = 0.0f, int width = 900, int height = 600) {
+  ed.init_headless(width, height);
+  r477_empty_scene(ed);
+  R500Scene s;
+  s.bo = r477_blockout(ed);
+  s.bo->set_world_position({0.0f, 0.0f, 0.0f});
+  Blockout *b = s.bo->get<Blockout>();
+  b->method = method;
+  if (cell > 0.0f) b->cell = cell;
+  ed.select_for_test(s.bo->id, false);
+  ed.command("blockout add " + words);
+  s.piece = ed.active_object_for_test();
+  if (s.piece) s.piece->set_local_position({0.0f, 0.0f, 0.0f});  // (a new piece stands where the camera looks: the numbers are measured from the Blockout's origin)
+  r495_built(ed);
+  return s;
+}
+
+/* The positions of a mesh's corners. */
+const std::vector<Vec3> &r500_pts(const GameObject &bo) {
+  static const std::vector<Vec3> none;
+  const Mesh *m = r495_mesh(bo);
+  return m ? m->positions : none;
+}
+
+/* How many groups of values there are when two values within `gap` are one group (posts, columns: each a cluster of corners). */
+size_t r500_clusters(std::vector<float> v, float gap) {
+  std::sort(v.begin(), v.end());
+  size_t n = v.empty() ? 0 : 1;
+  for (size_t i = 1; i < v.size(); i++) n += v[i] - v[i - 1] > gap;
+  return n;
+}
+
+/* The grid path puts a corner within about a cell of where the numbers say; the exact path to rounding. */
+float r500_tol(int method) { return method == 2 ? 0.03f : 2e-3f; }
+
+float r500_top(const GameObject &bo) {
+  float y = -1e30f;
+  for (const Vec3 &p : r500_pts(bo)) y = std::max(y, p.y);
+  return y;
+}
+
+/* The words of each kind as `blockout add` says them, and the kind. */
+struct R500Kind {
+  const char *words;
+  int preset;
+};
+const R500Kind kR500Kinds[] = {{"column", kPresetColumn},   {"pilaster", kPresetPilaster}, {"beam", kPresetBeam},          {"railing", kPresetRailing}, {"roof", kPresetRoof},
+                               {"stairs l", kPresetStairsL}, {"stairs u", kPresetStairsU},   {"stairs spiral", kPresetSpiral}, {"arcade", kPresetArcade}};
+
+}  // namespace
+
+static void tests_round500_kinds() {
+  /* ---- Criterion 1: each kind is one piece, sound on each path, alone and in a room ---- */
+  test("architectural pieces (500): each of the nine kinds made by the console is ONE piece - one object with no children, no object per solid - and its result is closed, valid, outward, with no faces on top of each other, on each path, alone and standing in a room", [] {
+    for (int method : r498_methods())
+      for (const R500Kind &k : kR500Kinds)
+        for (const bool in_room : {false, true}) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->get<Blockout>()->method = method;
+          bo->get<Blockout>()->cell = 0.02f;
+          ed.select_for_test(bo->id, false);
+          if (in_room) r478_room_by_command(ed, *bo);
+          const size_t before = r477_all_pieces(*bo).size();
+          ed.command(std::string("blockout add ") + k.words);
+          r495_built(ed);
+          GameObject *g = ed.active_object_for_test();
+          const BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+          const std::string label = std::string(r498_method_name(method)) + " " + k.words + (in_room ? " in a room" : " alone");
+          CHECK(bp && bp->preset == k.preset && bp->opening == 0 && !bp->is_room() && g->children.empty());
+          CHECK(r477_all_pieces(*bo).size() == before + 1);
+          size_t small = 0;
+          const std::string why = r498_judge(*bo, &small);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          const BlockoutStatus &st = bo->get<Blockout>()->state.status;
+          CHECK(st.skipped.empty() && st.refusal.empty());
+          std::printf("    %s: %zu faces, small faces on top of others %zu, %zu unresolved\n", label.c_str(), r495_mesh(*bo)->face_count(), small, st.unresolved);
+          size_t named = 0;
+          for (uint64_t id : bo->get<Blockout>()->state.faces.piece) named += g && blockout_piece_owner(id) == g->id;
+          CHECK(named > 0);  // (the faces name the made pieces; the owner is the piece the user means)
+        }
+  });
+}
+
+static void tests_round500_numbers() {
+  /* ---- Criterion 2: the numbers do what they say, measured on the mesh ---- */
+  test("architectural pieces (500): a column's Taper, Base Height and Capital Height, a railing's six posts on 5 m at 1 m, an arcade's five columns, a gable's ridge from its pitch - measured on the mesh, on each path", [] {
+    for (int method : r498_methods()) {
+      const float tol = r500_tol(method);
+      {  // a column: radius 0.25, 3 m, taper 0.6, plinth 0.3 high and 0.8 wide, capital 0.25 high and 0.7 wide
+        Editor ed;
+        const R500Scene s = r500_make(ed, "column 0.25 3", method, 0.01f);
+        for (const char *line : {"blockout set taper 0.6", "blockout set baseheight 0.3", "blockout set capitalheight 0.25", "blockout set basewidth 0.8", "blockout set capitalwidth 0.7"}) ed.command(line);
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, tol);
+        auto shaft_radius = [&](float y) {
+          float r = 0.0f;
+          for (const Vec3 &p : r500_pts(*s.bo))
+            if (std::fabs(p.y - y) < tol && std::hypot(p.x, p.z) < 0.3f) r = std::max(r, std::hypot(p.x, p.z));
+          return r;
+        };
+        const float bottom = shaft_radius(0.3f), top = shaft_radius(2.75f);
+        std::printf("    %s column: shaft radius %.4f at the plinth, %.4f under the capital (taper %.3f)\n", r498_method_name(method), bottom, top, bottom > 0.0f ? top / bottom : 0.0f);
+        CHECK_NEAR(bottom, 0.25f, tol);
+        CHECK_NEAR(top, 0.15f, tol);
+        float plinth = 0.0f, capital = 1e30f;
+        for (const Vec3 &p : r500_pts(*s.bo)) {
+          if (std::fabs(std::fabs(p.x) - 0.4f) < tol && p.y < 1.0f) plinth = std::max(plinth, p.y);
+          if (std::fabs(std::fabs(p.x) - 0.35f) < tol && p.y > 2.0f) capital = std::min(capital, p.y);
+        }
+        CHECK_NEAR(plinth, 0.3f, tol);
+        CHECK_NEAR(capital, 2.75f, tol);
+      }
+      {  // a railing: 5 m at 1 m is 6 posts; at 0.5 m it is 11
+        Editor ed;
+        const R500Scene s = r500_make(ed, "railing 5 1", method, 0.01f);
+        auto posts = [&] {
+          std::vector<float> xs;
+          for (const Vec3 &p : r500_pts(*s.bo))
+            if (std::fabs(p.y) < tol) xs.push_back(p.x);
+          return r500_clusters(xs, 0.2f);
+        };
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK(posts() == 6);
+        ed.command("blockout set spacing 0.5");
+        r495_built(ed);
+        CHECK(posts() == 11);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (1.0f)) > (tol)) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(1.0f), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, 1.0f, tol); }
+      }
+      {  // an arcade of 4 has 5 columns
+        Editor ed;
+        const R500Scene s = r500_make(ed, "arcade 4 2.5 3", method, 0.02f);
+        std::vector<float> xs;
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y) < tol) xs.push_back(p.x);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK(r500_clusters(xs, 0.5f) == 5);
+        ed.command("blockout set count 7");
+        r495_built(ed);
+        xs.clear();
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y) < tol) xs.push_back(p.x);
+        CHECK(r500_clusters(xs, 0.5f) == 8);
+      }
+      {  // a gable roof: the ridge is the half span (with the overhang) times the tangent of the pitch, and Ridge Height sets the pitch back
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 35", method, 0.02f);
+        const BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+        const float want = (2.0f + 0.3f) * std::tan(35.0f * 3.14159265f / 180.0f);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(blockout_roof_ridge(*bp), want, 1e-4f);
+        CHECK_NEAR(r500_top(*s.bo), want, tol);
+        ed.command("blockout set pitch 20");
+        r495_built(ed);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (2.3f * std::tan(20.0f * 3.14159265f / 180.0f))) > (tol)) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(2.3f * std::tan(20.0f * 3.14159265f / 180.0f)), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, 2.3f * std::tan(20.0f * 3.14159265f / 180.0f), tol); }
+        ed.command("blockout set ridge 1.0");
+        r495_built(ed);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (1.0f)) > (tol)) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(1.0f), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, 1.0f, tol); }
+        CHECK_NEAR(bp->pitch, std::atan(1.0f / 2.3f) * 180.0f / 3.14159265f, 1e-3f);
+      }
+    }
+  });
+
+  test("architectural pieces (500): a hip roof over an L-shaped outline closes - sound on each path, with its top faces in the Roof class - and a hip over a rectangle, a gable and a shed rise to the height their pitch says", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+      ed.command("blockout set roofstyle hip");
+      ed.command("blockout outline -3 -3 3 -3 3 0 0 0 0 3 -3 3");
+      r495_built(ed);
+      const std::string why = r498_judge(*s.bo);
+      if (!why.empty()) std::printf("    %s hip over an L: %s\n", r498_method_name(method), why.c_str());
+      CHECK(why.empty());
+      CHECK(s.bo->get<Blockout>()->state.status.skipped.empty() && s.bo->get<Blockout>()->state.status.refusal.empty());
+      const R498Class roof = r498_class(*s.bo, *s.piece, kClassRoof);
+      CHECK(roof.faces >= 4);
+      /* Every Roof face looks up, and every face that looks up is a Roof face. */
+      const Mesh &m = *r495_mesh(*s.bo);
+      const Blockout *b = s.bo->get<Blockout>();
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      blockout_snapshot(*s.bo, pieces, settings);
+      size_t up = 0, wrong = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        double nx = 0, ny = 0, nz = 0;
+        const uint32_t *fv = m.face_verts(f);
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          const Vec3 p = m.positions[fv[i]], q = m.positions[fv[(i + 1) % m.face_size(f)]];
+          nx += (double)(p.y - q.y) * (p.z + q.z), ny += (double)(p.z - q.z) * (p.x + q.x), nz += (double)(p.x - q.x) * (p.y + q.y);
+        }
+        const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!(len > 0.0)) continue;
+        const bool looks_up = ny / len > 0.05;
+        const blockout::Piece *piece = nullptr;
+        for (const blockout::Piece &p : pieces)
+          if (p.id == b->state.faces.piece[f]) piece = &p;
+        const bool is_roof = piece && blockout_face_class(*piece, b->state.faces.side[f]) == kClassRoof;
+        up += looks_up;
+        wrong += looks_up != is_roof;
+      }
+      CHECK(up > 0 && wrong == 0);
+    }
+    for (int method : r498_methods())
+      for (int style : {kRoofGable, kRoofHip, kRoofShed}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 40", method, 0.02f);
+        s.piece->get<BlockoutPiece>()->roof_style = style;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = style == kRoofShed ? 4.6f * std::tan(40.0f * 3.14159265f / 180.0f) : 2.3f * std::tan(40.0f * 3.14159265f / 180.0f);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (want)) > (r500_tol(method))) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(want), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, want, r500_tol(method)); }
+      }
+  });
+
+  test("architectural pieces (500): L and U stairs reach their Total Height at the last step, a spiral turns by its Turn - either way round - and a roof with a Thickness is a sheet, not a solid (less volume), on each path", [] {
+    for (int method : r498_methods()) {
+      const float tol = r500_tol(method);
+      for (const char *words : {"stairs l 1 3 2 8", "stairs u 1 3 2 8", "stairs l 1.2 2.4 1.5 6"}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, words, method, 0.02f);
+        const float height = s.piece->get<BlockoutPiece>()->total_height;
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), height, tol);
+        /* The landing's level is half way: the first flight's last tread is at half the height. */
+        bool half = false;
+        for (const Vec3 &p : r500_pts(*s.bo)) half = half || std::fabs(p.y - 0.5f * height) < tol;
+        CHECK(half);
+      }
+      for (const float turn : {270.0f, -180.0f, 90.0f}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "stairs spiral 1 0.1 3 16", method, 0.02f);
+        s.piece->get<BlockoutPiece>()->turn = turn;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, tol);
+        /* The last step's outer corners, at the top: the later one lies at the angle of Turn. */
+        float best = 1e30f;
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y - 3.0f) < tol && std::hypot(p.x, p.z) > 0.6f) {
+            float ang = std::atan2(p.z, p.x) * 180.0f / 3.14159265f - turn;
+            while (ang > 180.0f) ang -= 360.0f;
+            while (ang < -180.0f) ang += 360.0f;
+            best = std::min(best, std::fabs(ang));
+          }
+        std::printf("    %s spiral Turn %g: the last step's corner is %.2f degrees from it\n", r498_method_name(method), turn, best);
+        CHECK(best < (method == 2 ? 4.0f : 0.5f));
+      }
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+        const double solid = r476_volume(*r495_mesh(*s.bo));
+        s.piece->get<BlockoutPiece>()->thickness = 0.1f;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const double sheet = r476_volume(*r495_mesh(*s.bo));
+        std::printf("    %s roof: solid %.3f m3, a 0.1 m sheet %.3f m3\n", r498_method_name(method), solid, sheet);
+        CHECK(sheet > 0.0 && sheet < 0.5 * solid);
+      }
+    }
+  });
+}
+
+static void tests_round500_ui() {
+  /* ---- Criterion 1, 3: by the panel with real events, F9, handles, the Inspector ---- */
+  test("architectural pieces (500): the Architecture dropdown and Add button in the Modeling Tools window make each kind - one piece - and GameObject > Blockout > Architecture has an entry for each; real events", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "beam", method, 0.02f);
+      CHECK(s.piece != nullptr);
+      r496_panel(ed);
+      CHECK(r496_has(ed, "tools:architecture") && r496_has(ed, "tools:architecture_add"));
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(s.bo->id, false);
+        r477_settle(ed, 2);
+        const size_t pieces = r477_all_pieces(*s.bo).size();
+        CHECK(r496_pick_combo(ed, "tools:architecture", kBlockoutPresetNames[k.preset]));
+        CHECK(r496_click_key(ed, "tools:architecture_add"));
+        r495_built(ed);
+        const BlockoutPiece *bp = r477_active_piece(ed);
+        CHECK(r477_all_pieces(*s.bo).size() == pieces + 1 && bp && bp->preset == k.preset);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s, panel, %s: %s\n", r498_method_name(method), k.words, why.c_str());
+        CHECK(why.empty());
+      }
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(s.bo->id, false);
+        r477_settle(ed, 2);
+        CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "submenu:Architecture", std::string("menu:") + kBlockoutPresetNames[k.preset]}));
+        const BlockoutPiece *bp = r477_active_piece(ed);
+        CHECK(bp && bp->preset == k.preset);
+      }
+    }
+  });
+
+  test("architectural pieces (500): F9 right after `blockout add` shows a kind's numbers, a typed number re-runs the piece from before in the same undo step, and an undo takes the whole piece back", [] {
+    auto f9 = [](Editor &ed, const char *words) {
+      ed.init_headless(1600, 1000);
+      r477_empty_scene(ed);
+      ed.command("camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.05f;
+      ed.select_for_test(bo->id, false);
+      ed.mark_changed_for_test("test scene");  // (the Blockout is the state an undo goes back to)
+      ed.command(std::string("blockout add ") + words);
+      r477_settle(ed, 3);
+      return bo;
+    };
+    Editor ed;
+    GameObject *bo = f9(ed, "railing 5 1");
+    GameObject *rail = ed.active_object_for_test();
+    BlockoutPiece *bp = rail ? rail->get<BlockoutPiece>() : nullptr;
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "blockout" && ed.obj_last_for_test().n == 7 && bp);
+    if (!bp) return;
+    for (const char *row : {"adjust:Length", "adjust:Rail Height", "adjust:Post Spacing", "adjust:Post Size", "adjust:Rail Size", "adjust:Bottom Rail"}) CHECK(r496_has(ed, row));
+    CHECK(!r496_has(ed, "adjust:Pitch") && !r496_has(ed, "adjust:Taper"));
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r479_type(ed, "adjust:Post Spacing", "0.5"));
+    CHECK_NEAR(bp->post_spacing, 0.5f, 1e-5f);
+    CHECK(r479_type(ed, "adjust:Length", "2"));
+    CHECK_NEAR(bp->length, 2.0f, 1e-5f);
+    CHECK(bp->rail_height == 1.0f && ed.undo_steps_for_test() == steps);  // (the same step, amended each time)
+    r495_built(ed);
+    CHECK(r498_judge(*bo).empty());
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == 0);  // (the scene is restored: `bo` is no longer the object)
+    /* A roof's F9 has the Pitch and no Ridge Height (it is worked out), and a Spiral's has Turn and Quarter Turns. */
+    Editor ed2;
+    f9(ed2, "roof");
+    GameObject *roof = ed2.active_object_for_test();
+    CHECK(roof && ed2.obj_last_valid() && r496_has(ed2, "adjust:Pitch") && r496_has(ed2, "adjust:Roof Style") && !r496_has(ed2, "adjust:Ridge Height"));
+    CHECK(r479_type(ed2, "adjust:Pitch", "45"));
+    CHECK(roof && std::fabs(roof->get<BlockoutPiece>()->pitch - 45.0f) < 1e-4f);
+    Editor ed3;
+    f9(ed3, "stairs spiral");
+    CHECK(ed3.obj_last_valid() && r496_has(ed3, "adjust:Turn") && r496_has(ed3, "adjust:Quarter Turns") && r496_has(ed3, "adjust:Total Height"));
+  });
+
+  test("architectural pieces (500): the handles of a column, a beam and a roof change their main sizes with real mouse events, one undo step each, the mesh staying sound", [] {
+    for (int method : r498_methods())
+      for (const char *words : {"column 0.25 3", "beam 4 0.3 0.3", "roof 6 4 30"}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, words, method, 0.02f);
+        ed.select_for_test(s.piece->id, false);
+        ed.mark_changed_for_test("test scene");
+        Vec3 at = s.piece->world_matrix().point({0.0f, 1.0f, 0.0f});
+        bool framed = false;
+        for (float yaw : {0.0f, 30.0f, 330.0f}) {
+          ed.command(strprintf("camera %g 10 7 %g %g %g", yaw, at.x, at.y, at.z));
+          r477_settle(ed, 3);
+          int x = 0, y = 0;
+          framed = ed.blockout_handle_pixel_for_test("top", x, y);
+          if (framed) break;
+        }
+        CHECK(framed);
+        if (!framed) continue;
+        BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+        const BlockoutPiece before = *bp;
+        const size_t depth = ed.undo_depth_for_test();
+        Vec3 lo, hi;
+        blockout_preset_bounds(before, lo, hi);
+        CHECK(r479_pull(ed, "top", s.piece->world_matrix().point({0.5f * (lo.x + hi.x), hi.y + 0.5f, 0.5f * (lo.z + hi.z)}), platform::MOD_CTRL));
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + " " + words;
+        if (bp->preset == kPresetColumn) CHECK(bp->height > before.height + 0.3f && bp->height < before.height + 0.7f);
+        if (bp->preset == kPresetBeam) CHECK(bp->size.y > before.size.y + 0.3f && bp->size.y < before.size.y + 0.7f);
+        if (bp->preset == kPresetRoof) CHECK(bp->pitch > before.pitch);  // (the top is the ridge: pulling it up steepens the roof)
+        CHECK(ed.undo_depth_for_test() == depth + 1);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s after the handle: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+      }
+  });
+
+  test("architectural pieces (500): the Inspector shows a preset's own rows and the shared ones it reads, no Shape or Opening rows, and a Ridge Height that is worked out; a scene file lists each name once", [] {
+    auto rows = [](int preset) {
+      BlockoutPiece p;
+      blockout_preset_defaults(p, preset);
+      R478Probe probe;
+      p.reflect(probe);
+      std::string out;
+      for (const R478Probe::Seen &s : probe.seen) out += s.name + "|";
+      return out;
+    };
+    auto has = [](const std::string &r, const char *name) { return r.find(std::string("|") + name + "|") != std::string::npos || r.rfind(std::string(name) + "|", 0) == 0; };
+    const std::string column = rows(kPresetColumn), roof = rows(kPresetRoof), railing = rows(kPresetRailing), spiral = rows(kPresetSpiral), arcade = rows(kPresetArcade);
+    CHECK(has(column, "Preset") && has(column, "Radius") && has(column, "Height") && has(column, "Taper") && has(column, "Base Height") && has(column, "Capital Width") && has(column, "Segments"));
+    CHECK(!has(column, "Shape") && !has(column, "Operation") && !has(column, "Opening") && !has(column, "Room") && !has(column, "Pitch") && !has(column, "Blend Radius"));
+    CHECK(has(roof, "Roof Style") && has(roof, "Pitch") && has(roof, "Ridge Height") && has(roof, "Overhang") && has(roof, "Thickness") && has(roof, "Span") && has(roof, "Length") && has(roof, "Roof Material"));
+    CHECK(has(railing, "Post Spacing") && has(railing, "Post Size") && has(railing, "Rail Height") && has(railing, "Rail Size") && has(railing, "Bottom Rail") && !has(railing, "Taper"));
+    CHECK(has(spiral, "Turn") && has(spiral, "Total Height") && has(spiral, "Inner Radius") && has(spiral, "Steps") && !has(spiral, "Roof Material"));
+    CHECK(has(arcade, "Count") && has(arcade, "Column Width") && has(arcade, "Arch Rise") && has(arcade, "Depth") && has(arcade, "Arch Thickness"));
+    CHECK(!has(rows(kPresetNone), "Preset") == false && !has(rows(kPresetNone), "Taper") && !has(rows(kPresetNone), "Roof Material"));
+    struct All : R478Probe {
+      bool all_fields() const override { return true; }
+      bool serializing() const override { return true; }  // (a file: Ridge Height, which is worked out, is not in it)
+    } all;
+    BlockoutPiece p;
+    p.reflect(all);
+    std::set<std::string> names;
+    size_t dup = 0;
+    for (const R478Probe::Seen &s : all.seen) dup += !names.insert(s.name).second;
+    CHECK(dup == 0);
+    for (const char *key : {"Preset", "Square Shaft", "Base Height", "Taper", "Post Spacing", "Roof Style", "Pitch", "Thickness", "Total Height", "Turn", "Count", "Arch Thickness", "Roof Material"}) CHECK(all.find(key));
+    CHECK(all.find("Ridge Height") == nullptr);  // (derived: never in the file)
+    CHECK(kBlockoutClasses == 9 && kClassRoof == 8 && std::string(kBlockoutClassNames[kClassRoof]) == "Roof");
+  });
+}
+
+static void tests_round500_more() {
+  /* ---- Criterion 3, 4: scale, turn, materials ---- */
+  test("architectural pieces (500): scaling a piece scales its sizes and not its counts or angles - a railing twice as long has twice the posts at the same spacing - and Turn 90 turns stairs about their origin, one undo step", [] {
+    BlockoutPiece p;
+    blockout_preset_defaults(p, kPresetRailing);
+    CHECK(blockout_piece_scale(p, Vec3(2.0f, 1.5f, 3.0f)));
+    CHECK_NEAR(p.length, 10.0f, 1e-5f);
+    CHECK_NEAR(p.rail_height, 1.5f, 1e-5f);
+    CHECK_NEAR(p.post_spacing, 2.0f, 1e-6f);  // (a size, so it scales: round 500's fix pass - the scaled railing has the same posts, twice as far apart)
+    BlockoutPiece r;
+    blockout_preset_defaults(r, kPresetRoof);
+    r.pitch = 33.0f;
+    CHECK(blockout_piece_scale(r, Vec3(2.0f, 2.0f, 2.0f)));
+    CHECK(r.length == 12.0f && r.span == 8.0f && r.pitch == 33.0f && r.roof_style == kRoofGable);
+    BlockoutPiece a;
+    blockout_preset_defaults(a, kPresetArcade);
+    CHECK(blockout_piece_scale(a, Vec3(2.0f, 2.0f, 2.0f)));
+    CHECK(a.count == 4 && a.span == 5.0f && a.column_width == 0.8f);
+    BlockoutPiece q = r;
+    CHECK(blockout_piece_scale(q, Vec3(1.0f)));
+    CHECK(std::memcmp(&q.length, &r.length, sizeof(float)) == 0 && std::memcmp(&q.span, &r.span, sizeof(float)) == 0);  // (a scale of 1 changes no bit)
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing 5 1", method, 0.02f);
+      s.bo->set_local_scale(Vec3(2.0f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout applyscale");
+      r495_built(ed);
+      const BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+      CHECK_NEAR(bp->length, 10.0f, 1e-4f);
+      CHECK_NEAR(bp->post_spacing, 2.0f, 1e-6f);
+      std::vector<float> xs;
+      for (const Vec3 &pt : r500_pts(*s.bo))
+        if (std::fabs(pt.y) < r500_tol(method)) xs.push_back(pt.x);
+      CHECK(r500_clusters(xs, 0.2f) == 6);  // (10 m at 2 m: the same 6 posts as 5 m at 1 m, twice as far apart - Post Spacing scales, round 500's fix pass)
+      CHECK(r498_judge(*s.bo).empty());
+      /* Stairs turn a quarter about their origin. */
+      Editor ed2;
+      const R500Scene t = r500_make(ed2, "stairs l 1 3 2 8", method, 0.02f);
+      const BlockoutPiece before = *t.piece->get<BlockoutPiece>();
+      const size_t depth = ed2.undo_depth_for_test();
+      ed2.command("blockout turn 1");
+      r495_built(ed2);
+      const BlockoutPiece *tp = t.piece->get<BlockoutPiece>();
+      CHECK(tp->stair_width == before.stair_width && tp->length == before.length && tp->steps == before.steps);
+      CHECK(ed2.undo_depth_for_test() == depth + 1);
+      CHECK_NEAR(length(t.piece->world_matrix().dir({0, 0, 1}) - Vec3(1, 0, 0)), 0.0f, 1e-4f);  // (its +Z now looks along +X)
+      CHECK(r498_judge(*t.bo).empty());
+    }
+  });
+
+  test("architectural pieces (500): a roof's top faces are the Roof class, everything else Solid - the Blockout's Roof Material and the piece's own override each put a material on the top faces only, and the old classes keep their numbers", [] {
+    Editor ed;
+    const R500Scene s = r500_make(ed, "roof 6 4 30", 2, 0.02f);
+    const BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+    CHECK(bp->has_class(kClassRoof) && bp->has_class(kClassSolid) && !bp->has_class(kClassCut) && !bp->has_class(kClassFloor));
+    const BlockoutPiece column = [] {
+      BlockoutPiece c;
+      blockout_preset_defaults(c, kPresetColumn);
+      return c;
+    }();
+    CHECK(column.has_class(kClassSolid) && !column.has_class(kClassRoof));
+    const R498Class roof = r498_class(*s.bo, *s.piece, kClassRoof), solid = r498_class(*s.bo, *s.piece, kClassSolid);
+    CHECK(roof.faces >= 2 && solid.faces >= 3);
+    const std::string mat = r482_material("R500Roof", Vec3(0.8f, 0.3f, 0.2f)), own = r482_material("R500RoofOwn", Vec3(0.2f, 0.4f, 0.9f));
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout set material roof " + mat);
+    r495_built(ed);
+    CHECK(s.bo->get<Blockout>()->material[kClassRoof] == mat);
+    const Mesh *m = r495_mesh(*s.bo);
+    CHECK(m && m->face_material.size() == m->face_count());
+    std::set<int32_t> slots(m->face_material.begin(), m->face_material.end());
+    CHECK(slots.size() == 2);
+    ed.select_for_test(s.piece->id, false);
+    ed.command("blockout set material roof " + own);
+    r495_built(ed);
+    CHECK(s.piece->get<BlockoutPiece>()->material[kClassRoof] == own);
+    ed.select_for_test(s.piece->id, false);
+    ed.command("blockout set material cut " + own);  // (a roof makes no Cut faces: refused, nothing changes)
+    CHECK(s.piece->get<BlockoutPiece>()->material[kClassCut].empty());
+  });
+
+  /* ---- Criterion 5: hostile numbers ---- */
+  test("architectural pieces (500): 0 or 1,000 posts, a pitch of 0 or 90 degrees, a taper of 0, 500 steps, an arcade of 0, NaN and 1e9 in any number leave a valid mesh or a clean refusal the status names, on each path; counts are held to 256", [] {
+    struct Case {
+      const char *what;
+      int preset;
+      std::function<void(BlockoutPiece &)> set;
+      bool refused;  // the piece is left out and named
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const Case cases[] = {
+        {"railing, spacing 0.0001 (1,000 posts)", kPresetRailing, [](BlockoutPiece &p) { p.post_spacing = 0.0001f; }, false},
+        {"railing, spacing 0", kPresetRailing, [](BlockoutPiece &p) { p.post_spacing = 0.0f; }, false},
+        {"railing, length 0", kPresetRailing, [](BlockoutPiece &p) { p.length = 0.0f; }, false},
+        {"railing, rails thicker than it is high", kPresetRailing, [](BlockoutPiece &p) { p.rail_size = 5.0f; }, false},
+        {"roof, pitch 0 (solid)", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 0.0f; }, true},
+        {"roof, pitch 0 with a thickness", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 0.0f, p.thickness = 0.1f; }, false},
+        {"roof, pitch 90", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 90.0f; }, false},
+        {"roof, hip, pitch 90", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 90.0f, p.roof_style = kRoofHip; }, false},
+        {"roof, a square hip", kPresetRoof, [](BlockoutPiece &p) { p.roof_style = kRoofHip, p.length = 4.0f, p.span = 4.0f; }, false},
+        {"roof, negative pitch and overhang", kPresetRoof, [](BlockoutPiece &p) { p.pitch = -30.0f, p.overhang = -2.0f; }, true},
+        {"column, taper 0", kPresetColumn, [](BlockoutPiece &p) { p.taper = 0.0f; }, false},
+        {"column, taper 1e9", kPresetColumn, [](BlockoutPiece &p) { p.taper = 1e9f; }, false},
+        {"column, base and capital taller than it", kPresetColumn, [](BlockoutPiece &p) { p.base_height = 10.0f, p.capital_height = 10.0f; }, false},
+        {"column, square, 1e9 radius", kPresetColumn, [](BlockoutPiece &p) { p.square = true, p.radius = 1e9f; }, true},
+        {"pilaster, NaN height", kPresetPilaster, [nan](BlockoutPiece &p) { p.height = nan; }, true},
+        {"beam, NaN length", kPresetBeam, [nan](BlockoutPiece &p) { p.size.x = nan; }, true},
+        {"beam, 1e9 width", kPresetBeam, [](BlockoutPiece &p) { p.size.z = 1e9f; }, true},
+        {"stairs l, 500 steps", kPresetStairsL, [](BlockoutPiece &p) { p.steps = 500; }, false},
+        {"stairs u, 0 steps", kPresetStairsU, [](BlockoutPiece &p) { p.steps = 0; }, false},
+        {"stairs u, infinite run", kPresetStairsU, [](BlockoutPiece &p) { p.length = std::numeric_limits<float>::infinity(); }, true},
+        {"spiral, 500 steps", kPresetSpiral, [](BlockoutPiece &p) { p.steps = 500; }, false},
+        {"spiral, turn 1e9", kPresetSpiral, [](BlockoutPiece &p) { p.turn = 1e9f; }, false},
+        {"spiral, inner radius over the radius", kPresetSpiral, [](BlockoutPiece &p) { p.inner_radius = 5.0f; }, false},
+        {"spiral, 1 step, turn 180", kPresetSpiral, [](BlockoutPiece &p) { p.steps = 1, p.turn = 180.0f; }, false},
+        {"arcade, 0 arches", kPresetArcade, [](BlockoutPiece &p) { p.count = 0; }, false},
+        {"arcade, 1,000 arches", kPresetArcade, [](BlockoutPiece &p) { p.count = 1000; }, true},
+        {"arcade, NaN rise", kPresetArcade, [nan](BlockoutPiece &p) { p.arch_rise = nan; }, true},
+    };
+    for (int method : r498_methods())
+      for (const Case &c : cases) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->get<Blockout>()->method = method;
+        bo->get<Blockout>()->cell = 0.05f;
+        GameObject *g = ed.scene().create("Hostile", bo);
+        BlockoutPiece *bp = g->add<BlockoutPiece>();
+        blockout_preset_defaults(*bp, c.preset);
+        c.set(*bp);
+        r495_built(ed);
+        const Blockout *b = bo->get<Blockout>();
+        const Mesh *m = r495_mesh(*bo);
+        const std::string label = std::string(r498_method_name(method)) + " " + c.what;
+        CHECK(m != nullptr);
+        if (!m) continue;
+        bool finite = true;
+        for (const Vec3 &p : m->positions) finite = finite && finite_bits(p.x) && finite_bits(p.y) && finite_bits(p.z);
+        std::vector<blockout::Piece> pieces;
+        blockout::Settings settings;
+        BlockoutSnapshotNotes notes;
+        blockout_snapshot(*bo, pieces, settings, &notes);
+        size_t made = 0;
+        for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
+        const std::string why = m->face_count() ? r498_judge(*bo) : "";
+        const bool named = !notes.refused.empty() && notes.refused[0].first == g->id;
+        if (!finite || !why.empty() || (c.refused && (!named || m->face_count())) || made > 1100) std::printf("    %s: %zu pieces made, refused %d, finite %d: %s\n", label.c_str(), made, (int)named, (int)finite, why.c_str());
+        CHECK(finite && why.empty() && made <= 1100);
+        CHECK(!c.refused || (named && m->face_count() == 0));
+        CHECK(b->state.status.refusal.empty());
+      }
+    BlockoutPiece p;
+    blockout_preset_defaults(p, kPresetArcade);
+    std::vector<float> n{1e9f};
+    blockout_preset_numbers(p, n);
+    CHECK(p.count == kBlockoutPresetMaxCount);
+    BlockoutPiece s;
+    blockout_preset_defaults(s, kPresetStairsL);
+    n = {1.0f, 3.0f, 2.0f, -50.0f};
+    blockout_preset_numbers(s, n);
+    CHECK(s.steps == 1);
+  });
+
+  /* ---- Criterion 6: save and open, Bake / Unbake, export ---- */
+  test("architectural pieces (500): every kind and the Blockout's Roof Material survive save and open with the same mesh, and a scene saved before the round (preset 0) loads as it was - its mesh by hash", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2;
+    bo->get<Blockout>()->cell = 0.05f;
+    ed.select_for_test(bo->id, false);
+    const std::string roof = r482_material("R500Saved", Vec3(0.7f, 0.2f, 0.2f));
+    ed.command("blockout set material roof " + roof);
+    for (const R500Kind &k : kR500Kinds) {
+      ed.select_for_test(bo->id, false);
+      ed.command(std::string("blockout add ") + k.words);
+      GameObject *g = ed.active_object_for_test();
+      if (g) g->set_local_position({(float)k.preset * 8.0f, 0.0f, 0.0f});  // (apart: each kind is its own part)
+    }
+    ed.command("blockout set pitch 33");
+    r495_built(ed);
+    const Mesh before = *r495_mesh(*bo);
+    std::vector<BlockoutPiece> numbers;
+    for (GameObject *g : r477_all_pieces(*bo)) numbers.push_back(*g->get<BlockoutPiece>());
+    const std::string text = save_scene_text(ed.scene());
+    for (const char *key : {"Preset", "Taper", "Post_Spacing", "Roof_Style", "Pitch", "Total_Height", "Turn", "Count", "Roof_Material"}) CHECK(text.find(std::string("  ") + key + " ") != std::string::npos);
+    const std::string path = te_scene_path(ed, "r500_all.scene");
+    CHECK(fs::write_file(path, text));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *back = r477_find(ed);
+    CHECK(back && r495_mesh(*back) && r477_same(before, *r495_mesh(*back)) && r482_scratch_same(*back));
+    std::vector<GameObject *> loaded = back ? r477_all_pieces(*back) : std::vector<GameObject *>{};
+    CHECK(loaded.size() == numbers.size());
+    for (size_t i = 0; i < loaded.size() && i < numbers.size(); i++) {
+      const BlockoutPiece *b = loaded[i]->get<BlockoutPiece>();
+      CHECK(b->preset == numbers[i].preset && b->pitch == numbers[i].pitch && b->length == numbers[i].length && b->count == numbers[i].count && b->turn == numbers[i].turn &&
+            b->taper == numbers[i].taper && b->post_spacing == numbers[i].post_spacing && b->roof_style == numbers[i].roof_style);
+    }
+    CHECK(back && back->get<Blockout>()->material[kClassRoof] == roof);
+    fs::remove_file(path);
+    /* A piece without a preset reads none of the new numbers: the mesh of a box and a room is what it was (the snapshot's pieces carry no points and no generated id). */
+    Editor old;
+    old.init_headless(900, 600);
+    r477_empty_scene(old);
+    GameObject *ob = r477_blockout(old);
+    r477_piece(old, *ob, "Wall", 0, 0, {0, 0, 0}, {2.4f, 2.4f, 0.2f});
+    r495_built(old);
+    BlockoutPiece *wall = old.scene().find_by_name("Wall")->get<BlockoutPiece>();
+    wall->taper = 0.3f, wall->pitch = 70.0f, wall->count = 99, wall->length = 40.0f, wall->post_spacing = 0.01f;  // (preset 0: none of them is read)
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    blockout_snapshot(*ob, pieces, settings);
+    CHECK(pieces.size() == 1 && !blockout_id_generated(pieces[0].id) && pieces[0].points.empty());
+    const Mesh plain = *r495_mesh(*ob);
+    wall->taper = 1.0f, wall->pitch = 30.0f, wall->count = 4, wall->length = 5.0f, wall->post_spacing = 1.0f;
+    r495_built(old);
+    CHECK(r477_same(plain, *r495_mesh(*ob)));
+  });
+
+  test("architectural pieces (500): Bake to Mesh keeps a preset's mesh and numbers under the disabled child, Unbake gives the same mesh and numbers back, and OBJ, FBX and GLB export one mesh with a material of its own for a roof", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+      const std::string mat = r482_material("R500Bake", Vec3(0.3f, 0.7f, 0.4f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout set material roof " + mat);
+      r495_built(ed);
+      const uint64_t bo_id = s.bo->id, piece_id = s.piece->id;
+      const Mesh live = *r495_mesh(*s.bo);
+      const BlockoutPiece numbers = *s.piece->get<BlockoutPiece>();
+      const std::map<std::string, size_t> want = r482_triangles(*s.bo);
+      CHECK(want.size() == 2);
+      for (const char *format : {"fbx", "glb", "obj"}) {
+        const std::string name = std::string("r500_live.") + format;
+        const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
+        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs);
+      }
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<BlockoutBaked>() && !baked->get<Blockout>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(bo_id);
+      GameObject *held = ed.scene().find(piece_id);
+      CHECK(baked && baked->get<Blockout>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      const BlockoutPiece *b = held ? held->get<BlockoutPiece>() : nullptr;
+      CHECK(b && b->preset == numbers.preset && b->pitch == numbers.pitch && b->length == numbers.length && b->span == numbers.span && b->overhang == numbers.overhang);
+      CHECK(baked && baked->get<Blockout>()->material[kClassRoof] == mat);
+    }
+  });
+
+  test("architectural pieces (500): clicking a column's shaft selects the piece - the object - and the faces name made pieces no object has", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "column 0.25 3", method, 0.02f, 1600, 1000);  // (the size the round 479 picking tests use)
+      ed.command("camera 25 20 6 0 1.5 0");  // (as the door's click test aims: the eye, then the point looked at)
+      r477_settle(ed, 3);
+      GameObject *hit = r479p_click(ed, {0.0f, 1.5f, 0.0f});
+      int px = 0, py = 0;
+      const bool projected = ed.project_to_window({0.0f, 1.5f, 0.0f}, px, py);
+      if (hit != s.piece) std::printf("    projected %d at %d,%d, selection %zu, ", (int)projected, px, py, ed.selection_size_for_test());
+      if (hit != s.piece) std::printf("    clicked the column: got '%s'\n", hit ? hit->name.c_str() : "nothing");
+      CHECK(hit == s.piece);
+      const Blockout *b = s.bo->get<Blockout>();
+      size_t made = 0;
+      for (uint64_t id : b->state.faces.piece) made += blockout_id_generated(id) && blockout_piece_owner(id) == s.piece->id;
+      CHECK(made > 4 && ed.scene().find(s.piece->id | kBlockoutGeneratedBit) == nullptr);
+    }
+  });
+
+  test("architectural pieces (500): a Pilaster made in a room stands against the room's first wall - its back on the wall's face, its front out into the room - the console words `blockout set` change a kind's numbers by one undo step, and a bad word or value warns and changes nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2;
+    bo->get<Blockout>()->cell = 0.05f;
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    ed.select_for_test(room->id, false);
+    r477_settle(ed, 2);
+    ed.command("blockout add pilaster 0.2 2.6");
+    r495_built(ed);
+    GameObject *pil = ed.active_object_for_test();
+    CHECK(pil && pil->get<BlockoutPiece>() && pil->get<BlockoutPiece>()->preset == kPresetPilaster);
+    if (!pil) return;
+    /* Its +Z looks into the room (the way the wall's face looks); its back (z = 0) is on a wall of the room. */
+    const Vec3 out = normalize(pil->world_matrix().dir({0, 0, 1})), at = pil->world_matrix().point({0, 0, 0});
+    const Vec3 inside = room->world_matrix().point({0, 0, 0});
+    CHECK(dot(inside - at, out) > 1.0f);  // (the room's middle is in front of it)
+    CHECK(r498_judge(*bo).empty());
+    const size_t depth = ed.undo_depth_for_test();
+    const size_t mark = r477_mark();
+    size_t warnings = 0;
+    for (const char *line : {"blockout set taper", "blockout set taper abc", "blockout set pitch 30", "blockout set shaft round", "blockout set nonsense 3", "blockout set baseheight nan"}) {
+      ed.command(line);
+    }
+    r477_log_since(mark, &warnings);
+    CHECK(warnings >= 4);
+    CHECK(ed.undo_depth_for_test() == depth);
+    ed.command("blockout set taper 0.7");
+    ed.command("blockout set taper 0.7");
+    r477_settle(ed, 2);
+    CHECK_NEAR(pil->get<BlockoutPiece>()->taper, 0.7f, 1e-6f);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    ed.command("blockout set taper 7");
+    CHECK(pil->get<BlockoutPiece>()->taper == 2.0f);  // (held to its range)
+  });
+
+  /* ---- The grid path ---- */
+  test("architectural pieces (500): on the grid a railing's 8 cm posts and 5 cm rails are held at a cell and the status names the Railing and the Field Cell that shows them; the exact path's pieces do not depend on the Field Cell", [] {
+    Editor ed;
+    const R500Scene s = r500_make(ed, "railing 5 1", 2, 0.1f);
+    CHECK(r498_judge(*s.bo).empty());
+    const std::vector<std::string> lines = r498fix_status(ed, *s.bo);
+    std::string note;
+    for (const std::string &l : lines)
+      if (l.find("Railing 'Railing'") != std::string::npos) note = l;
+    std::printf("    %s\n", note.c_str());
+    CHECK(note.find("its posts and rails are finer than Field Cell 0.10 m - held at one cell; lower Field Cell to ") != std::string::npos);
+    const size_t at = note.find("lower Field Cell to ");
+    const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
+    CHECK(advised > 0.0f && advised < 0.1f);
+    s.bo->get<Blockout>()->cell = advised;
+    r495_built(ed);
+    CHECK(!r498fix_has(r498fix_status(ed, *s.bo), "Railing 'Railing'") && r498_judge(*s.bo).empty());
+    for (const R500Kind &k : kR500Kinds) {
+      Editor ex;
+      const R500Scene e = r500_make(ex, k.words, 1, 0.1f);
+      std::vector<blockout::Piece> a, b;
+      blockout::Settings st;
+      blockout_snapshot(*e.bo, a, st);
+      e.bo->get<Blockout>()->cell = 0.02f;
+      blockout_snapshot(*e.bo, b, st);
+      bool same = a.size() == b.size() && a.size() > 0;
+      for (size_t i = 0; same && i < a.size(); i++)
+        same = a[i].id == b[i].id && a[i].shape == b[i].shape && a[i].points.size() == b[i].points.size() &&
+               std::memcmp(a[i].to_blockout.m, b[i].to_blockout.m, sizeof(a[i].to_blockout.m)) == 0 && std::memcmp(&a[i].size, &b[i].size, sizeof(Vec3)) == 0;
+      CHECK(same);
+    }
+  });
+}
+
+static void tests_round500_wire() {
+  test("architectural pieces (500 fix): the wire of a tapered column is its shaft's two rings - 12 corners at the bottom radius and 12 at the top radius - its plinth and its capital, drawn from the kept hull", [] {
+    BlockoutPiece p;
+    blockout_preset_defaults(p, kPresetColumn);
+    p.radius = 0.25f, p.height = 3.0f, p.taper = 0.6f, p.segments = 12;
+    std::vector<Vec3> ends;
+    blockout_piece_wire(p, Mat4::identity(), false, [&](Vec3 a, Vec3 b) { ends.push_back(a), ends.push_back(b); });
+    size_t bottom = 0, top = 0, wrong = 0;
+    std::set<std::pair<int, int>> bottom_at, top_at;
+    /* The shaft runs half way into the plinth and the capital (y 0.1 and 2.9), on the line that is 0.25 at the plinth's top (0.2) and 0.15 under the capital (2.8). */
+    const float r_low = 0.25f * (1.0f + (0.6f - 1.0f) * (0.1f - 0.2f) / 2.6f), r_high = 0.25f * (1.0f + (0.6f - 1.0f) * (2.9f - 0.2f) / 2.6f);
+    for (const Vec3 &e : ends) {
+      const float r = std::hypot(e.x, e.z);
+      if (std::fabs(e.y - 0.1f) < 1e-4f && std::fabs(r - r_low) < 1e-4f) bottom_at.insert({(int)std::lround(e.x * 1000), (int)std::lround(e.z * 1000)});
+      if (std::fabs(e.y - 2.9f) < 1e-4f && std::fabs(r - r_high) < 1e-4f) top_at.insert({(int)std::lround(e.x * 1000), (int)std::lround(e.z * 1000)});
+      wrong += !finite_bits(e.x) || !finite_bits(e.y) || !finite_bits(e.z);
+    }
+    bottom = bottom_at.size(), top = top_at.size();
+    CHECK(bottom == 12 && top == 12 && wrong == 0);
+    CHECK(ends.size() >= 2 * (12 * 3 + 12 + 12));  // (the rings' sides and the shaft's 12 edges, and the two blocks' 12 edges each, at least)
+    /* Drawn again it is the same lines (the kept hull gives the same faces). */
+    std::vector<Vec3> again;
+    blockout_piece_wire(p, Mat4::identity(), false, [&](Vec3 a, Vec3 b) { again.push_back(a), again.push_back(b); });
+    CHECK(again.size() == ends.size() && std::memcmp(again.data(), ends.data(), ends.size() * sizeof(Vec3)) == 0);
+  });
+}
+
+static void tests_round500_labels() {
+  test("architectural pieces (500, HCI): the Architecture row and its Add button in the Modeling Tools window are not clipped at 1366 x 768, at 1024 x 640 and at UI scale 1.5, measured as the HCI sweep measures a label - and the Blockout buttons above are still whole", [] {
+    struct Config {
+      int w, h;
+      float scale;
+    };
+    for (const Config &c : {Config{1366, 768, 1.0f}, Config{1024, 640, 1.0f}, Config{1920, 1080, 1.5f}, Config{1366, 768, 1.5f}}) {
+      Editor ed;
+      ed.init_headless(c.w, c.h);
+      ed.set_ui_scale_for_test(c.scale);
+      r496_panel(ed);
+      const auto &u = ed.ui_for_test();
+      size_t found = 0, clipped = 0;
+      for (const char *label : {"Blockout", "Door", "Window", "Add Box", "Add Cyl", "Add Sph", "Cut Box", "Cut Cyl", "Cut Sph", "Room Box", "Room Cyl", "Add"}) {
+        Recti r;
+        if (!ed.button_rect_for_test(label, r)) continue;
+        found++;
+        const int room = r.w - u.px(8), tw = ed.text_width_for_test(label);
+        if (tw > room) clipped++, std::printf("    %dx%d x%g: '%s' is %d px in %d px\n", c.w, c.h, c.scale, label, tw, room);
+      }
+      CHECK(found == 12 && clipped == 0);
+      /* The dropdown's items are the widest label of the row: its longest name fits the combo (the label "Architecture" fits half the row). */
+      Recti combo;
+      CHECK(ed.button_rect_for_test("tools:architecture", combo) && combo.w > 0);
+      int widest = 0;
+      for (int k = 1; k < kBlockoutPresets; k++) widest = std::max(widest, ed.text_width_for_test(kBlockoutPresetNames[k]));
+      if (widest + u.px(24) > combo.w) std::printf("    %dx%d x%g: the longest name is %d px in a %d px dropdown\n", c.w, c.h, c.scale, widest, combo.w);
+      CHECK(widest + u.px(24) <= combo.w);
+      CHECK(ed.text_width_for_test("Architecture") <= combo.w);
+    }
+  });
+}
+
+static void tests_round500_lesson() {
+  test("learn: \"Architectural pieces\" comes after \"Doors with a style\"; its Try-its, run in order on the selection - twice in a row, from the default scene and beside another Blockout - give no warning and a sound mesh; every question has an answer", [] {
+    int doors = -1, arch = -1;
+    for (int i = 0; i < lesson_count(); i++) {
+      if (std::string(lesson(i).title) == "Doors with a style") doors = i;
+      if (std::string(lesson(i).title) == "Architectural pieces") arch = i;
+    }
+    CHECK(doors >= 0 && arch == doors + 1);
+    if (arch < 0) return;
+    const std::string body = lesson(arch).body;
+    size_t questions = 0, answered = 0, tries = 0;
+    std::vector<std::string> cmds;
+    std::istringstream is(body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++, answered += line.find(" | ") != std::string::npos && line.size() > line.find(" | ") + 20;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      tries++;
+      std::string c = line.substr(6, line.find(" | ") - 6);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      cmds.push_back(c);
+    }
+    CHECK(tries >= 9 && questions >= 3 && answered == questions);
+    for (const char *word : {"Column", "Pilaster", "Beam", "Railing", "Roof", "Stairs L", "Spiral", "Arcade"}) CHECK(body.find(word) != std::string::npos);
+    for (const bool busy : {false, true}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      if (busy) {
+        GameObject *other = r477_blockout(ed, "Other Blockout");
+        other->get<Blockout>()->method = 2;
+        r478_room_by_command(ed, *other);
+        r495_built(ed);
+      }
+      for (int run = 0; run < (busy ? 1 : 2); run++) {
+        const size_t mark = r477_mark();
+        for (const std::string &c : cmds) {
+          ed.command(c);
+          r495_built(ed);
+        }
+        size_t warnings = 0;
+        const std::string log = r477_log_since(mark, &warnings);
+        if (warnings) std::printf("    %s run %d:\n%s", busy ? "beside another Blockout" : "default scene", run + 1, log.c_str());
+        CHECK(warnings == 0);
+        size_t bad = 0, kinds = 0;
+        ed.scene().for_each([&](GameObject &g) {
+          if (const BlockoutPiece *bp = g.get<BlockoutPiece>(); bp && bp->preset) kinds++;
+          if (!g.get<Blockout>() || !r495_mesh(g)) return;
+          const std::string why = r498_judge(g);
+          if (!why.empty()) bad++, std::printf("    %s run %d: %s: %s\n", busy ? "busy" : "default", run + 1, g.name.c_str(), why.c_str());
+        });
+        CHECK(bad == 0 && kinds >= 8);
+      }
+    }
+  });
+}
+
+static void tests_round500() {
+  tests_round500_kinds();
+  tests_round500_numbers();
+  tests_round500_ui();
+  tests_round500_more();
+  tests_round500_labels();
+  tests_round500_wire();
+  tests_round500_lesson();
+}
+
+// r500te-begin
+/* ===================================================================== */
+/* Round 500, the test engineer's (task 0484): the Convex kernel shape measured on its own, then each kind's numbers measured on the mesh   */
+/* (point probes, runs along a line), scale, hostile numbers, export. From the criteria, not from the generator.                             */
+/* ===================================================================== */
+
+namespace {
+
+Piece t500_convex(uint64_t id, std::vector<Vec3> pts, const Mat4 &to = Mat4::identity(), Op op = Op::Add) {
+  Piece p;
+  p.id = id, p.shape = Shape::Convex, p.op = op, p.points = std::move(pts), p.to_blockout = to;
+  return p;
+}
+
+std::vector<Vec3> t500_box_pts(Vec3 lo, Vec3 hi) {
+  std::vector<Vec3> p;
+  for (int i = 0; i < 8; i++) p.push_back(Vec3((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z));
+  return p;
+}
+
+/* Square 2 x 2 at y = 0 under a square 1 x 1 at y = 1: volume 7/3. */
+std::vector<Vec3> t500_frustum_pts() {
+  std::vector<Vec3> p;
+  for (int i = 0; i < 4; i++) p.push_back(Vec3((i & 1) ? 1.0f : -1.0f, 0.0f, (i & 2) ? 1.0f : -1.0f));
+  for (int i = 0; i < 4; i++) p.push_back(Vec3((i & 1) ? 0.5f : -0.5f, 1.0f, (i & 2) ? 0.5f : -0.5f));
+  return p;
+}
+
+/* Two rings of n corners: radius r0 at y = 0 and r1 at y = h. */
+std::vector<Vec3> t500_rings(int n, float r0, float r1, float h) {
+  std::vector<Vec3> p;
+  for (int k = 0; k < 2; k++)
+    for (int i = 0; i < n; i++) {
+      const float a = 6.2831853f * (float)i / (float)n, r = k ? r1 : r0;
+      p.push_back(Vec3(r * std::cos(a), k ? h : 0.0f, r * std::sin(a)));
+    }
+  return p;
+}
+/* Its volume: the frustum of two regular n-gons (the corners are the ring's, so this is exact). */
+double t500_rings_volume(int n, double r0, double r1, double h) {
+  const double s = 0.5 * (double)n * std::sin(6.283185307179586 / (double)n), a0 = s * r0 * r0, a1 = s * r1 * r1;
+  return h / 3.0 * (a0 + a1 + std::sqrt(a0 * a1));
+}
+
+/* n corners spread evenly over a sphere (the golden spiral): every one is a corner of the hull. */
+std::vector<Vec3> t500_sphere_pts(int n, float r) {
+  std::vector<Vec3> p;
+  for (int i = 0; i < n; i++) {
+    const double y = 1.0 - 2.0 * ((double)i + 0.5) / (double)n, rad = std::sqrt(1.0 - y * y), phi = 2.399963229728653 * (double)i;
+    p.push_back(Vec3(r * (float)(rad * std::cos(phi)), r * (float)y, r * (float)(rad * std::sin(phi))));
+  }
+  return p;
+}
+
+/* How far a mesh is from being the convex hull of `pts` placed by `to`: a corner of the mesh that is no point is its distance to the nearest point, and a point outside a face's plane is
+ * its distance to it. (A mesh with both zero is the hull: convex, and made of the points.) */
+double t500_hull_error(const Mesh &m, const std::vector<Vec3> &pts, const Mat4 &to) {
+  std::vector<Vec3> world;
+  for (const Vec3 &p : pts) world.push_back(to.point(p));
+  double worst = 0.0;
+  for (const Vec3 &v : m.positions) {
+    double best = 1e30;
+    for (const Vec3 &p : world) best = std::min(best, (double)length(v - p));
+    worst = std::max(worst, best);
+  }
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const Vec3 n = m.face_normal(f), c = m.face_center(f);
+    for (const Vec3 &p : world) worst = std::max(worst, (double)dot(n, p - c));
+  }
+  return worst;
+}
+
+bool t500_refused(const R476Built &b, uint64_t id) { return b.mesh.face_count() == 0 && r480t_skipped_any(b, id); }
+
+}  // namespace
+
+static void tests_round500_te_kernel() {
+  /* ---- The kernel's new shape, measured against formulas ---- */
+  test("blockout convex (500 te): a tetrahedron, a cube from 8 corners, a frustum, 32-gon prisms and frusta (64 corners) and 64 corners on a sphere are closed valid solids of the formula's volume and ARE the hull of their points, on each path, at the origin, off the grid and turned", [] {
+    struct Solid {
+      const char *name;
+      std::vector<Vec3> pts;
+      double volume;  // -1: no formula (the sphere): bounds
+      int faces, verts;
+      bool curved;
+    };
+    const std::vector<Solid> solids = {
+        {"tetrahedron", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)}, 1.0 / 6.0, 4, 4, false},
+        {"cube from 8 corners", t500_box_pts(Vec3(-0.5f), Vec3(0.5f)), 1.0, 6, 8, false},
+        {"frustum", t500_frustum_pts(), 7.0 / 3.0, 6, 8, false},
+        {"32-gon prism", t500_rings(32, 1.0f, 1.0f, 2.0f), t500_rings_volume(32, 1.0, 1.0, 2.0), 34, 64, true},
+        {"32-gon frustum", t500_rings(32, 1.0f, 0.5f, 1.5f), t500_rings_volume(32, 1.0, 0.5, 1.5), 34, 64, true},
+        {"64 corners on a sphere", t500_sphere_pts(64, 1.0f), -1.0, -1, 64, true},
+    };
+    const Mat4 places[3] = {Mat4::identity(), Mat4::translate(Vec3(0.137f, 0.291f, -0.213f)), Mat4::trs(Vec3(0.137f, 0.291f, -0.213f), Quat::euler(Vec3(20.0f, 30.0f, 40.0f)), Vec3(1.0f))};
+    const char *const place_names[3] = {"at the origin", "off the grid", "turned"};
+    for (Path path : r476_paths())
+      for (const Solid &s : solids)
+        for (int pl = 0; pl < 3; pl++) {
+          const std::vector<Piece> pieces{t500_convex(7, s.pts, places[pl])};
+          const R476Built b = r476_build(pieces, path, 0.05f);
+          const std::string label = std::string(r476_name(path)) + " " + s.name + " " + place_names[pl];
+          CHECK(b.ok);
+          const std::string why = r480t_judge(b);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          const double vol = r476_volume(b.mesh);
+          const double want = s.volume > 0.0 ? s.volume : 4.0 / 3.0 * 3.14159265358979;
+          const double rel = std::fabs(vol - want) / want;
+          const bool exact = path == Path::Crisp, grid = !exact && (s.curved || pl == 2);
+          const double tol = exact ? 1e-4 : grid ? 3e-2 : 1e-3;
+          const double hull = t500_hull_error(b.mesh, s.pts, places[pl]);
+          if ((rel > 1e-5 && s.volume > 0.0) || hull > 1e-4) std::printf("    %s: volume %.6f (formula %.6f, off by %.2e), hull error %.2e m, %zu faces, %zu corners\n", label.c_str(), vol, want, rel, hull, b.mesh.face_count(), b.mesh.vert_count());
+          if (s.volume > 0.0) CHECK(rel < tol);
+          else CHECK(vol > 0.88 * want && vol < want);
+          CHECK(hull < (exact ? 1e-4 : grid ? 0.05 : 2e-3));
+          if (exact || !grid) {
+            if (s.faces > 0) CHECK((int)b.mesh.face_count() == s.faces);
+            CHECK((int)b.mesh.vert_count() == s.verts);
+          }
+          bool named = true;
+          for (size_t f = 0; f < b.faces.piece.size(); f++) named = named && b.faces.piece[f] == 7;
+          CHECK(named && b.faces.piece.size() == b.mesh.face_count());
+        }
+  });
+
+  test("blockout convex (500 te): corners that make no solid - 4 on a plane, a line, one place, fewer than 4, more than 64, NaN or infinite - are left out and named, and the rest of the build is whole; duplicates, interior and edge-middle points change nothing", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    std::vector<Vec3> tetra = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    std::vector<Vec3> tetra_nan = tetra, tetra_inf = tetra, tetra_ninf = tetra, doubled = tetra, near_dup = tetra, big = t500_rings(33, 1.0f, 1.0f, 1.0f), big64 = t500_rings(32, 1.0f, 1.0f, 1.0f);
+    tetra_nan[3].y = nan, tetra_inf[2].x = inf, tetra_ninf[1].z = -inf;
+    for (const Vec3 &p : tetra) doubled.push_back(p);
+    for (size_t i = 0, n = tetra.size(); i < n; i++) near_dup.push_back(tetra[i] + Vec3(1e-7f, -1e-7f, 1e-7f));
+    /* The cube with one kind of extra point at a time: inside, in the middle of edges, in the middle of faces (points that are not corners of the hull). */
+    const std::vector<Vec3> cube8 = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+    std::vector<Vec3> cube_inner = cube8, cube_edges = cube8, cube_face1 = cube8, cube_faces3 = cube8;
+    cube_inner.push_back(Vec3(0.1f, 0.2f, -0.1f));
+    for (Vec3 e : {Vec3(0.0f, 0.5f, 0.5f), Vec3(0.5f, 0.0f, -0.5f), Vec3(-0.5f, -0.5f, 0.0f), Vec3(0.0f, -0.5f, 0.5f)}) cube_edges.push_back(e);
+    cube_face1.push_back(Vec3(0.5f, 0.0f, 0.0f));
+    for (Vec3 e : {Vec3(0.5f, 0.0f, 0.0f), Vec3(0.0f, -0.5f, 0.0f), Vec3(0.0f, 0.0f, -0.5f)}) cube_faces3.push_back(e);
+    struct Case {
+      const char *what;
+      std::vector<Vec3> pts;
+      int expect;  // 0 refused, 1 built, 2 either
+      double volume;
+      int verts;
+      Vec3 twin = Vec3(0.0f), twin_at = Vec3(0.0f);  // a box of this size at this place: the way the kernel treats a plain box of the same size (size 0: none)
+    };
+    const std::vector<Case> cases = {
+        {"the tetrahedron twice over (8 points)", doubled, 1, 1.0 / 6.0, 4},
+        {"the tetrahedron with every corner repeated 1e-7 off", near_dup, 1, 1.0 / 6.0, 4},
+        {"a cube with a point inside it", cube_inner, 1, 1.0, 8},
+        {"a cube with a point in the middle of each of four edges", cube_edges, 1, 1.0, 8},
+        {"a cube with a point in the middle of one face", cube_face1, 1, 1.0, 8},
+        {"a cube with a point in the middle of each of three faces", cube_faces3, 1, 1.0, 8},
+        {"4 points in a plane", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}, 0, 0.0, 0},
+        {"5 points in a plane (a square and its middle)", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1), Vec3(0.5f, 0, 0.5f)}, 0, 0.0, 0},
+        {"5 points in a line", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(2, 0, 0), Vec3(3, 0, 0), Vec3(4, 0, 0)}, 0, 0.0, 0},
+        {"4 equal points", {Vec3(1, 2, 3), Vec3(1, 2, 3), Vec3(1, 2, 3), Vec3(1, 2, 3)}, 0, 0.0, 0},
+        {"3 points", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}, 0, 0.0, 0},
+        {"no points", {}, 0, 0.0, 0},
+        {"65 points", big, 0, 0.0, 0},
+        {"64 points (the most)", big64, 1, t500_rings_volume(32, 1.0, 1.0, 1.0), 64},
+        {"a NaN corner", tetra_nan, 0, 0.0, 0},
+        {"an infinite corner", tetra_inf, 0, 0.0, 0},
+        {"a minus infinite corner", tetra_ninf, 0, 0.0, 0},
+        {"an apex 1e-8 off the plane of a triangle (inside the tolerance)", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0.3f, 0.3f, 1e-8f)}, 2, 0.0, 0},
+        {"an apex 1e-4 off the plane of a triangle (a sliver)", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0.3f, 0.3f, 1e-4f)}, 2, 0.5e-4 / 3.0, 4},
+        {"a needle: one edge 1000 m, 1 cm across", {Vec3(0, 0, 0), Vec3(1000, 0, 0), Vec3(0, 0.01f, 0), Vec3(0, 0, 0.01f)}, 2, 1000.0 * 0.01 * 0.01 / 6.0, 4},
+        {"a 10 x 10 x 0.001 m slab", t500_box_pts(Vec3(-5, 0, -5), Vec3(5, 0.001f, 5)), 2, 0.1, 8, Vec3(10.0f, 0.001f, 10.0f), Vec3(0.0f, 0.0005f, 0.0f)},
+        {"a cube of 1e-4 m", t500_box_pts(Vec3(-0.5e-4f), Vec3(0.5e-4f)), 2, 1e-12, 8, Vec3(1e-4f), Vec3(0.0f)},
+        {"a cube of 1e4 m", t500_box_pts(Vec3(-5000.0f), Vec3(5000.0f)), 2, 1e12, 8, Vec3(1e4f), Vec3(0.0f)},
+    };
+    for (Path path : r476_paths())
+      for (const Case &c : cases) {
+        /* The convex alone: built or left out and named. */
+        const R476Built b = r476_build({t500_convex(2, c.pts)}, path, 0.1f);
+        const std::string label = std::string(r476_name(path)) + " " + c.what;
+        if (!b.ok) std::printf("    %s: the build was refused: %s\n", label.c_str(), b.report.why.c_str());
+        CHECK(b.ok);
+        const bool refused = t500_refused(b, 2);
+        if (refused) {
+          std::string why;
+          for (const blockout::Skipped &sk : b.report.skipped)
+            if (sk.id == 2) why = sk.why;
+          CHECK(!why.empty());
+          std::printf("    %s: left out: %s%s\n", label.c_str(), why.c_str(), c.expect == 1 ? "  <- it is a solid" : "");
+        }
+        else if (c.expect == 0) std::printf("    %s: built, but it is no solid (%zu faces)\n", label.c_str(), b.mesh.face_count());
+        CHECK(!(c.expect == 0 && !refused) && !(c.expect == 1 && refused));
+        const std::string why = r480t_judge(b);
+        if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        if (!refused && c.volume > 0.0 && c.expect != 0 && b.mesh.face_count() > 0) {
+          const double vol = r476_volume(b.mesh), rel = std::fabs(vol - c.volume) / c.volume;
+          if (rel > 0.02) std::printf("    %s: volume %.9g, want %.9g (off by %.1e)\n", label.c_str(), vol, c.volume, rel);
+          if (c.expect == 1 || path == Path::Crisp) CHECK(rel < (path == Path::Crisp ? 1e-3 : 0.1));
+        }
+        /* Built as nothing and not named: the piece vanished. A plain box of the same size does the same on the grid (a part thinner than a cell) - then it is the grid's rule, not the convex's. */
+        if (!refused && c.expect != 0 && b.mesh.face_count() == 0) {
+          bool twin_empty = false;
+          if (c.twin.x > 0.0f) twin_empty = r476_build({box_piece(2, c.twin, c.twin_at)}, path, 0.1f).mesh.face_count() == 0;
+          std::printf("    %s: built as nothing and not named%s\n", label.c_str(), twin_empty ? " (a box of the same size does the same)" : "");
+          CHECK(twin_empty || c.expect == 2 && c.twin.x == 0.0f);
+        }
+        if (c.expect == 1 && !refused && c.verts > 0) {
+          if ((int)b.mesh.vert_count() != c.verts) std::printf("    %s: %zu corners, want %d\n", label.c_str(), b.mesh.vert_count(), c.verts);
+          if (path == Path::Crisp) CHECK((int)b.mesh.vert_count() == c.verts);
+        }
+        /* With a box beside it: the left-out piece changes nothing of the box. */
+        if (c.expect == 0) {
+          const R476Built with = r476_build({box_piece(1, {1, 1, 1}, {20, 0, 0}), t500_convex(2, c.pts)}, path, 0.1f);
+          bool box_named = false;
+          for (const blockout::Skipped &sk : with.report.skipped) box_named = box_named || sk.id == 1;
+          CHECK(with.ok && with.mesh.face_count() == 6 && !box_named && r480t_skipped_any(with, 2));
+        }
+      }
+  });
+
+  /* ---- Touching and cutting ---- */
+  test("blockout convex (500 te): a convex cube touching a box face to face joins it into one 2 x 1 x 1 solid, exactly, and a hair (1e-7, 1e-5) apart or overlapping stays sound wherever a box beside a box does; either order of pieces", [] {
+    const std::vector<Vec3> cube = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+    for (Path path : r476_paths())
+      for (const float gap : {0.0f, 1e-7f, -1e-7f, 1e-5f, -1e-5f})
+        for (const bool convex_first : {true, false}) {
+          std::vector<Piece> pieces{t500_convex(1, cube), box_piece(2, {1, 1, 1}, {1.0f + gap, 0, 0})};
+          std::vector<Piece> twin{box_piece(1, {1, 1, 1}, {0, 0, 0}), box_piece(2, {1, 1, 1}, {1.0f + gap, 0, 0})};
+          if (!convex_first) std::swap(pieces[0], pieces[1]), std::swap(twin[0], twin[1]);
+          const R476Built b = r476_build(pieces, path, 0.05f), base = r476_build(twin, path, 0.05f);
+          const std::string label = std::string(r476_name(path)) + strprintf(" gap %g %s first", (double)gap, convex_first ? "convex" : "box");
+          const std::string why = r480t_judge(b), base_why = r480t_judge(base);
+          if (!why.empty() || !base_why.empty()) std::printf("    %s: with the convex: '%s' (%zu faces); two boxes: '%s' (%zu faces)\n", label.c_str(), why.c_str(), b.mesh.face_count(), base_why.c_str(), base.mesh.face_count());
+          CHECK(b.ok);
+          if (base_why.empty()) CHECK(why.empty());  // (a convex is no worse than a box in the same place)
+          if (gap == 0.0f) {
+            CHECK(why.empty());
+            CHECK(b.mesh.face_count() == 6 && b.mesh.vert_count() == 8);
+            CHECK_NEAR(r476_volume(b.mesh), 2.0, 2e-4);
+            CHECK(r476_same_shape(b, base));
+          }
+          else CHECK_NEAR(r476_volume(b.mesh), 2.0, 2e-3);
+        }
+  });
+
+  test("blockout convex (500 te): a convex piece subtracted from a box (a corner cut, a flared pocket through the top, a through hole) and intersected with a box (an octahedron) leaves the formula's volume, on each path", [] {
+    for (Path path : r476_paths()) {
+      const double tol = path == Path::Crisp ? 1e-4 : 4e-3;
+      {  // a corner: the cube [0.5,1.5] x [0.5,1.5] x [-0.5,0.5] takes 0.5 x 0.5 x 1 out of the 2 m cube
+        const R476Built b = r476_build({box_piece(1, {2, 2, 2}, {0, 0, 0}), t500_convex(2, t500_box_pts(Vec3(0.5f, 0.5f, -0.5f), Vec3(1.5f, 1.5f, 0.5f)), Mat4::identity(), Op::Subtract)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "corner cut"));
+        CHECK_NEAR(r476_volume(b.mesh), 7.75, 8.0 * tol);
+      }
+      {  // a pocket that widens upward: half width 0.25 + 0.25 y, from y 0 to 2: inside the box (up to y 1) 7/12
+        std::vector<Vec3> pts;
+        for (int k = 0; k < 2; k++)
+          for (int i = 0; i < 4; i++) {
+            const float hw = k ? 0.75f : 0.25f;
+            pts.push_back(Vec3((i & 1) ? hw : -hw, k ? 2.0f : 0.0f, (i & 2) ? hw : -hw));
+          }
+        const R476Built b = r476_build({box_piece(1, {2, 2, 2}, {0, 0, 0}), t500_convex(2, pts, Mat4::identity(), Op::Subtract)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "pocket"));
+        CHECK_NEAR(r476_volume(b.mesh), 8.0 - 7.0 / 12.0, 8.0 * tol);
+      }
+      {  // a through hole: an octagonal prism of radius 0.5 through a 4 x 1 x 4 slab
+        const double area = 0.5 * 8.0 * 0.25 * std::sin(6.283185307179586 / 8.0);
+        const R476Built b = r476_build({box_piece(1, {4, 1, 4}, {0, 0, 0}), t500_convex(2, t500_rings(8, 0.5f, 0.5f, 2.0f), Mat4::translate(Vec3(0.0f, -1.0f, 0.0f)), Op::Subtract)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "through hole"));
+        CHECK_NEAR(r476_volume(b.mesh), 16.0 - area, 16.0 * tol);
+      }
+      {  // an octahedron of radius 1 as an Intersect piece over a 2 m cube: the octahedron, 4/3
+        const R476Built b = r476_build({box_piece(1, {2, 2, 2}, {0, 0, 0}), t500_convex(2, {Vec3(1, 0, 0), Vec3(-1, 0, 0), Vec3(0, 1, 0), Vec3(0, -1, 0), Vec3(0, 0, 1), Vec3(0, 0, -1)}, Mat4::identity(), Op::Intersect)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "octahedron"));
+        CHECK_NEAR(r476_volume(b.mesh), 4.0 / 3.0, 4.0 / 3.0 * tol);
+        CHECK(b.mesh.face_count() == 8 || path == Path::Field);
+      }
+    }
+  });
+
+  /* ---- Placement, determinism, the cache ---- */
+  test("blockout convex (500 te): a mirrored, an unevenly scaled and a turned placement keep the solid outward and of the right volume; a piece's own Room and Blend flags are not read", [] {
+    const std::vector<Vec3> tetra = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    for (Path path : r476_paths()) {
+      struct Place {
+        const char *what;
+        Mat4 m;
+        double scale;
+      };
+      const Place places[] = {{"mirrored in X", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat(), Vec3(-1.0f, 1.0f, 1.0f)), 1.0},
+                              {"mirrored in all three", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat(), Vec3(-1.0f)), 1.0},
+                              {"scaled 2 1 3", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat(), Vec3(2.0f, 1.0f, 3.0f)), 6.0},
+                              {"scaled 2 1 3 and turned", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat::euler(Vec3(10.0f, 25.0f, 70.0f)), Vec3(2.0f, 1.0f, 3.0f)), 6.0}};
+      for (const Place &pl : places) {
+        const R476Built b = r476_build({t500_convex(1, tetra, pl.m)}, path, 0.03f);
+        const std::string label = std::string(r476_name(path)) + " " + pl.what;
+        CHECK(b.ok);
+        const std::string why = r480t_judge(b);
+        if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        if (!why.empty() || b.mesh.face_count() == 0) continue;
+        const double vol = r476_volume(b.mesh), want = pl.scale / 6.0;
+        if (std::fabs(vol - want) / want > 1e-3) std::printf("    %s: volume %.6f, want %.6f\n", label.c_str(), vol, want);
+        CHECK(std::fabs(vol - want) / want < (path == Path::Crisp ? 1e-3 : 0.1));
+        CHECK(b.mesh.face_count() == 4 || path == Path::Field);
+      }
+      /* Room and Blend are not read for a convex piece: the same bytes as without them. */
+      Piece plain = t500_convex(1, t500_box_pts(Vec3(-0.5f), Vec3(0.5f))), odd = plain;
+      odd.room = true, odd.wall = 0.7f, odd.floor = 0.7f, odd.ceiling = 0.7f, odd.open_top = true, odd.blend = 0.25f;
+      const R476Built a = r476_build({plain, box_piece(2, {1, 1, 1}, {1.0f, 0, 0})}, path, 0.05f), b = r476_build({odd, box_piece(2, {1, 1, 1}, {1.0f, 0, 0})}, path, 0.05f);
+      if (!r476_same_mesh(a, b)) std::printf("    %s: Room / Blend on a convex piece changed the mesh (%zu faces against %zu)\n", r476_name(path), b.mesh.face_count(), a.mesh.face_count());
+      CHECK(r476_same_mesh(a, b));
+      /* The Blend radius of the piece it touches is not read either (the mesh piece's rule: "nor is that of a piece it touches"). */
+      Piece blended = box_piece(2, {1, 1, 1}, {1.0f, 0, 0});
+      blended.blend = 0.2f;
+      const R476Built c = r476_build({plain, blended}, path, 0.05f);
+      const std::string why = r480t_judge(c);
+      if (!why.empty()) std::printf("    %s: a blended box beside a convex cube: %s\n", r476_name(path), why.c_str());
+      CHECK(why.empty());
+    }
+  });
+
+  test("blockout convex (500 te): two builds give the same bytes; the points in another order give the same faces; the cache returns the solid it made and is not fooled by a changed corner, a dropped corner or a changed order", [] {
+    const std::vector<Vec3> frustum = t500_frustum_pts();
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{t500_convex(3, frustum, Mat4::translate(Vec3(0.2f, 0.3f, 0.1f))), box_piece(4, {1, 1, 1}, {1.7f, 0.3f, 0.1f})};
+      const R476Built a = r476_build(pieces, path, 0.05f), b = r476_build(pieces, path, 0.05f);
+      CHECK(a.ok && r476_same_mesh(a, b));
+      /* The points rotated, then reversed, then every other one first. */
+      std::vector<std::vector<Vec3>> orders;
+      std::vector<Vec3> p = frustum;
+      std::rotate(p.begin(), p.begin() + 3, p.end());
+      orders.push_back(p);
+      p = frustum;
+      std::reverse(p.begin(), p.end());
+      orders.push_back(p);
+      p.clear();
+      for (size_t i = 0; i < frustum.size(); i += 2) p.push_back(frustum[i]);
+      for (size_t i = 1; i < frustum.size(); i += 2) p.push_back(frustum[i]);
+      orders.push_back(p);
+      for (size_t k = 0; k < orders.size(); k++) {
+        std::vector<Piece> other = pieces;
+        other[0].points = orders[k];
+        const R476Built c = r476_build(other, path, 0.05f);
+        const bool shape = r476_same_shape(a, c), bytes = r476_same_mesh(a, c);
+        std::printf("    %s order %zu: same faces %s, same bytes %s\n", r476_name(path), k, shape ? "yes" : "NO", bytes ? "yes" : "no");
+        CHECK(shape);
+        CHECK(r480t_judge(c).empty());
+      }
+      /* The cache. */
+      blockout::Cache cache;
+      std::vector<Piece> work{t500_convex(1, t500_box_pts(Vec3(-0.5f), Vec3(0.5f)))};
+      const R476Built first = r476_build(work, path, 0.05f, &cache), again = r476_build(work, path, 0.05f, &cache);
+      CHECK(first.ok && again.report.cached == 1 && r476_same_mesh(first, again));
+      work[0].points = t500_box_pts(Vec3(-0.5f, -0.5f, -0.5f), Vec3(0.5f, 1.0f, 0.5f));  // taller, the same id
+      const R476Built taller = r476_build(work, path, 0.05f, &cache);
+      if (std::fabs(r476_volume(taller.mesh) - 1.5) > 1e-3) std::printf("    %s: after a corner moved the cache gave volume %.4f (1.5 is right)\n", r476_name(path), r476_volume(taller.mesh));
+      CHECK_NEAR(r476_volume(taller.mesh), 1.5, 1e-3);
+      work[0].points = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+      work[0].points.pop_back();  // seven corners of the cube: 5/6
+      const R476Built seven = r476_build(work, path, 0.05f, &cache);
+      if (std::fabs(r476_volume(seven.mesh) - 5.0 / 6.0) > 1e-3) std::printf("    %s: after a corner was dropped the cache gave volume %.4f (0.8333 is right)\n", r476_name(path), r476_volume(seven.mesh));
+      CHECK_NEAR(r476_volume(seven.mesh), 5.0 / 6.0, path == Path::Crisp ? 1e-4 : 2e-2);
+      work[0].points = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+      std::swap(work[0].points[0], work[0].points[7]);
+      const R476Built swapped = r476_build(work, path, 0.05f, &cache);
+      CHECK_NEAR(r476_volume(swapped.mesh), 1.0, path == Path::Crisp ? 1e-4 : 2e-2);
+    }
+  });
+
+  test("blockout convex (500 te): convex_up_faces counts the faces that look up (the first sides), convex_edges lists each edge once, both say so for corners with no solid, and the up faces are exactly the sides below that count in a build", [] {
+    const std::vector<Vec3> cube = t500_box_pts(Vec3(-0.5f), Vec3(0.5f)), tetra = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    const std::vector<Vec3> gable = {Vec3(-2, 0, -1), Vec3(2, 0, -1), Vec3(2, 0, 1), Vec3(-2, 0, 1), Vec3(-2, 1, 0), Vec3(2, 1, 0)};
+    CHECK(blockout::convex_up_faces(cube) == 1 && blockout::convex_up_faces(tetra) == 1 && blockout::convex_up_faces(gable) == 2);
+    CHECK(blockout::convex_up_faces({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}) == -1);
+    CHECK(blockout::convex_up_faces({Vec3(0, 0, 0), Vec3(1, 0, 0)}) == -1);
+    CHECK(blockout::convex_up_faces(t500_rings(32, 1.0f, 1.0f, 2.0f)) == 1);
+    CHECK(blockout::convex_up_faces(cube, 2.0f) == 0);  // (a threshold above any normal's y: none)
+    CHECK(blockout::convex_edges(cube).size() == 24 && blockout::convex_edges(tetra).size() == 12 && blockout::convex_edges(gable).size() == 18);
+    CHECK(blockout::convex_edges(t500_rings(32, 1.0f, 1.0f, 2.0f)).size() == 192);
+    CHECK(blockout::convex_edges({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}).empty());
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(blockout::convex_up_faces({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, nan, 1)}) == -1 && blockout::convex_edges({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, nan, 1)}).empty());
+    for (Path path : r476_paths()) {
+      const R476Built b = r476_build({t500_convex(5, gable, Mat4::translate(Vec3(0.0f, 0.1f, 0.0f)))}, path, 0.05f);
+      CHECK(b.ok && r480t_judge(b).empty());
+      size_t up = 0, below = 0, wrong = 0;
+      for (size_t f = 0; f < b.mesh.face_count(); f++) {
+        const bool looks_up = b.mesh.face_normal(f).y > 0.05f, named_up = b.faces.side[f] < 2;
+        up += looks_up, below += named_up, wrong += looks_up != named_up;
+      }
+      if (wrong) std::printf("    %s: %zu faces look up, %zu are named by a side below 2, %zu disagree\n", r476_name(path), up, below, wrong);
+      CHECK(up == 2 && wrong == 0);
+    }
+    /* Whose face is at a point: the convex's top. */
+    const std::vector<Piece> two{box_piece(1, {1, 1, 1}, {5, 0, 0}), t500_convex(2, cube)};
+    uint64_t piece = 1;
+    uint32_t side = 99;
+    CHECK(blockout::face_owner(two, Vec3(0.0f, 0.5f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), piece, side) && piece == 2);
+    const blockout::FaceOwners owners(two);
+    piece = 1, side = 99;
+    CHECK(owners.at(Vec3(0.0f, 0.5f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), piece, side) && piece == 2 && side == 0);  // (the cube's one face that looks up is its side 0)
+  });
+}
+
+namespace {
+
+size_t t500_objects(Editor &ed) {
+  size_t n = 0;
+  ed.scene().for_each([&](GameObject &) { n++; });
+  return n;
+}
+
+/* Whether a point of the piece's own space is inside the Blockout's matter. */
+bool t500_in(const R500Scene &s, float x, float y, float z) { return r498_matter(*s.bo, *s.piece, Vec3(x, y, z)); }
+
+/* The runs of matter along Y at (x, z), from y0 to y1 in steps: each (from, to). */
+std::vector<std::pair<float, float>> t500_runs(const R500Scene &s, float x, float z, float y0, float y1, float step) {
+  std::vector<std::pair<float, float>> out;
+  bool in = false;
+  float start = 0.0f;
+  for (float y = y0; y <= y1 + 1e-6f; y += step) {
+    const bool m = t500_in(s, x, y, z);
+    if (m && !in) in = true, start = y;
+    if (!m && in) in = false, out.push_back({start, y - step});
+  }
+  if (in) out.push_back({start, y1});
+  return out;
+}
+
+/* The shaft's half width along +X at height y: matter from the axis out. */
+float t500_radius(const R500Scene &s, float y) {
+  float r = 0.0f;
+  for (float x = 0.0f; x < 0.6f; x += 0.0025f) {
+    if (!t500_in(s, x, y, 0.0f)) break;
+    r = x;
+  }
+  return r;
+}
+
+/* Posts along X: the groups of corners on the ground. */
+size_t t500_posts_x(const GameObject &bo, float tol) {
+  std::vector<float> xs;
+  for (const Vec3 &p : r500_pts(bo))
+    if (std::fabs(p.y) < tol) xs.push_back(p.x);
+  return r500_clusters(xs, 0.2f);
+}
+/* ... and in the plan (an outline's posts). */
+size_t t500_posts_xz(const GameObject &bo, float tol) {
+  std::vector<Vec2> centres;
+  for (const Vec3 &p : r500_pts(bo)) {
+    if (std::fabs(p.y) >= tol) continue;
+    bool near = false;
+    for (const Vec2 &c : centres) near = near || std::hypot(p.x - c.x, p.z - c.y) <= 0.2f;
+    if (!near) centres.push_back(Vec2(p.x, p.z));
+  }
+  return centres.size();
+}
+
+/* Every number of a preset finite. */
+bool t500_finite(const BlockoutPiece &p) {
+  for (float v : {p.size.x, p.size.y, p.size.z, p.radius, p.height, p.base_height, p.capital_height, p.base_width, p.capital_width, p.taper, p.length, p.post_spacing, p.post_size, p.rail_size,
+                  p.rail_height, p.span, p.pitch, p.overhang, p.thickness, p.total_height, p.stair_width, p.turn, p.column_width, p.arch_thickness, p.inner_radius, p.depth, p.arch_rise})
+    if (!finite_bits(v)) return false;
+  return true;
+}
+
+/* The class of each face of a Blockout's live mesh (-1: a face no piece owns). */
+std::vector<int> t500_classes(const GameObject &bo) {
+  std::vector<int> out;
+  const Mesh *m = r495_mesh(bo);
+  const Blockout *b = bo.get<Blockout>();
+  if (!m || !b || b->state.faces.piece.size() != m->face_count()) return out;
+  std::vector<blockout::Piece> pieces;
+  blockout::Settings st;
+  blockout_snapshot(bo, pieces, st);
+  for (size_t f = 0; f < m->face_count(); f++) {
+    const blockout::Piece *piece = nullptr;
+    for (const blockout::Piece &p : pieces)
+      if (p.id == b->state.faces.piece[f]) piece = &p;
+    out.push_back(piece ? blockout_face_class(*piece, b->state.faces.side[f]) : -1);
+  }
+  return out;
+}
+
+/* A kind's `blockout add` words and a name, for the lists below. */
+const char *t500_words(int preset) {
+  for (const R500Kind &k : kR500Kinds)
+    if (k.preset == preset) return k.words;
+  return "";
+}
+
+}  // namespace
+
+static void tests_round500_te_measured() {
+  /* ---- Criterion 2, from point probes: no vertex lists, no generator's own numbers ---- */
+  test("architectural pieces (500 te): a column's Taper, Base Height, Capital Height, round or square shaft and the 90% rule are measured with probes along the shaft and across it, on each path", [] {
+    for (int method : r498_methods())
+      for (const bool square : {false, true}) {
+        const float tol = method == 2 ? 0.03f : 0.006f;
+        Editor ed;
+        const R500Scene s = r500_make(ed, "column 0.25 3", method, 0.02f);
+        if (square) ed.command("blockout set shaft square");
+        for (const char *line : {"blockout set taper 0.5", "blockout set baseheight 0.4", "blockout set capitalheight 0.5", "blockout set basewidth 1", "blockout set capitalwidth 0.9"}) ed.command(line);
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + (square ? " square" : " round");
+        CHECK(r498_judge(*s.bo).empty());
+        /* The shaft narrows from 0.25 at the plinth's top (y 0.4) to 0.125 under the capital (y 2.5), straight. */
+        for (float y : {0.45f, 1.45f, 2.45f}) {
+          const float want = 0.25f * (1.0f - 0.5f * (y - 0.4f) / 2.1f), got = t500_radius(s, y);
+          if (std::fabs(got - want) > tol) std::printf("    %s: shaft half width %.4f at y %.2f, want %.4f\n", label.c_str(), got, y, want);
+          CHECK_NEAR(got, want, tol);
+        }
+        CHECK(t500_in(s, 0.17f, 1.45f, 0.17f) == square);  // (a round shaft's corner of the square is air)
+        /* The plinth is 1 m wide and 0.4 high, the capital 0.9 wide from 2.5 to 3: along Y at x = z = 0.42 (inside both). */
+        const auto runs = t500_runs(s, 0.42f, 0.42f, 0.0f, 3.0f, 0.005f);
+        if (runs.size() != 2) std::printf("    %s: %zu runs of matter at the plinth's and capital's edge, want 2\n", label.c_str(), runs.size());
+        CHECK(runs.size() == 2);
+        if (runs.size() == 2) {
+          CHECK_NEAR(runs[0].first, 0.0f, 0.011f);
+          CHECK_NEAR(runs[0].second, 0.4f, tol);
+          CHECK_NEAR(runs[1].first, 2.5f, tol);
+          CHECK_NEAR(runs[1].second, 3.0f, 0.011f);
+        }
+        CHECK(!t500_in(s, 0.52f, 0.2f, 0.0f) && t500_in(s, 0.48f, 0.2f, 0.0f));  // (the plinth's width: 1 m)
+        CHECK(!t500_in(s, 0.47f, 2.7f, 0.0f) && t500_in(s, 0.43f, 2.7f, 0.0f));  // (the capital's: 0.9 m)
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, 0.011f);
+      }
+    /* A plinth and a capital that together fill the column are cut to 90%: Height 1, 0.8 + 0.8 leaves 0.1 of shaft. */
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "column 0.25 1", method, 0.02f);
+      for (const char *line : {"blockout set baseheight 0.8", "blockout set capitalheight 0.8"}) ed.command(line);
+      r495_built(ed);
+      CHECK(r498_judge(*s.bo).empty());
+      const auto runs = t500_runs(s, 0.3f, 0.0f, 0.0f, 1.0f, 0.005f);
+      if (runs.size() != 2) std::printf("    %s: %zu runs at x 0.3, want 2 (plinth and capital)\n", r498_method_name(method), runs.size());
+      CHECK(runs.size() == 2);
+      if (runs.size() == 2) {
+        CHECK_NEAR(runs[0].second, 0.45f, 0.025f);
+        CHECK_NEAR(runs[1].first, 0.55f, 0.025f);
+      }
+      CHECK(t500_in(s, 0.0f, 0.5f, 0.0f));  // (the shaft joins them)
+    }
+  });
+
+  test("architectural pieces (500 te): a pilaster stands on its wall - nothing behind z 0, its front at the capital's half width - a beam is Length x Depth x Width about its bottom middle, on each path", [] {
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "pilaster 0.2 2.6", method, 0.01f);
+        CHECK(r498_judge(*s.bo).empty());
+        const AABB box = r495_mesh(*s.bo)->bounds();
+        std::printf("    %s pilaster: x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f\n", r498_method_name(method), box.min.x, box.max.x, box.min.y, box.max.y, box.min.z, box.max.z);
+        CHECK(box.min.z > -tol && box.min.z < tol);  // (its back is on the wall's plane)
+        CHECK_NEAR(box.max.z, 0.35f, tol);           // (the capital's half width in front)
+        CHECK_NEAR(box.min.x, -0.35f, tol);
+        CHECK_NEAR(box.max.x, 0.35f, tol);
+        CHECK_NEAR(box.max.y, 2.6f, tol);
+        CHECK(t500_in(s, 0.0f, 1.3f, 0.1f) && !t500_in(s, 0.0f, 1.3f, -0.1f) && !t500_in(s, 0.0f, 1.3f, 0.3f));  // (the shaft is half a square column 0.4 wide: 0.2 deep)
+      }
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "beam 3 0.5 0.2", method, 0.01f);
+        CHECK(r498_judge(*s.bo).empty());
+        const AABB box = r495_mesh(*s.bo)->bounds();
+        CHECK_NEAR(box.min.x, -1.5f, tol);
+        CHECK_NEAR(box.max.x, 1.5f, tol);
+        CHECK_NEAR(box.min.y, 0.0f, tol);
+        CHECK_NEAR(box.max.y, 0.5f, tol);
+        CHECK_NEAR(box.min.z, -0.1f, tol);
+        CHECK_NEAR(box.max.z, 0.1f, tol);
+        CHECK(r495_mesh(*s.bo)->face_count() == 6 || method == 2);
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): a railing's posts - 5 m at 1 m is 6, at 0.7 m the rule is ceil(length / spacing) + 1 = 9 evenly spaced (0.625 m), a spacing past the length leaves the two end posts - along an L outline every corner is a post, and Bottom Rail off takes the lower rail away", [] {
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing 5 1", method, 0.01f);
+      CHECK(r498_judge(*s.bo).empty());
+      CHECK(t500_posts_x(*s.bo, tol) == 6);
+      struct Spacing {
+        float spacing;
+        size_t posts;
+      };
+      for (const Spacing &sp : {Spacing{0.7f, 9}, Spacing{0.5f, 11}, Spacing{2.0f, 4}, Spacing{5.0f, 2}, Spacing{50.0f, 2}, Spacing{0.99f, 7}, Spacing{1.0f, 6}}) {
+        ed.command(strprintf("blockout set spacing %g", (double)sp.spacing));
+        r495_built(ed);
+        const size_t got = t500_posts_x(*s.bo, tol);
+        if (got != sp.posts) std::printf("    %s: railing 5 m at %g m spacing has %zu posts, expected %zu (ceil(5 / spacing) + 1)\n", r498_method_name(method), (double)sp.spacing, got, sp.posts);
+        CHECK(got == sp.posts);
+        CHECK(r498_judge(*s.bo).empty());
+      }
+      /* 9 posts: evenly spaced along the 5 m, the first and last at the ends. */
+      ed.command("blockout set spacing 0.7");
+      r495_built(ed);
+      std::vector<float> xs;
+      for (const Vec3 &p : r500_pts(*s.bo))
+        if (std::fabs(p.y) < tol) xs.push_back(p.x);
+      std::sort(xs.begin(), xs.end());
+      CHECK_NEAR(xs.front(), -2.5f - 0.04f, tol);
+      CHECK_NEAR(xs.back(), 2.5f + 0.04f, tol);
+      /* The lower rail: matter at y 0.12 between two posts, and none when it is off. */
+      ed.command("blockout set spacing 1");
+      r495_built(ed);
+      CHECK(t500_in(s, 0.0f, 0.12f, 0.0f));  // (half way between two posts)
+      ed.command("blockout set bottomrail off");
+      r495_built(ed);
+      CHECK(!t500_in(s, 0.0f, 0.12f, 0.0f) && t500_in(s, 0.0f, 0.97f, 0.0f) && r498_judge(*s.bo).empty());
+      /* An L outline (sides 4, 2, 2, 2, 2, 4 m): the posts of each side, the corners once. */
+      ed.command("blockout set bottomrail on");
+      ed.command("blockout outline 0 0 4 0 4 2 2 2 2 4 0 4");
+      r495_built(ed);
+      const size_t posts = t500_posts_xz(*s.bo, tol);
+      const std::string why = r498_judge(*s.bo);
+      if (posts != 16 || !why.empty()) std::printf("    %s: railing along an L: %zu posts (want 16: 4 + 2 + 2 + 2 + 2 + 4 per side less the shared corners), %s\n", r498_method_name(method), posts, why.empty() ? "sound" : why.c_str());
+      CHECK(posts == 16);
+      CHECK(why.empty());
+      CHECK(t500_in(s, 2.0f, 0.97f, 0.0f) && t500_in(s, 4.0f, 0.97f, 1.0f) && !t500_in(s, 1.0f, 0.97f, 1.0f));  // (the top rail runs along the sides, not across)
+    }
+  });
+
+  test("architectural pieces (500 te): a railing holds its posts to 256 a side (spacing 0.01 over 100 m is 256, not 257) and 1,024 a railing; a roof over a rectangle rises (half span + overhang) x tan(pitch) - gable, hip over the nearer half side, shed over the whole span", [] {
+    {
+      BlockoutPiece bp;
+      blockout_preset_defaults(bp, kPresetRailing);
+      bp.length = 100.0f, bp.post_spacing = 0.01f, bp.bottom_rail = false;
+      std::vector<blockout::Piece> pieces;
+      std::vector<std::string> notes;
+      CHECK(blockout_preset_pieces(bp, 9, Mat4::identity(), pieces, 0.0f, &notes));
+      size_t tall = 0;
+      for (const blockout::Piece &p : pieces) tall += p.size.y > 0.5f && p.size.x < 0.5f;  // (a post is tall and thin; the rail is long)
+      if (tall > 256) std::printf("    a 100 m railing at 0.01 m spacing made %zu posts on one side: \"at most 256 posts a side\"\n", tall);
+      CHECK(tall <= 256 && tall >= 255);
+      /* An outline with many long sides: 1,024 in all. */
+      bp.outline = {Vec2(0, 0), Vec2(100, 0), Vec2(100, 100), Vec2(0, 100)};
+      pieces.clear(), notes.clear();
+      CHECK(blockout_preset_pieces(bp, 9, Mat4::identity(), pieces, 0.0f, &notes));
+      tall = 0;
+      for (const blockout::Piece &p : pieces) tall += p.size.y > 0.5f && p.size.x < 0.5f;
+      CHECK(tall <= 1024 && tall >= 1000);
+      bool said = false;
+      for (const std::string &n : notes) said = said || n.find("1024") != std::string::npos;
+      CHECK(said || tall < 1024);
+    }
+    struct Roof {
+      float pitch, overhang;
+    };
+    const float rad = 3.14159265f / 180.0f;
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.05f : 0.003f;
+      for (const Roof &r : {Roof{30.0f, 0.3f}, Roof{45.0f, 0.0f}, Roof{30.0f, 1.0f}, Roof{60.0f, 0.3f}, Roof{10.0f, 0.0f}}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, strprintf("roof 6 4 %g", (double)r.pitch), method, 0.04f);
+        ed.command(strprintf("blockout set overhang %g", (double)r.overhang));
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" gable pitch %g overhang %g", (double)r.pitch, (double)r.overhang);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = (2.0f + r.overhang) * std::tan(r.pitch * rad);
+        if (std::fabs(r500_top(*s.bo) - want) > tol) std::printf("    %s: ridge at %.4f, want %.4f\n", label.c_str(), r500_top(*s.bo), want);
+        CHECK_NEAR(r500_top(*s.bo), want, tol);
+        /* The ridge is over the middle of the span, along the whole length (with the overhang), and the eaves are at the ground. */
+        const float ridge_x = 3.0f + r.overhang, eave_z = 2.0f + r.overhang;
+        CHECK(t500_in(s, 0.0f, 0.5f * want, 0.0f) && !t500_in(s, 0.0f, want + 0.1f, 0.0f));
+        CHECK(t500_in(s, ridge_x - 0.1f, 0.25f * std::tan(r.pitch * rad), eave_z - 0.5f) && !t500_in(s, ridge_x + 0.15f, 0.02f, 0.0f) && !t500_in(s, 0.0f, 0.02f, eave_z + 0.15f));
+        CHECK_NEAR(r495_mesh(*s.bo)->bounds().min.y, 0.0f, tol);
+        CHECK_NEAR(r495_mesh(*s.bo)->bounds().max.x, ridge_x, tol);
+        CHECK_NEAR(r495_mesh(*s.bo)->bounds().max.z, eave_z, tol);
+      }
+      /* Hip: the ridge is 2 * (a - b) long, centred, at the nearer half side times the tangent; Shed: the whole span times the tangent. */
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+        ed.command("blockout set roofstyle hip");
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = 2.3f * std::tan(30.0f * rad), top = r500_top(*s.bo);
+        CHECK_NEAR(top, want, tol);
+        std::vector<float> xs;
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y - top) < tol && std::fabs(p.z) < tol) xs.push_back(p.x);
+        std::sort(xs.begin(), xs.end());
+        if (xs.empty()) std::printf("    %s hip: no corner at the ridge's height\n", r498_method_name(method));
+        CHECK(!xs.empty());
+        if (!xs.empty()) {
+          CHECK_NEAR(xs.front(), -1.0f, tol);  // (3.3 - 2.3)
+          CHECK_NEAR(xs.back(), 1.0f, tol);
+        }
+        CHECK(!t500_in(s, 2.0f, want * 0.9f, 0.0f) && t500_in(s, 0.0f, want * 0.9f, 0.0f));
+        /* A square hip is a pyramid: one apex. */
+        ed.command("blockout set length 4");
+        ed.command("blockout set span 4");
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), 2.3f * std::tan(30.0f * rad), tol);
+        size_t apex = 0;
+        for (const Vec3 &p : r500_pts(*s.bo)) apex += std::fabs(p.y - r500_top(*s.bo)) < tol && std::hypot(p.x, p.z) < 0.05f;
+        if (method == 1) CHECK(apex >= 1);  // (the grid may round an apex's corner off)
+      }
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+        ed.command("blockout set roofstyle shed");
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = 4.6f * std::tan(30.0f * rad);
+        CHECK_NEAR(r500_top(*s.bo), want, tol);
+        CHECK(t500_in(s, 0.0f, 0.5f * want, 2.2f) && !t500_in(s, 0.0f, 0.5f * want, -2.0f));
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): roofs over a rectangle, an L, a T and a U outline - gable, hip and shed, solid and with a 0.1 m sheet - close, are sound with no faces on top of each other, on each path; a sheet rises to ridge + thickness; every outline with a slanted side is refused with a status note and builds nothing", [] {
+    struct Outline {
+      const char *what;
+      const char *line;
+    };
+    const Outline outlines[] = {{"rectangle", "blockout outline 0 0 6 0 6 4 0 4"},
+                                {"L", "blockout outline 0 0 6 0 6 2 2 2 2 6 0 6"},
+                                {"T", "blockout outline 0 0 6 0 6 2 4 2 4 5 2 5 2 2 0 2"},
+                                {"U", "blockout outline 0 0 6 0 6 4 4 4 4 2 2 2 2 4 0 4"}};
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      for (const Outline &o : outlines)
+        for (int style : {kRoofGable, kRoofHip, kRoofShed})
+          for (const float t : {0.0f, 0.1f}) {
+            const std::string name = o.what;
+            const bool keep = (name == "rectangle" && (t == 0.0f || style == kRoofGable)) || (name == "L" && ((style == kRoofHip) || (style == kRoofShed && t == 0.0f) || (style == kRoofGable && t > 0.0f))) ||
+                              (name == "T" && style == kRoofHip && t > 0.0f) || (name == "U" && style == kRoofHip && t == 0.0f);
+            if (!keep) continue;  // (a sample: the stress sweep has every one)
+            Editor ed;
+            const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.06f);
+            ed.command(o.line);
+            BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+            bp->roof_style = style, bp->thickness = t;
+            r495_built(ed);
+            const std::string label = std::string(r498_method_name(method)) + " " + o.what + " " + kBlockoutRoofStyleNames[style] + strprintf(" sheet %g", (double)t);
+            size_t small = 0;
+            const std::string why = r498_judge(*s.bo, &small);
+            if (!why.empty() || small) std::printf("    %s: %s (%zu small faces on top of others)\n", label.c_str(), why.empty() ? "sound" : why.c_str(), small);
+            CHECK(why.empty());
+            CHECK(s.bo->get<Blockout>()->state.status.skipped.empty());
+            CHECK(r495_mesh(*s.bo) && r495_mesh(*s.bo)->face_count() > 0);
+            if (std::string(o.what) == "rectangle" && style != kRoofHip) {
+              const float want = (style == kRoofShed ? 4.6f : 2.3f) * std::tan(30.0f * 3.14159265f / 180.0f) + t;
+              CHECK_NEAR(r500_top(*s.bo), want, tol);
+            }
+            if (t > 0.0f && std::string(o.what) == "rectangle") {  // a sheet: no matter under the ridge, a quarter of the way up
+              const float ridge = r500_top(*s.bo);
+              CHECK(!t500_in(s, 3.0f, 0.25f * ridge, 2.0f) || style == kRoofShed);  // (a shed's high wall is at the back: the middle is still under the slope)
+            }
+          }
+      const char *slanted[] = {"blockout outline 0 0 4 0 0 4", "blockout outline 0 0 6 0 5 4 1 4", "blockout outline 0 0 4 0 4 4 2 5 0 4"};
+      for (const char *line : slanted) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.1f);
+        ed.command(line);
+        r495_built(ed);
+        std::vector<blockout::Piece> pieces;
+        blockout::Settings st;
+        BlockoutSnapshotNotes notes;
+        blockout_snapshot(*s.bo, pieces, st, &notes);
+        const Mesh *m = r495_mesh(*s.bo);
+        const bool named = !notes.refused.empty() && notes.refused[0].first == s.piece->id && notes.refused[0].second.find("square corners") != std::string::npos;
+        if (!named || (m && m->face_count())) std::printf("    %s '%s': refused with a note %d (%s), %zu faces built\n", r498_method_name(method), line, (int)named, notes.refused.empty() ? "" : notes.refused[0].second.c_str(), m ? m->face_count() : 0);
+        CHECK(named && (!m || m->face_count() == 0));
+        CHECK(s.bo->get<Blockout>()->state.status.refusal.empty());
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): L and U stairs - the first flight climbs to half the Total Height, the landing is a level box at that height, the second flight's last tread is at Total Height - by probes, with Fill Under, and again after Turn 90 (a quarter turn about the origin carries every probe)", [] {
+    for (int method : r498_methods())
+      for (const bool u_turn : {false, true})
+        for (const bool turned : {false, true}) {
+          Editor ed;
+          const R500Scene s = r500_make(ed, u_turn ? "stairs u 1 3 2 8" : "stairs l 1 3 2 8", method, 0.02f);
+          if (turned) ed.command("blockout turn 1");
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + (u_turn ? " U" : " L") + (turned ? " turned" : "");
+          CHECK(r498_judge(*s.bo).empty());
+          auto at = [&](float x, float y, float z) { return t500_in(s, x, y, z); };
+          size_t wrong = 0;
+          auto expect = [&](bool got, bool want, const char *what) {
+            if (got != want) wrong++, std::printf("    %s: %s is %s\n", label.c_str(), what, got ? "solid" : "air");
+          };
+          /* Flight 1: from z 0 to 2 along +Z, x -0.5..0.5; each step 0.25 deep and 1.5 / 8 = 0.1875 high; the last tread tops at 1.5. */
+          expect(at(0.0f, 0.15f, 0.1f), true, "under the first tread");
+          expect(at(0.0f, 0.26f, 0.1f), false, "over the first tread");
+          expect(at(0.0f, 1.45f, 1.9f), true, "under the last tread of flight 1");
+          expect(at(0.0f, 1.56f, 1.9f), false, "over the last tread of flight 1");
+          /* The landing: z 2..3, up to 1.5. */
+          expect(at(0.0f, 1.45f, 2.5f), true, "the landing (a hair under its top)");
+          expect(at(0.0f, 1.56f, 2.5f), false, "over the landing");
+          if (!u_turn) {  // flight 2 along +X from x 0.5 to 2.5 at z 2.5: its first tread tops at 1.6875, its last at 3
+            expect(at(0.6f, 1.6f, 2.5f), true, "under flight 2's first tread");
+            expect(at(0.6f, 1.77f, 2.5f), false, "over flight 2's first tread");
+            expect(at(2.4f, 2.95f, 2.5f), true, "under the last tread (Total Height 3)");
+            expect(at(2.4f, 3.05f, 2.5f), false, "over the last tread");
+            expect(at(2.0f, 0.5f, 2.5f), true, "the mass under flight 2 (Fill Under)");
+            expect(at(0.0f, 2.0f, 2.5f), false, "the air over the landing");
+          }
+          else {  // flight 2 back along -Z at x 1, from z 2 to 0: its last tread (z 0..0.25) tops at 3
+            expect(at(1.0f, 1.6f, 1.9f), true, "under flight 2's first tread");
+            expect(at(1.0f, 1.77f, 1.9f), false, "over flight 2's first tread");
+            expect(at(1.0f, 2.95f, 0.1f), true, "under the last tread (Total Height 3)");
+            expect(at(1.0f, 3.05f, 0.1f), false, "over the last tread");
+            expect(at(1.0f, 0.5f, 1.0f), true, "the mass under flight 2 (Fill Under)");
+            expect(at(0.0f, 2.0f, 1.0f), false, "the air beside flight 2 over flight 1");
+          }
+          CHECK(wrong == 0);
+          CHECK_NEAR(r500_top(*s.bo), 3.0f, method == 2 ? 0.03f : 0.003f);
+        }
+    /* Fill Under off: the flights stand on slabs (air under the treads away from the ends). */
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "stairs l 1 3 2 8", method, 0.02f);
+      ed.command("blockout set fill off");
+      r495_built(ed);
+      const std::string why = r498_judge(*s.bo);
+      if (!why.empty()) std::printf("    %s stairs L, Fill Under off: %s\n", r498_method_name(method), why.c_str());
+      CHECK(why.empty());
+      CHECK_NEAR(r500_top(*s.bo), 3.0f, method == 2 ? 0.03f : 0.003f);
+    }
+  });
+
+  test("architectural pieces (500 te): spiral stairs - every step's tread is at its height and at its angle (Turn 270, -180, 90, 720), nothing before the first step or past the last, the Turn is held to 1440 and 170 degrees a step, and the post is air-free matter up to Total Height", [] {
+    const float pi = 3.14159265f;
+    for (int method : r498_methods()) {
+      struct Spiral {
+        float turn;
+        int steps;
+      };
+      for (const Spiral &sp : {Spiral{270.0f, 16}, Spiral{-180.0f, 12}, Spiral{90.0f, 16}, Spiral{720.0f, 24}, Spiral{1e9f, 16}, Spiral{1440.0f, 4}}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, strprintf("stairs spiral 1 0.1 3 %d", sp.steps), method, 0.02f);
+        s.piece->get<BlockoutPiece>()->turn = sp.turn;
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" spiral turn %g steps %d", (double)sp.turn, sp.steps);
+        CHECK(r498_judge(*s.bo).empty());
+        const float turn = std::min(1440.0f, std::max(-1440.0f, sp.turn)), da = std::min(170.0f, std::max(-170.0f, turn / (float)sp.steps)), rise = 3.0f / (float)sp.steps;
+        size_t wrong = 0;
+        /* A step is the hull of its eight corners, so its outer edge is a chord: at the middle of a step of `da` degrees it reaches only cos(da / 2) of the radius. The probes sit at 0.6 of
+         * the radius, or at 0.85 of what the chord reaches. */
+        const float reach = std::cos(0.5f * std::fabs(da) * pi / 180.0f), rho = std::min(0.6f, 0.85f * reach);
+        std::printf("    %s: a step of %.1f degrees reaches %.3f of the radius at its middle (the chord)\n", label.c_str(), (double)std::fabs(da), (double)reach);
+        auto probe = [&](float deg, float y, bool want, const char *what) {
+          const float a = deg * pi / 180.0f;
+          if (rho < 0.15f) return;  // (the chord is inside the post's reach: nothing to tell it from the post)
+          if (t500_in(s, rho * std::cos(a), y, rho * std::sin(a)) != want) wrong++, std::printf("    %s: %s (angle %.1f, y %.3f) is %s\n", label.c_str(), what, (double)deg, (double)y, want ? "air" : "solid");
+        };
+        for (int i : {0, sp.steps / 3, sp.steps / 2, sp.steps - 1}) {
+          const float mid = (float)i * da + 0.5f * da, top = rise * (float)(i + 1);
+          probe(mid, top - 0.05f, true, "under a tread");
+          if (std::fabs(turn) <= 360.0f) probe(mid, top + 0.05f, false, "over a tread");  // (past a full circle the next turn's steps stand over it)
+        }
+        CHECK(wrong == 0);
+        /* Before the first step and past the last one it is air at a low height (Fill Under reaches the floor under each step only). */
+        if (std::fabs(turn) <= 360.0f && std::fabs(da) >= 10.0f) {  // (a step's half is wider than a cell)
+          const float before = (turn >= 0.0f ? -0.5f : 0.5f) * std::fabs(da), after = turn + (turn >= 0.0f ? 0.5f : -0.5f) * std::fabs(da);
+          probe(before, 0.04f, false, "before the first step");
+          probe(after, 0.04f, false, "past the last step");
+          probe(after, 2.5f, false, "past the last step, high");
+        }
+        CHECK(t500_in(s, 0.0f, 1.5f, 0.0f) && t500_in(s, 0.0f, 2.95f, 0.0f) && !t500_in(s, 0.0f, 3.05f, 0.0f));  // (the post, to Total Height)
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, method == 2 ? 0.03f : 0.003f);
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): an arcade of 4 has 5 columns and 4 open arches, of 7 has 8 and 7, of 1 has 2 and 1, by probes at mid height and under each crown; a count of 0 is 1, and the arch ring is closed over each opening", [] {
+    for (int method : r498_methods())
+      for (const int count : {4, 7, 1, 0}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, strprintf("arcade %d 2.5 3", count), method, 0.02f);
+        const int n = std::max(1, count);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" arcade %d", count);
+        CHECK(r498_judge(*s.bo).empty());
+        const float cw = 0.4f, span = 2.5f, pitch = span + cw, total = (float)n * span + (float)(n + 1) * cw, x0 = -0.5f * total;
+        size_t columns = 0, arches = 0, wrong = 0;
+        for (int k = 0; k <= n; k++) {
+          const float cx = x0 + (float)k * pitch + 0.5f * cw;
+          columns += t500_in(s, cx, 1.5f, 0.0f);
+          if (!t500_in(s, cx, 1.5f, 0.0f) || !t500_in(s, cx, 2.9f, 0.0f)) wrong++;
+          if (k < n) {
+            const float mid = cx + 0.5f * pitch;
+            arches += !t500_in(s, mid, 1.5f, 0.0f);
+            if (t500_in(s, mid, 1.5f, 0.0f) || t500_in(s, mid, 3.6f, 0.0f)) wrong++;     // (the opening, under the crown at 3 + 1.25)
+            if (!t500_in(s, mid, 4.4f, 0.0f)) wrong++;                                      // (the ring over it: 0.3 thick at the crown)
+            if (t500_in(s, mid, 4.8f, 0.0f)) wrong++;                                       // (nothing above the ring)
+          }
+        }
+        if (columns != (size_t)n + 1 || arches != (size_t)n || wrong) std::printf("    %s: %zu columns (want %d), %zu openings (want %d), %zu wrong probes\n", label.c_str(), columns, n + 1, arches, n, wrong);
+        CHECK(columns == (size_t)n + 1 && arches == (size_t)n && wrong == 0);
+        /* Nothing beyond the last column. */
+        CHECK(!t500_in(s, x0 - 0.1f, 1.5f, 0.0f) && !t500_in(s, -x0 + 0.1f, 1.5f, 0.0f));
+        /* And its depth: 0.5 m about the origin along Z. */
+        CHECK(t500_in(s, x0 + 0.2f, 1.5f, 0.2f) && !t500_in(s, x0 + 0.2f, 1.5f, 0.3f));
+      }
+  });
+}
+
+namespace {
+
+/* A handle of a preset piece pulled `metres` along its way by the mouse, with Ctrl (no snapping): the camera is turned until the handle can be taken. False when it cannot. */
+bool t500_pull(Editor &ed, GameObject &piece, const char *handle, float metres) {
+  BlockoutPiece &bp = *piece.get<BlockoutPiece>();
+  Vec3 lo, hi;
+  if (!blockout_preset_bounds(bp, lo, hi)) return false;
+  const float mx = 0.5f * (lo.x + hi.x), my = 0.5f * (lo.y + hi.y), mz = 0.5f * (lo.z + hi.z);
+  const std::string h = handle;
+  Vec3 at(mx, hi.y, mz), dir(0, 1, 0);
+  if (h == "+x" || h == "side") at = Vec3(hi.x, my, mz), dir = Vec3(1, 0, 0);
+  if (h == "+z") at = Vec3(mx, my, hi.z), dir = Vec3(0, 0, 1);
+  const float ext = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
+  const Vec3 centre = piece.world_matrix().point(Vec3(mx, my, mz));
+  bool framed = false;
+  for (float yaw : {0.0f, 30.0f, 330.0f, 60.0f}) {
+    ed.command(strprintf("camera %g 25 %g %g %g %g", (double)yaw, (double)(2.2f * ext + 3.0f), (double)centre.x, (double)centre.y, (double)centre.z));
+    r477_settle(ed, 3);
+    int x = 0, y = 0;
+    framed = ed.blockout_handle_pixel_for_test(handle, x, y);
+    if (framed) break;
+  }
+  if (!framed) return false;
+  return r479_pull(ed, handle, piece.world_matrix().point(at + dir * metres), platform::MOD_CTRL);
+}
+
+}  // namespace
+
+static void tests_round500_te_editor() {
+  /* ---- Criterion 1: standing in a room ---- */
+  test("architectural pieces (500 te): each of the nine kinds standing on the floor of a 4 x 3 x 4 room, against its wall and turned 30 degrees on the floor - sound, one piece, on each path; the problems and small faces on top of others are counted where there are any", [] {
+    struct Place {
+      const char *what;
+      Vec3 at;
+      float yaw;
+    };
+    const Place places[] = {{"on the floor", Vec3(0.3f, -1.5f, 0.2f), 0.0f}, {"against the wall", Vec3(0.0f, -1.5f, -2.0f), 0.0f}, {"turned on the floor", Vec3(0.3f, -1.5f, 0.2f), 30.0f}};
+    size_t problems = 0, small_total = 0;
+    for (int method : r498_methods())
+      for (const R500Kind &k : kR500Kinds) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->get<Blockout>()->method = method;
+        bo->get<Blockout>()->cell = 0.08f;
+        GameObject *room = r478_room_by_command(ed, *bo);
+        CHECK(room != nullptr);
+        if (!room) return;
+        room->set_local_position({0.0f, 0.0f, 0.0f});
+        ed.select_for_test(bo->id, false);
+        ed.command(std::string("blockout add ") + k.words);
+        GameObject *g = ed.active_object_for_test();
+        CHECK(g && g->get<BlockoutPiece>() && g->get<BlockoutPiece>()->preset == k.preset);
+        if (!g) continue;
+        for (const Place &pl : places) {
+          g->set_local_position(pl.at);
+          g->set_local_rotation(Quat::euler(Vec3(0.0f, pl.yaw, 0.0f)));
+          r495_built(ed);
+          if (&pl == &places[0] && k.preset == kPresetColumn) CHECK(r498_matter(*bo, *room, Vec3(0.0f, -1.6f, 0.0f)) && !r498_matter(*bo, *room, Vec3(1.0f, 0.0f, 1.0f)));  // (the room is where this test thinks it is)
+          size_t small = 0;
+          const std::string why = r498_judge(*bo, &small);
+          const BlockoutStatus &st = bo->get<Blockout>()->state.status;
+          small_total += small;
+          if (!why.empty() || small || !st.skipped.empty() || !st.refusal.empty()) {
+            problems += !why.empty();
+            std::printf("    %s %s %s: %s, %zu small faces on top of others, %zu unresolved, %zu skipped\n", r498_method_name(method), k.words, pl.what, why.empty() ? "sound" : why.c_str(), small, st.unresolved, st.skipped.size());
+          }
+          CHECK(why.empty());
+          CHECK(st.skipped.empty() && st.refusal.empty());
+        }
+      }
+    std::printf("    in a room: %zu unsound results, %zu small faces on top of others in all\n", problems, small_total);
+  });
+
+  test("architectural pieces (500 te): each kind made by its numbers (the kernel's pieces) stands on the floor of a 2 x 2 interior and against its wall (placed exactly on the room's faces), sound on each path", [] {
+    const float pi_half = 90.0f;
+    size_t bad = 0, small_total = 0;
+    for (Path path : r476_paths())
+      for (const R500Kind &k : kR500Kinds)
+        for (int place = 0; place < 3; place++) {
+          std::vector<Piece> pieces = r476_interior(2, 2);
+          BlockoutPiece bp;
+          blockout_preset_defaults(bp, k.preset);
+          std::vector<std::string> notes;
+          const Mat4 at = place == 0 ? Mat4::translate(Vec3(0.3f, -1.4f, 0.2f)) : place == 1 ? Mat4::trs(Vec3(-1.9f, -1.4f, 0.2f), Quat::euler(Vec3(0.0f, pi_half, 0.0f)), Vec3(1.0f)) : Mat4::trs(Vec3(2.0f, -1.4f, 0.0f), Quat::euler(Vec3(0.0f, 45.0f, 0.0f)), Vec3(1.0f));
+          const bool made = blockout_preset_pieces(bp, 100, at, pieces, path == Path::Field ? 0.08f : 0.0f, &notes);
+          CHECK(made);
+          const R476Built b = r476_build(pieces, path, 0.08f);
+          size_t small = 0;
+          const std::string why = r480t_judge(b, &small);
+          small_total += small;
+          if (!why.empty() || small) {
+            bad += !why.empty();
+            std::printf("    %s %s %s: %s, %zu small faces on top of others\n", r476_name(path), k.words, place == 0 ? "on the floor" : place == 1 ? "against a wall" : "turned in the doorway's line", why.empty() ? "sound" : why.c_str(), small);
+          }
+          CHECK(b.ok && why.empty());
+        }
+    std::printf("    in an interior: %zu unsound results, %zu small faces on top of others in all\n", bad, small_total);
+  });
+
+  test("architectural pieces (500 te): every kind's faces are Solid except a roof's top faces (Roof), the Blockout's Roof and Solid materials and a piece's own override land on the right faces, and every face has UVs at the world scale, on each path", [] {
+    for (int method : r498_methods()) {
+      for (int style : {kRoofGable, kRoofHip, kRoofShed})
+        for (const float t : {0.0f, 0.1f}) {
+          if ((style == kRoofHip) != (t > 0.0f) && style != kRoofGable) continue;  // (gable solid and with a sheet, hip with a sheet, shed solid)
+          Editor ed;
+          const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.03f);
+          BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+          bp->roof_style = style, bp->thickness = t;
+          const std::string roof_mat = r482_material("R500TeRoof", Vec3(0.8f, 0.3f, 0.2f)), solid_mat = r482_material("R500TeSolid", Vec3(0.3f, 0.3f, 0.8f)), own_mat = r482_material("R500TeOwn", Vec3(0.2f, 0.8f, 0.3f));
+          ed.select_for_test(s.bo->id, false);
+          ed.command("blockout set material roof " + roof_mat);
+          ed.command("blockout set material solid " + solid_mat);
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutRoofStyleNames[style] + strprintf(" sheet %g", (double)t);
+          const Mesh *m = r495_mesh(*s.bo);
+          const MeshRenderer *mr = s.bo->get<MeshRenderer>();
+          CHECK(m && mr && m->face_count() > 0);
+          if (!m || !mr) continue;
+          std::vector<int> classes = t500_classes(*s.bo);
+          CHECK(classes.size() == m->face_count());
+          size_t roof = 0, other = 0, wrong_class = 0, wrong_mat = 0;
+          for (size_t f = 0; f < classes.size(); f++) {
+            const bool up = m->face_normal(f).y > 0.05f;
+            const int cls = classes[f];
+            roof += cls == kClassRoof, other += cls == kClassSolid;
+            wrong_class += (cls != kClassRoof && cls != kClassSolid) || (up != (cls == kClassRoof));
+            wrong_mat += r482_face_material(*m, *mr, f) != (cls == kClassRoof ? roof_mat : solid_mat);
+          }
+          if (wrong_class || wrong_mat || !roof || !other) std::printf("    %s: %zu roof faces, %zu solid, %zu faces in a wrong class, %zu with a wrong material\n", label.c_str(), roof, other, wrong_class, wrong_mat);
+          CHECK(roof > 0 && other > 0 && wrong_class == 0 && wrong_mat == 0);
+          /* The piece's own Roof material takes the top faces only. */
+          ed.select_for_test(s.piece->id, false);
+          ed.command("blockout set material roof " + own_mat);
+          r495_built(ed);
+          classes = t500_classes(*s.bo);
+          size_t own_wrong = 0;
+          m = r495_mesh(*s.bo);
+          mr = s.bo->get<MeshRenderer>();
+          for (size_t f = 0; m && mr && f < classes.size(); f++) own_wrong += r482_face_material(*m, *mr, f) != (classes[f] == kClassRoof ? own_mat : solid_mat);
+          CHECK(own_wrong == 0);
+        }
+      /* UVs: every kind, at the world scale, no two faces of one plane disagreeing at a corner. */
+      for (const R500Kind &k : kR500Kinds) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, k.words, method, 0.02f);
+        const Mesh *m = r495_mesh(*s.bo);
+        CHECK(m && m->face_count() > 0 && m->has_uvs());
+        if (!m) continue;
+        /* Round 482's rule lays a face flat in its own plane, so it can only hold for a face that has one: a face whose corners are not in one plane (the grid path's quads on
+         * a spiral step's turned sides) or a sliver thinner than the measure's own 1e-4 (the exact path leaves one where two steps share a radial plane, corners 5e-6 m
+         * apart; the stress section counts such faces apart) cannot be laid flat without stretch, whatever the UVs. Those faces are counted and printed, not measured. */
+        auto measurable = [](const Mesh &mm, size_t f) {
+          Vec3 n(0.0f, 0.0f, 0.0f), c(0.0f, 0.0f, 0.0f);
+          float longest = 0.0f;
+          const uint32_t first = mm.face_offsets[f], last = mm.face_offsets[f + 1];
+          for (uint32_t i = first; i < last; i++) {
+            const Vec3 a = mm.positions[mm.corner_verts[i]], b = mm.positions[mm.corner_verts[i + 1 < last ? i + 1 : first]];
+            n = n + Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+            c = c + a, longest = std::max(longest, length(b - a));
+          }
+          const float area = 0.5f * length(n);
+          if (!(longest > 0.0f) || area / longest < 1e-4f) return false;  // (a sliver: its width under the measure's tolerance)
+          n = n * (1.0f / length(n)), c = c * (1.0f / (float)(last - first));
+          for (uint32_t i = first; i < last; i++)
+            if (std::fabs(dot(mm.positions[mm.corner_verts[i]] - c, n)) > 1e-4f) return false;  // (not flat)
+          return true;
+        };
+        size_t left_out = 0;
+        for (size_t f = 0; f < m->face_count(); f++) left_out += !measurable(*m, f);
+        if (left_out) std::printf("    %s %s: %zu of %zu faces not flat or slivers, left out of the UV measure\n", r498_method_name(method), k.words, left_out, m->face_count());
+        const size_t scale_bad = r482_scale_problems(*m, 1.0f, +measurable), clashes = r482_clashes(*m);
+        /* The same measure of a plain shape of the same kind of faces (a Cylinder for a column, Stairs for the spiral, an Arch for the arcade): the metric counts curved faces whose corners meet
+         * at one place under a different basis, so a round piece is held to what the round shape itself gives. */
+        size_t base_scale = 0, base_clash = 0;
+        const char *plain = k.preset == kPresetColumn ? "cylinder 0.25 3" : k.preset == kPresetSpiral ? "stairs 1 3 2 16" : k.preset == kPresetArcade ? "arch" : nullptr;
+        if (plain) {
+          Editor eb;
+          const R500Scene b = r500_make(eb, plain, method, 0.02f);
+          const Mesh *bm = r495_mesh(*b.bo);
+          if (bm && bm->face_count()) base_scale = r482_scale_problems(*bm, 1.0f), base_clash = r482_clashes(*bm);
+          if (scale_bad || clashes) std::printf("    %s %s: a plain '%s' has %zu UV scale problems, %zu corner clashes\n", r498_method_name(method), k.words, plain, base_scale, base_clash);
+        }
+        if (scale_bad || clashes) std::printf("    %s %s: %zu UV scale problems, %zu corner clashes\n", r498_method_name(method), k.words, scale_bad, clashes);
+        CHECK(scale_bad <= base_scale && (k.preset == kPresetArcade || k.preset == kPresetSpiral || clashes <= base_clash));  // (an arcade is several arches and a spiral's steps are turned about Y, so their corner clashes (a coarse measure that a round shape also gives) are printed above, not held to the plain shape's; the scale problems are)
+        for (int cls : t500_classes(*s.bo)) CHECK(cls == kClassSolid || (k.preset == kPresetRoof && cls == kClassRoof));
+      }
+    }
+  });
+
+  /* ---- Criterion 3: the panel, the Inspector, F9, the handles, scale ---- */
+  test("architectural pieces (500 te): the Architecture dropdown and Add button make exactly one object for each kind - no child, no extra object - and the Hierarchy lists that one", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "beam", method, 0.05f);
+      r496_panel(ed);
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(s.bo->id, false);
+        r477_settle(ed, 2);
+        const size_t objects = t500_objects(ed);
+        CHECK(r496_pick_combo(ed, "tools:architecture", kBlockoutPresetNames[k.preset]));
+        CHECK(r496_click_key(ed, "tools:architecture_add"));
+        r495_built(ed);
+        GameObject *g = ed.active_object_for_test();
+        const size_t now = t500_objects(ed);
+        if (now != objects + 1) std::printf("    %s %s by the panel: %zu objects made\n", r498_method_name(method), k.words, now - objects);
+        CHECK(now == objects + 1);
+        CHECK(g && g->children.empty() && g->parent == s.bo && g->get<BlockoutPiece>() && g->get<BlockoutPiece>()->preset == k.preset);
+        CHECK(r498_judge(*s.bo).empty());
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): a number typed in the Inspector (a railing's Post Spacing) is one undo step, undo gives the old posts back and redo the new ones", [] {
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing 5 1", method, 0.02f, 1600, 1000);
+      ed.mark_changed_for_test("test scene");
+      const uint64_t id = s.piece->id, bo_id = s.bo->id;
+      ed.command("window Inspector");
+      ed.record_buttons_for_test(true);
+      ed.select_for_test(id, false);
+      r477_settle(ed, 4);
+      auto piece = [&]() -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+      CHECK(t500_posts_x(*s.bo, tol) == 6);
+      const size_t depth = ed.undo_depth_for_test();
+      CHECK(r479_type(ed, "field:Post Spacing", "0.5"));
+      r495_built(ed);
+      CHECK_NEAR(piece().post_spacing, 0.5f, 1e-6f);
+      CHECK(ed.undo_depth_for_test() == depth + 1);
+      CHECK(t500_posts_x(*s.bo, tol) == 11 && r498_judge(*s.bo).empty());
+      CHECK(r479_type(ed, "field:Length", "2"));
+      r495_built(ed);
+      CHECK_NEAR(piece().length, 2.0f, 1e-6f);
+      CHECK(ed.undo_depth_for_test() == depth + 2);
+      CHECK(t500_posts_x(*s.bo, tol) == 5);  // (2 m at 0.5 m)
+      ed.command("undo");
+      r495_built(ed);
+      GameObject *live = ed.scene().find(bo_id);  // (the objects may have been rebuilt by the undo)
+      CHECK(live != nullptr);
+      if (!live) continue;
+      CHECK_NEAR(piece().length, 5.0f, 1e-6f);
+      CHECK_NEAR(piece().post_spacing, 0.5f, 1e-6f);
+      CHECK(t500_posts_x(*live, tol) == 11);
+      ed.command("undo");
+      r495_built(ed);
+      live = ed.scene().find(bo_id);
+      CHECK(live != nullptr);
+      if (!live) continue;
+      CHECK_NEAR(piece().post_spacing, 1.0f, 1e-6f);
+      CHECK(t500_posts_x(*live, tol) == 6);
+      ed.command("redo");
+      ed.command("redo");
+      r495_built(ed);
+      live = ed.scene().find(bo_id);
+      CHECK(live != nullptr);
+      if (!live) continue;
+      CHECK_NEAR(piece().post_spacing, 0.5f, 1e-6f);
+      CHECK_NEAR(piece().length, 2.0f, 1e-6f);
+      CHECK(t500_posts_x(*live, tol) == 5 && r498_judge(*live).empty());
+    }
+  });
+
+  test("architectural pieces (500 te): F9 right after `blockout add` for a roof, spiral stairs, an arcade, L stairs and a column re-runs the piece from before - typed numbers change the one piece, never add another, one undo takes it all back - in the Unity and the Blender keymap's F9 too", [] {
+    struct Case {
+      const char *words;
+      const char *row;
+      const char *text;
+      const char *row2;
+      const char *text2;
+    };
+    const Case cases[] = {{"roof", "adjust:Pitch", "45", "adjust:Overhang", "0.5"},
+                          {"stairs spiral", "adjust:Steps", "8", "adjust:Turn", "180"},
+                          {"arcade", "adjust:Count", "6", "adjust:Column Width", "0.5"},
+                          {"stairs l", "adjust:Steps", "4", "adjust:Total Height", "2"},
+                          {"column", "adjust:Taper", "0.5", "adjust:Height", "2"}};
+    for (const Case &c : cases) {
+      Editor ed;
+      ed.init_headless(1600, 1000);
+      r477_empty_scene(ed);
+      ed.command("camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.05f;
+      ed.select_for_test(bo->id, false);
+      ed.mark_changed_for_test("test scene");
+      ed.command(std::string("blockout add ") + c.words);
+      r477_settle(ed, 3);
+      GameObject *g = ed.active_object_for_test();
+      CHECK(g && g->get<BlockoutPiece>() && ed.obj_last_valid() && r496_has(ed, c.row) && r496_has(ed, c.row2));
+      if (!g || !r496_has(ed, c.row) || !r496_has(ed, c.row2)) continue;
+      const uint64_t id = g->id;
+      const BlockoutPiece first = *g->get<BlockoutPiece>();
+      CHECK(r479_type(ed, c.row, c.text));
+      CHECK(r479_type(ed, c.row2, c.text2));
+      r495_built(ed);
+      CHECK(r477_all_pieces(*bo).size() == 1 && ed.scene().find(id) != nullptr);
+      const BlockoutPiece &now = *ed.scene().find(id)->get<BlockoutPiece>();
+      CHECK(now.preset == first.preset);
+      if (std::string(c.words) == "roof") CHECK(now.pitch == 45.0f && now.overhang == 0.5f && now.length == first.length && now.span == first.span);
+      if (std::string(c.words) == "stairs spiral") CHECK(now.steps == 8 && now.turn == 180.0f && now.radius == first.radius);
+      if (std::string(c.words) == "arcade") CHECK(now.count == 6 && now.column_width == 0.5f && now.span == first.span);
+      if (std::string(c.words) == "stairs l") CHECK(now.steps == 4 && now.total_height == 2.0f && now.stair_width == first.stair_width);
+      if (std::string(c.words) == "column") CHECK(now.taper == 0.5f && now.height == 2.0f && now.radius == first.radius);
+      const std::string why = r498_judge(*bo);
+      if (!why.empty()) std::printf("    F9 %s: %s\n", c.words, why.c_str());
+      CHECK(why.empty());
+      ed.command("undo");
+      r477_settle(ed, 3);
+      CHECK(r477_count(ed, true) == 0);
+    }
+    /* F9 itself, in the keymaps that bind it differently: it closes the panel and opens it again. */
+    for (const char *preset : {"Unity", "Blender", "Maya"}) {
+      Editor ed;
+      ed.init_headless(1600, 1000);
+      ed.command(std::string("keymap ") + preset);
+      r477_empty_scene(ed);
+      ed.command("camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.1f;
+      ed.select_for_test(bo->id, false);
+      ed.mark_changed_for_test("test scene");
+      ed.command("blockout add roof");
+      r477_settle(ed, 3);
+      CHECK(r496_has(ed, "adjust:Pitch"));
+      const int mods = std::string(preset) == "Maya" ? platform::MOD_CTRL : 0;  // (Maya's F9 is Vertex mode: its Adjust Last Operation is Ctrl+F9)
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, 800, 500)});
+      te_press(ed, platform::KEY_F9, mods);
+      r477_settle(ed, 3);
+      const bool closed = !r496_has(ed, "adjust:Pitch");
+      te_press(ed, platform::KEY_F9, mods);
+      r477_settle(ed, 3);
+      const bool again = r496_has(ed, "adjust:Pitch");
+      if (!closed || !again) std::printf("    keymap %s: F9 closed the roof's panel %d, opened it again %d\n", preset, (int)closed, (int)again);
+      CHECK(closed && again);
+    }
+  });
+
+  test("architectural pieces (500 te): the handles of a railing (+x), a spiral (side), a roof (+z), L stairs (top), an arcade (top), a column (side) and a beam (+z) change the number they are named for with real mouse events, one undo step each, and the mesh stays sound", [] {
+    struct Case {
+      const char *words;
+      const char *handle;
+      float metres;
+    };
+    const Case cases[] = {{"railing 5 1", "+x", 0.5f},        {"stairs spiral 1 0.1 3 16", "side", 0.5f}, {"roof 6 4 30", "+z", 0.5f}, {"stairs l 1 3 2 8", "top", 0.5f},
+                          {"arcade 3 2.5 3", "top", 0.5f},    {"column 0.25 3", "side", 0.25f},          {"beam 4 0.3 0.3", "+z", 0.3f}};
+    for (int method : r498_methods())
+      for (const Case &c : cases) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, c.words, method, 0.05f, 1600, 1000);
+        BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+        const BlockoutPiece before = *bp;
+        ed.select_for_test(s.piece->id, false);
+        ed.mark_changed_for_test("test scene");
+        r477_settle(ed, 3);  // (the mark is committed by the frames that follow)
+        const size_t depth = ed.undo_depth_for_test();
+        const uint64_t piece_id = s.piece->id, bo_id = s.bo->id;
+        const std::string label = std::string(r498_method_name(method)) + " " + c.words + " " + c.handle;
+        const bool pulled = t500_pull(ed, *s.piece, c.handle, c.metres);
+        if (!pulled) std::printf("    %s: the handle could not be taken\n", label.c_str());
+        CHECK(pulled);
+        if (!pulled) continue;
+        r495_built(ed);
+        const std::string h = c.handle, w = c.words;
+        float was = 0.0f, now = 0.0f;
+        if (w.rfind("railing", 0) == 0) was = before.length, now = bp->length;
+        else if (w.rfind("stairs spiral", 0) == 0) was = before.radius, now = bp->radius;
+        else if (w.rfind("roof", 0) == 0) was = before.span, now = bp->span;
+        else if (w.rfind("stairs l", 0) == 0) was = before.total_height, now = bp->total_height;
+        else if (w.rfind("arcade", 0) == 0) was = before.height, now = bp->height;
+        else if (w.rfind("column", 0) == 0) was = before.radius, now = bp->radius;
+        else if (w.rfind("beam", 0) == 0) was = before.size.z, now = bp->size.z;
+        if (std::fabs((now - was) - c.metres) > 0.3f * c.metres + 0.1f) std::printf("    %s: the number went from %g to %g, pulled %g\n", label.c_str(), (double)was, (double)now, (double)c.metres);
+        CHECK(now > was + 0.3f * c.metres && now < was + 1.7f * c.metres + 0.1f);
+        if (ed.undo_depth_for_test() != depth + 1) std::printf("    %s: undo depth %zu after the pull, %zu before\n", label.c_str(), ed.undo_depth_for_test(), depth);
+        CHECK(ed.undo_depth_for_test() == depth + 1);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s after the handle: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        CHECK(t500_finite(*bp) && (w.rfind("stairs spiral", 0) != 0 || bp->inner_radius < bp->radius));
+        ed.command("undo");
+        r495_built(ed);
+        (void)bo_id;
+        GameObject *back = ed.scene().find(piece_id);  // (an undo may rebuild the objects: found again by id)
+        CHECK(back && back->get<BlockoutPiece>());
+        if (back && back->get<BlockoutPiece>()) {
+          const BlockoutPiece &undone = *back->get<BlockoutPiece>();
+          CHECK(undone.length == before.length && undone.radius == before.radius && undone.span == before.span && undone.total_height == before.total_height && undone.height == before.height);
+        }
+      }
+  });
+
+  test("architectural pieces (500 te): scaling a piece scales its sizes and never its counts, angles, Taper, Pitch or a size that was 0 (a solid roof's Thickness, an Overhang of 0, a column with no plinth); hostile factors leave finite numbers in range; a solid roof applied with a scale of 2 is still solid, eight times the volume", [] {
+    for (int preset = 1; preset < kBlockoutPresets; preset++) {
+      BlockoutPiece p;
+      blockout_preset_defaults(p, preset);
+      const BlockoutPiece before = p;
+      CHECK(blockout_piece_scale(p, Vec3(2.0f, 1.5f, 3.0f)));
+      const bool same = p.preset == before.preset && p.steps == before.steps && p.count == before.count && p.segments == before.segments && p.square == before.square &&
+                        p.bottom_rail == before.bottom_rail && p.roof_style == before.roof_style && p.fill_under == before.fill_under && (p.preset == kPresetRoof || std::memcmp(&p.pitch, &before.pitch, 4) == 0) &&
+                        std::memcmp(&p.taper, &before.taper, 4) == 0 && std::memcmp(&p.turn, &before.turn, 4) == 0;
+      /* (Round 500's fix pass: a roof's Pitch follows the ratio of the rise's factor to the run's - here 1.5 over 3 - so that a roof scaled in Y keeps the shape it is drawn with; it is the one angle that scales.) */
+      if (preset == kPresetRoof) CHECK_NEAR(std::tan(p.pitch * 3.14159265f / 180.0f), std::tan(before.pitch * 3.14159265f / 180.0f) * 1.5f / 3.0f, 1e-4f);
+      if (!same) std::printf("    %s: scaling changed a count or an angle\n", kBlockoutPresetNames[preset]);
+      CHECK(same);
+      CHECK(t500_finite(p));
+    }
+    struct Zero {
+      const char *what;
+      int preset;
+      std::function<void(BlockoutPiece &)> make;
+      std::function<bool(const BlockoutPiece &)> still_zero;
+    };
+    const Zero zeros[] = {
+        {"a solid roof's Thickness", kPresetRoof, [](BlockoutPiece &p) { p.thickness = 0.0f; }, [](const BlockoutPiece &p) { return p.thickness == 0.0f; }},
+        {"a roof's Overhang of 0", kPresetRoof, [](BlockoutPiece &p) { p.overhang = 0.0f; }, [](const BlockoutPiece &p) { return p.overhang == 0.0f; }},
+        {"a column's Base Height of 0", kPresetColumn, [](BlockoutPiece &p) { p.base_height = 0.0f; }, [](const BlockoutPiece &p) { return p.base_height == 0.0f; }},
+        {"a column's Capital Height of 0", kPresetColumn, [](BlockoutPiece &p) { p.capital_height = 0.0f; }, [](const BlockoutPiece &p) { return p.capital_height == 0.0f; }},
+        {"a pilaster's Capital Height of 0", kPresetPilaster, [](BlockoutPiece &p) { p.capital_height = 0.0f; }, [](const BlockoutPiece &p) { return p.capital_height == 0.0f; }},
+        {"a spiral's Inner Radius of 0", kPresetSpiral, [](BlockoutPiece &p) { p.inner_radius = 0.0f; }, [](const BlockoutPiece &p) { return p.inner_radius == 0.0f; }},
+        {"an arcade's Arch Rise of 0 (a half circle)", kPresetArcade, [](BlockoutPiece &p) { p.arch_rise = 0.0f; }, [](const BlockoutPiece &p) { return p.arch_rise == 0.0f; }},
+    };
+    for (const Zero &z : zeros) {
+      BlockoutPiece p;
+      blockout_preset_defaults(p, z.preset);
+      z.make(p);
+      CHECK(blockout_piece_scale(p, Vec3(2.0f)));
+      if (!z.still_zero(p)) std::printf("    scaling by 2 turned %s into a size (the smallest allowed, %g m)\n", z.what, (double)kBlockoutMinSize);
+      CHECK(z.still_zero(p));
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (int preset = 1; preset < kBlockoutPresets; preset++)
+      for (const float f : {nan, 0.0f, -2.0f, inf, 1e30f, 1e-30f, 1.0f}) {
+        BlockoutPiece p;
+        blockout_preset_defaults(p, preset);
+        CHECK(blockout_piece_scale(p, Vec3(f, 1.0f, f)));
+        bool range = t500_finite(p);
+        for (float v : {p.radius, p.height, p.length, p.span, p.size.x, p.size.y, p.size.z, p.total_height, p.stair_width, p.rail_height, p.post_size, p.rail_size, p.column_width, p.overhang, p.thickness})
+          range = range && std::fabs(v) <= kBlockoutMaxSize;
+        if (!range) std::printf("    %s scaled by %g: a number is not finite or past %g\n", kBlockoutPresetNames[preset], (double)f, (double)kBlockoutMaxSize);
+        CHECK(range);
+      }
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.05f);
+      const double solid = r476_volume(*r495_mesh(*s.bo));
+      s.bo->set_local_scale(Vec3(2.0f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout applyscale");
+      r495_built(ed);
+      const double scaled = r476_volume(*r495_mesh(*s.bo));
+      std::printf("    %s roof: volume %.3f, after Apply Scale 2: %.3f (ratio %.2f, 8 is right), Thickness %g\n", r498_method_name(method), solid, scaled, scaled / solid, (double)s.piece->get<BlockoutPiece>()->thickness);
+      CHECK(scaled > 7.0 * solid && scaled < 9.0 * solid);
+      CHECK(s.piece->get<BlockoutPiece>()->thickness == 0.0f);
+    }
+  });
+}
+
+static void tests_round500_te_hostile() {
+  /* ---- Criterion 5: hostile numbers, by words and by typing ---- */
+  test("architectural pieces (500 te): hostile `blockout add` numbers (0, negative, NaN, infinite, 1e9, 1e6 arches, 500 steps, a pitch past 90) give finite numbers and a sound mesh or a clean refusal, on each path, never a crash", [] {
+    const char *const adds[] = {"railing 1e9 1e9", "railing nan nan", "railing -5 -5", "railing 0 0", "roof 1e9 1e9 90", "roof 0 0 0", "roof nan 4 30", "roof 6 4 -10", "roof 6 4 1e9", "roof abc",
+                                "column 0 0", "column 1e9 1e9", "column nan", "pilaster 1e9 1e9", "beam 0 0 0", "beam inf nan -1", "beam 1e9 1e9 1e9",
+                                "stairs l 0 0 0 0", "stairs l 1e9 1e9 1e9 1e9", "stairs u 1 3 2 1e9", "stairs u -1 -3 -2 -8", "stairs spiral 0 0 0 0 0",
+                                "stairs spiral 1 5 3 500 1e9", "stairs spiral 1 0.1 3 16 nan", "arcade 0", "arcade 1e6 0 0", "arcade 3 nan nan",
+                                "arcade -4"};
+    for (int method : r498_methods()) {
+      size_t bad = 0, nth = 0;
+      for (const char *line : adds) {
+        if (r498_methods().size() > 1 && (nth++ % 2) != (method == 2 ? 1u : 0u)) continue;  // (a sample: with both paths each line runs on one of them, alternately; the stress sweep has the rest)
+        const auto t0 = std::chrono::steady_clock::now();
+        Editor ed;
+        const R500Scene s = r500_make(ed, line, method, 0.1f);
+        r495_built(ed);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ms > 800.0) std::printf("    (%s 'blockout add %s' took %.0f ms)\n", r498_method_name(method), line, ms);
+        const std::string why = t498_verdict(*s.bo);
+        const bool finite = !s.piece || !s.piece->get<BlockoutPiece>() || t500_finite(*s.piece->get<BlockoutPiece>());
+        if (!why.empty() || !finite) bad++, std::printf("    %s 'blockout add %s': %s\n", r498_method_name(method), line, finite ? why.c_str() : "a number is not finite");
+      }
+      CHECK(bad == 0);
+    }
+  });
+
+  test("architectural pieces (500 te): hostile `blockout set` words on each kind (spacing 0 / -1 / nan / 1e30, pitch 0 / 90 / -10, taper 0 / 2 / 1e9, 500 steps, an inner radius past the radius, turn 0 / 1e9, 1e6 arches, sizes of 1e30) keep the numbers finite and the mesh sound or cleanly refused, on each path", [] {
+    struct Kind {
+      const char *words;
+      std::vector<const char *> lines;
+    };
+    const std::vector<Kind> kinds = {
+        {"railing", {"spacing 0", "spacing -1", "spacing nan", "spacing 1e30", "spacing 0.0001", "length 0", "length 1e30", "postsize 1e30", "railsize 5", "railheight 0", "bottomrail off", "spacing 1", "length 5"}},
+        {"roof", {"pitch 0", "pitch 90", "pitch -10", "pitch nan", "pitch 1e9", "overhang 1e9", "thickness 1e9", "thickness 0.0001", "span 0", "span 1e30", "ridge 0", "ridge 1e9", "ridge nan", "roofstyle hip", "pitch 90", "roofstyle shed", "pitch 85", "thickness 0.5"}},
+        {"column", {"taper 0", "taper 2", "taper 1e9", "taper -1", "radius 0", "radius 1e30", "height 1e30", "height 0", "baseheight 1e9", "capitalheight 1e9", "segments 0", "segments 1e9", "shaft square", "taper 0.05"}},
+        {"pilaster", {"taper 0", "taper 1e9", "radius 1e30", "height 0", "baseheight 1e9", "radius 0.01"}},
+        {"stairs l", {"steps 500", "steps 0", "steps -5", "totalheight 0", "totalheight 1e30", "length 1e30", "fill off", "steps 1", "length 0"}},
+        {"stairs u", {"steps 500", "steps 0", "totalheight 0", "length 1e30", "fill off", "steps 1", "flightwidth 0.01"}},
+        {"stairs spiral", {"steps 500", "steps 1", "innerradius 5", "innerradius 0", "turn 0", "turn 1e9", "turn -1e9", "radius 0.01", "radius 1e30", "fill off", "turn 90", "steps 256"}},
+        {"arcade", {"count 0", "count 1e6", "count 1000", "count -3", "span 0", "span 1e30", "archrise 1e9", "archrise 0", "columnwidth 1e30", "depth 1e30", "segments 3", "count 4", "columnwidth 0.01"}},
+    };
+    for (int method : r498_methods())
+      for (const Kind &k : kinds) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, k.words, method, 0.1f);
+        CHECK(s.piece != nullptr);
+        if (!s.piece) continue;
+        const uint64_t id = s.piece->id;
+        size_t bad = 0, nth = 0;
+        for (const char *line : k.lines) {
+          if (r498_methods().size() > 1 && (nth++ % 2) != (method == 2 ? 1u : 0u)) continue;  // (a sample: with both paths each line runs on one of them, alternately)
+          const auto t0 = std::chrono::steady_clock::now();
+          ed.select_for_test(id, false);
+          ed.command(std::string("blockout set ") + line);
+          r495_built(ed);
+          const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+          if (ms > 800.0) std::printf("    (%s %s 'blockout set %s' took %.0f ms)\n", r498_method_name(method), k.words, line, ms);
+          const std::string why = t498_verdict(*s.bo);
+          const bool finite = t500_finite(*s.piece->get<BlockoutPiece>());
+          if (!why.empty() || !finite) bad++, std::printf("    %s %s, 'blockout set %s': %s\n", r498_method_name(method), k.words, line, finite ? why.c_str() : "a number is not finite");
+        }
+        CHECK(bad == 0);
+      }
+  });
+
+  test("architectural pieces (500 te): hostile words typed into the Inspector's own fields (NaN, -5, 1e30, text, infinity, 0, 1e9) leave finite numbers and a sound or cleanly refused mesh, for a railing, a roof, a column, spiral stairs and an arcade", [] {
+    struct Kind {
+      const char *words;
+      std::vector<const char *> rows;
+    };
+    const std::vector<Kind> kinds = {{"railing", {"Post Spacing", "Length"}},
+                                     {"roof", {"Pitch", "Thickness"}},
+                                     {"column", {"Taper", "Segments"}},
+                                     {"stairs spiral", {"Steps", "Turn"}},
+                                     {"arcade", {"Count", "Arch Rise"}}};
+    size_t typed = 0, missing = 0;
+    for (const Kind &k : kinds) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, k.words, 2, 0.1f, 1600, 1000);
+      CHECK(s.piece != nullptr);
+      if (!s.piece) continue;
+      const uint64_t id = s.piece->id;
+      ed.command("window Inspector");
+      ed.record_buttons_for_test(true);
+      ed.select_for_test(id, false);
+      r477_settle(ed, 4);
+      for (const char *row : k.rows)
+        for (const char *text : {"nan", "1e30", "0"}) {
+          if (!r479_type(ed, std::string("field:") + row, text)) {
+            missing++, std::printf("    %s: the row '%s' is not in the Inspector's view\n", k.words, row);
+            break;
+          }
+          typed++;
+          r495_built(ed);
+          const bool fine = t500_finite(*ed.scene().find(id)->get<BlockoutPiece>());
+          const std::string why = t498_verdict(*s.bo);
+          if (!fine || !why.empty()) std::printf("    %s: '%s' typed '%s': %s\n", k.words, row, text, fine ? why.c_str() : "a number is not finite");
+          CHECK(fine && why.empty());
+        }
+    }
+    std::printf("    %zu words typed, %zu rows not found\n", typed, missing);
+    CHECK(typed >= 30 && missing == 0);
+  });
+
+  /* ---- Criterion 6: save and open, Bake, export, with one of each kind ---- */
+  test("architectural pieces (500 te): one of each of the nine kinds in a Blockout with a Roof material keeps its mesh bytes and numbers through Save / Open, Bake / Unbake, and OBJ, FBX and GLB export one mesh with the roof's faces in the Roof material, on each path", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_world_position({0.0f, 0.0f, 0.0f});
+      bo->get<Blockout>()->method = method;
+      bo->get<Blockout>()->cell = 0.05f;
+      const std::string roof_mat = r482_material("R500TeAll", Vec3(0.7f, 0.2f, 0.2f));
+      ed.select_for_test(bo->id, false);
+      ed.command("blockout set material roof " + roof_mat);
+      std::vector<uint64_t> ids;
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(bo->id, false);
+        ed.command(std::string("blockout add ") + k.words);
+        GameObject *g = ed.active_object_for_test();
+        CHECK(g != nullptr);
+        if (!g) return;
+        g->set_local_position({(float)(k.preset - 1) * 16.0f, 0.0f, 0.0f});  // (apart: no two kinds touch)
+        ids.push_back(g->id);
+      }
+      r495_built(ed);
+      const uint64_t bo_id = bo->id;
+      const std::string label = r498_method_name(method);
+      const std::string why = r498_judge(*bo);
+      if (!why.empty()) std::printf("    %s all nine kinds: %s\n", label.c_str(), why.c_str());
+      CHECK(why.empty());
+      const Mesh before = *r495_mesh(*bo);
+      const uint64_t hash = blockout_mesh_hash(before);
+      std::vector<BlockoutPiece> numbers;
+      for (uint64_t id : ids) numbers.push_back(*ed.scene().find(id)->get<BlockoutPiece>());
+      const std::map<std::string, size_t> want = r482_triangles(*bo);
+      const size_t roof_tris = want.count("R500TeAll") ? want.at("R500TeAll") : 0;
+      CHECK(roof_tris > 0);
+      std::printf("    %s all nine kinds: %zu faces, %zu roof triangles, hash %llx\n", label.c_str(), before.face_count(), roof_tris, (unsigned long long)hash);
+      /* Export: one mesh, UVs, the roof's triangles in the roof's material. */
+      for (const char *format : {"obj", "fbx", "glb"}) {
+        const std::string name = std::string("r500te_all.") + format;
+        const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
+        const size_t got = back.triangles.count("R500TeAll") ? back.triangles.at("R500TeAll") : 0;
+        if (!back.ok || back.mesh_nodes != 1 || !back.uvs || got != roof_tris) std::printf("    %s %s: ok %d, %zu mesh nodes, uvs %d, roof triangles %zu (want %zu)\n", label.c_str(), format, (int)back.ok, back.mesh_nodes, (int)back.uvs, got, roof_tris);
+        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs && got == roof_tris);
+      }
+      /* Bake and Unbake. */
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<BlockoutBaked>() && r495_mesh(*baked) && r477_same(before, *r495_mesh(*baked)));
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<Blockout>() && r495_mesh(*baked) && r477_same(before, *r495_mesh(*baked)) && blockout_mesh_hash(*r495_mesh(*baked)) == hash);
+      for (size_t i = 0; i < ids.size(); i++) {
+        GameObject *g = ed.scene().find(ids[i]);
+        const BlockoutPiece *b = g ? g->get<BlockoutPiece>() : nullptr;
+        CHECK(b && b->preset == numbers[i].preset && b->length == numbers[i].length && b->radius == numbers[i].radius && b->count == numbers[i].count && b->steps == numbers[i].steps && b->turn == numbers[i].turn);
+      }
+      /* Save and open. */
+      const std::string path = te_scene_path(ed, "r500te_all.scene");
+      CHECK(fs::write_file(path, save_scene_text(ed.scene())));
+      ed.command("newscene");
+      CHECK(ed.open_scene_for_test(path));
+      for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+      r495_built(ed);
+      GameObject *back = r477_find(ed);
+      CHECK(back && r495_mesh(*back) && r477_same(before, *r495_mesh(*back)) && blockout_mesh_hash(*r495_mesh(*back)) == hash && r482_scratch_same(*back));
+      fs::remove_file(path);
+    }
+  });
+
+  /* ---- Old scenes ---- */
+  test("architectural pieces (500 te): a Blockout of round 499's pieces (a box, a room, a styled door and window) builds the same bytes whatever a piece without a preset holds in the round's new fields - NaN, infinity, zero, 1e30 - and its hash is printed", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_world_position({0.0f, 0.0f, 0.0f});
+      bo->get<Blockout>()->method = method;
+      bo->get<Blockout>()->cell = 0.05f;
+      r477_piece(ed, *bo, "Box", 0, 0, {6.0f, 0.5f, 0.0f}, {1.5f, 1.0f, 1.0f});
+      GameObject *room = r478_room_by_command(ed, *bo);
+      CHECK(room != nullptr);
+      if (!room) return;
+      room->set_local_position({0.0f, 0.0f, 0.0f});
+      ed.select_for_test(room->id, false);
+      ed.command("blockout add door double");
+      ed.select_for_test(room->id, false);
+      ed.command("blockout add window single");
+      r495_built(ed);
+      const std::string why = r498_judge(*bo);
+      CHECK(why.empty());
+      const Mesh plain = *r495_mesh(*bo);
+      const uint64_t hash = blockout_mesh_hash(plain);
+      std::printf("    %s old-style scene: %zu faces, hash %llx\n", r498_method_name(method), plain.face_count(), (unsigned long long)hash);
+      const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+      size_t changed = 0, pieces = 0;
+      for (const float v : {nan, inf, 0.0f, -3.0f, 1e30f}) {
+        for (GameObject *g : r477_all_pieces(*bo)) {
+          BlockoutPiece *p = g->get<BlockoutPiece>();
+          CHECK(p->preset == 0);
+          p->square = true, p->base_height = v, p->capital_height = v, p->base_width = v, p->capital_width = v, p->taper = v, p->length = v, p->post_spacing = v, p->post_size = v, p->rail_size = v,
+          p->rail_height = v, p->bottom_rail = false, p->roof_style = 2, p->span = v, p->pitch = v, p->overhang = v, p->thickness = v, p->total_height = v, p->stair_width = v, p->turn = v,
+          p->column_width = v, p->arch_thickness = v, p->count = v > 0.0f && v < 1e29f ? 3 : -5;
+          pieces++;
+        }
+        r495_built(ed);
+        const Mesh now = *r495_mesh(*bo);
+        const bool same = r477_same(plain, now) && blockout_mesh_hash(now) == hash;
+        changed += !same;
+        if (!same) std::printf("    %s: the new fields at %g changed the mesh of a scene without presets (%zu faces, hash %llx)\n", r498_method_name(method), (double)v, now.face_count(), (unsigned long long)blockout_mesh_hash(now));
+      }
+      CHECK(pieces > 0 && changed == 0);
+    }
+  });
+}
+
+static void tests_round500_te() {
+  tests_round500_te_kernel();
+  tests_round500_te_measured();
+  tests_round500_te_editor();
+  tests_round500_te_hostile();
+}
+// r500te-end
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -19000,4 +26811,14 @@ void run_blockout_tests() {
   tests_round483_te();
   tests_round497();
   tests_round497_te();
+  tests_round498();
+  tests_round498_te();
+  tests_round498_fix();
+  tests_round499();
+  tests_round499_te();
+  tests_round499_upright();
+  tests_round499_presets();
+  tests_round499_upright_console();
+  tests_round500();
+  tests_round500_te();
 }
