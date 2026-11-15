@@ -3572,7 +3572,10 @@ static void tests_round166_to_round170() {
       /* (Over the window's left margin: no list or field inside the window takes the wheel there before the window.) */
       mv.x = wheel.x = w.x + ed.ui_for_test().px(3);
       mv.y = wheel.y = w.y + w.h / 2;
-      wheel.wheel_y = !seen || f.y > w.bottom() ? -3.0f : 3.0f;
+      /* Down while any of it is below the window, up only while it is above. (Round 509: judged by its top edge, a field
+       * straddling the bottom - its top inside, its bottom out - was wheeled up, then down again, for good: macOS's font
+       * put Toon Bands there; at 900-916 px tall windows Windows did the same.) */
+      wheel.wheel_y = !seen || f.bottom() > w.bottom() ? -3.0f : 3.0f;
       ed.step_frame_headless({mv});
       ed.step_frame_headless({wheel});
       ed.step_frame_headless();
