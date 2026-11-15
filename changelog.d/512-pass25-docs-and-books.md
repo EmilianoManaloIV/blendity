@@ -21,4 +21,11 @@ in order. The owner added: "Also make sure to modify books too for the docs."
   when Embree's DLL is deployed without dpcpp's SYCL runtime (sycl9.dll and the ur_ / xptifw DLLs): a fresh worktree's
   programs had exited at once with an empty log.
 
-**Checked:** CHECKS_PLACEHOLDER
+**Checked:** on the joined tree (main with #415, #411, #412, #413, #414), every group in its own fresh folder. Windows with
+Blender's libraries: 62,606 checks in 3,144 tests, 0 failed but the three `gpu` card-picture tests that fail on main too.
+Dependency-free (Windows) and Linux: every group 0 failed but load-timed checks that passed on a quiet rerun (Linux `vr`'s
+BVH speed ratio, three runs green) or failed a different check each run (the dependency-free `livelink` group's clip-sync and
+tick-time checks under the machine's other load; a finding for its owner: checks that assert a time, against ADR 0056).
+`build.sh`: touching `tests/test_common.h` rebuilt the 23 test objects and nothing else. `make_books.py --check` (182
+references, all cited), both PDFs built; two code reviews (changes needed: two wrong facts, the user guide's PDF, figures
+that did not show what their captions said - all made) and an approval.
