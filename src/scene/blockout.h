@@ -202,4 +202,10 @@ bool crisp_available();
 bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out, Faces *faces = nullptr, Report *report = nullptr,
            Cache *cache = nullptr, const std::atomic<bool> *cancel = nullptr);
 
+/* Round 514 (ADR 0138): the piece's own shape as a closed mesh in its own space - its numbers only (not its place, operation,
+ * Blend or room), what a modifier stack on the piece runs over. A box, cylinder, sphere and wedge are the solid the kernel makes
+ * of them; stairs, an arch and an outline are their convex parts united by a build of the piece alone; a mesh piece is its mesh.
+ * False when the numbers make no shape. */
+bool piece_shape_mesh(const Piece &piece, Mesh &out);
+
 }  // namespace bl::blockout

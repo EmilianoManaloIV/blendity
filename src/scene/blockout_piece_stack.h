@@ -12,7 +12,11 @@ namespace bl {
 struct Component;
 class GameObject;
 struct BlockoutPiece;
+struct BlockoutSurface;
 struct Mesh;
+namespace blockout {
+struct Piece;
+}
 
 /* Why a piece does not take this kind of modifier ("" when it does): it reads another object, or only changes shading. */
 std::string blockout_piece_modifier_refusal(const char *type);
@@ -26,5 +30,22 @@ bool blockout_piece_stack_live(const GameObject &piece);
 uint64_t blockout_piece_stack_hash(const GameObject &piece);
 /* The stack run over the piece's shape (a closed mesh in the piece's space), top to bottom. */
 void blockout_piece_stack_run(const std::vector<const Component *> &stack, Mesh &m);
+
+/* The snapshot's part (main thread): when `piece`'s object carries a live stack, its note - `index` its place in the snapshot's piece
+ * list, the key of the evaluated mesh (the kernel piece's numbers and the stack), clones of the modifiers - goes into `surface`. */
+void blockout_piece_stack_note(const GameObject &piece, const blockout::Piece &numbers, size_t index, BlockoutSurface &surface);
+/* The build's part (its worker): each noted piece becomes a mesh piece - its shape from its numbers, then its stack - taken from a
+ * cache by key when it was evaluated before (a moved piece keeps its key). A piece whose shape or stack gives no mesh is left as its
+ * numbers. Returns how many stacks were evaluated (not taken from the cache). */
+size_t blockout_piece_stacks_apply(std::vector<blockout::Piece> &pieces, const BlockoutSurface &surface);
+/* What the Blockout's status says about its pieces' stacks: each piece that carries one and is built as a mesh, and each whose
+ * modifiers do nothing (a room, a door or window, an Intersect piece) and why. Lines as `blockout_status_lines` makes them. */
+void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pair<std::string, bool>> &lines);
+/* The stacks evaluated since the start (any Blockout, any thread). */
+uint64_t blockout_piece_stack_evaluations();
+/* The cache of evaluated meshes: emptied (a new or opened scene), its size now (entries and bytes of points and corners), its caps. */
+void blockout_piece_stack_cache_clear();
+void blockout_piece_stack_cache_size(size_t &entries, size_t &bytes);
+size_t blockout_piece_stack_cache_limit(bool in_bytes);
 
 }  // namespace bl

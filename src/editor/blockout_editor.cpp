@@ -3,6 +3,7 @@
 // snapshot, built on a worker (a thread inside JobSystem::run_background, as eval_job_request does) and adopted when it
 // is still wanted - and the ways to make, see, pick and refuse to edit one.
 #include "editor.h"
+#include "../scene/blockout_piece_stack.h"  // (round 514)
 
 #include "blockout_pick.h"
 
@@ -106,6 +107,7 @@ void Editor::blockout_unwant(uint64_t obj) {
 void Editor::blockout_request(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash, BlockoutSurface &&surface) {
   if (!jobs_async() || JobSystem::in_background()) {
     blockout_main_builds_++;
+    blockout_piece_stacks_apply(pieces, surface);  // (round 514: as on the worker)
     MeshPtr mesh = std::make_shared<Mesh>();
     blockout::Faces faces;
     blockout::Report report;
@@ -138,6 +140,7 @@ void Editor::blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Pi
   raw->thread = std::thread([raw, delay_ms] {
     if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     JobSystem::global().run_background([raw] {
+      blockout_piece_stacks_apply(raw->pieces, raw->surface);  // (round 514: a piece's modifier stack makes it a mesh piece, here on the worker)
       MeshPtr mesh = std::make_shared<Mesh>();
       raw->ok = blockout::build(raw->pieces, raw->settings, *mesh, &raw->faces, &raw->report, raw->cache.get(), &raw->cancel);
       if (!raw->ok) return;
@@ -1476,6 +1479,7 @@ std::vector<std::pair<std::string, bool>> Editor::blockout_status_lines(const Ga
     const GameObject *o = scene_ ? scene_->find(k.id) : nullptr;
     lines.push_back({strprintf("'%s' is scaled unevenly: turned pieces are sheared%s", o ? o->name.c_str() : "an object", k.above ? " (above the Blockout: not the Blockout's to change)" : ""), true});
   }
+  blockout_piece_stack_status(g, lines);  // (round 514: the pieces that carry modifiers)
   if (!s.built) {
     lines.push_back({"Not built yet", false});
     return lines;

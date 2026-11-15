@@ -39,6 +39,14 @@ struct BlockoutSurface {
     float offset_u = 0.0f, offset_v = 0.0f, rotation = 0.0f;
   };
   std::vector<Piece> pieces;
+  /* Round 514 (ADR 0138): the pieces that carry a modifier stack - their place in the snapshot's piece list, the key of the evaluated
+   * mesh (numbers and stack, never the place) and clones of the modifiers, run on the build's worker (blockout_piece_stack.h). */
+  struct Stack {
+    size_t index = 0;
+    uint64_t key = 0;
+    std::vector<std::shared_ptr<const Component>> modifiers;
+  };
+  std::vector<Stack> stacks;
 };
 
 /* Written into a Blockout's fresh mesh by the build (on the worker): the slot of every face (by the class of the face and the piece that

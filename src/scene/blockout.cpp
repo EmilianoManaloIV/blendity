@@ -1628,4 +1628,43 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
   return true;
 }
 
+/* Round 514 (ADR 0138): a piece's own shape as a mesh, for the modifier stack it carries. */
+bool piece_shape_mesh(const Piece &piece, Mesh &out) {
+  out = Mesh();
+  if (piece.shape == Shape::Mesh) {
+    if (!piece.mesh || piece.mesh->face_count() == 0) return false;
+    out = *piece.mesh;
+    return true;
+  }
+  Piece p = piece;
+  p.to_blockout = Mat4::identity(), p.op = Op::Add, p.room = false, p.blend = 0.0f;
+  if (!finite_piece(p)) return false;
+  Solid s;
+  const double identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+  const bool one = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : p.shape == Shape::Sphere ? local_sphere(p, s)
+                   : p.shape == Shape::Wedge ? local_wedge(p, identity, nullptr, s) : false;
+  if (!one) return build({p}, Settings(), out) && out.face_count() > 0;  // (stairs, an arch, an outline: several convex parts, united)
+  for (const V3 &v : s.verts) out.positions.push_back(Vec3((float)v.x, (float)v.y, (float)v.z));
+  out.corner_verts.assign(s.face_verts.begin(), s.face_verts.end());
+  out.face_offsets.assign(s.face_offsets.begin(), s.face_offsets.end());
+  /* The local solid's faces are not all wound one way before the solid is placed: each face of a convex solid is turned to look away
+   * from its middle, so a modifier (a Bevel) meets one closed, outward surface. */
+  V3 mid(0, 0, 0);
+  for (const V3 &v : s.verts) mid = mid + v;
+  mid = mid * (1.0 / (double)std::max<size_t>(1, s.verts.size()));
+  for (size_t f = 0; f + 1 < out.face_offsets.size(); f++) {
+    const uint32_t a = out.face_offsets[f], b = out.face_offsets[f + 1];
+    V3 n(0, 0, 0), c(0, 0, 0);
+    for (uint32_t i = a; i < b; i++) {
+      const V3 &p0 = s.verts[out.corner_verts[i]], &p1 = s.verts[out.corner_verts[i + 1 < b ? i + 1 : a]];
+      n = n + V3((p0.y - p1.y) * (p0.z + p1.z), (p0.z - p1.z) * (p0.x + p1.x), (p0.x - p1.x) * (p0.y + p1.y));
+      c = c + p0;
+    }
+    c = c * (1.0 / (double)std::max<uint32_t>(1, b - a));
+    if (dot(n, c - mid) < 0.0) std::reverse(out.corner_verts.begin() + a, out.corner_verts.begin() + b);
+  }
+  out.touch();
+  return out.face_count() > 0;
+}
+
 }  // namespace bl::blockout

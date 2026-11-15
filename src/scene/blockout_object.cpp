@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The Blockout object (ADR 0129, task 0453): the two components' fields and the snapshot the kernel is given.
 #include "blockout_object.h"
+#include "blockout_piece_stack.h"  // (round 514: a piece's modifier stack)
 
 #include "../core/hash.h"
 
@@ -492,6 +493,7 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
         if (notes) notes->refused.push_back({c->id, why});
       }
       else {
+        if (notes) blockout_piece_stack_note(*c, p, pieces.size(), notes->surface);  // (round 514: a stack on the piece, run on the build's worker)
         pieces.push_back(std::move(p));
         if (source && notes) notes->sources.push_back(source->id);
         if (notes) {  // (round 482: what the faces of this piece are given besides their shape)
@@ -549,6 +551,7 @@ uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, cons
       for (const std::string &m : sp.materials) h = hash_mix(h, fnv1a(m.data(), m.size()));
       h = mix_float(mix_float(mix_float(h, sp.offset_u), sp.offset_v), sp.rotation);
     }
+    for (const BlockoutSurface::Stack &st : s.stacks) h = hash_mix(hash_mix(h, st.index), st.key);  // (round 514: a piece's stack)
   }
   for (const blockout::Piece &p : pieces) {
     h = hash_mix(h, p.id);
