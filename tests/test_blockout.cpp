@@ -13213,7 +13213,8 @@ static void tests_round482() {
     ed.select_for_test(bo->id, false);
     r477_settle(ed);
     const size_t depth = ed.undo_depth_for_test();
-    for (const char *line : {"blockout set material", "blockout set material roof Assets/Materials/R482/R482Cmd.mat", "blockout set material floor", "blockout set material floor NoSuchMaterial482", "blockout set texscale",
+    /* (Round 500 made "roof" a class of its own, so the unknown class this names is now "chimney": the same refusal, a different word.) */
+    for (const char *line : {"blockout set material", "blockout set material chimney Assets/Materials/R482/R482Cmd.mat", "blockout set material floor", "blockout set material floor NoSuchMaterial482", "blockout set texscale",
                              "blockout set texscale 0", "blockout set texscale -2", "blockout set texscale abc", "blockout set texscale nan", "blockout set texscale inf", "blockout set texscale 1e999"}) {
       const size_t mark = r477_mark();
       size_t warnings = 0;
@@ -19746,7 +19747,7 @@ static void tests_round498_more() {
 
   test("blockout window styles (498): the Glass class comes after the six of round 482 - their names and order unchanged - and a window's glass, its numbers and the Blockout's Glass Material each change the snapshot's hash", [] {
     /* Round 499 added the Leaf class after Glass: eight classes now (this said seven), Glass still the seventh slot's number 6 and the six before it unchanged. */
-    CHECK(kBlockoutClasses == 8 && kClassGlass == 6 && kClassLeaf == 7);
+    CHECK(kBlockoutClasses == 9 && kClassGlass == 6 && kClassLeaf == 7 && kClassRoof == 8);  // (round 500 added Roof after Leaf: nine classes; the eight before it keep their numbers)
     const char *const want[7] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass"};
     for (int k = 0; k < 7; k++) CHECK(std::string(kBlockoutClassNames[k]) == want[k]);
     CHECK(kClassFloor == 0 && kClassWalls == 1 && kClassCeiling == 2 && kClassOutside == 3 && kClassCut == 4 && kClassSolid == 5);
@@ -22229,7 +22230,7 @@ static void tests_round499_more() {
   });
 
   test("blockout door styles (499): the Leaf class is the eighth - the seven before it keep their names and numbers - and a door's leaf, its numbers and the Blockout's Leaf Material each change the snapshot's hash", [] {
-    CHECK(kBlockoutClasses == 8 && kClassLeaf == 7 && std::string(kBlockoutClassNames[kClassLeaf]) == "Leaf");
+    CHECK(kBlockoutClasses == 9 && kClassLeaf == 7 && std::string(kBlockoutClassNames[kClassLeaf]) == "Leaf");  // (round 500 added Roof as the ninth: Leaf is still the eighth class, number 7)
     const char *const want[8] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass", "Leaf"};
     for (int k = 0; k < 8; k++) CHECK(std::string(kBlockoutClassNames[k]) == want[k]);
     Editor ed;
@@ -23715,6 +23716,2506 @@ static void tests_round499_te() {
 }
 // r499te-end
 
+/* ===================================================================== */
+/* Round 500 (task 0484): architectural pieces                            */
+/* ===================================================================== */
+
+namespace {
+
+struct R500Scene {
+  GameObject *bo = nullptr, *piece = nullptr;
+};
+
+/* An empty Blockout and `blockout add <words>` into it by the console (method 0 Auto, 1 Exact, 2 Field; a cell above 0 is the Field Cell). */
+R500Scene r500_make(Editor &ed, const std::string &words, int method = 0, float cell = 0.0f, int width = 900, int height = 600) {
+  ed.init_headless(width, height);
+  r477_empty_scene(ed);
+  R500Scene s;
+  s.bo = r477_blockout(ed);
+  s.bo->set_world_position({0.0f, 0.0f, 0.0f});
+  Blockout *b = s.bo->get<Blockout>();
+  b->method = method;
+  if (cell > 0.0f) b->cell = cell;
+  ed.select_for_test(s.bo->id, false);
+  ed.command("blockout add " + words);
+  s.piece = ed.active_object_for_test();
+  if (s.piece) s.piece->set_local_position({0.0f, 0.0f, 0.0f});  // (a new piece stands where the camera looks: the numbers are measured from the Blockout's origin)
+  r495_built(ed);
+  return s;
+}
+
+/* The positions of a mesh's corners. */
+const std::vector<Vec3> &r500_pts(const GameObject &bo) {
+  static const std::vector<Vec3> none;
+  const Mesh *m = r495_mesh(bo);
+  return m ? m->positions : none;
+}
+
+/* How many groups of values there are when two values within `gap` are one group (posts, columns: each a cluster of corners). */
+size_t r500_clusters(std::vector<float> v, float gap) {
+  std::sort(v.begin(), v.end());
+  size_t n = v.empty() ? 0 : 1;
+  for (size_t i = 1; i < v.size(); i++) n += v[i] - v[i - 1] > gap;
+  return n;
+}
+
+/* The grid path puts a corner within about a cell of where the numbers say; the exact path to rounding. */
+float r500_tol(int method) { return method == 2 ? 0.03f : 2e-3f; }
+
+float r500_top(const GameObject &bo) {
+  float y = -1e30f;
+  for (const Vec3 &p : r500_pts(bo)) y = std::max(y, p.y);
+  return y;
+}
+
+/* The words of each kind as `blockout add` says them, and the kind. */
+struct R500Kind {
+  const char *words;
+  int preset;
+};
+const R500Kind kR500Kinds[] = {{"column", kPresetColumn},   {"pilaster", kPresetPilaster}, {"beam", kPresetBeam},          {"railing", kPresetRailing}, {"roof", kPresetRoof},
+                               {"stairs l", kPresetStairsL}, {"stairs u", kPresetStairsU},   {"stairs spiral", kPresetSpiral}, {"arcade", kPresetArcade}};
+
+}  // namespace
+
+static void tests_round500_kinds() {
+  /* ---- Criterion 1: each kind is one piece, sound on each path, alone and in a room ---- */
+  test("architectural pieces (500): each of the nine kinds made by the console is ONE piece - one object with no children, no object per solid - and its result is closed, valid, outward, with no faces on top of each other, on each path, alone and standing in a room", [] {
+    for (int method : r498_methods())
+      for (const R500Kind &k : kR500Kinds)
+        for (const bool in_room : {false, true}) {
+          Editor ed;
+          ed.init_headless(900, 600);
+          r477_empty_scene(ed);
+          GameObject *bo = r477_blockout(ed);
+          bo->get<Blockout>()->method = method;
+          bo->get<Blockout>()->cell = 0.02f;
+          ed.select_for_test(bo->id, false);
+          if (in_room) r478_room_by_command(ed, *bo);
+          const size_t before = r477_all_pieces(*bo).size();
+          ed.command(std::string("blockout add ") + k.words);
+          r495_built(ed);
+          GameObject *g = ed.active_object_for_test();
+          const BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+          const std::string label = std::string(r498_method_name(method)) + " " + k.words + (in_room ? " in a room" : " alone");
+          CHECK(bp && bp->preset == k.preset && bp->opening == 0 && !bp->is_room() && g->children.empty());
+          CHECK(r477_all_pieces(*bo).size() == before + 1);
+          size_t small = 0;
+          const std::string why = r498_judge(*bo, &small);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          const BlockoutStatus &st = bo->get<Blockout>()->state.status;
+          CHECK(st.skipped.empty() && st.refusal.empty());
+          std::printf("    %s: %zu faces, small faces on top of others %zu, %zu unresolved\n", label.c_str(), r495_mesh(*bo)->face_count(), small, st.unresolved);
+          size_t named = 0;
+          for (uint64_t id : bo->get<Blockout>()->state.faces.piece) named += g && blockout_piece_owner(id) == g->id;
+          CHECK(named > 0);  // (the faces name the made pieces; the owner is the piece the user means)
+        }
+  });
+}
+
+static void tests_round500_numbers() {
+  /* ---- Criterion 2: the numbers do what they say, measured on the mesh ---- */
+  test("architectural pieces (500): a column's Taper, Base Height and Capital Height, a railing's six posts on 5 m at 1 m, an arcade's five columns, a gable's ridge from its pitch - measured on the mesh, on each path", [] {
+    for (int method : r498_methods()) {
+      const float tol = r500_tol(method);
+      {  // a column: radius 0.25, 3 m, taper 0.6, plinth 0.3 high and 0.8 wide, capital 0.25 high and 0.7 wide
+        Editor ed;
+        const R500Scene s = r500_make(ed, "column 0.25 3", method, 0.01f);
+        for (const char *line : {"blockout set taper 0.6", "blockout set baseheight 0.3", "blockout set capitalheight 0.25", "blockout set basewidth 0.8", "blockout set capitalwidth 0.7"}) ed.command(line);
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, tol);
+        auto shaft_radius = [&](float y) {
+          float r = 0.0f;
+          for (const Vec3 &p : r500_pts(*s.bo))
+            if (std::fabs(p.y - y) < tol && std::hypot(p.x, p.z) < 0.3f) r = std::max(r, std::hypot(p.x, p.z));
+          return r;
+        };
+        const float bottom = shaft_radius(0.3f), top = shaft_radius(2.75f);
+        std::printf("    %s column: shaft radius %.4f at the plinth, %.4f under the capital (taper %.3f)\n", r498_method_name(method), bottom, top, bottom > 0.0f ? top / bottom : 0.0f);
+        CHECK_NEAR(bottom, 0.25f, tol);
+        CHECK_NEAR(top, 0.15f, tol);
+        float plinth = 0.0f, capital = 1e30f;
+        for (const Vec3 &p : r500_pts(*s.bo)) {
+          if (std::fabs(std::fabs(p.x) - 0.4f) < tol && p.y < 1.0f) plinth = std::max(plinth, p.y);
+          if (std::fabs(std::fabs(p.x) - 0.35f) < tol && p.y > 2.0f) capital = std::min(capital, p.y);
+        }
+        CHECK_NEAR(plinth, 0.3f, tol);
+        CHECK_NEAR(capital, 2.75f, tol);
+      }
+      {  // a railing: 5 m at 1 m is 6 posts; at 0.5 m it is 11
+        Editor ed;
+        const R500Scene s = r500_make(ed, "railing 5 1", method, 0.01f);
+        auto posts = [&] {
+          std::vector<float> xs;
+          for (const Vec3 &p : r500_pts(*s.bo))
+            if (std::fabs(p.y) < tol) xs.push_back(p.x);
+          return r500_clusters(xs, 0.2f);
+        };
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK(posts() == 6);
+        ed.command("blockout set spacing 0.5");
+        r495_built(ed);
+        CHECK(posts() == 11);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (1.0f)) > (tol)) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(1.0f), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, 1.0f, tol); }
+      }
+      {  // an arcade of 4 has 5 columns
+        Editor ed;
+        const R500Scene s = r500_make(ed, "arcade 4 2.5 3", method, 0.02f);
+        std::vector<float> xs;
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y) < tol) xs.push_back(p.x);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK(r500_clusters(xs, 0.5f) == 5);
+        ed.command("blockout set count 7");
+        r495_built(ed);
+        xs.clear();
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y) < tol) xs.push_back(p.x);
+        CHECK(r500_clusters(xs, 0.5f) == 8);
+      }
+      {  // a gable roof: the ridge is the half span (with the overhang) times the tangent of the pitch, and Ridge Height sets the pitch back
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 35", method, 0.02f);
+        const BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+        const float want = (2.0f + 0.3f) * std::tan(35.0f * 3.14159265f / 180.0f);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(blockout_roof_ridge(*bp), want, 1e-4f);
+        CHECK_NEAR(r500_top(*s.bo), want, tol);
+        ed.command("blockout set pitch 20");
+        r495_built(ed);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (2.3f * std::tan(20.0f * 3.14159265f / 180.0f))) > (tol)) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(2.3f * std::tan(20.0f * 3.14159265f / 180.0f)), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, 2.3f * std::tan(20.0f * 3.14159265f / 180.0f), tol); }
+        ed.command("blockout set ridge 1.0");
+        r495_built(ed);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (1.0f)) > (tol)) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(1.0f), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, 1.0f, tol); }
+        CHECK_NEAR(bp->pitch, std::atan(1.0f / 2.3f) * 180.0f / 3.14159265f, 1e-3f);
+      }
+    }
+  });
+
+  test("architectural pieces (500): a hip roof over an L-shaped outline closes - sound on each path, with its top faces in the Roof class - and a hip over a rectangle, a gable and a shed rise to the height their pitch says", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+      ed.command("blockout set roofstyle hip");
+      ed.command("blockout outline -3 -3 3 -3 3 0 0 0 0 3 -3 3");
+      r495_built(ed);
+      const std::string why = r498_judge(*s.bo);
+      if (!why.empty()) std::printf("    %s hip over an L: %s\n", r498_method_name(method), why.c_str());
+      CHECK(why.empty());
+      CHECK(s.bo->get<Blockout>()->state.status.skipped.empty() && s.bo->get<Blockout>()->state.status.refusal.empty());
+      const R498Class roof = r498_class(*s.bo, *s.piece, kClassRoof);
+      CHECK(roof.faces >= 4);
+      /* Every Roof face looks up, and every face that looks up is a Roof face. */
+      const Mesh &m = *r495_mesh(*s.bo);
+      const Blockout *b = s.bo->get<Blockout>();
+      std::vector<blockout::Piece> pieces;
+      blockout::Settings settings;
+      blockout_snapshot(*s.bo, pieces, settings);
+      size_t up = 0, wrong = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        double nx = 0, ny = 0, nz = 0;
+        const uint32_t *fv = m.face_verts(f);
+        for (uint32_t i = 0; i < m.face_size(f); i++) {
+          const Vec3 p = m.positions[fv[i]], q = m.positions[fv[(i + 1) % m.face_size(f)]];
+          nx += (double)(p.y - q.y) * (p.z + q.z), ny += (double)(p.z - q.z) * (p.x + q.x), nz += (double)(p.x - q.x) * (p.y + q.y);
+        }
+        const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!(len > 0.0)) continue;
+        const bool looks_up = ny / len > 0.05;
+        const blockout::Piece *piece = nullptr;
+        for (const blockout::Piece &p : pieces)
+          if (p.id == b->state.faces.piece[f]) piece = &p;
+        const bool is_roof = piece && blockout_face_class(*piece, b->state.faces.side[f]) == kClassRoof;
+        up += looks_up;
+        wrong += looks_up != is_roof;
+      }
+      CHECK(up > 0 && wrong == 0);
+    }
+    for (int method : r498_methods())
+      for (int style : {kRoofGable, kRoofHip, kRoofShed}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 40", method, 0.02f);
+        s.piece->get<BlockoutPiece>()->roof_style = style;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = style == kRoofShed ? 4.6f * std::tan(40.0f * 3.14159265f / 180.0f) : 2.3f * std::tan(40.0f * 3.14159265f / 180.0f);
+        { const float t_ = r500_top(*s.bo); if (std::fabs(t_ - (want)) > (r500_tol(method))) std::printf("    top %g, want %g (cell %g)\n", t_, (float)(want), s.bo->get<Blockout>()->cell); CHECK_NEAR(t_, want, r500_tol(method)); }
+      }
+  });
+
+  test("architectural pieces (500): L and U stairs reach their Total Height at the last step, a spiral turns by its Turn - either way round - and a roof with a Thickness is a sheet, not a solid (less volume), on each path", [] {
+    for (int method : r498_methods()) {
+      const float tol = r500_tol(method);
+      for (const char *words : {"stairs l 1 3 2 8", "stairs u 1 3 2 8", "stairs l 1.2 2.4 1.5 6"}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, words, method, 0.02f);
+        const float height = s.piece->get<BlockoutPiece>()->total_height;
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), height, tol);
+        /* The landing's level is half way: the first flight's last tread is at half the height. */
+        bool half = false;
+        for (const Vec3 &p : r500_pts(*s.bo)) half = half || std::fabs(p.y - 0.5f * height) < tol;
+        CHECK(half);
+      }
+      for (const float turn : {270.0f, -180.0f, 90.0f}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "stairs spiral 1 0.1 3 16", method, 0.02f);
+        s.piece->get<BlockoutPiece>()->turn = turn;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, tol);
+        /* The last step's outer corners, at the top: the later one lies at the angle of Turn. */
+        float best = 1e30f;
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y - 3.0f) < tol && std::hypot(p.x, p.z) > 0.6f) {
+            float ang = std::atan2(p.z, p.x) * 180.0f / 3.14159265f - turn;
+            while (ang > 180.0f) ang -= 360.0f;
+            while (ang < -180.0f) ang += 360.0f;
+            best = std::min(best, std::fabs(ang));
+          }
+        std::printf("    %s spiral Turn %g: the last step's corner is %.2f degrees from it\n", r498_method_name(method), turn, best);
+        CHECK(best < (method == 2 ? 4.0f : 0.5f));
+      }
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+        const double solid = r476_volume(*r495_mesh(*s.bo));
+        s.piece->get<BlockoutPiece>()->thickness = 0.1f;
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const double sheet = r476_volume(*r495_mesh(*s.bo));
+        std::printf("    %s roof: solid %.3f m3, a 0.1 m sheet %.3f m3\n", r498_method_name(method), solid, sheet);
+        CHECK(sheet > 0.0 && sheet < 0.5 * solid);
+      }
+    }
+  });
+}
+
+static void tests_round500_ui() {
+  /* ---- Criterion 1, 3: by the panel with real events, F9, handles, the Inspector ---- */
+  test("architectural pieces (500): the Architecture dropdown and Add button in the Modeling Tools window make each kind - one piece - and GameObject > Blockout > Architecture has an entry for each; real events", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "beam", method, 0.02f);
+      CHECK(s.piece != nullptr);
+      r496_panel(ed);
+      CHECK(r496_has(ed, "tools:architecture") && r496_has(ed, "tools:architecture_add"));
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(s.bo->id, false);
+        r477_settle(ed, 2);
+        const size_t pieces = r477_all_pieces(*s.bo).size();
+        CHECK(r496_pick_combo(ed, "tools:architecture", kBlockoutPresetNames[k.preset]));
+        CHECK(r496_click_key(ed, "tools:architecture_add"));
+        r495_built(ed);
+        const BlockoutPiece *bp = r477_active_piece(ed);
+        CHECK(r477_all_pieces(*s.bo).size() == pieces + 1 && bp && bp->preset == k.preset);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s, panel, %s: %s\n", r498_method_name(method), k.words, why.c_str());
+        CHECK(why.empty());
+      }
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(s.bo->id, false);
+        r477_settle(ed, 2);
+        CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "submenu:Architecture", std::string("menu:") + kBlockoutPresetNames[k.preset]}));
+        const BlockoutPiece *bp = r477_active_piece(ed);
+        CHECK(bp && bp->preset == k.preset);
+      }
+    }
+  });
+
+  test("architectural pieces (500): F9 right after `blockout add` shows a kind's numbers, a typed number re-runs the piece from before in the same undo step, and an undo takes the whole piece back", [] {
+    auto f9 = [](Editor &ed, const char *words) {
+      ed.init_headless(1600, 1000);
+      r477_empty_scene(ed);
+      ed.command("camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.05f;
+      ed.select_for_test(bo->id, false);
+      ed.mark_changed_for_test("test scene");  // (the Blockout is the state an undo goes back to)
+      ed.command(std::string("blockout add ") + words);
+      r477_settle(ed, 3);
+      return bo;
+    };
+    Editor ed;
+    GameObject *bo = f9(ed, "railing 5 1");
+    GameObject *rail = ed.active_object_for_test();
+    BlockoutPiece *bp = rail ? rail->get<BlockoutPiece>() : nullptr;
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "blockout" && ed.obj_last_for_test().n == 7 && bp);
+    if (!bp) return;
+    for (const char *row : {"adjust:Length", "adjust:Rail Height", "adjust:Post Spacing", "adjust:Post Size", "adjust:Rail Size", "adjust:Bottom Rail"}) CHECK(r496_has(ed, row));
+    CHECK(!r496_has(ed, "adjust:Pitch") && !r496_has(ed, "adjust:Taper"));
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r479_type(ed, "adjust:Post Spacing", "0.5"));
+    CHECK_NEAR(bp->post_spacing, 0.5f, 1e-5f);
+    CHECK(r479_type(ed, "adjust:Length", "2"));
+    CHECK_NEAR(bp->length, 2.0f, 1e-5f);
+    CHECK(bp->rail_height == 1.0f && ed.undo_steps_for_test() == steps);  // (the same step, amended each time)
+    r495_built(ed);
+    CHECK(r498_judge(*bo).empty());
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == 0);  // (the scene is restored: `bo` is no longer the object)
+    /* A roof's F9 has the Pitch and no Ridge Height (it is worked out), and a Spiral's has Turn and Quarter Turns. */
+    Editor ed2;
+    f9(ed2, "roof");
+    GameObject *roof = ed2.active_object_for_test();
+    CHECK(roof && ed2.obj_last_valid() && r496_has(ed2, "adjust:Pitch") && r496_has(ed2, "adjust:Roof Style") && !r496_has(ed2, "adjust:Ridge Height"));
+    CHECK(r479_type(ed2, "adjust:Pitch", "45"));
+    CHECK(roof && std::fabs(roof->get<BlockoutPiece>()->pitch - 45.0f) < 1e-4f);
+    Editor ed3;
+    f9(ed3, "stairs spiral");
+    CHECK(ed3.obj_last_valid() && r496_has(ed3, "adjust:Turn") && r496_has(ed3, "adjust:Quarter Turns") && r496_has(ed3, "adjust:Total Height"));
+  });
+
+  test("architectural pieces (500): the handles of a column, a beam and a roof change their main sizes with real mouse events, one undo step each, the mesh staying sound", [] {
+    for (int method : r498_methods())
+      for (const char *words : {"column 0.25 3", "beam 4 0.3 0.3", "roof 6 4 30"}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, words, method, 0.02f);
+        ed.select_for_test(s.piece->id, false);
+        ed.mark_changed_for_test("test scene");
+        Vec3 at = s.piece->world_matrix().point({0.0f, 1.0f, 0.0f});
+        bool framed = false;
+        for (float yaw : {0.0f, 30.0f, 330.0f}) {
+          ed.command(strprintf("camera %g 10 7 %g %g %g", yaw, at.x, at.y, at.z));
+          r477_settle(ed, 3);
+          int x = 0, y = 0;
+          framed = ed.blockout_handle_pixel_for_test("top", x, y);
+          if (framed) break;
+        }
+        CHECK(framed);
+        if (!framed) continue;
+        BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+        const BlockoutPiece before = *bp;
+        const size_t depth = ed.undo_depth_for_test();
+        Vec3 lo, hi;
+        blockout_preset_bounds(before, lo, hi);
+        CHECK(r479_pull(ed, "top", s.piece->world_matrix().point({0.5f * (lo.x + hi.x), hi.y + 0.5f, 0.5f * (lo.z + hi.z)}), platform::MOD_CTRL));
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + " " + words;
+        if (bp->preset == kPresetColumn) CHECK(bp->height > before.height + 0.3f && bp->height < before.height + 0.7f);
+        if (bp->preset == kPresetBeam) CHECK(bp->size.y > before.size.y + 0.3f && bp->size.y < before.size.y + 0.7f);
+        if (bp->preset == kPresetRoof) CHECK(bp->pitch > before.pitch);  // (the top is the ridge: pulling it up steepens the roof)
+        CHECK(ed.undo_depth_for_test() == depth + 1);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s after the handle: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+      }
+  });
+
+  test("architectural pieces (500): the Inspector shows a preset's own rows and the shared ones it reads, no Shape or Opening rows, and a Ridge Height that is worked out; a scene file lists each name once", [] {
+    auto rows = [](int preset) {
+      BlockoutPiece p;
+      blockout_preset_defaults(p, preset);
+      R478Probe probe;
+      p.reflect(probe);
+      std::string out;
+      for (const R478Probe::Seen &s : probe.seen) out += s.name + "|";
+      return out;
+    };
+    auto has = [](const std::string &r, const char *name) { return r.find(std::string("|") + name + "|") != std::string::npos || r.rfind(std::string(name) + "|", 0) == 0; };
+    const std::string column = rows(kPresetColumn), roof = rows(kPresetRoof), railing = rows(kPresetRailing), spiral = rows(kPresetSpiral), arcade = rows(kPresetArcade);
+    CHECK(has(column, "Preset") && has(column, "Radius") && has(column, "Height") && has(column, "Taper") && has(column, "Base Height") && has(column, "Capital Width") && has(column, "Segments"));
+    CHECK(!has(column, "Shape") && !has(column, "Operation") && !has(column, "Opening") && !has(column, "Room") && !has(column, "Pitch") && !has(column, "Blend Radius"));
+    CHECK(has(roof, "Roof Style") && has(roof, "Pitch") && has(roof, "Ridge Height") && has(roof, "Overhang") && has(roof, "Thickness") && has(roof, "Span") && has(roof, "Length") && has(roof, "Roof Material"));
+    CHECK(has(railing, "Post Spacing") && has(railing, "Post Size") && has(railing, "Rail Height") && has(railing, "Rail Size") && has(railing, "Bottom Rail") && !has(railing, "Taper"));
+    CHECK(has(spiral, "Turn") && has(spiral, "Total Height") && has(spiral, "Inner Radius") && has(spiral, "Steps") && !has(spiral, "Roof Material"));
+    CHECK(has(arcade, "Count") && has(arcade, "Column Width") && has(arcade, "Arch Rise") && has(arcade, "Depth") && has(arcade, "Arch Thickness"));
+    CHECK(!has(rows(kPresetNone), "Preset") == false && !has(rows(kPresetNone), "Taper") && !has(rows(kPresetNone), "Roof Material"));
+    struct All : R478Probe {
+      bool all_fields() const override { return true; }
+      bool serializing() const override { return true; }  // (a file: Ridge Height, which is worked out, is not in it)
+    } all;
+    BlockoutPiece p;
+    p.reflect(all);
+    std::set<std::string> names;
+    size_t dup = 0;
+    for (const R478Probe::Seen &s : all.seen) dup += !names.insert(s.name).second;
+    CHECK(dup == 0);
+    for (const char *key : {"Preset", "Square Shaft", "Base Height", "Taper", "Post Spacing", "Roof Style", "Pitch", "Thickness", "Total Height", "Turn", "Count", "Arch Thickness", "Roof Material"}) CHECK(all.find(key));
+    CHECK(all.find("Ridge Height") == nullptr);  // (derived: never in the file)
+    CHECK(kBlockoutClasses == 9 && kClassRoof == 8 && std::string(kBlockoutClassNames[kClassRoof]) == "Roof");
+  });
+}
+
+static void tests_round500_more() {
+  /* ---- Criterion 3, 4: scale, turn, materials ---- */
+  test("architectural pieces (500): scaling a piece scales its sizes and not its counts or angles - a railing twice as long has twice the posts at the same spacing - and Turn 90 turns stairs about their origin, one undo step", [] {
+    BlockoutPiece p;
+    blockout_preset_defaults(p, kPresetRailing);
+    CHECK(blockout_piece_scale(p, Vec3(2.0f, 1.5f, 3.0f)));
+    CHECK_NEAR(p.length, 10.0f, 1e-5f);
+    CHECK_NEAR(p.rail_height, 1.5f, 1e-5f);
+    CHECK_NEAR(p.post_spacing, 2.0f, 1e-6f);  // (a size, so it scales: round 500's fix pass - the scaled railing has the same posts, twice as far apart)
+    BlockoutPiece r;
+    blockout_preset_defaults(r, kPresetRoof);
+    r.pitch = 33.0f;
+    CHECK(blockout_piece_scale(r, Vec3(2.0f, 2.0f, 2.0f)));
+    CHECK(r.length == 12.0f && r.span == 8.0f && r.pitch == 33.0f && r.roof_style == kRoofGable);
+    BlockoutPiece a;
+    blockout_preset_defaults(a, kPresetArcade);
+    CHECK(blockout_piece_scale(a, Vec3(2.0f, 2.0f, 2.0f)));
+    CHECK(a.count == 4 && a.span == 5.0f && a.column_width == 0.8f);
+    BlockoutPiece q = r;
+    CHECK(blockout_piece_scale(q, Vec3(1.0f)));
+    CHECK(std::memcmp(&q.length, &r.length, sizeof(float)) == 0 && std::memcmp(&q.span, &r.span, sizeof(float)) == 0);  // (a scale of 1 changes no bit)
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing 5 1", method, 0.02f);
+      s.bo->set_local_scale(Vec3(2.0f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout applyscale");
+      r495_built(ed);
+      const BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+      CHECK_NEAR(bp->length, 10.0f, 1e-4f);
+      CHECK_NEAR(bp->post_spacing, 2.0f, 1e-6f);
+      std::vector<float> xs;
+      for (const Vec3 &pt : r500_pts(*s.bo))
+        if (std::fabs(pt.y) < r500_tol(method)) xs.push_back(pt.x);
+      CHECK(r500_clusters(xs, 0.2f) == 6);  // (10 m at 2 m: the same 6 posts as 5 m at 1 m, twice as far apart - Post Spacing scales, round 500's fix pass)
+      CHECK(r498_judge(*s.bo).empty());
+      /* Stairs turn a quarter about their origin. */
+      Editor ed2;
+      const R500Scene t = r500_make(ed2, "stairs l 1 3 2 8", method, 0.02f);
+      const BlockoutPiece before = *t.piece->get<BlockoutPiece>();
+      const size_t depth = ed2.undo_depth_for_test();
+      ed2.command("blockout turn 1");
+      r495_built(ed2);
+      const BlockoutPiece *tp = t.piece->get<BlockoutPiece>();
+      CHECK(tp->stair_width == before.stair_width && tp->length == before.length && tp->steps == before.steps);
+      CHECK(ed2.undo_depth_for_test() == depth + 1);
+      CHECK_NEAR(length(t.piece->world_matrix().dir({0, 0, 1}) - Vec3(1, 0, 0)), 0.0f, 1e-4f);  // (its +Z now looks along +X)
+      CHECK(r498_judge(*t.bo).empty());
+    }
+  });
+
+  test("architectural pieces (500): a roof's top faces are the Roof class, everything else Solid - the Blockout's Roof Material and the piece's own override each put a material on the top faces only, and the old classes keep their numbers", [] {
+    Editor ed;
+    const R500Scene s = r500_make(ed, "roof 6 4 30", 2, 0.02f);
+    const BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+    CHECK(bp->has_class(kClassRoof) && bp->has_class(kClassSolid) && !bp->has_class(kClassCut) && !bp->has_class(kClassFloor));
+    const BlockoutPiece column = [] {
+      BlockoutPiece c;
+      blockout_preset_defaults(c, kPresetColumn);
+      return c;
+    }();
+    CHECK(column.has_class(kClassSolid) && !column.has_class(kClassRoof));
+    const R498Class roof = r498_class(*s.bo, *s.piece, kClassRoof), solid = r498_class(*s.bo, *s.piece, kClassSolid);
+    CHECK(roof.faces >= 2 && solid.faces >= 3);
+    const std::string mat = r482_material("R500Roof", Vec3(0.8f, 0.3f, 0.2f)), own = r482_material("R500RoofOwn", Vec3(0.2f, 0.4f, 0.9f));
+    ed.select_for_test(s.bo->id, false);
+    ed.command("blockout set material roof " + mat);
+    r495_built(ed);
+    CHECK(s.bo->get<Blockout>()->material[kClassRoof] == mat);
+    const Mesh *m = r495_mesh(*s.bo);
+    CHECK(m && m->face_material.size() == m->face_count());
+    std::set<int32_t> slots(m->face_material.begin(), m->face_material.end());
+    CHECK(slots.size() == 2);
+    ed.select_for_test(s.piece->id, false);
+    ed.command("blockout set material roof " + own);
+    r495_built(ed);
+    CHECK(s.piece->get<BlockoutPiece>()->material[kClassRoof] == own);
+    ed.select_for_test(s.piece->id, false);
+    ed.command("blockout set material cut " + own);  // (a roof makes no Cut faces: refused, nothing changes)
+    CHECK(s.piece->get<BlockoutPiece>()->material[kClassCut].empty());
+  });
+
+  /* ---- Criterion 5: hostile numbers ---- */
+  test("architectural pieces (500): 0 or 1,000 posts, a pitch of 0 or 90 degrees, a taper of 0, 500 steps, an arcade of 0, NaN and 1e9 in any number leave a valid mesh or a clean refusal the status names, on each path; counts are held to 256", [] {
+    struct Case {
+      const char *what;
+      int preset;
+      std::function<void(BlockoutPiece &)> set;
+      bool refused;  // the piece is left out and named
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const Case cases[] = {
+        {"railing, spacing 0.0001 (1,000 posts)", kPresetRailing, [](BlockoutPiece &p) { p.post_spacing = 0.0001f; }, false},
+        {"railing, spacing 0", kPresetRailing, [](BlockoutPiece &p) { p.post_spacing = 0.0f; }, false},
+        {"railing, length 0", kPresetRailing, [](BlockoutPiece &p) { p.length = 0.0f; }, false},
+        {"railing, rails thicker than it is high", kPresetRailing, [](BlockoutPiece &p) { p.rail_size = 5.0f; }, false},
+        {"roof, pitch 0 (solid)", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 0.0f; }, true},
+        {"roof, pitch 0 with a thickness", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 0.0f, p.thickness = 0.1f; }, false},
+        {"roof, pitch 90", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 90.0f; }, false},
+        {"roof, hip, pitch 90", kPresetRoof, [](BlockoutPiece &p) { p.pitch = 90.0f, p.roof_style = kRoofHip; }, false},
+        {"roof, a square hip", kPresetRoof, [](BlockoutPiece &p) { p.roof_style = kRoofHip, p.length = 4.0f, p.span = 4.0f; }, false},
+        {"roof, negative pitch and overhang", kPresetRoof, [](BlockoutPiece &p) { p.pitch = -30.0f, p.overhang = -2.0f; }, true},
+        {"column, taper 0", kPresetColumn, [](BlockoutPiece &p) { p.taper = 0.0f; }, false},
+        {"column, taper 1e9", kPresetColumn, [](BlockoutPiece &p) { p.taper = 1e9f; }, false},
+        {"column, base and capital taller than it", kPresetColumn, [](BlockoutPiece &p) { p.base_height = 10.0f, p.capital_height = 10.0f; }, false},
+        {"column, square, 1e9 radius", kPresetColumn, [](BlockoutPiece &p) { p.square = true, p.radius = 1e9f; }, true},
+        {"pilaster, NaN height", kPresetPilaster, [nan](BlockoutPiece &p) { p.height = nan; }, true},
+        {"beam, NaN length", kPresetBeam, [nan](BlockoutPiece &p) { p.size.x = nan; }, true},
+        {"beam, 1e9 width", kPresetBeam, [](BlockoutPiece &p) { p.size.z = 1e9f; }, true},
+        {"stairs l, 500 steps", kPresetStairsL, [](BlockoutPiece &p) { p.steps = 500; }, false},
+        {"stairs u, 0 steps", kPresetStairsU, [](BlockoutPiece &p) { p.steps = 0; }, false},
+        {"stairs u, infinite run", kPresetStairsU, [](BlockoutPiece &p) { p.length = std::numeric_limits<float>::infinity(); }, true},
+        {"spiral, 500 steps", kPresetSpiral, [](BlockoutPiece &p) { p.steps = 500; }, false},
+        {"spiral, turn 1e9", kPresetSpiral, [](BlockoutPiece &p) { p.turn = 1e9f; }, false},
+        {"spiral, inner radius over the radius", kPresetSpiral, [](BlockoutPiece &p) { p.inner_radius = 5.0f; }, false},
+        {"spiral, 1 step, turn 180", kPresetSpiral, [](BlockoutPiece &p) { p.steps = 1, p.turn = 180.0f; }, false},
+        {"arcade, 0 arches", kPresetArcade, [](BlockoutPiece &p) { p.count = 0; }, false},
+        {"arcade, 1,000 arches", kPresetArcade, [](BlockoutPiece &p) { p.count = 1000; }, true},
+        {"arcade, NaN rise", kPresetArcade, [nan](BlockoutPiece &p) { p.arch_rise = nan; }, true},
+    };
+    for (int method : r498_methods())
+      for (const Case &c : cases) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->get<Blockout>()->method = method;
+        bo->get<Blockout>()->cell = 0.05f;
+        GameObject *g = ed.scene().create("Hostile", bo);
+        BlockoutPiece *bp = g->add<BlockoutPiece>();
+        blockout_preset_defaults(*bp, c.preset);
+        c.set(*bp);
+        r495_built(ed);
+        const Blockout *b = bo->get<Blockout>();
+        const Mesh *m = r495_mesh(*bo);
+        const std::string label = std::string(r498_method_name(method)) + " " + c.what;
+        CHECK(m != nullptr);
+        if (!m) continue;
+        bool finite = true;
+        for (const Vec3 &p : m->positions) finite = finite && finite_bits(p.x) && finite_bits(p.y) && finite_bits(p.z);
+        std::vector<blockout::Piece> pieces;
+        blockout::Settings settings;
+        BlockoutSnapshotNotes notes;
+        blockout_snapshot(*bo, pieces, settings, &notes);
+        size_t made = 0;
+        for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
+        const std::string why = m->face_count() ? r498_judge(*bo) : "";
+        const bool named = !notes.refused.empty() && notes.refused[0].first == g->id;
+        if (!finite || !why.empty() || (c.refused && (!named || m->face_count())) || made > 1100) std::printf("    %s: %zu pieces made, refused %d, finite %d: %s\n", label.c_str(), made, (int)named, (int)finite, why.c_str());
+        CHECK(finite && why.empty() && made <= 1100);
+        CHECK(!c.refused || (named && m->face_count() == 0));
+        CHECK(b->state.status.refusal.empty());
+      }
+    BlockoutPiece p;
+    blockout_preset_defaults(p, kPresetArcade);
+    std::vector<float> n{1e9f};
+    blockout_preset_numbers(p, n);
+    CHECK(p.count == kBlockoutPresetMaxCount);
+    BlockoutPiece s;
+    blockout_preset_defaults(s, kPresetStairsL);
+    n = {1.0f, 3.0f, 2.0f, -50.0f};
+    blockout_preset_numbers(s, n);
+    CHECK(s.steps == 1);
+  });
+
+  /* ---- Criterion 6: save and open, Bake / Unbake, export ---- */
+  test("architectural pieces (500): every kind and the Blockout's Roof Material survive save and open with the same mesh, and a scene saved before the round (preset 0) loads as it was - its mesh by hash", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2;
+    bo->get<Blockout>()->cell = 0.05f;
+    ed.select_for_test(bo->id, false);
+    const std::string roof = r482_material("R500Saved", Vec3(0.7f, 0.2f, 0.2f));
+    ed.command("blockout set material roof " + roof);
+    for (const R500Kind &k : kR500Kinds) {
+      ed.select_for_test(bo->id, false);
+      ed.command(std::string("blockout add ") + k.words);
+      GameObject *g = ed.active_object_for_test();
+      if (g) g->set_local_position({(float)k.preset * 8.0f, 0.0f, 0.0f});  // (apart: each kind is its own part)
+    }
+    ed.command("blockout set pitch 33");
+    r495_built(ed);
+    const Mesh before = *r495_mesh(*bo);
+    std::vector<BlockoutPiece> numbers;
+    for (GameObject *g : r477_all_pieces(*bo)) numbers.push_back(*g->get<BlockoutPiece>());
+    const std::string text = save_scene_text(ed.scene());
+    for (const char *key : {"Preset", "Taper", "Post_Spacing", "Roof_Style", "Pitch", "Total_Height", "Turn", "Count", "Roof_Material"}) CHECK(text.find(std::string("  ") + key + " ") != std::string::npos);
+    const std::string path = te_scene_path(ed, "r500_all.scene");
+    CHECK(fs::write_file(path, text));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r495_built(ed);
+    GameObject *back = r477_find(ed);
+    CHECK(back && r495_mesh(*back) && r477_same(before, *r495_mesh(*back)) && r482_scratch_same(*back));
+    std::vector<GameObject *> loaded = back ? r477_all_pieces(*back) : std::vector<GameObject *>{};
+    CHECK(loaded.size() == numbers.size());
+    for (size_t i = 0; i < loaded.size() && i < numbers.size(); i++) {
+      const BlockoutPiece *b = loaded[i]->get<BlockoutPiece>();
+      CHECK(b->preset == numbers[i].preset && b->pitch == numbers[i].pitch && b->length == numbers[i].length && b->count == numbers[i].count && b->turn == numbers[i].turn &&
+            b->taper == numbers[i].taper && b->post_spacing == numbers[i].post_spacing && b->roof_style == numbers[i].roof_style);
+    }
+    CHECK(back && back->get<Blockout>()->material[kClassRoof] == roof);
+    fs::remove_file(path);
+    /* A piece without a preset reads none of the new numbers: the mesh of a box and a room is what it was (the snapshot's pieces carry no points and no generated id). */
+    Editor old;
+    old.init_headless(900, 600);
+    r477_empty_scene(old);
+    GameObject *ob = r477_blockout(old);
+    r477_piece(old, *ob, "Wall", 0, 0, {0, 0, 0}, {2.4f, 2.4f, 0.2f});
+    r495_built(old);
+    BlockoutPiece *wall = old.scene().find_by_name("Wall")->get<BlockoutPiece>();
+    wall->taper = 0.3f, wall->pitch = 70.0f, wall->count = 99, wall->length = 40.0f, wall->post_spacing = 0.01f;  // (preset 0: none of them is read)
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    blockout_snapshot(*ob, pieces, settings);
+    CHECK(pieces.size() == 1 && !blockout_id_generated(pieces[0].id) && pieces[0].points.empty());
+    const Mesh plain = *r495_mesh(*ob);
+    wall->taper = 1.0f, wall->pitch = 30.0f, wall->count = 4, wall->length = 5.0f, wall->post_spacing = 1.0f;
+    r495_built(old);
+    CHECK(r477_same(plain, *r495_mesh(*ob)));
+  });
+
+  test("architectural pieces (500): Bake to Mesh keeps a preset's mesh and numbers under the disabled child, Unbake gives the same mesh and numbers back, and OBJ, FBX and GLB export one mesh with a material of its own for a roof", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+      const std::string mat = r482_material("R500Bake", Vec3(0.3f, 0.7f, 0.4f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout set material roof " + mat);
+      r495_built(ed);
+      const uint64_t bo_id = s.bo->id, piece_id = s.piece->id;
+      const Mesh live = *r495_mesh(*s.bo);
+      const BlockoutPiece numbers = *s.piece->get<BlockoutPiece>();
+      const std::map<std::string, size_t> want = r482_triangles(*s.bo);
+      CHECK(want.size() == 2);
+      for (const char *format : {"fbx", "glb", "obj"}) {
+        const std::string name = std::string("r500_live.") + format;
+        const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
+        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs);
+      }
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<BlockoutBaked>() && !baked->get<Blockout>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(bo_id);
+      GameObject *held = ed.scene().find(piece_id);
+      CHECK(baked && baked->get<Blockout>() && r495_mesh(*baked) && r477_same(live, *r495_mesh(*baked)));
+      const BlockoutPiece *b = held ? held->get<BlockoutPiece>() : nullptr;
+      CHECK(b && b->preset == numbers.preset && b->pitch == numbers.pitch && b->length == numbers.length && b->span == numbers.span && b->overhang == numbers.overhang);
+      CHECK(baked && baked->get<Blockout>()->material[kClassRoof] == mat);
+    }
+  });
+
+  test("architectural pieces (500): clicking a column's shaft selects the piece - the object - and the faces name made pieces no object has", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "column 0.25 3", method, 0.02f, 1600, 1000);  // (the size the round 479 picking tests use)
+      ed.command("camera 25 20 6 0 1.5 0");  // (as the door's click test aims: the eye, then the point looked at)
+      r477_settle(ed, 3);
+      GameObject *hit = r479p_click(ed, {0.0f, 1.5f, 0.0f});
+      int px = 0, py = 0;
+      const bool projected = ed.project_to_window({0.0f, 1.5f, 0.0f}, px, py);
+      if (hit != s.piece) std::printf("    projected %d at %d,%d, selection %zu, ", (int)projected, px, py, ed.selection_size_for_test());
+      if (hit != s.piece) std::printf("    clicked the column: got '%s'\n", hit ? hit->name.c_str() : "nothing");
+      CHECK(hit == s.piece);
+      const Blockout *b = s.bo->get<Blockout>();
+      size_t made = 0;
+      for (uint64_t id : b->state.faces.piece) made += blockout_id_generated(id) && blockout_piece_owner(id) == s.piece->id;
+      CHECK(made > 4 && ed.scene().find(s.piece->id | kBlockoutGeneratedBit) == nullptr);
+    }
+  });
+
+  test("architectural pieces (500): a Pilaster made in a room stands against the room's first wall - its back on the wall's face, its front out into the room - the console words `blockout set` change a kind's numbers by one undo step, and a bad word or value warns and changes nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->method = 2;
+    bo->get<Blockout>()->cell = 0.05f;
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    ed.select_for_test(room->id, false);
+    r477_settle(ed, 2);
+    ed.command("blockout add pilaster 0.2 2.6");
+    r495_built(ed);
+    GameObject *pil = ed.active_object_for_test();
+    CHECK(pil && pil->get<BlockoutPiece>() && pil->get<BlockoutPiece>()->preset == kPresetPilaster);
+    if (!pil) return;
+    /* Its +Z looks into the room (the way the wall's face looks); its back (z = 0) is on a wall of the room. */
+    const Vec3 out = normalize(pil->world_matrix().dir({0, 0, 1})), at = pil->world_matrix().point({0, 0, 0});
+    const Vec3 inside = room->world_matrix().point({0, 0, 0});
+    CHECK(dot(inside - at, out) > 1.0f);  // (the room's middle is in front of it)
+    CHECK(r498_judge(*bo).empty());
+    const size_t depth = ed.undo_depth_for_test();
+    const size_t mark = r477_mark();
+    size_t warnings = 0;
+    for (const char *line : {"blockout set taper", "blockout set taper abc", "blockout set pitch 30", "blockout set shaft round", "blockout set nonsense 3", "blockout set baseheight nan"}) {
+      ed.command(line);
+    }
+    r477_log_since(mark, &warnings);
+    CHECK(warnings >= 4);
+    CHECK(ed.undo_depth_for_test() == depth);
+    ed.command("blockout set taper 0.7");
+    ed.command("blockout set taper 0.7");
+    r477_settle(ed, 2);
+    CHECK_NEAR(pil->get<BlockoutPiece>()->taper, 0.7f, 1e-6f);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    ed.command("blockout set taper 7");
+    CHECK(pil->get<BlockoutPiece>()->taper == 2.0f);  // (held to its range)
+  });
+
+  /* ---- The grid path ---- */
+  test("architectural pieces (500): on the grid a railing's 8 cm posts and 5 cm rails are held at a cell and the status names the Railing and the Field Cell that shows them; the exact path's pieces do not depend on the Field Cell", [] {
+    Editor ed;
+    const R500Scene s = r500_make(ed, "railing 5 1", 2, 0.1f);
+    CHECK(r498_judge(*s.bo).empty());
+    const std::vector<std::string> lines = r498fix_status(ed, *s.bo);
+    std::string note;
+    for (const std::string &l : lines)
+      if (l.find("Railing 'Railing'") != std::string::npos) note = l;
+    std::printf("    %s\n", note.c_str());
+    CHECK(note.find("its posts and rails are finer than Field Cell 0.10 m - held at one cell; lower Field Cell to ") != std::string::npos);
+    const size_t at = note.find("lower Field Cell to ");
+    const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
+    CHECK(advised > 0.0f && advised < 0.1f);
+    s.bo->get<Blockout>()->cell = advised;
+    r495_built(ed);
+    CHECK(!r498fix_has(r498fix_status(ed, *s.bo), "Railing 'Railing'") && r498_judge(*s.bo).empty());
+    for (const R500Kind &k : kR500Kinds) {
+      Editor ex;
+      const R500Scene e = r500_make(ex, k.words, 1, 0.1f);
+      std::vector<blockout::Piece> a, b;
+      blockout::Settings st;
+      blockout_snapshot(*e.bo, a, st);
+      e.bo->get<Blockout>()->cell = 0.02f;
+      blockout_snapshot(*e.bo, b, st);
+      bool same = a.size() == b.size() && a.size() > 0;
+      for (size_t i = 0; same && i < a.size(); i++)
+        same = a[i].id == b[i].id && a[i].shape == b[i].shape && a[i].points.size() == b[i].points.size() &&
+               std::memcmp(a[i].to_blockout.m, b[i].to_blockout.m, sizeof(a[i].to_blockout.m)) == 0 && std::memcmp(&a[i].size, &b[i].size, sizeof(Vec3)) == 0;
+      CHECK(same);
+    }
+  });
+}
+
+static void tests_round500_wire() {
+  test("architectural pieces (500 fix): the wire of a tapered column is its shaft's two rings - 12 corners at the bottom radius and 12 at the top radius - its plinth and its capital, drawn from the kept hull", [] {
+    BlockoutPiece p;
+    blockout_preset_defaults(p, kPresetColumn);
+    p.radius = 0.25f, p.height = 3.0f, p.taper = 0.6f, p.segments = 12;
+    std::vector<Vec3> ends;
+    blockout_piece_wire(p, Mat4::identity(), false, [&](Vec3 a, Vec3 b) { ends.push_back(a), ends.push_back(b); });
+    size_t bottom = 0, top = 0, wrong = 0;
+    std::set<std::pair<int, int>> bottom_at, top_at;
+    /* The shaft runs half way into the plinth and the capital (y 0.1 and 2.9), on the line that is 0.25 at the plinth's top (0.2) and 0.15 under the capital (2.8). */
+    const float r_low = 0.25f * (1.0f + (0.6f - 1.0f) * (0.1f - 0.2f) / 2.6f), r_high = 0.25f * (1.0f + (0.6f - 1.0f) * (2.9f - 0.2f) / 2.6f);
+    for (const Vec3 &e : ends) {
+      const float r = std::hypot(e.x, e.z);
+      if (std::fabs(e.y - 0.1f) < 1e-4f && std::fabs(r - r_low) < 1e-4f) bottom_at.insert({(int)std::lround(e.x * 1000), (int)std::lround(e.z * 1000)});
+      if (std::fabs(e.y - 2.9f) < 1e-4f && std::fabs(r - r_high) < 1e-4f) top_at.insert({(int)std::lround(e.x * 1000), (int)std::lround(e.z * 1000)});
+      wrong += !finite_bits(e.x) || !finite_bits(e.y) || !finite_bits(e.z);
+    }
+    bottom = bottom_at.size(), top = top_at.size();
+    CHECK(bottom == 12 && top == 12 && wrong == 0);
+    CHECK(ends.size() >= 2 * (12 * 3 + 12 + 12));  // (the rings' sides and the shaft's 12 edges, and the two blocks' 12 edges each, at least)
+    /* Drawn again it is the same lines (the kept hull gives the same faces). */
+    std::vector<Vec3> again;
+    blockout_piece_wire(p, Mat4::identity(), false, [&](Vec3 a, Vec3 b) { again.push_back(a), again.push_back(b); });
+    CHECK(again.size() == ends.size() && std::memcmp(again.data(), ends.data(), ends.size() * sizeof(Vec3)) == 0);
+  });
+}
+
+static void tests_round500_labels() {
+  test("architectural pieces (500, HCI): the Architecture row and its Add button in the Modeling Tools window are not clipped at 1366 x 768, at 1024 x 640 and at UI scale 1.5, measured as the HCI sweep measures a label - and the Blockout buttons above are still whole", [] {
+    struct Config {
+      int w, h;
+      float scale;
+    };
+    for (const Config &c : {Config{1366, 768, 1.0f}, Config{1024, 640, 1.0f}, Config{1920, 1080, 1.5f}, Config{1366, 768, 1.5f}}) {
+      Editor ed;
+      ed.init_headless(c.w, c.h);
+      ed.set_ui_scale_for_test(c.scale);
+      r496_panel(ed);
+      const auto &u = ed.ui_for_test();
+      size_t found = 0, clipped = 0;
+      for (const char *label : {"Blockout", "Door", "Window", "Add Box", "Add Cyl", "Add Sph", "Cut Box", "Cut Cyl", "Cut Sph", "Room Box", "Room Cyl", "Add"}) {
+        Recti r;
+        if (!ed.button_rect_for_test(label, r)) continue;
+        found++;
+        const int room = r.w - u.px(8), tw = ed.text_width_for_test(label);
+        if (tw > room) clipped++, std::printf("    %dx%d x%g: '%s' is %d px in %d px\n", c.w, c.h, c.scale, label, tw, room);
+      }
+      CHECK(found == 12 && clipped == 0);
+      /* The dropdown's items are the widest label of the row: its longest name fits the combo (the label "Architecture" fits half the row). */
+      Recti combo;
+      CHECK(ed.button_rect_for_test("tools:architecture", combo) && combo.w > 0);
+      int widest = 0;
+      for (int k = 1; k < kBlockoutPresets; k++) widest = std::max(widest, ed.text_width_for_test(kBlockoutPresetNames[k]));
+      if (widest + u.px(24) > combo.w) std::printf("    %dx%d x%g: the longest name is %d px in a %d px dropdown\n", c.w, c.h, c.scale, widest, combo.w);
+      CHECK(widest + u.px(24) <= combo.w);
+      CHECK(ed.text_width_for_test("Architecture") <= combo.w);
+    }
+  });
+}
+
+static void tests_round500_lesson() {
+  test("learn: \"Architectural pieces\" comes after \"Doors with a style\"; its Try-its, run in order on the selection - twice in a row, from the default scene and beside another Blockout - give no warning and a sound mesh; every question has an answer", [] {
+    int doors = -1, arch = -1;
+    for (int i = 0; i < lesson_count(); i++) {
+      if (std::string(lesson(i).title) == "Doors with a style") doors = i;
+      if (std::string(lesson(i).title) == "Architectural pieces") arch = i;
+    }
+    CHECK(doors >= 0 && arch == doors + 1);
+    if (arch < 0) return;
+    const std::string body = lesson(arch).body;
+    size_t questions = 0, answered = 0, tries = 0;
+    std::vector<std::string> cmds;
+    std::istringstream is(body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++, answered += line.find(" | ") != std::string::npos && line.size() > line.find(" | ") + 20;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      tries++;
+      std::string c = line.substr(6, line.find(" | ") - 6);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      cmds.push_back(c);
+    }
+    CHECK(tries >= 9 && questions >= 3 && answered == questions);
+    for (const char *word : {"Column", "Pilaster", "Beam", "Railing", "Roof", "Stairs L", "Spiral", "Arcade"}) CHECK(body.find(word) != std::string::npos);
+    for (const bool busy : {false, true}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      if (busy) {
+        GameObject *other = r477_blockout(ed, "Other Blockout");
+        other->get<Blockout>()->method = 2;
+        r478_room_by_command(ed, *other);
+        r495_built(ed);
+      }
+      for (int run = 0; run < (busy ? 1 : 2); run++) {
+        const size_t mark = r477_mark();
+        for (const std::string &c : cmds) {
+          ed.command(c);
+          r495_built(ed);
+        }
+        size_t warnings = 0;
+        const std::string log = r477_log_since(mark, &warnings);
+        if (warnings) std::printf("    %s run %d:\n%s", busy ? "beside another Blockout" : "default scene", run + 1, log.c_str());
+        CHECK(warnings == 0);
+        size_t bad = 0, kinds = 0;
+        ed.scene().for_each([&](GameObject &g) {
+          if (const BlockoutPiece *bp = g.get<BlockoutPiece>(); bp && bp->preset) kinds++;
+          if (!g.get<Blockout>() || !r495_mesh(g)) return;
+          const std::string why = r498_judge(g);
+          if (!why.empty()) bad++, std::printf("    %s run %d: %s: %s\n", busy ? "busy" : "default", run + 1, g.name.c_str(), why.c_str());
+        });
+        CHECK(bad == 0 && kinds >= 8);
+      }
+    }
+  });
+}
+
+static void tests_round500() {
+  tests_round500_kinds();
+  tests_round500_numbers();
+  tests_round500_ui();
+  tests_round500_more();
+  tests_round500_labels();
+  tests_round500_wire();
+  tests_round500_lesson();
+}
+
+// r500te-begin
+/* ===================================================================== */
+/* Round 500, the test engineer's (task 0484): the Convex kernel shape measured on its own, then each kind's numbers measured on the mesh   */
+/* (point probes, runs along a line), scale, hostile numbers, export. From the criteria, not from the generator.                             */
+/* ===================================================================== */
+
+namespace {
+
+Piece t500_convex(uint64_t id, std::vector<Vec3> pts, const Mat4 &to = Mat4::identity(), Op op = Op::Add) {
+  Piece p;
+  p.id = id, p.shape = Shape::Convex, p.op = op, p.points = std::move(pts), p.to_blockout = to;
+  return p;
+}
+
+std::vector<Vec3> t500_box_pts(Vec3 lo, Vec3 hi) {
+  std::vector<Vec3> p;
+  for (int i = 0; i < 8; i++) p.push_back(Vec3((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z));
+  return p;
+}
+
+/* Square 2 x 2 at y = 0 under a square 1 x 1 at y = 1: volume 7/3. */
+std::vector<Vec3> t500_frustum_pts() {
+  std::vector<Vec3> p;
+  for (int i = 0; i < 4; i++) p.push_back(Vec3((i & 1) ? 1.0f : -1.0f, 0.0f, (i & 2) ? 1.0f : -1.0f));
+  for (int i = 0; i < 4; i++) p.push_back(Vec3((i & 1) ? 0.5f : -0.5f, 1.0f, (i & 2) ? 0.5f : -0.5f));
+  return p;
+}
+
+/* Two rings of n corners: radius r0 at y = 0 and r1 at y = h. */
+std::vector<Vec3> t500_rings(int n, float r0, float r1, float h) {
+  std::vector<Vec3> p;
+  for (int k = 0; k < 2; k++)
+    for (int i = 0; i < n; i++) {
+      const float a = 6.2831853f * (float)i / (float)n, r = k ? r1 : r0;
+      p.push_back(Vec3(r * std::cos(a), k ? h : 0.0f, r * std::sin(a)));
+    }
+  return p;
+}
+/* Its volume: the frustum of two regular n-gons (the corners are the ring's, so this is exact). */
+double t500_rings_volume(int n, double r0, double r1, double h) {
+  const double s = 0.5 * (double)n * std::sin(6.283185307179586 / (double)n), a0 = s * r0 * r0, a1 = s * r1 * r1;
+  return h / 3.0 * (a0 + a1 + std::sqrt(a0 * a1));
+}
+
+/* n corners spread evenly over a sphere (the golden spiral): every one is a corner of the hull. */
+std::vector<Vec3> t500_sphere_pts(int n, float r) {
+  std::vector<Vec3> p;
+  for (int i = 0; i < n; i++) {
+    const double y = 1.0 - 2.0 * ((double)i + 0.5) / (double)n, rad = std::sqrt(1.0 - y * y), phi = 2.399963229728653 * (double)i;
+    p.push_back(Vec3(r * (float)(rad * std::cos(phi)), r * (float)y, r * (float)(rad * std::sin(phi))));
+  }
+  return p;
+}
+
+/* How far a mesh is from being the convex hull of `pts` placed by `to`: a corner of the mesh that is no point is its distance to the nearest point, and a point outside a face's plane is
+ * its distance to it. (A mesh with both zero is the hull: convex, and made of the points.) */
+double t500_hull_error(const Mesh &m, const std::vector<Vec3> &pts, const Mat4 &to) {
+  std::vector<Vec3> world;
+  for (const Vec3 &p : pts) world.push_back(to.point(p));
+  double worst = 0.0;
+  for (const Vec3 &v : m.positions) {
+    double best = 1e30;
+    for (const Vec3 &p : world) best = std::min(best, (double)length(v - p));
+    worst = std::max(worst, best);
+  }
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const Vec3 n = m.face_normal(f), c = m.face_center(f);
+    for (const Vec3 &p : world) worst = std::max(worst, (double)dot(n, p - c));
+  }
+  return worst;
+}
+
+bool t500_refused(const R476Built &b, uint64_t id) { return b.mesh.face_count() == 0 && r480t_skipped_any(b, id); }
+
+}  // namespace
+
+static void tests_round500_te_kernel() {
+  /* ---- The kernel's new shape, measured against formulas ---- */
+  test("blockout convex (500 te): a tetrahedron, a cube from 8 corners, a frustum, 32-gon prisms and frusta (64 corners) and 64 corners on a sphere are closed valid solids of the formula's volume and ARE the hull of their points, on each path, at the origin, off the grid and turned", [] {
+    struct Solid {
+      const char *name;
+      std::vector<Vec3> pts;
+      double volume;  // -1: no formula (the sphere): bounds
+      int faces, verts;
+      bool curved;
+    };
+    const std::vector<Solid> solids = {
+        {"tetrahedron", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)}, 1.0 / 6.0, 4, 4, false},
+        {"cube from 8 corners", t500_box_pts(Vec3(-0.5f), Vec3(0.5f)), 1.0, 6, 8, false},
+        {"frustum", t500_frustum_pts(), 7.0 / 3.0, 6, 8, false},
+        {"32-gon prism", t500_rings(32, 1.0f, 1.0f, 2.0f), t500_rings_volume(32, 1.0, 1.0, 2.0), 34, 64, true},
+        {"32-gon frustum", t500_rings(32, 1.0f, 0.5f, 1.5f), t500_rings_volume(32, 1.0, 0.5, 1.5), 34, 64, true},
+        {"64 corners on a sphere", t500_sphere_pts(64, 1.0f), -1.0, -1, 64, true},
+    };
+    const Mat4 places[3] = {Mat4::identity(), Mat4::translate(Vec3(0.137f, 0.291f, -0.213f)), Mat4::trs(Vec3(0.137f, 0.291f, -0.213f), Quat::euler(Vec3(20.0f, 30.0f, 40.0f)), Vec3(1.0f))};
+    const char *const place_names[3] = {"at the origin", "off the grid", "turned"};
+    for (Path path : r476_paths())
+      for (const Solid &s : solids)
+        for (int pl = 0; pl < 3; pl++) {
+          const std::vector<Piece> pieces{t500_convex(7, s.pts, places[pl])};
+          const R476Built b = r476_build(pieces, path, 0.05f);
+          const std::string label = std::string(r476_name(path)) + " " + s.name + " " + place_names[pl];
+          CHECK(b.ok);
+          const std::string why = r480t_judge(b);
+          if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+          CHECK(why.empty());
+          const double vol = r476_volume(b.mesh);
+          const double want = s.volume > 0.0 ? s.volume : 4.0 / 3.0 * 3.14159265358979;
+          const double rel = std::fabs(vol - want) / want;
+          const bool exact = path == Path::Crisp, grid = !exact && (s.curved || pl == 2);
+          const double tol = exact ? 1e-4 : grid ? 3e-2 : 1e-3;
+          const double hull = t500_hull_error(b.mesh, s.pts, places[pl]);
+          if ((rel > 1e-5 && s.volume > 0.0) || hull > 1e-4) std::printf("    %s: volume %.6f (formula %.6f, off by %.2e), hull error %.2e m, %zu faces, %zu corners\n", label.c_str(), vol, want, rel, hull, b.mesh.face_count(), b.mesh.vert_count());
+          if (s.volume > 0.0) CHECK(rel < tol);
+          else CHECK(vol > 0.88 * want && vol < want);
+          CHECK(hull < (exact ? 1e-4 : grid ? 0.05 : 2e-3));
+          if (exact || !grid) {
+            if (s.faces > 0) CHECK((int)b.mesh.face_count() == s.faces);
+            CHECK((int)b.mesh.vert_count() == s.verts);
+          }
+          bool named = true;
+          for (size_t f = 0; f < b.faces.piece.size(); f++) named = named && b.faces.piece[f] == 7;
+          CHECK(named && b.faces.piece.size() == b.mesh.face_count());
+        }
+  });
+
+  test("blockout convex (500 te): corners that make no solid - 4 on a plane, a line, one place, fewer than 4, more than 64, NaN or infinite - are left out and named, and the rest of the build is whole; duplicates, interior and edge-middle points change nothing", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    std::vector<Vec3> tetra = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    std::vector<Vec3> tetra_nan = tetra, tetra_inf = tetra, tetra_ninf = tetra, doubled = tetra, near_dup = tetra, big = t500_rings(33, 1.0f, 1.0f, 1.0f), big64 = t500_rings(32, 1.0f, 1.0f, 1.0f);
+    tetra_nan[3].y = nan, tetra_inf[2].x = inf, tetra_ninf[1].z = -inf;
+    for (const Vec3 &p : tetra) doubled.push_back(p);
+    for (size_t i = 0, n = tetra.size(); i < n; i++) near_dup.push_back(tetra[i] + Vec3(1e-7f, -1e-7f, 1e-7f));
+    /* The cube with one kind of extra point at a time: inside, in the middle of edges, in the middle of faces (points that are not corners of the hull). */
+    const std::vector<Vec3> cube8 = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+    std::vector<Vec3> cube_inner = cube8, cube_edges = cube8, cube_face1 = cube8, cube_faces3 = cube8;
+    cube_inner.push_back(Vec3(0.1f, 0.2f, -0.1f));
+    for (Vec3 e : {Vec3(0.0f, 0.5f, 0.5f), Vec3(0.5f, 0.0f, -0.5f), Vec3(-0.5f, -0.5f, 0.0f), Vec3(0.0f, -0.5f, 0.5f)}) cube_edges.push_back(e);
+    cube_face1.push_back(Vec3(0.5f, 0.0f, 0.0f));
+    for (Vec3 e : {Vec3(0.5f, 0.0f, 0.0f), Vec3(0.0f, -0.5f, 0.0f), Vec3(0.0f, 0.0f, -0.5f)}) cube_faces3.push_back(e);
+    struct Case {
+      const char *what;
+      std::vector<Vec3> pts;
+      int expect;  // 0 refused, 1 built, 2 either
+      double volume;
+      int verts;
+      Vec3 twin = Vec3(0.0f), twin_at = Vec3(0.0f);  // a box of this size at this place: the way the kernel treats a plain box of the same size (size 0: none)
+    };
+    const std::vector<Case> cases = {
+        {"the tetrahedron twice over (8 points)", doubled, 1, 1.0 / 6.0, 4},
+        {"the tetrahedron with every corner repeated 1e-7 off", near_dup, 1, 1.0 / 6.0, 4},
+        {"a cube with a point inside it", cube_inner, 1, 1.0, 8},
+        {"a cube with a point in the middle of each of four edges", cube_edges, 1, 1.0, 8},
+        {"a cube with a point in the middle of one face", cube_face1, 1, 1.0, 8},
+        {"a cube with a point in the middle of each of three faces", cube_faces3, 1, 1.0, 8},
+        {"4 points in a plane", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}, 0, 0.0, 0},
+        {"5 points in a plane (a square and its middle)", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1), Vec3(0.5f, 0, 0.5f)}, 0, 0.0, 0},
+        {"5 points in a line", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(2, 0, 0), Vec3(3, 0, 0), Vec3(4, 0, 0)}, 0, 0.0, 0},
+        {"4 equal points", {Vec3(1, 2, 3), Vec3(1, 2, 3), Vec3(1, 2, 3), Vec3(1, 2, 3)}, 0, 0.0, 0},
+        {"3 points", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}, 0, 0.0, 0},
+        {"no points", {}, 0, 0.0, 0},
+        {"65 points", big, 0, 0.0, 0},
+        {"64 points (the most)", big64, 1, t500_rings_volume(32, 1.0, 1.0, 1.0), 64},
+        {"a NaN corner", tetra_nan, 0, 0.0, 0},
+        {"an infinite corner", tetra_inf, 0, 0.0, 0},
+        {"a minus infinite corner", tetra_ninf, 0, 0.0, 0},
+        {"an apex 1e-8 off the plane of a triangle (inside the tolerance)", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0.3f, 0.3f, 1e-8f)}, 2, 0.0, 0},
+        {"an apex 1e-4 off the plane of a triangle (a sliver)", {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0.3f, 0.3f, 1e-4f)}, 2, 0.5e-4 / 3.0, 4},
+        {"a needle: one edge 1000 m, 1 cm across", {Vec3(0, 0, 0), Vec3(1000, 0, 0), Vec3(0, 0.01f, 0), Vec3(0, 0, 0.01f)}, 2, 1000.0 * 0.01 * 0.01 / 6.0, 4},
+        {"a 10 x 10 x 0.001 m slab", t500_box_pts(Vec3(-5, 0, -5), Vec3(5, 0.001f, 5)), 2, 0.1, 8, Vec3(10.0f, 0.001f, 10.0f), Vec3(0.0f, 0.0005f, 0.0f)},
+        {"a cube of 1e-4 m", t500_box_pts(Vec3(-0.5e-4f), Vec3(0.5e-4f)), 2, 1e-12, 8, Vec3(1e-4f), Vec3(0.0f)},
+        {"a cube of 1e4 m", t500_box_pts(Vec3(-5000.0f), Vec3(5000.0f)), 2, 1e12, 8, Vec3(1e4f), Vec3(0.0f)},
+    };
+    for (Path path : r476_paths())
+      for (const Case &c : cases) {
+        /* The convex alone: built or left out and named. */
+        const R476Built b = r476_build({t500_convex(2, c.pts)}, path, 0.1f);
+        const std::string label = std::string(r476_name(path)) + " " + c.what;
+        if (!b.ok) std::printf("    %s: the build was refused: %s\n", label.c_str(), b.report.why.c_str());
+        CHECK(b.ok);
+        const bool refused = t500_refused(b, 2);
+        if (refused) {
+          std::string why;
+          for (const blockout::Skipped &sk : b.report.skipped)
+            if (sk.id == 2) why = sk.why;
+          CHECK(!why.empty());
+          std::printf("    %s: left out: %s%s\n", label.c_str(), why.c_str(), c.expect == 1 ? "  <- it is a solid" : "");
+        }
+        else if (c.expect == 0) std::printf("    %s: built, but it is no solid (%zu faces)\n", label.c_str(), b.mesh.face_count());
+        CHECK(!(c.expect == 0 && !refused) && !(c.expect == 1 && refused));
+        const std::string why = r480t_judge(b);
+        if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        if (!refused && c.volume > 0.0 && c.expect != 0 && b.mesh.face_count() > 0) {
+          const double vol = r476_volume(b.mesh), rel = std::fabs(vol - c.volume) / c.volume;
+          if (rel > 0.02) std::printf("    %s: volume %.9g, want %.9g (off by %.1e)\n", label.c_str(), vol, c.volume, rel);
+          if (c.expect == 1 || path == Path::Crisp) CHECK(rel < (path == Path::Crisp ? 1e-3 : 0.1));
+        }
+        /* Built as nothing and not named: the piece vanished. A plain box of the same size does the same on the grid (a part thinner than a cell) - then it is the grid's rule, not the convex's. */
+        if (!refused && c.expect != 0 && b.mesh.face_count() == 0) {
+          bool twin_empty = false;
+          if (c.twin.x > 0.0f) twin_empty = r476_build({box_piece(2, c.twin, c.twin_at)}, path, 0.1f).mesh.face_count() == 0;
+          std::printf("    %s: built as nothing and not named%s\n", label.c_str(), twin_empty ? " (a box of the same size does the same)" : "");
+          CHECK(twin_empty || c.expect == 2 && c.twin.x == 0.0f);
+        }
+        if (c.expect == 1 && !refused && c.verts > 0) {
+          if ((int)b.mesh.vert_count() != c.verts) std::printf("    %s: %zu corners, want %d\n", label.c_str(), b.mesh.vert_count(), c.verts);
+          if (path == Path::Crisp) CHECK((int)b.mesh.vert_count() == c.verts);
+        }
+        /* With a box beside it: the left-out piece changes nothing of the box. */
+        if (c.expect == 0) {
+          const R476Built with = r476_build({box_piece(1, {1, 1, 1}, {20, 0, 0}), t500_convex(2, c.pts)}, path, 0.1f);
+          bool box_named = false;
+          for (const blockout::Skipped &sk : with.report.skipped) box_named = box_named || sk.id == 1;
+          CHECK(with.ok && with.mesh.face_count() == 6 && !box_named && r480t_skipped_any(with, 2));
+        }
+      }
+  });
+
+  /* ---- Touching and cutting ---- */
+  test("blockout convex (500 te): a convex cube touching a box face to face joins it into one 2 x 1 x 1 solid, exactly, and a hair (1e-7, 1e-5) apart or overlapping stays sound wherever a box beside a box does; either order of pieces", [] {
+    const std::vector<Vec3> cube = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+    for (Path path : r476_paths())
+      for (const float gap : {0.0f, 1e-7f, -1e-7f, 1e-5f, -1e-5f})
+        for (const bool convex_first : {true, false}) {
+          std::vector<Piece> pieces{t500_convex(1, cube), box_piece(2, {1, 1, 1}, {1.0f + gap, 0, 0})};
+          std::vector<Piece> twin{box_piece(1, {1, 1, 1}, {0, 0, 0}), box_piece(2, {1, 1, 1}, {1.0f + gap, 0, 0})};
+          if (!convex_first) std::swap(pieces[0], pieces[1]), std::swap(twin[0], twin[1]);
+          const R476Built b = r476_build(pieces, path, 0.05f), base = r476_build(twin, path, 0.05f);
+          const std::string label = std::string(r476_name(path)) + strprintf(" gap %g %s first", (double)gap, convex_first ? "convex" : "box");
+          const std::string why = r480t_judge(b), base_why = r480t_judge(base);
+          if (!why.empty() || !base_why.empty()) std::printf("    %s: with the convex: '%s' (%zu faces); two boxes: '%s' (%zu faces)\n", label.c_str(), why.c_str(), b.mesh.face_count(), base_why.c_str(), base.mesh.face_count());
+          CHECK(b.ok);
+          if (base_why.empty()) CHECK(why.empty());  // (a convex is no worse than a box in the same place)
+          if (gap == 0.0f) {
+            CHECK(why.empty());
+            CHECK(b.mesh.face_count() == 6 && b.mesh.vert_count() == 8);
+            CHECK_NEAR(r476_volume(b.mesh), 2.0, 2e-4);
+            CHECK(r476_same_shape(b, base));
+          }
+          else CHECK_NEAR(r476_volume(b.mesh), 2.0, 2e-3);
+        }
+  });
+
+  test("blockout convex (500 te): a convex piece subtracted from a box (a corner cut, a flared pocket through the top, a through hole) and intersected with a box (an octahedron) leaves the formula's volume, on each path", [] {
+    for (Path path : r476_paths()) {
+      const double tol = path == Path::Crisp ? 1e-4 : 4e-3;
+      {  // a corner: the cube [0.5,1.5] x [0.5,1.5] x [-0.5,0.5] takes 0.5 x 0.5 x 1 out of the 2 m cube
+        const R476Built b = r476_build({box_piece(1, {2, 2, 2}, {0, 0, 0}), t500_convex(2, t500_box_pts(Vec3(0.5f, 0.5f, -0.5f), Vec3(1.5f, 1.5f, 0.5f)), Mat4::identity(), Op::Subtract)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "corner cut"));
+        CHECK_NEAR(r476_volume(b.mesh), 7.75, 8.0 * tol);
+      }
+      {  // a pocket that widens upward: half width 0.25 + 0.25 y, from y 0 to 2: inside the box (up to y 1) 7/12
+        std::vector<Vec3> pts;
+        for (int k = 0; k < 2; k++)
+          for (int i = 0; i < 4; i++) {
+            const float hw = k ? 0.75f : 0.25f;
+            pts.push_back(Vec3((i & 1) ? hw : -hw, k ? 2.0f : 0.0f, (i & 2) ? hw : -hw));
+          }
+        const R476Built b = r476_build({box_piece(1, {2, 2, 2}, {0, 0, 0}), t500_convex(2, pts, Mat4::identity(), Op::Subtract)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "pocket"));
+        CHECK_NEAR(r476_volume(b.mesh), 8.0 - 7.0 / 12.0, 8.0 * tol);
+      }
+      {  // a through hole: an octagonal prism of radius 0.5 through a 4 x 1 x 4 slab
+        const double area = 0.5 * 8.0 * 0.25 * std::sin(6.283185307179586 / 8.0);
+        const R476Built b = r476_build({box_piece(1, {4, 1, 4}, {0, 0, 0}), t500_convex(2, t500_rings(8, 0.5f, 0.5f, 2.0f), Mat4::translate(Vec3(0.0f, -1.0f, 0.0f)), Op::Subtract)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "through hole"));
+        CHECK_NEAR(r476_volume(b.mesh), 16.0 - area, 16.0 * tol);
+      }
+      {  // an octahedron of radius 1 as an Intersect piece over a 2 m cube: the octahedron, 4/3
+        const R476Built b = r476_build({box_piece(1, {2, 2, 2}, {0, 0, 0}), t500_convex(2, {Vec3(1, 0, 0), Vec3(-1, 0, 0), Vec3(0, 1, 0), Vec3(0, -1, 0), Vec3(0, 0, 1), Vec3(0, 0, -1)}, Mat4::identity(), Op::Intersect)}, path, 0.05f);
+        CHECK(b.ok && r476_sound(b.mesh, "octahedron"));
+        CHECK_NEAR(r476_volume(b.mesh), 4.0 / 3.0, 4.0 / 3.0 * tol);
+        CHECK(b.mesh.face_count() == 8 || path == Path::Field);
+      }
+    }
+  });
+
+  /* ---- Placement, determinism, the cache ---- */
+  test("blockout convex (500 te): a mirrored, an unevenly scaled and a turned placement keep the solid outward and of the right volume; a piece's own Room and Blend flags are not read", [] {
+    const std::vector<Vec3> tetra = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    for (Path path : r476_paths()) {
+      struct Place {
+        const char *what;
+        Mat4 m;
+        double scale;
+      };
+      const Place places[] = {{"mirrored in X", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat(), Vec3(-1.0f, 1.0f, 1.0f)), 1.0},
+                              {"mirrored in all three", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat(), Vec3(-1.0f)), 1.0},
+                              {"scaled 2 1 3", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat(), Vec3(2.0f, 1.0f, 3.0f)), 6.0},
+                              {"scaled 2 1 3 and turned", Mat4::trs(Vec3(0.3f, 0.1f, 0.2f), Quat::euler(Vec3(10.0f, 25.0f, 70.0f)), Vec3(2.0f, 1.0f, 3.0f)), 6.0}};
+      for (const Place &pl : places) {
+        const R476Built b = r476_build({t500_convex(1, tetra, pl.m)}, path, 0.03f);
+        const std::string label = std::string(r476_name(path)) + " " + pl.what;
+        CHECK(b.ok);
+        const std::string why = r480t_judge(b);
+        if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        if (!why.empty() || b.mesh.face_count() == 0) continue;
+        const double vol = r476_volume(b.mesh), want = pl.scale / 6.0;
+        if (std::fabs(vol - want) / want > 1e-3) std::printf("    %s: volume %.6f, want %.6f\n", label.c_str(), vol, want);
+        CHECK(std::fabs(vol - want) / want < (path == Path::Crisp ? 1e-3 : 0.1));
+        CHECK(b.mesh.face_count() == 4 || path == Path::Field);
+      }
+      /* Room and Blend are not read for a convex piece: the same bytes as without them. */
+      Piece plain = t500_convex(1, t500_box_pts(Vec3(-0.5f), Vec3(0.5f))), odd = plain;
+      odd.room = true, odd.wall = 0.7f, odd.floor = 0.7f, odd.ceiling = 0.7f, odd.open_top = true, odd.blend = 0.25f;
+      const R476Built a = r476_build({plain, box_piece(2, {1, 1, 1}, {1.0f, 0, 0})}, path, 0.05f), b = r476_build({odd, box_piece(2, {1, 1, 1}, {1.0f, 0, 0})}, path, 0.05f);
+      if (!r476_same_mesh(a, b)) std::printf("    %s: Room / Blend on a convex piece changed the mesh (%zu faces against %zu)\n", r476_name(path), b.mesh.face_count(), a.mesh.face_count());
+      CHECK(r476_same_mesh(a, b));
+      /* The Blend radius of the piece it touches is not read either (the mesh piece's rule: "nor is that of a piece it touches"). */
+      Piece blended = box_piece(2, {1, 1, 1}, {1.0f, 0, 0});
+      blended.blend = 0.2f;
+      const R476Built c = r476_build({plain, blended}, path, 0.05f);
+      const std::string why = r480t_judge(c);
+      if (!why.empty()) std::printf("    %s: a blended box beside a convex cube: %s\n", r476_name(path), why.c_str());
+      CHECK(why.empty());
+    }
+  });
+
+  test("blockout convex (500 te): two builds give the same bytes; the points in another order give the same faces; the cache returns the solid it made and is not fooled by a changed corner, a dropped corner or a changed order", [] {
+    const std::vector<Vec3> frustum = t500_frustum_pts();
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{t500_convex(3, frustum, Mat4::translate(Vec3(0.2f, 0.3f, 0.1f))), box_piece(4, {1, 1, 1}, {1.7f, 0.3f, 0.1f})};
+      const R476Built a = r476_build(pieces, path, 0.05f), b = r476_build(pieces, path, 0.05f);
+      CHECK(a.ok && r476_same_mesh(a, b));
+      /* The points rotated, then reversed, then every other one first. */
+      std::vector<std::vector<Vec3>> orders;
+      std::vector<Vec3> p = frustum;
+      std::rotate(p.begin(), p.begin() + 3, p.end());
+      orders.push_back(p);
+      p = frustum;
+      std::reverse(p.begin(), p.end());
+      orders.push_back(p);
+      p.clear();
+      for (size_t i = 0; i < frustum.size(); i += 2) p.push_back(frustum[i]);
+      for (size_t i = 1; i < frustum.size(); i += 2) p.push_back(frustum[i]);
+      orders.push_back(p);
+      for (size_t k = 0; k < orders.size(); k++) {
+        std::vector<Piece> other = pieces;
+        other[0].points = orders[k];
+        const R476Built c = r476_build(other, path, 0.05f);
+        const bool shape = r476_same_shape(a, c), bytes = r476_same_mesh(a, c);
+        std::printf("    %s order %zu: same faces %s, same bytes %s\n", r476_name(path), k, shape ? "yes" : "NO", bytes ? "yes" : "no");
+        CHECK(shape);
+        CHECK(r480t_judge(c).empty());
+      }
+      /* The cache. */
+      blockout::Cache cache;
+      std::vector<Piece> work{t500_convex(1, t500_box_pts(Vec3(-0.5f), Vec3(0.5f)))};
+      const R476Built first = r476_build(work, path, 0.05f, &cache), again = r476_build(work, path, 0.05f, &cache);
+      CHECK(first.ok && again.report.cached == 1 && r476_same_mesh(first, again));
+      work[0].points = t500_box_pts(Vec3(-0.5f, -0.5f, -0.5f), Vec3(0.5f, 1.0f, 0.5f));  // taller, the same id
+      const R476Built taller = r476_build(work, path, 0.05f, &cache);
+      if (std::fabs(r476_volume(taller.mesh) - 1.5) > 1e-3) std::printf("    %s: after a corner moved the cache gave volume %.4f (1.5 is right)\n", r476_name(path), r476_volume(taller.mesh));
+      CHECK_NEAR(r476_volume(taller.mesh), 1.5, 1e-3);
+      work[0].points = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+      work[0].points.pop_back();  // seven corners of the cube: 5/6
+      const R476Built seven = r476_build(work, path, 0.05f, &cache);
+      if (std::fabs(r476_volume(seven.mesh) - 5.0 / 6.0) > 1e-3) std::printf("    %s: after a corner was dropped the cache gave volume %.4f (0.8333 is right)\n", r476_name(path), r476_volume(seven.mesh));
+      CHECK_NEAR(r476_volume(seven.mesh), 5.0 / 6.0, path == Path::Crisp ? 1e-4 : 2e-2);
+      work[0].points = t500_box_pts(Vec3(-0.5f), Vec3(0.5f));
+      std::swap(work[0].points[0], work[0].points[7]);
+      const R476Built swapped = r476_build(work, path, 0.05f, &cache);
+      CHECK_NEAR(r476_volume(swapped.mesh), 1.0, path == Path::Crisp ? 1e-4 : 2e-2);
+    }
+  });
+
+  test("blockout convex (500 te): convex_up_faces counts the faces that look up (the first sides), convex_edges lists each edge once, both say so for corners with no solid, and the up faces are exactly the sides below that count in a build", [] {
+    const std::vector<Vec3> cube = t500_box_pts(Vec3(-0.5f), Vec3(0.5f)), tetra = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    const std::vector<Vec3> gable = {Vec3(-2, 0, -1), Vec3(2, 0, -1), Vec3(2, 0, 1), Vec3(-2, 0, 1), Vec3(-2, 1, 0), Vec3(2, 1, 0)};
+    CHECK(blockout::convex_up_faces(cube) == 1 && blockout::convex_up_faces(tetra) == 1 && blockout::convex_up_faces(gable) == 2);
+    CHECK(blockout::convex_up_faces({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}) == -1);
+    CHECK(blockout::convex_up_faces({Vec3(0, 0, 0), Vec3(1, 0, 0)}) == -1);
+    CHECK(blockout::convex_up_faces(t500_rings(32, 1.0f, 1.0f, 2.0f)) == 1);
+    CHECK(blockout::convex_up_faces(cube, 2.0f) == 0);  // (a threshold above any normal's y: none)
+    CHECK(blockout::convex_edges(cube).size() == 24 && blockout::convex_edges(tetra).size() == 12 && blockout::convex_edges(gable).size() == 18);
+    CHECK(blockout::convex_edges(t500_rings(32, 1.0f, 1.0f, 2.0f)).size() == 192);
+    CHECK(blockout::convex_edges({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}).empty());
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(blockout::convex_up_faces({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, nan, 1)}) == -1 && blockout::convex_edges({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, nan, 1)}).empty());
+    for (Path path : r476_paths()) {
+      const R476Built b = r476_build({t500_convex(5, gable, Mat4::translate(Vec3(0.0f, 0.1f, 0.0f)))}, path, 0.05f);
+      CHECK(b.ok && r480t_judge(b).empty());
+      size_t up = 0, below = 0, wrong = 0;
+      for (size_t f = 0; f < b.mesh.face_count(); f++) {
+        const bool looks_up = b.mesh.face_normal(f).y > 0.05f, named_up = b.faces.side[f] < 2;
+        up += looks_up, below += named_up, wrong += looks_up != named_up;
+      }
+      if (wrong) std::printf("    %s: %zu faces look up, %zu are named by a side below 2, %zu disagree\n", r476_name(path), up, below, wrong);
+      CHECK(up == 2 && wrong == 0);
+    }
+    /* Whose face is at a point: the convex's top. */
+    const std::vector<Piece> two{box_piece(1, {1, 1, 1}, {5, 0, 0}), t500_convex(2, cube)};
+    uint64_t piece = 1;
+    uint32_t side = 99;
+    CHECK(blockout::face_owner(two, Vec3(0.0f, 0.5f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), piece, side) && piece == 2);
+    const blockout::FaceOwners owners(two);
+    piece = 1, side = 99;
+    CHECK(owners.at(Vec3(0.0f, 0.5f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), piece, side) && piece == 2 && side == 0);  // (the cube's one face that looks up is its side 0)
+  });
+}
+
+namespace {
+
+size_t t500_objects(Editor &ed) {
+  size_t n = 0;
+  ed.scene().for_each([&](GameObject &) { n++; });
+  return n;
+}
+
+/* Whether a point of the piece's own space is inside the Blockout's matter. */
+bool t500_in(const R500Scene &s, float x, float y, float z) { return r498_matter(*s.bo, *s.piece, Vec3(x, y, z)); }
+
+/* The runs of matter along Y at (x, z), from y0 to y1 in steps: each (from, to). */
+std::vector<std::pair<float, float>> t500_runs(const R500Scene &s, float x, float z, float y0, float y1, float step) {
+  std::vector<std::pair<float, float>> out;
+  bool in = false;
+  float start = 0.0f;
+  for (float y = y0; y <= y1 + 1e-6f; y += step) {
+    const bool m = t500_in(s, x, y, z);
+    if (m && !in) in = true, start = y;
+    if (!m && in) in = false, out.push_back({start, y - step});
+  }
+  if (in) out.push_back({start, y1});
+  return out;
+}
+
+/* The shaft's half width along +X at height y: matter from the axis out. */
+float t500_radius(const R500Scene &s, float y) {
+  float r = 0.0f;
+  for (float x = 0.0f; x < 0.6f; x += 0.0025f) {
+    if (!t500_in(s, x, y, 0.0f)) break;
+    r = x;
+  }
+  return r;
+}
+
+/* Posts along X: the groups of corners on the ground. */
+size_t t500_posts_x(const GameObject &bo, float tol) {
+  std::vector<float> xs;
+  for (const Vec3 &p : r500_pts(bo))
+    if (std::fabs(p.y) < tol) xs.push_back(p.x);
+  return r500_clusters(xs, 0.2f);
+}
+/* ... and in the plan (an outline's posts). */
+size_t t500_posts_xz(const GameObject &bo, float tol) {
+  std::vector<Vec2> centres;
+  for (const Vec3 &p : r500_pts(bo)) {
+    if (std::fabs(p.y) >= tol) continue;
+    bool near = false;
+    for (const Vec2 &c : centres) near = near || std::hypot(p.x - c.x, p.z - c.y) <= 0.2f;
+    if (!near) centres.push_back(Vec2(p.x, p.z));
+  }
+  return centres.size();
+}
+
+/* Every number of a preset finite. */
+bool t500_finite(const BlockoutPiece &p) {
+  for (float v : {p.size.x, p.size.y, p.size.z, p.radius, p.height, p.base_height, p.capital_height, p.base_width, p.capital_width, p.taper, p.length, p.post_spacing, p.post_size, p.rail_size,
+                  p.rail_height, p.span, p.pitch, p.overhang, p.thickness, p.total_height, p.stair_width, p.turn, p.column_width, p.arch_thickness, p.inner_radius, p.depth, p.arch_rise})
+    if (!finite_bits(v)) return false;
+  return true;
+}
+
+/* The class of each face of a Blockout's live mesh (-1: a face no piece owns). */
+std::vector<int> t500_classes(const GameObject &bo) {
+  std::vector<int> out;
+  const Mesh *m = r495_mesh(bo);
+  const Blockout *b = bo.get<Blockout>();
+  if (!m || !b || b->state.faces.piece.size() != m->face_count()) return out;
+  std::vector<blockout::Piece> pieces;
+  blockout::Settings st;
+  blockout_snapshot(bo, pieces, st);
+  for (size_t f = 0; f < m->face_count(); f++) {
+    const blockout::Piece *piece = nullptr;
+    for (const blockout::Piece &p : pieces)
+      if (p.id == b->state.faces.piece[f]) piece = &p;
+    out.push_back(piece ? blockout_face_class(*piece, b->state.faces.side[f]) : -1);
+  }
+  return out;
+}
+
+/* A kind's `blockout add` words and a name, for the lists below. */
+const char *t500_words(int preset) {
+  for (const R500Kind &k : kR500Kinds)
+    if (k.preset == preset) return k.words;
+  return "";
+}
+
+}  // namespace
+
+static void tests_round500_te_measured() {
+  /* ---- Criterion 2, from point probes: no vertex lists, no generator's own numbers ---- */
+  test("architectural pieces (500 te): a column's Taper, Base Height, Capital Height, round or square shaft and the 90% rule are measured with probes along the shaft and across it, on each path", [] {
+    for (int method : r498_methods())
+      for (const bool square : {false, true}) {
+        const float tol = method == 2 ? 0.03f : 0.006f;
+        Editor ed;
+        const R500Scene s = r500_make(ed, "column 0.25 3", method, 0.02f);
+        if (square) ed.command("blockout set shaft square");
+        for (const char *line : {"blockout set taper 0.5", "blockout set baseheight 0.4", "blockout set capitalheight 0.5", "blockout set basewidth 1", "blockout set capitalwidth 0.9"}) ed.command(line);
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + (square ? " square" : " round");
+        CHECK(r498_judge(*s.bo).empty());
+        /* The shaft narrows from 0.25 at the plinth's top (y 0.4) to 0.125 under the capital (y 2.5), straight. */
+        for (float y : {0.45f, 1.45f, 2.45f}) {
+          const float want = 0.25f * (1.0f - 0.5f * (y - 0.4f) / 2.1f), got = t500_radius(s, y);
+          if (std::fabs(got - want) > tol) std::printf("    %s: shaft half width %.4f at y %.2f, want %.4f\n", label.c_str(), got, y, want);
+          CHECK_NEAR(got, want, tol);
+        }
+        CHECK(t500_in(s, 0.17f, 1.45f, 0.17f) == square);  // (a round shaft's corner of the square is air)
+        /* The plinth is 1 m wide and 0.4 high, the capital 0.9 wide from 2.5 to 3: along Y at x = z = 0.42 (inside both). */
+        const auto runs = t500_runs(s, 0.42f, 0.42f, 0.0f, 3.0f, 0.005f);
+        if (runs.size() != 2) std::printf("    %s: %zu runs of matter at the plinth's and capital's edge, want 2\n", label.c_str(), runs.size());
+        CHECK(runs.size() == 2);
+        if (runs.size() == 2) {
+          CHECK_NEAR(runs[0].first, 0.0f, 0.011f);
+          CHECK_NEAR(runs[0].second, 0.4f, tol);
+          CHECK_NEAR(runs[1].first, 2.5f, tol);
+          CHECK_NEAR(runs[1].second, 3.0f, 0.011f);
+        }
+        CHECK(!t500_in(s, 0.52f, 0.2f, 0.0f) && t500_in(s, 0.48f, 0.2f, 0.0f));  // (the plinth's width: 1 m)
+        CHECK(!t500_in(s, 0.47f, 2.7f, 0.0f) && t500_in(s, 0.43f, 2.7f, 0.0f));  // (the capital's: 0.9 m)
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, 0.011f);
+      }
+    /* A plinth and a capital that together fill the column are cut to 90%: Height 1, 0.8 + 0.8 leaves 0.1 of shaft. */
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "column 0.25 1", method, 0.02f);
+      for (const char *line : {"blockout set baseheight 0.8", "blockout set capitalheight 0.8"}) ed.command(line);
+      r495_built(ed);
+      CHECK(r498_judge(*s.bo).empty());
+      const auto runs = t500_runs(s, 0.3f, 0.0f, 0.0f, 1.0f, 0.005f);
+      if (runs.size() != 2) std::printf("    %s: %zu runs at x 0.3, want 2 (plinth and capital)\n", r498_method_name(method), runs.size());
+      CHECK(runs.size() == 2);
+      if (runs.size() == 2) {
+        CHECK_NEAR(runs[0].second, 0.45f, 0.025f);
+        CHECK_NEAR(runs[1].first, 0.55f, 0.025f);
+      }
+      CHECK(t500_in(s, 0.0f, 0.5f, 0.0f));  // (the shaft joins them)
+    }
+  });
+
+  test("architectural pieces (500 te): a pilaster stands on its wall - nothing behind z 0, its front at the capital's half width - a beam is Length x Depth x Width about its bottom middle, on each path", [] {
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "pilaster 0.2 2.6", method, 0.01f);
+        CHECK(r498_judge(*s.bo).empty());
+        const AABB box = r495_mesh(*s.bo)->bounds();
+        std::printf("    %s pilaster: x %.3f..%.3f y %.3f..%.3f z %.3f..%.3f\n", r498_method_name(method), box.min.x, box.max.x, box.min.y, box.max.y, box.min.z, box.max.z);
+        CHECK(box.min.z > -tol && box.min.z < tol);  // (its back is on the wall's plane)
+        CHECK_NEAR(box.max.z, 0.35f, tol);           // (the capital's half width in front)
+        CHECK_NEAR(box.min.x, -0.35f, tol);
+        CHECK_NEAR(box.max.x, 0.35f, tol);
+        CHECK_NEAR(box.max.y, 2.6f, tol);
+        CHECK(t500_in(s, 0.0f, 1.3f, 0.1f) && !t500_in(s, 0.0f, 1.3f, -0.1f) && !t500_in(s, 0.0f, 1.3f, 0.3f));  // (the shaft is half a square column 0.4 wide: 0.2 deep)
+      }
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "beam 3 0.5 0.2", method, 0.01f);
+        CHECK(r498_judge(*s.bo).empty());
+        const AABB box = r495_mesh(*s.bo)->bounds();
+        CHECK_NEAR(box.min.x, -1.5f, tol);
+        CHECK_NEAR(box.max.x, 1.5f, tol);
+        CHECK_NEAR(box.min.y, 0.0f, tol);
+        CHECK_NEAR(box.max.y, 0.5f, tol);
+        CHECK_NEAR(box.min.z, -0.1f, tol);
+        CHECK_NEAR(box.max.z, 0.1f, tol);
+        CHECK(r495_mesh(*s.bo)->face_count() == 6 || method == 2);
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): a railing's posts - 5 m at 1 m is 6, at 0.7 m the rule is ceil(length / spacing) + 1 = 9 evenly spaced (0.625 m), a spacing past the length leaves the two end posts - along an L outline every corner is a post, and Bottom Rail off takes the lower rail away", [] {
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing 5 1", method, 0.01f);
+      CHECK(r498_judge(*s.bo).empty());
+      CHECK(t500_posts_x(*s.bo, tol) == 6);
+      struct Spacing {
+        float spacing;
+        size_t posts;
+      };
+      for (const Spacing &sp : {Spacing{0.7f, 9}, Spacing{0.5f, 11}, Spacing{2.0f, 4}, Spacing{5.0f, 2}, Spacing{50.0f, 2}, Spacing{0.99f, 7}, Spacing{1.0f, 6}}) {
+        ed.command(strprintf("blockout set spacing %g", (double)sp.spacing));
+        r495_built(ed);
+        const size_t got = t500_posts_x(*s.bo, tol);
+        if (got != sp.posts) std::printf("    %s: railing 5 m at %g m spacing has %zu posts, expected %zu (ceil(5 / spacing) + 1)\n", r498_method_name(method), (double)sp.spacing, got, sp.posts);
+        CHECK(got == sp.posts);
+        CHECK(r498_judge(*s.bo).empty());
+      }
+      /* 9 posts: evenly spaced along the 5 m, the first and last at the ends. */
+      ed.command("blockout set spacing 0.7");
+      r495_built(ed);
+      std::vector<float> xs;
+      for (const Vec3 &p : r500_pts(*s.bo))
+        if (std::fabs(p.y) < tol) xs.push_back(p.x);
+      std::sort(xs.begin(), xs.end());
+      CHECK_NEAR(xs.front(), -2.5f - 0.04f, tol);
+      CHECK_NEAR(xs.back(), 2.5f + 0.04f, tol);
+      /* The lower rail: matter at y 0.12 between two posts, and none when it is off. */
+      ed.command("blockout set spacing 1");
+      r495_built(ed);
+      CHECK(t500_in(s, 0.0f, 0.12f, 0.0f));  // (half way between two posts)
+      ed.command("blockout set bottomrail off");
+      r495_built(ed);
+      CHECK(!t500_in(s, 0.0f, 0.12f, 0.0f) && t500_in(s, 0.0f, 0.97f, 0.0f) && r498_judge(*s.bo).empty());
+      /* An L outline (sides 4, 2, 2, 2, 2, 4 m): the posts of each side, the corners once. */
+      ed.command("blockout set bottomrail on");
+      ed.command("blockout outline 0 0 4 0 4 2 2 2 2 4 0 4");
+      r495_built(ed);
+      const size_t posts = t500_posts_xz(*s.bo, tol);
+      const std::string why = r498_judge(*s.bo);
+      if (posts != 16 || !why.empty()) std::printf("    %s: railing along an L: %zu posts (want 16: 4 + 2 + 2 + 2 + 2 + 4 per side less the shared corners), %s\n", r498_method_name(method), posts, why.empty() ? "sound" : why.c_str());
+      CHECK(posts == 16);
+      CHECK(why.empty());
+      CHECK(t500_in(s, 2.0f, 0.97f, 0.0f) && t500_in(s, 4.0f, 0.97f, 1.0f) && !t500_in(s, 1.0f, 0.97f, 1.0f));  // (the top rail runs along the sides, not across)
+    }
+  });
+
+  test("architectural pieces (500 te): a railing holds its posts to 256 a side (spacing 0.01 over 100 m is 256, not 257) and 1,024 a railing; a roof over a rectangle rises (half span + overhang) x tan(pitch) - gable, hip over the nearer half side, shed over the whole span", [] {
+    {
+      BlockoutPiece bp;
+      blockout_preset_defaults(bp, kPresetRailing);
+      bp.length = 100.0f, bp.post_spacing = 0.01f, bp.bottom_rail = false;
+      std::vector<blockout::Piece> pieces;
+      std::vector<std::string> notes;
+      CHECK(blockout_preset_pieces(bp, 9, Mat4::identity(), pieces, 0.0f, &notes));
+      size_t tall = 0;
+      for (const blockout::Piece &p : pieces) tall += p.size.y > 0.5f && p.size.x < 0.5f;  // (a post is tall and thin; the rail is long)
+      if (tall > 256) std::printf("    a 100 m railing at 0.01 m spacing made %zu posts on one side: \"at most 256 posts a side\"\n", tall);
+      CHECK(tall <= 256 && tall >= 255);
+      /* An outline with many long sides: 1,024 in all. */
+      bp.outline = {Vec2(0, 0), Vec2(100, 0), Vec2(100, 100), Vec2(0, 100)};
+      pieces.clear(), notes.clear();
+      CHECK(blockout_preset_pieces(bp, 9, Mat4::identity(), pieces, 0.0f, &notes));
+      tall = 0;
+      for (const blockout::Piece &p : pieces) tall += p.size.y > 0.5f && p.size.x < 0.5f;
+      CHECK(tall <= 1024 && tall >= 1000);
+      bool said = false;
+      for (const std::string &n : notes) said = said || n.find("1024") != std::string::npos;
+      CHECK(said || tall < 1024);
+    }
+    struct Roof {
+      float pitch, overhang;
+    };
+    const float rad = 3.14159265f / 180.0f;
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.05f : 0.003f;
+      for (const Roof &r : {Roof{30.0f, 0.3f}, Roof{45.0f, 0.0f}, Roof{30.0f, 1.0f}, Roof{60.0f, 0.3f}, Roof{10.0f, 0.0f}}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, strprintf("roof 6 4 %g", (double)r.pitch), method, 0.04f);
+        ed.command(strprintf("blockout set overhang %g", (double)r.overhang));
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" gable pitch %g overhang %g", (double)r.pitch, (double)r.overhang);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = (2.0f + r.overhang) * std::tan(r.pitch * rad);
+        if (std::fabs(r500_top(*s.bo) - want) > tol) std::printf("    %s: ridge at %.4f, want %.4f\n", label.c_str(), r500_top(*s.bo), want);
+        CHECK_NEAR(r500_top(*s.bo), want, tol);
+        /* The ridge is over the middle of the span, along the whole length (with the overhang), and the eaves are at the ground. */
+        const float ridge_x = 3.0f + r.overhang, eave_z = 2.0f + r.overhang;
+        CHECK(t500_in(s, 0.0f, 0.5f * want, 0.0f) && !t500_in(s, 0.0f, want + 0.1f, 0.0f));
+        CHECK(t500_in(s, ridge_x - 0.1f, 0.25f * std::tan(r.pitch * rad), eave_z - 0.5f) && !t500_in(s, ridge_x + 0.15f, 0.02f, 0.0f) && !t500_in(s, 0.0f, 0.02f, eave_z + 0.15f));
+        CHECK_NEAR(r495_mesh(*s.bo)->bounds().min.y, 0.0f, tol);
+        CHECK_NEAR(r495_mesh(*s.bo)->bounds().max.x, ridge_x, tol);
+        CHECK_NEAR(r495_mesh(*s.bo)->bounds().max.z, eave_z, tol);
+      }
+      /* Hip: the ridge is 2 * (a - b) long, centred, at the nearer half side times the tangent; Shed: the whole span times the tangent. */
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+        ed.command("blockout set roofstyle hip");
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = 2.3f * std::tan(30.0f * rad), top = r500_top(*s.bo);
+        CHECK_NEAR(top, want, tol);
+        std::vector<float> xs;
+        for (const Vec3 &p : r500_pts(*s.bo))
+          if (std::fabs(p.y - top) < tol && std::fabs(p.z) < tol) xs.push_back(p.x);
+        std::sort(xs.begin(), xs.end());
+        if (xs.empty()) std::printf("    %s hip: no corner at the ridge's height\n", r498_method_name(method));
+        CHECK(!xs.empty());
+        if (!xs.empty()) {
+          CHECK_NEAR(xs.front(), -1.0f, tol);  // (3.3 - 2.3)
+          CHECK_NEAR(xs.back(), 1.0f, tol);
+        }
+        CHECK(!t500_in(s, 2.0f, want * 0.9f, 0.0f) && t500_in(s, 0.0f, want * 0.9f, 0.0f));
+        /* A square hip is a pyramid: one apex. */
+        ed.command("blockout set length 4");
+        ed.command("blockout set span 4");
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        CHECK_NEAR(r500_top(*s.bo), 2.3f * std::tan(30.0f * rad), tol);
+        size_t apex = 0;
+        for (const Vec3 &p : r500_pts(*s.bo)) apex += std::fabs(p.y - r500_top(*s.bo)) < tol && std::hypot(p.x, p.z) < 0.05f;
+        if (method == 1) CHECK(apex >= 1);  // (the grid may round an apex's corner off)
+      }
+      {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.02f);
+        ed.command("blockout set roofstyle shed");
+        r495_built(ed);
+        CHECK(r498_judge(*s.bo).empty());
+        const float want = 4.6f * std::tan(30.0f * rad);
+        CHECK_NEAR(r500_top(*s.bo), want, tol);
+        CHECK(t500_in(s, 0.0f, 0.5f * want, 2.2f) && !t500_in(s, 0.0f, 0.5f * want, -2.0f));
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): roofs over a rectangle, an L, a T and a U outline - gable, hip and shed, solid and with a 0.1 m sheet - close, are sound with no faces on top of each other, on each path; a sheet rises to ridge + thickness; every outline with a slanted side is refused with a status note and builds nothing", [] {
+    struct Outline {
+      const char *what;
+      const char *line;
+    };
+    const Outline outlines[] = {{"rectangle", "blockout outline 0 0 6 0 6 4 0 4"},
+                                {"L", "blockout outline 0 0 6 0 6 2 2 2 2 6 0 6"},
+                                {"T", "blockout outline 0 0 6 0 6 2 4 2 4 5 2 5 2 2 0 2"},
+                                {"U", "blockout outline 0 0 6 0 6 4 4 4 4 2 2 2 2 4 0 4"}};
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      for (const Outline &o : outlines)
+        for (int style : {kRoofGable, kRoofHip, kRoofShed})
+          for (const float t : {0.0f, 0.1f}) {
+            const std::string name = o.what;
+            const bool keep = (name == "rectangle" && (t == 0.0f || style == kRoofGable)) || (name == "L" && ((style == kRoofHip) || (style == kRoofShed && t == 0.0f) || (style == kRoofGable && t > 0.0f))) ||
+                              (name == "T" && style == kRoofHip && t > 0.0f) || (name == "U" && style == kRoofHip && t == 0.0f);
+            if (!keep) continue;  // (a sample: the stress sweep has every one)
+            Editor ed;
+            const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.06f);
+            ed.command(o.line);
+            BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+            bp->roof_style = style, bp->thickness = t;
+            r495_built(ed);
+            const std::string label = std::string(r498_method_name(method)) + " " + o.what + " " + kBlockoutRoofStyleNames[style] + strprintf(" sheet %g", (double)t);
+            size_t small = 0;
+            const std::string why = r498_judge(*s.bo, &small);
+            if (!why.empty() || small) std::printf("    %s: %s (%zu small faces on top of others)\n", label.c_str(), why.empty() ? "sound" : why.c_str(), small);
+            CHECK(why.empty());
+            CHECK(s.bo->get<Blockout>()->state.status.skipped.empty());
+            CHECK(r495_mesh(*s.bo) && r495_mesh(*s.bo)->face_count() > 0);
+            if (std::string(o.what) == "rectangle" && style != kRoofHip) {
+              const float want = (style == kRoofShed ? 4.6f : 2.3f) * std::tan(30.0f * 3.14159265f / 180.0f) + t;
+              CHECK_NEAR(r500_top(*s.bo), want, tol);
+            }
+            if (t > 0.0f && std::string(o.what) == "rectangle") {  // a sheet: no matter under the ridge, a quarter of the way up
+              const float ridge = r500_top(*s.bo);
+              CHECK(!t500_in(s, 3.0f, 0.25f * ridge, 2.0f) || style == kRoofShed);  // (a shed's high wall is at the back: the middle is still under the slope)
+            }
+          }
+      const char *slanted[] = {"blockout outline 0 0 4 0 0 4", "blockout outline 0 0 6 0 5 4 1 4", "blockout outline 0 0 4 0 4 4 2 5 0 4"};
+      for (const char *line : slanted) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.1f);
+        ed.command(line);
+        r495_built(ed);
+        std::vector<blockout::Piece> pieces;
+        blockout::Settings st;
+        BlockoutSnapshotNotes notes;
+        blockout_snapshot(*s.bo, pieces, st, &notes);
+        const Mesh *m = r495_mesh(*s.bo);
+        const bool named = !notes.refused.empty() && notes.refused[0].first == s.piece->id && notes.refused[0].second.find("square corners") != std::string::npos;
+        if (!named || (m && m->face_count())) std::printf("    %s '%s': refused with a note %d (%s), %zu faces built\n", r498_method_name(method), line, (int)named, notes.refused.empty() ? "" : notes.refused[0].second.c_str(), m ? m->face_count() : 0);
+        CHECK(named && (!m || m->face_count() == 0));
+        CHECK(s.bo->get<Blockout>()->state.status.refusal.empty());
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): L and U stairs - the first flight climbs to half the Total Height, the landing is a level box at that height, the second flight's last tread is at Total Height - by probes, with Fill Under, and again after Turn 90 (a quarter turn about the origin carries every probe)", [] {
+    for (int method : r498_methods())
+      for (const bool u_turn : {false, true})
+        for (const bool turned : {false, true}) {
+          Editor ed;
+          const R500Scene s = r500_make(ed, u_turn ? "stairs u 1 3 2 8" : "stairs l 1 3 2 8", method, 0.02f);
+          if (turned) ed.command("blockout turn 1");
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + (u_turn ? " U" : " L") + (turned ? " turned" : "");
+          CHECK(r498_judge(*s.bo).empty());
+          auto at = [&](float x, float y, float z) { return t500_in(s, x, y, z); };
+          size_t wrong = 0;
+          auto expect = [&](bool got, bool want, const char *what) {
+            if (got != want) wrong++, std::printf("    %s: %s is %s\n", label.c_str(), what, got ? "solid" : "air");
+          };
+          /* Flight 1: from z 0 to 2 along +Z, x -0.5..0.5; each step 0.25 deep and 1.5 / 8 = 0.1875 high; the last tread tops at 1.5. */
+          expect(at(0.0f, 0.15f, 0.1f), true, "under the first tread");
+          expect(at(0.0f, 0.26f, 0.1f), false, "over the first tread");
+          expect(at(0.0f, 1.45f, 1.9f), true, "under the last tread of flight 1");
+          expect(at(0.0f, 1.56f, 1.9f), false, "over the last tread of flight 1");
+          /* The landing: z 2..3, up to 1.5. */
+          expect(at(0.0f, 1.45f, 2.5f), true, "the landing (a hair under its top)");
+          expect(at(0.0f, 1.56f, 2.5f), false, "over the landing");
+          if (!u_turn) {  // flight 2 along +X from x 0.5 to 2.5 at z 2.5: its first tread tops at 1.6875, its last at 3
+            expect(at(0.6f, 1.6f, 2.5f), true, "under flight 2's first tread");
+            expect(at(0.6f, 1.77f, 2.5f), false, "over flight 2's first tread");
+            expect(at(2.4f, 2.95f, 2.5f), true, "under the last tread (Total Height 3)");
+            expect(at(2.4f, 3.05f, 2.5f), false, "over the last tread");
+            expect(at(2.0f, 0.5f, 2.5f), true, "the mass under flight 2 (Fill Under)");
+            expect(at(0.0f, 2.0f, 2.5f), false, "the air over the landing");
+          }
+          else {  // flight 2 back along -Z at x 1, from z 2 to 0: its last tread (z 0..0.25) tops at 3
+            expect(at(1.0f, 1.6f, 1.9f), true, "under flight 2's first tread");
+            expect(at(1.0f, 1.77f, 1.9f), false, "over flight 2's first tread");
+            expect(at(1.0f, 2.95f, 0.1f), true, "under the last tread (Total Height 3)");
+            expect(at(1.0f, 3.05f, 0.1f), false, "over the last tread");
+            expect(at(1.0f, 0.5f, 1.0f), true, "the mass under flight 2 (Fill Under)");
+            expect(at(0.0f, 2.0f, 1.0f), false, "the air beside flight 2 over flight 1");
+          }
+          CHECK(wrong == 0);
+          CHECK_NEAR(r500_top(*s.bo), 3.0f, method == 2 ? 0.03f : 0.003f);
+        }
+    /* Fill Under off: the flights stand on slabs (air under the treads away from the ends). */
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "stairs l 1 3 2 8", method, 0.02f);
+      ed.command("blockout set fill off");
+      r495_built(ed);
+      const std::string why = r498_judge(*s.bo);
+      if (!why.empty()) std::printf("    %s stairs L, Fill Under off: %s\n", r498_method_name(method), why.c_str());
+      CHECK(why.empty());
+      CHECK_NEAR(r500_top(*s.bo), 3.0f, method == 2 ? 0.03f : 0.003f);
+    }
+  });
+
+  test("architectural pieces (500 te): spiral stairs - every step's tread is at its height and at its angle (Turn 270, -180, 90, 720), nothing before the first step or past the last, the Turn is held to 1440 and 170 degrees a step, and the post is air-free matter up to Total Height", [] {
+    const float pi = 3.14159265f;
+    for (int method : r498_methods()) {
+      struct Spiral {
+        float turn;
+        int steps;
+      };
+      for (const Spiral &sp : {Spiral{270.0f, 16}, Spiral{-180.0f, 12}, Spiral{90.0f, 16}, Spiral{720.0f, 24}, Spiral{1e9f, 16}, Spiral{1440.0f, 4}}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, strprintf("stairs spiral 1 0.1 3 %d", sp.steps), method, 0.02f);
+        s.piece->get<BlockoutPiece>()->turn = sp.turn;
+        r495_built(ed);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" spiral turn %g steps %d", (double)sp.turn, sp.steps);
+        CHECK(r498_judge(*s.bo).empty());
+        const float turn = std::min(1440.0f, std::max(-1440.0f, sp.turn)), da = std::min(170.0f, std::max(-170.0f, turn / (float)sp.steps)), rise = 3.0f / (float)sp.steps;
+        size_t wrong = 0;
+        /* A step is the hull of its eight corners, so its outer edge is a chord: at the middle of a step of `da` degrees it reaches only cos(da / 2) of the radius. The probes sit at 0.6 of
+         * the radius, or at 0.85 of what the chord reaches. */
+        const float reach = std::cos(0.5f * std::fabs(da) * pi / 180.0f), rho = std::min(0.6f, 0.85f * reach);
+        std::printf("    %s: a step of %.1f degrees reaches %.3f of the radius at its middle (the chord)\n", label.c_str(), (double)std::fabs(da), (double)reach);
+        auto probe = [&](float deg, float y, bool want, const char *what) {
+          const float a = deg * pi / 180.0f;
+          if (rho < 0.15f) return;  // (the chord is inside the post's reach: nothing to tell it from the post)
+          if (t500_in(s, rho * std::cos(a), y, rho * std::sin(a)) != want) wrong++, std::printf("    %s: %s (angle %.1f, y %.3f) is %s\n", label.c_str(), what, (double)deg, (double)y, want ? "air" : "solid");
+        };
+        for (int i : {0, sp.steps / 3, sp.steps / 2, sp.steps - 1}) {
+          const float mid = (float)i * da + 0.5f * da, top = rise * (float)(i + 1);
+          probe(mid, top - 0.05f, true, "under a tread");
+          if (std::fabs(turn) <= 360.0f) probe(mid, top + 0.05f, false, "over a tread");  // (past a full circle the next turn's steps stand over it)
+        }
+        CHECK(wrong == 0);
+        /* Before the first step and past the last one it is air at a low height (Fill Under reaches the floor under each step only). */
+        if (std::fabs(turn) <= 360.0f && std::fabs(da) >= 10.0f) {  // (a step's half is wider than a cell)
+          const float before = (turn >= 0.0f ? -0.5f : 0.5f) * std::fabs(da), after = turn + (turn >= 0.0f ? 0.5f : -0.5f) * std::fabs(da);
+          probe(before, 0.04f, false, "before the first step");
+          probe(after, 0.04f, false, "past the last step");
+          probe(after, 2.5f, false, "past the last step, high");
+        }
+        CHECK(t500_in(s, 0.0f, 1.5f, 0.0f) && t500_in(s, 0.0f, 2.95f, 0.0f) && !t500_in(s, 0.0f, 3.05f, 0.0f));  // (the post, to Total Height)
+        CHECK_NEAR(r500_top(*s.bo), 3.0f, method == 2 ? 0.03f : 0.003f);
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): an arcade of 4 has 5 columns and 4 open arches, of 7 has 8 and 7, of 1 has 2 and 1, by probes at mid height and under each crown; a count of 0 is 1, and the arch ring is closed over each opening", [] {
+    for (int method : r498_methods())
+      for (const int count : {4, 7, 1, 0}) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, strprintf("arcade %d 2.5 3", count), method, 0.02f);
+        const int n = std::max(1, count);
+        const std::string label = std::string(r498_method_name(method)) + strprintf(" arcade %d", count);
+        CHECK(r498_judge(*s.bo).empty());
+        const float cw = 0.4f, span = 2.5f, pitch = span + cw, total = (float)n * span + (float)(n + 1) * cw, x0 = -0.5f * total;
+        size_t columns = 0, arches = 0, wrong = 0;
+        for (int k = 0; k <= n; k++) {
+          const float cx = x0 + (float)k * pitch + 0.5f * cw;
+          columns += t500_in(s, cx, 1.5f, 0.0f);
+          if (!t500_in(s, cx, 1.5f, 0.0f) || !t500_in(s, cx, 2.9f, 0.0f)) wrong++;
+          if (k < n) {
+            const float mid = cx + 0.5f * pitch;
+            arches += !t500_in(s, mid, 1.5f, 0.0f);
+            if (t500_in(s, mid, 1.5f, 0.0f) || t500_in(s, mid, 3.6f, 0.0f)) wrong++;     // (the opening, under the crown at 3 + 1.25)
+            if (!t500_in(s, mid, 4.4f, 0.0f)) wrong++;                                      // (the ring over it: 0.3 thick at the crown)
+            if (t500_in(s, mid, 4.8f, 0.0f)) wrong++;                                       // (nothing above the ring)
+          }
+        }
+        if (columns != (size_t)n + 1 || arches != (size_t)n || wrong) std::printf("    %s: %zu columns (want %d), %zu openings (want %d), %zu wrong probes\n", label.c_str(), columns, n + 1, arches, n, wrong);
+        CHECK(columns == (size_t)n + 1 && arches == (size_t)n && wrong == 0);
+        /* Nothing beyond the last column. */
+        CHECK(!t500_in(s, x0 - 0.1f, 1.5f, 0.0f) && !t500_in(s, -x0 + 0.1f, 1.5f, 0.0f));
+        /* And its depth: 0.5 m about the origin along Z. */
+        CHECK(t500_in(s, x0 + 0.2f, 1.5f, 0.2f) && !t500_in(s, x0 + 0.2f, 1.5f, 0.3f));
+      }
+  });
+}
+
+namespace {
+
+/* A handle of a preset piece pulled `metres` along its way by the mouse, with Ctrl (no snapping): the camera is turned until the handle can be taken. False when it cannot. */
+bool t500_pull(Editor &ed, GameObject &piece, const char *handle, float metres) {
+  BlockoutPiece &bp = *piece.get<BlockoutPiece>();
+  Vec3 lo, hi;
+  if (!blockout_preset_bounds(bp, lo, hi)) return false;
+  const float mx = 0.5f * (lo.x + hi.x), my = 0.5f * (lo.y + hi.y), mz = 0.5f * (lo.z + hi.z);
+  const std::string h = handle;
+  Vec3 at(mx, hi.y, mz), dir(0, 1, 0);
+  if (h == "+x" || h == "side") at = Vec3(hi.x, my, mz), dir = Vec3(1, 0, 0);
+  if (h == "+z") at = Vec3(mx, my, hi.z), dir = Vec3(0, 0, 1);
+  const float ext = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
+  const Vec3 centre = piece.world_matrix().point(Vec3(mx, my, mz));
+  bool framed = false;
+  for (float yaw : {0.0f, 30.0f, 330.0f, 60.0f}) {
+    ed.command(strprintf("camera %g 25 %g %g %g %g", (double)yaw, (double)(2.2f * ext + 3.0f), (double)centre.x, (double)centre.y, (double)centre.z));
+    r477_settle(ed, 3);
+    int x = 0, y = 0;
+    framed = ed.blockout_handle_pixel_for_test(handle, x, y);
+    if (framed) break;
+  }
+  if (!framed) return false;
+  return r479_pull(ed, handle, piece.world_matrix().point(at + dir * metres), platform::MOD_CTRL);
+}
+
+}  // namespace
+
+static void tests_round500_te_editor() {
+  /* ---- Criterion 1: standing in a room ---- */
+  test("architectural pieces (500 te): each of the nine kinds standing on the floor of a 4 x 3 x 4 room, against its wall and turned 30 degrees on the floor - sound, one piece, on each path; the problems and small faces on top of others are counted where there are any", [] {
+    struct Place {
+      const char *what;
+      Vec3 at;
+      float yaw;
+    };
+    const Place places[] = {{"on the floor", Vec3(0.3f, -1.5f, 0.2f), 0.0f}, {"against the wall", Vec3(0.0f, -1.5f, -2.0f), 0.0f}, {"turned on the floor", Vec3(0.3f, -1.5f, 0.2f), 30.0f}};
+    size_t problems = 0, small_total = 0;
+    for (int method : r498_methods())
+      for (const R500Kind &k : kR500Kinds) {
+        Editor ed;
+        ed.init_headless(900, 600);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        bo->get<Blockout>()->method = method;
+        bo->get<Blockout>()->cell = 0.08f;
+        GameObject *room = r478_room_by_command(ed, *bo);
+        CHECK(room != nullptr);
+        if (!room) return;
+        room->set_local_position({0.0f, 0.0f, 0.0f});
+        ed.select_for_test(bo->id, false);
+        ed.command(std::string("blockout add ") + k.words);
+        GameObject *g = ed.active_object_for_test();
+        CHECK(g && g->get<BlockoutPiece>() && g->get<BlockoutPiece>()->preset == k.preset);
+        if (!g) continue;
+        for (const Place &pl : places) {
+          g->set_local_position(pl.at);
+          g->set_local_rotation(Quat::euler(Vec3(0.0f, pl.yaw, 0.0f)));
+          r495_built(ed);
+          if (&pl == &places[0] && k.preset == kPresetColumn) CHECK(r498_matter(*bo, *room, Vec3(0.0f, -1.6f, 0.0f)) && !r498_matter(*bo, *room, Vec3(1.0f, 0.0f, 1.0f)));  // (the room is where this test thinks it is)
+          size_t small = 0;
+          const std::string why = r498_judge(*bo, &small);
+          const BlockoutStatus &st = bo->get<Blockout>()->state.status;
+          small_total += small;
+          if (!why.empty() || small || !st.skipped.empty() || !st.refusal.empty()) {
+            problems += !why.empty();
+            std::printf("    %s %s %s: %s, %zu small faces on top of others, %zu unresolved, %zu skipped\n", r498_method_name(method), k.words, pl.what, why.empty() ? "sound" : why.c_str(), small, st.unresolved, st.skipped.size());
+          }
+          CHECK(why.empty());
+          CHECK(st.skipped.empty() && st.refusal.empty());
+        }
+      }
+    std::printf("    in a room: %zu unsound results, %zu small faces on top of others in all\n", problems, small_total);
+  });
+
+  test("architectural pieces (500 te): each kind made by its numbers (the kernel's pieces) stands on the floor of a 2 x 2 interior and against its wall (placed exactly on the room's faces), sound on each path", [] {
+    const float pi_half = 90.0f;
+    size_t bad = 0, small_total = 0;
+    for (Path path : r476_paths())
+      for (const R500Kind &k : kR500Kinds)
+        for (int place = 0; place < 3; place++) {
+          std::vector<Piece> pieces = r476_interior(2, 2);
+          BlockoutPiece bp;
+          blockout_preset_defaults(bp, k.preset);
+          std::vector<std::string> notes;
+          const Mat4 at = place == 0 ? Mat4::translate(Vec3(0.3f, -1.4f, 0.2f)) : place == 1 ? Mat4::trs(Vec3(-1.9f, -1.4f, 0.2f), Quat::euler(Vec3(0.0f, pi_half, 0.0f)), Vec3(1.0f)) : Mat4::trs(Vec3(2.0f, -1.4f, 0.0f), Quat::euler(Vec3(0.0f, 45.0f, 0.0f)), Vec3(1.0f));
+          const bool made = blockout_preset_pieces(bp, 100, at, pieces, path == Path::Field ? 0.08f : 0.0f, &notes);
+          CHECK(made);
+          const R476Built b = r476_build(pieces, path, 0.08f);
+          size_t small = 0;
+          const std::string why = r480t_judge(b, &small);
+          small_total += small;
+          if (!why.empty() || small) {
+            bad += !why.empty();
+            std::printf("    %s %s %s: %s, %zu small faces on top of others\n", r476_name(path), k.words, place == 0 ? "on the floor" : place == 1 ? "against a wall" : "turned in the doorway's line", why.empty() ? "sound" : why.c_str(), small);
+          }
+          CHECK(b.ok && why.empty());
+        }
+    std::printf("    in an interior: %zu unsound results, %zu small faces on top of others in all\n", bad, small_total);
+  });
+
+  test("architectural pieces (500 te): every kind's faces are Solid except a roof's top faces (Roof), the Blockout's Roof and Solid materials and a piece's own override land on the right faces, and every face has UVs at the world scale, on each path", [] {
+    for (int method : r498_methods()) {
+      for (int style : {kRoofGable, kRoofHip, kRoofShed})
+        for (const float t : {0.0f, 0.1f}) {
+          if ((style == kRoofHip) != (t > 0.0f) && style != kRoofGable) continue;  // (gable solid and with a sheet, hip with a sheet, shed solid)
+          Editor ed;
+          const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.03f);
+          BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+          bp->roof_style = style, bp->thickness = t;
+          const std::string roof_mat = r482_material("R500TeRoof", Vec3(0.8f, 0.3f, 0.2f)), solid_mat = r482_material("R500TeSolid", Vec3(0.3f, 0.3f, 0.8f)), own_mat = r482_material("R500TeOwn", Vec3(0.2f, 0.8f, 0.3f));
+          ed.select_for_test(s.bo->id, false);
+          ed.command("blockout set material roof " + roof_mat);
+          ed.command("blockout set material solid " + solid_mat);
+          r495_built(ed);
+          const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutRoofStyleNames[style] + strprintf(" sheet %g", (double)t);
+          const Mesh *m = r495_mesh(*s.bo);
+          const MeshRenderer *mr = s.bo->get<MeshRenderer>();
+          CHECK(m && mr && m->face_count() > 0);
+          if (!m || !mr) continue;
+          std::vector<int> classes = t500_classes(*s.bo);
+          CHECK(classes.size() == m->face_count());
+          size_t roof = 0, other = 0, wrong_class = 0, wrong_mat = 0;
+          for (size_t f = 0; f < classes.size(); f++) {
+            const bool up = m->face_normal(f).y > 0.05f;
+            const int cls = classes[f];
+            roof += cls == kClassRoof, other += cls == kClassSolid;
+            wrong_class += (cls != kClassRoof && cls != kClassSolid) || (up != (cls == kClassRoof));
+            wrong_mat += r482_face_material(*m, *mr, f) != (cls == kClassRoof ? roof_mat : solid_mat);
+          }
+          if (wrong_class || wrong_mat || !roof || !other) std::printf("    %s: %zu roof faces, %zu solid, %zu faces in a wrong class, %zu with a wrong material\n", label.c_str(), roof, other, wrong_class, wrong_mat);
+          CHECK(roof > 0 && other > 0 && wrong_class == 0 && wrong_mat == 0);
+          /* The piece's own Roof material takes the top faces only. */
+          ed.select_for_test(s.piece->id, false);
+          ed.command("blockout set material roof " + own_mat);
+          r495_built(ed);
+          classes = t500_classes(*s.bo);
+          size_t own_wrong = 0;
+          m = r495_mesh(*s.bo);
+          mr = s.bo->get<MeshRenderer>();
+          for (size_t f = 0; m && mr && f < classes.size(); f++) own_wrong += r482_face_material(*m, *mr, f) != (classes[f] == kClassRoof ? own_mat : solid_mat);
+          CHECK(own_wrong == 0);
+        }
+      /* UVs: every kind, at the world scale, no two faces of one plane disagreeing at a corner. */
+      for (const R500Kind &k : kR500Kinds) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, k.words, method, 0.02f);
+        const Mesh *m = r495_mesh(*s.bo);
+        CHECK(m && m->face_count() > 0 && m->has_uvs());
+        if (!m) continue;
+        /* Round 482's rule lays a face flat in its own plane, so it can only hold for a face that has one: a face whose corners are not in one plane (the grid path's quads on
+         * a spiral step's turned sides) or a sliver thinner than the measure's own 1e-4 (the exact path leaves one where two steps share a radial plane, corners 5e-6 m
+         * apart; the stress section counts such faces apart) cannot be laid flat without stretch, whatever the UVs. Those faces are counted and printed, not measured. */
+        auto measurable = [](const Mesh &mm, size_t f) {
+          Vec3 n(0.0f, 0.0f, 0.0f), c(0.0f, 0.0f, 0.0f);
+          float longest = 0.0f;
+          const uint32_t first = mm.face_offsets[f], last = mm.face_offsets[f + 1];
+          for (uint32_t i = first; i < last; i++) {
+            const Vec3 a = mm.positions[mm.corner_verts[i]], b = mm.positions[mm.corner_verts[i + 1 < last ? i + 1 : first]];
+            n = n + Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+            c = c + a, longest = std::max(longest, length(b - a));
+          }
+          const float area = 0.5f * length(n);
+          if (!(longest > 0.0f) || area / longest < 1e-4f) return false;  // (a sliver: its width under the measure's tolerance)
+          n = n * (1.0f / length(n)), c = c * (1.0f / (float)(last - first));
+          for (uint32_t i = first; i < last; i++)
+            if (std::fabs(dot(mm.positions[mm.corner_verts[i]] - c, n)) > 1e-4f) return false;  // (not flat)
+          return true;
+        };
+        size_t left_out = 0;
+        for (size_t f = 0; f < m->face_count(); f++) left_out += !measurable(*m, f);
+        if (left_out) std::printf("    %s %s: %zu of %zu faces not flat or slivers, left out of the UV measure\n", r498_method_name(method), k.words, left_out, m->face_count());
+        const size_t scale_bad = r482_scale_problems(*m, 1.0f, +measurable), clashes = r482_clashes(*m);
+        /* The same measure of a plain shape of the same kind of faces (a Cylinder for a column, Stairs for the spiral, an Arch for the arcade): the metric counts curved faces whose corners meet
+         * at one place under a different basis, so a round piece is held to what the round shape itself gives. */
+        size_t base_scale = 0, base_clash = 0;
+        const char *plain = k.preset == kPresetColumn ? "cylinder 0.25 3" : k.preset == kPresetSpiral ? "stairs 1 3 2 16" : k.preset == kPresetArcade ? "arch" : nullptr;
+        if (plain) {
+          Editor eb;
+          const R500Scene b = r500_make(eb, plain, method, 0.02f);
+          const Mesh *bm = r495_mesh(*b.bo);
+          if (bm && bm->face_count()) base_scale = r482_scale_problems(*bm, 1.0f), base_clash = r482_clashes(*bm);
+          if (scale_bad || clashes) std::printf("    %s %s: a plain '%s' has %zu UV scale problems, %zu corner clashes\n", r498_method_name(method), k.words, plain, base_scale, base_clash);
+        }
+        if (scale_bad || clashes) std::printf("    %s %s: %zu UV scale problems, %zu corner clashes\n", r498_method_name(method), k.words, scale_bad, clashes);
+        CHECK(scale_bad <= base_scale && (k.preset == kPresetArcade || k.preset == kPresetSpiral || clashes <= base_clash));  // (an arcade is several arches and a spiral's steps are turned about Y, so their corner clashes (a coarse measure that a round shape also gives) are printed above, not held to the plain shape's; the scale problems are)
+        for (int cls : t500_classes(*s.bo)) CHECK(cls == kClassSolid || (k.preset == kPresetRoof && cls == kClassRoof));
+      }
+    }
+  });
+
+  /* ---- Criterion 3: the panel, the Inspector, F9, the handles, scale ---- */
+  test("architectural pieces (500 te): the Architecture dropdown and Add button make exactly one object for each kind - no child, no extra object - and the Hierarchy lists that one", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "beam", method, 0.05f);
+      r496_panel(ed);
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(s.bo->id, false);
+        r477_settle(ed, 2);
+        const size_t objects = t500_objects(ed);
+        CHECK(r496_pick_combo(ed, "tools:architecture", kBlockoutPresetNames[k.preset]));
+        CHECK(r496_click_key(ed, "tools:architecture_add"));
+        r495_built(ed);
+        GameObject *g = ed.active_object_for_test();
+        const size_t now = t500_objects(ed);
+        if (now != objects + 1) std::printf("    %s %s by the panel: %zu objects made\n", r498_method_name(method), k.words, now - objects);
+        CHECK(now == objects + 1);
+        CHECK(g && g->children.empty() && g->parent == s.bo && g->get<BlockoutPiece>() && g->get<BlockoutPiece>()->preset == k.preset);
+        CHECK(r498_judge(*s.bo).empty());
+      }
+    }
+  });
+
+  test("architectural pieces (500 te): a number typed in the Inspector (a railing's Post Spacing) is one undo step, undo gives the old posts back and redo the new ones", [] {
+    for (int method : r498_methods()) {
+      const float tol = method == 2 ? 0.03f : 0.003f;
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing 5 1", method, 0.02f, 1600, 1000);
+      ed.mark_changed_for_test("test scene");
+      const uint64_t id = s.piece->id, bo_id = s.bo->id;
+      ed.command("window Inspector");
+      ed.record_buttons_for_test(true);
+      ed.select_for_test(id, false);
+      r477_settle(ed, 4);
+      auto piece = [&]() -> const BlockoutPiece & { return *ed.scene().find(id)->get<BlockoutPiece>(); };
+      CHECK(t500_posts_x(*s.bo, tol) == 6);
+      const size_t depth = ed.undo_depth_for_test();
+      CHECK(r479_type(ed, "field:Post Spacing", "0.5"));
+      r495_built(ed);
+      CHECK_NEAR(piece().post_spacing, 0.5f, 1e-6f);
+      CHECK(ed.undo_depth_for_test() == depth + 1);
+      CHECK(t500_posts_x(*s.bo, tol) == 11 && r498_judge(*s.bo).empty());
+      CHECK(r479_type(ed, "field:Length", "2"));
+      r495_built(ed);
+      CHECK_NEAR(piece().length, 2.0f, 1e-6f);
+      CHECK(ed.undo_depth_for_test() == depth + 2);
+      CHECK(t500_posts_x(*s.bo, tol) == 5);  // (2 m at 0.5 m)
+      ed.command("undo");
+      r495_built(ed);
+      GameObject *live = ed.scene().find(bo_id);  // (the objects may have been rebuilt by the undo)
+      CHECK(live != nullptr);
+      if (!live) continue;
+      CHECK_NEAR(piece().length, 5.0f, 1e-6f);
+      CHECK_NEAR(piece().post_spacing, 0.5f, 1e-6f);
+      CHECK(t500_posts_x(*live, tol) == 11);
+      ed.command("undo");
+      r495_built(ed);
+      live = ed.scene().find(bo_id);
+      CHECK(live != nullptr);
+      if (!live) continue;
+      CHECK_NEAR(piece().post_spacing, 1.0f, 1e-6f);
+      CHECK(t500_posts_x(*live, tol) == 6);
+      ed.command("redo");
+      ed.command("redo");
+      r495_built(ed);
+      live = ed.scene().find(bo_id);
+      CHECK(live != nullptr);
+      if (!live) continue;
+      CHECK_NEAR(piece().post_spacing, 0.5f, 1e-6f);
+      CHECK_NEAR(piece().length, 2.0f, 1e-6f);
+      CHECK(t500_posts_x(*live, tol) == 5 && r498_judge(*live).empty());
+    }
+  });
+
+  test("architectural pieces (500 te): F9 right after `blockout add` for a roof, spiral stairs, an arcade, L stairs and a column re-runs the piece from before - typed numbers change the one piece, never add another, one undo takes it all back - in the Unity and the Blender keymap's F9 too", [] {
+    struct Case {
+      const char *words;
+      const char *row;
+      const char *text;
+      const char *row2;
+      const char *text2;
+    };
+    const Case cases[] = {{"roof", "adjust:Pitch", "45", "adjust:Overhang", "0.5"},
+                          {"stairs spiral", "adjust:Steps", "8", "adjust:Turn", "180"},
+                          {"arcade", "adjust:Count", "6", "adjust:Column Width", "0.5"},
+                          {"stairs l", "adjust:Steps", "4", "adjust:Total Height", "2"},
+                          {"column", "adjust:Taper", "0.5", "adjust:Height", "2"}};
+    for (const Case &c : cases) {
+      Editor ed;
+      ed.init_headless(1600, 1000);
+      r477_empty_scene(ed);
+      ed.command("camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.05f;
+      ed.select_for_test(bo->id, false);
+      ed.mark_changed_for_test("test scene");
+      ed.command(std::string("blockout add ") + c.words);
+      r477_settle(ed, 3);
+      GameObject *g = ed.active_object_for_test();
+      CHECK(g && g->get<BlockoutPiece>() && ed.obj_last_valid() && r496_has(ed, c.row) && r496_has(ed, c.row2));
+      if (!g || !r496_has(ed, c.row) || !r496_has(ed, c.row2)) continue;
+      const uint64_t id = g->id;
+      const BlockoutPiece first = *g->get<BlockoutPiece>();
+      CHECK(r479_type(ed, c.row, c.text));
+      CHECK(r479_type(ed, c.row2, c.text2));
+      r495_built(ed);
+      CHECK(r477_all_pieces(*bo).size() == 1 && ed.scene().find(id) != nullptr);
+      const BlockoutPiece &now = *ed.scene().find(id)->get<BlockoutPiece>();
+      CHECK(now.preset == first.preset);
+      if (std::string(c.words) == "roof") CHECK(now.pitch == 45.0f && now.overhang == 0.5f && now.length == first.length && now.span == first.span);
+      if (std::string(c.words) == "stairs spiral") CHECK(now.steps == 8 && now.turn == 180.0f && now.radius == first.radius);
+      if (std::string(c.words) == "arcade") CHECK(now.count == 6 && now.column_width == 0.5f && now.span == first.span);
+      if (std::string(c.words) == "stairs l") CHECK(now.steps == 4 && now.total_height == 2.0f && now.stair_width == first.stair_width);
+      if (std::string(c.words) == "column") CHECK(now.taper == 0.5f && now.height == 2.0f && now.radius == first.radius);
+      const std::string why = r498_judge(*bo);
+      if (!why.empty()) std::printf("    F9 %s: %s\n", c.words, why.c_str());
+      CHECK(why.empty());
+      ed.command("undo");
+      r477_settle(ed, 3);
+      CHECK(r477_count(ed, true) == 0);
+    }
+    /* F9 itself, in the keymaps that bind it differently: it closes the panel and opens it again. */
+    for (const char *preset : {"Unity", "Blender", "Maya"}) {
+      Editor ed;
+      ed.init_headless(1600, 1000);
+      ed.command(std::string("keymap ") + preset);
+      r477_empty_scene(ed);
+      ed.command("camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      bo->get<Blockout>()->method = 2, bo->get<Blockout>()->cell = 0.1f;
+      ed.select_for_test(bo->id, false);
+      ed.mark_changed_for_test("test scene");
+      ed.command("blockout add roof");
+      r477_settle(ed, 3);
+      CHECK(r496_has(ed, "adjust:Pitch"));
+      const int mods = std::string(preset) == "Maya" ? platform::MOD_CTRL : 0;  // (Maya's F9 is Vertex mode: its Adjust Last Operation is Ctrl+F9)
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, 800, 500)});
+      te_press(ed, platform::KEY_F9, mods);
+      r477_settle(ed, 3);
+      const bool closed = !r496_has(ed, "adjust:Pitch");
+      te_press(ed, platform::KEY_F9, mods);
+      r477_settle(ed, 3);
+      const bool again = r496_has(ed, "adjust:Pitch");
+      if (!closed || !again) std::printf("    keymap %s: F9 closed the roof's panel %d, opened it again %d\n", preset, (int)closed, (int)again);
+      CHECK(closed && again);
+    }
+  });
+
+  test("architectural pieces (500 te): the handles of a railing (+x), a spiral (side), a roof (+z), L stairs (top), an arcade (top), a column (side) and a beam (+z) change the number they are named for with real mouse events, one undo step each, and the mesh stays sound", [] {
+    struct Case {
+      const char *words;
+      const char *handle;
+      float metres;
+    };
+    const Case cases[] = {{"railing 5 1", "+x", 0.5f},        {"stairs spiral 1 0.1 3 16", "side", 0.5f}, {"roof 6 4 30", "+z", 0.5f}, {"stairs l 1 3 2 8", "top", 0.5f},
+                          {"arcade 3 2.5 3", "top", 0.5f},    {"column 0.25 3", "side", 0.25f},          {"beam 4 0.3 0.3", "+z", 0.3f}};
+    for (int method : r498_methods())
+      for (const Case &c : cases) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, c.words, method, 0.05f, 1600, 1000);
+        BlockoutPiece *bp = s.piece->get<BlockoutPiece>();
+        const BlockoutPiece before = *bp;
+        ed.select_for_test(s.piece->id, false);
+        ed.mark_changed_for_test("test scene");
+        r477_settle(ed, 3);  // (the mark is committed by the frames that follow)
+        const size_t depth = ed.undo_depth_for_test();
+        const uint64_t piece_id = s.piece->id, bo_id = s.bo->id;
+        const std::string label = std::string(r498_method_name(method)) + " " + c.words + " " + c.handle;
+        const bool pulled = t500_pull(ed, *s.piece, c.handle, c.metres);
+        if (!pulled) std::printf("    %s: the handle could not be taken\n", label.c_str());
+        CHECK(pulled);
+        if (!pulled) continue;
+        r495_built(ed);
+        const std::string h = c.handle, w = c.words;
+        float was = 0.0f, now = 0.0f;
+        if (w.rfind("railing", 0) == 0) was = before.length, now = bp->length;
+        else if (w.rfind("stairs spiral", 0) == 0) was = before.radius, now = bp->radius;
+        else if (w.rfind("roof", 0) == 0) was = before.span, now = bp->span;
+        else if (w.rfind("stairs l", 0) == 0) was = before.total_height, now = bp->total_height;
+        else if (w.rfind("arcade", 0) == 0) was = before.height, now = bp->height;
+        else if (w.rfind("column", 0) == 0) was = before.radius, now = bp->radius;
+        else if (w.rfind("beam", 0) == 0) was = before.size.z, now = bp->size.z;
+        if (std::fabs((now - was) - c.metres) > 0.3f * c.metres + 0.1f) std::printf("    %s: the number went from %g to %g, pulled %g\n", label.c_str(), (double)was, (double)now, (double)c.metres);
+        CHECK(now > was + 0.3f * c.metres && now < was + 1.7f * c.metres + 0.1f);
+        if (ed.undo_depth_for_test() != depth + 1) std::printf("    %s: undo depth %zu after the pull, %zu before\n", label.c_str(), ed.undo_depth_for_test(), depth);
+        CHECK(ed.undo_depth_for_test() == depth + 1);
+        const std::string why = r498_judge(*s.bo);
+        if (!why.empty()) std::printf("    %s after the handle: %s\n", label.c_str(), why.c_str());
+        CHECK(why.empty());
+        CHECK(t500_finite(*bp) && (w.rfind("stairs spiral", 0) != 0 || bp->inner_radius < bp->radius));
+        ed.command("undo");
+        r495_built(ed);
+        (void)bo_id;
+        GameObject *back = ed.scene().find(piece_id);  // (an undo may rebuild the objects: found again by id)
+        CHECK(back && back->get<BlockoutPiece>());
+        if (back && back->get<BlockoutPiece>()) {
+          const BlockoutPiece &undone = *back->get<BlockoutPiece>();
+          CHECK(undone.length == before.length && undone.radius == before.radius && undone.span == before.span && undone.total_height == before.total_height && undone.height == before.height);
+        }
+      }
+  });
+
+  test("architectural pieces (500 te): scaling a piece scales its sizes and never its counts, angles, Taper, Pitch or a size that was 0 (a solid roof's Thickness, an Overhang of 0, a column with no plinth); hostile factors leave finite numbers in range; a solid roof applied with a scale of 2 is still solid, eight times the volume", [] {
+    for (int preset = 1; preset < kBlockoutPresets; preset++) {
+      BlockoutPiece p;
+      blockout_preset_defaults(p, preset);
+      const BlockoutPiece before = p;
+      CHECK(blockout_piece_scale(p, Vec3(2.0f, 1.5f, 3.0f)));
+      const bool same = p.preset == before.preset && p.steps == before.steps && p.count == before.count && p.segments == before.segments && p.square == before.square &&
+                        p.bottom_rail == before.bottom_rail && p.roof_style == before.roof_style && p.fill_under == before.fill_under && (p.preset == kPresetRoof || std::memcmp(&p.pitch, &before.pitch, 4) == 0) &&
+                        std::memcmp(&p.taper, &before.taper, 4) == 0 && std::memcmp(&p.turn, &before.turn, 4) == 0;
+      /* (Round 500's fix pass: a roof's Pitch follows the ratio of the rise's factor to the run's - here 1.5 over 3 - so that a roof scaled in Y keeps the shape it is drawn with; it is the one angle that scales.) */
+      if (preset == kPresetRoof) CHECK_NEAR(std::tan(p.pitch * 3.14159265f / 180.0f), std::tan(before.pitch * 3.14159265f / 180.0f) * 1.5f / 3.0f, 1e-4f);
+      if (!same) std::printf("    %s: scaling changed a count or an angle\n", kBlockoutPresetNames[preset]);
+      CHECK(same);
+      CHECK(t500_finite(p));
+    }
+    struct Zero {
+      const char *what;
+      int preset;
+      std::function<void(BlockoutPiece &)> make;
+      std::function<bool(const BlockoutPiece &)> still_zero;
+    };
+    const Zero zeros[] = {
+        {"a solid roof's Thickness", kPresetRoof, [](BlockoutPiece &p) { p.thickness = 0.0f; }, [](const BlockoutPiece &p) { return p.thickness == 0.0f; }},
+        {"a roof's Overhang of 0", kPresetRoof, [](BlockoutPiece &p) { p.overhang = 0.0f; }, [](const BlockoutPiece &p) { return p.overhang == 0.0f; }},
+        {"a column's Base Height of 0", kPresetColumn, [](BlockoutPiece &p) { p.base_height = 0.0f; }, [](const BlockoutPiece &p) { return p.base_height == 0.0f; }},
+        {"a column's Capital Height of 0", kPresetColumn, [](BlockoutPiece &p) { p.capital_height = 0.0f; }, [](const BlockoutPiece &p) { return p.capital_height == 0.0f; }},
+        {"a pilaster's Capital Height of 0", kPresetPilaster, [](BlockoutPiece &p) { p.capital_height = 0.0f; }, [](const BlockoutPiece &p) { return p.capital_height == 0.0f; }},
+        {"a spiral's Inner Radius of 0", kPresetSpiral, [](BlockoutPiece &p) { p.inner_radius = 0.0f; }, [](const BlockoutPiece &p) { return p.inner_radius == 0.0f; }},
+        {"an arcade's Arch Rise of 0 (a half circle)", kPresetArcade, [](BlockoutPiece &p) { p.arch_rise = 0.0f; }, [](const BlockoutPiece &p) { return p.arch_rise == 0.0f; }},
+    };
+    for (const Zero &z : zeros) {
+      BlockoutPiece p;
+      blockout_preset_defaults(p, z.preset);
+      z.make(p);
+      CHECK(blockout_piece_scale(p, Vec3(2.0f)));
+      if (!z.still_zero(p)) std::printf("    scaling by 2 turned %s into a size (the smallest allowed, %g m)\n", z.what, (double)kBlockoutMinSize);
+      CHECK(z.still_zero(p));
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (int preset = 1; preset < kBlockoutPresets; preset++)
+      for (const float f : {nan, 0.0f, -2.0f, inf, 1e30f, 1e-30f, 1.0f}) {
+        BlockoutPiece p;
+        blockout_preset_defaults(p, preset);
+        CHECK(blockout_piece_scale(p, Vec3(f, 1.0f, f)));
+        bool range = t500_finite(p);
+        for (float v : {p.radius, p.height, p.length, p.span, p.size.x, p.size.y, p.size.z, p.total_height, p.stair_width, p.rail_height, p.post_size, p.rail_size, p.column_width, p.overhang, p.thickness})
+          range = range && std::fabs(v) <= kBlockoutMaxSize;
+        if (!range) std::printf("    %s scaled by %g: a number is not finite or past %g\n", kBlockoutPresetNames[preset], (double)f, (double)kBlockoutMaxSize);
+        CHECK(range);
+      }
+    for (int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "roof 6 4 30", method, 0.05f);
+      const double solid = r476_volume(*r495_mesh(*s.bo));
+      s.bo->set_local_scale(Vec3(2.0f));
+      ed.select_for_test(s.bo->id, false);
+      ed.command("blockout applyscale");
+      r495_built(ed);
+      const double scaled = r476_volume(*r495_mesh(*s.bo));
+      std::printf("    %s roof: volume %.3f, after Apply Scale 2: %.3f (ratio %.2f, 8 is right), Thickness %g\n", r498_method_name(method), solid, scaled, scaled / solid, (double)s.piece->get<BlockoutPiece>()->thickness);
+      CHECK(scaled > 7.0 * solid && scaled < 9.0 * solid);
+      CHECK(s.piece->get<BlockoutPiece>()->thickness == 0.0f);
+    }
+  });
+}
+
+static void tests_round500_te_hostile() {
+  /* ---- Criterion 5: hostile numbers, by words and by typing ---- */
+  test("architectural pieces (500 te): hostile `blockout add` numbers (0, negative, NaN, infinite, 1e9, 1e6 arches, 500 steps, a pitch past 90) give finite numbers and a sound mesh or a clean refusal, on each path, never a crash", [] {
+    const char *const adds[] = {"railing 1e9 1e9", "railing nan nan", "railing -5 -5", "railing 0 0", "roof 1e9 1e9 90", "roof 0 0 0", "roof nan 4 30", "roof 6 4 -10", "roof 6 4 1e9", "roof abc",
+                                "column 0 0", "column 1e9 1e9", "column nan", "pilaster 1e9 1e9", "beam 0 0 0", "beam inf nan -1", "beam 1e9 1e9 1e9",
+                                "stairs l 0 0 0 0", "stairs l 1e9 1e9 1e9 1e9", "stairs u 1 3 2 1e9", "stairs u -1 -3 -2 -8", "stairs spiral 0 0 0 0 0",
+                                "stairs spiral 1 5 3 500 1e9", "stairs spiral 1 0.1 3 16 nan", "arcade 0", "arcade 1e6 0 0", "arcade 3 nan nan",
+                                "arcade -4"};
+    for (int method : r498_methods()) {
+      size_t bad = 0, nth = 0;
+      for (const char *line : adds) {
+        if (r498_methods().size() > 1 && (nth++ % 2) != (method == 2 ? 1u : 0u)) continue;  // (a sample: with both paths each line runs on one of them, alternately; the stress sweep has the rest)
+        const auto t0 = std::chrono::steady_clock::now();
+        Editor ed;
+        const R500Scene s = r500_make(ed, line, method, 0.1f);
+        r495_built(ed);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ms > 800.0) std::printf("    (%s 'blockout add %s' took %.0f ms)\n", r498_method_name(method), line, ms);
+        const std::string why = t498_verdict(*s.bo);
+        const bool finite = !s.piece || !s.piece->get<BlockoutPiece>() || t500_finite(*s.piece->get<BlockoutPiece>());
+        if (!why.empty() || !finite) bad++, std::printf("    %s 'blockout add %s': %s\n", r498_method_name(method), line, finite ? why.c_str() : "a number is not finite");
+      }
+      CHECK(bad == 0);
+    }
+  });
+
+  test("architectural pieces (500 te): hostile `blockout set` words on each kind (spacing 0 / -1 / nan / 1e30, pitch 0 / 90 / -10, taper 0 / 2 / 1e9, 500 steps, an inner radius past the radius, turn 0 / 1e9, 1e6 arches, sizes of 1e30) keep the numbers finite and the mesh sound or cleanly refused, on each path", [] {
+    struct Kind {
+      const char *words;
+      std::vector<const char *> lines;
+    };
+    const std::vector<Kind> kinds = {
+        {"railing", {"spacing 0", "spacing -1", "spacing nan", "spacing 1e30", "spacing 0.0001", "length 0", "length 1e30", "postsize 1e30", "railsize 5", "railheight 0", "bottomrail off", "spacing 1", "length 5"}},
+        {"roof", {"pitch 0", "pitch 90", "pitch -10", "pitch nan", "pitch 1e9", "overhang 1e9", "thickness 1e9", "thickness 0.0001", "span 0", "span 1e30", "ridge 0", "ridge 1e9", "ridge nan", "roofstyle hip", "pitch 90", "roofstyle shed", "pitch 85", "thickness 0.5"}},
+        {"column", {"taper 0", "taper 2", "taper 1e9", "taper -1", "radius 0", "radius 1e30", "height 1e30", "height 0", "baseheight 1e9", "capitalheight 1e9", "segments 0", "segments 1e9", "shaft square", "taper 0.05"}},
+        {"pilaster", {"taper 0", "taper 1e9", "radius 1e30", "height 0", "baseheight 1e9", "radius 0.01"}},
+        {"stairs l", {"steps 500", "steps 0", "steps -5", "totalheight 0", "totalheight 1e30", "length 1e30", "fill off", "steps 1", "length 0"}},
+        {"stairs u", {"steps 500", "steps 0", "totalheight 0", "length 1e30", "fill off", "steps 1", "flightwidth 0.01"}},
+        {"stairs spiral", {"steps 500", "steps 1", "innerradius 5", "innerradius 0", "turn 0", "turn 1e9", "turn -1e9", "radius 0.01", "radius 1e30", "fill off", "turn 90", "steps 256"}},
+        {"arcade", {"count 0", "count 1e6", "count 1000", "count -3", "span 0", "span 1e30", "archrise 1e9", "archrise 0", "columnwidth 1e30", "depth 1e30", "segments 3", "count 4", "columnwidth 0.01"}},
+    };
+    for (int method : r498_methods())
+      for (const Kind &k : kinds) {
+        Editor ed;
+        const R500Scene s = r500_make(ed, k.words, method, 0.1f);
+        CHECK(s.piece != nullptr);
+        if (!s.piece) continue;
+        const uint64_t id = s.piece->id;
+        size_t bad = 0, nth = 0;
+        for (const char *line : k.lines) {
+          if (r498_methods().size() > 1 && (nth++ % 2) != (method == 2 ? 1u : 0u)) continue;  // (a sample: with both paths each line runs on one of them, alternately)
+          const auto t0 = std::chrono::steady_clock::now();
+          ed.select_for_test(id, false);
+          ed.command(std::string("blockout set ") + line);
+          r495_built(ed);
+          const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+          if (ms > 800.0) std::printf("    (%s %s 'blockout set %s' took %.0f ms)\n", r498_method_name(method), k.words, line, ms);
+          const std::string why = t498_verdict(*s.bo);
+          const bool finite = t500_finite(*s.piece->get<BlockoutPiece>());
+          if (!why.empty() || !finite) bad++, std::printf("    %s %s, 'blockout set %s': %s\n", r498_method_name(method), k.words, line, finite ? why.c_str() : "a number is not finite");
+        }
+        CHECK(bad == 0);
+      }
+  });
+
+  test("architectural pieces (500 te): hostile words typed into the Inspector's own fields (NaN, -5, 1e30, text, infinity, 0, 1e9) leave finite numbers and a sound or cleanly refused mesh, for a railing, a roof, a column, spiral stairs and an arcade", [] {
+    struct Kind {
+      const char *words;
+      std::vector<const char *> rows;
+    };
+    const std::vector<Kind> kinds = {{"railing", {"Post Spacing", "Length"}},
+                                     {"roof", {"Pitch", "Thickness"}},
+                                     {"column", {"Taper", "Segments"}},
+                                     {"stairs spiral", {"Steps", "Turn"}},
+                                     {"arcade", {"Count", "Arch Rise"}}};
+    size_t typed = 0, missing = 0;
+    for (const Kind &k : kinds) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, k.words, 2, 0.1f, 1600, 1000);
+      CHECK(s.piece != nullptr);
+      if (!s.piece) continue;
+      const uint64_t id = s.piece->id;
+      ed.command("window Inspector");
+      ed.record_buttons_for_test(true);
+      ed.select_for_test(id, false);
+      r477_settle(ed, 4);
+      for (const char *row : k.rows)
+        for (const char *text : {"nan", "1e30", "0"}) {
+          if (!r479_type(ed, std::string("field:") + row, text)) {
+            missing++, std::printf("    %s: the row '%s' is not in the Inspector's view\n", k.words, row);
+            break;
+          }
+          typed++;
+          r495_built(ed);
+          const bool fine = t500_finite(*ed.scene().find(id)->get<BlockoutPiece>());
+          const std::string why = t498_verdict(*s.bo);
+          if (!fine || !why.empty()) std::printf("    %s: '%s' typed '%s': %s\n", k.words, row, text, fine ? why.c_str() : "a number is not finite");
+          CHECK(fine && why.empty());
+        }
+    }
+    std::printf("    %zu words typed, %zu rows not found\n", typed, missing);
+    CHECK(typed >= 30 && missing == 0);
+  });
+
+  /* ---- Criterion 6: save and open, Bake, export, with one of each kind ---- */
+  test("architectural pieces (500 te): one of each of the nine kinds in a Blockout with a Roof material keeps its mesh bytes and numbers through Save / Open, Bake / Unbake, and OBJ, FBX and GLB export one mesh with the roof's faces in the Roof material, on each path", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_world_position({0.0f, 0.0f, 0.0f});
+      bo->get<Blockout>()->method = method;
+      bo->get<Blockout>()->cell = 0.05f;
+      const std::string roof_mat = r482_material("R500TeAll", Vec3(0.7f, 0.2f, 0.2f));
+      ed.select_for_test(bo->id, false);
+      ed.command("blockout set material roof " + roof_mat);
+      std::vector<uint64_t> ids;
+      for (const R500Kind &k : kR500Kinds) {
+        ed.select_for_test(bo->id, false);
+        ed.command(std::string("blockout add ") + k.words);
+        GameObject *g = ed.active_object_for_test();
+        CHECK(g != nullptr);
+        if (!g) return;
+        g->set_local_position({(float)(k.preset - 1) * 16.0f, 0.0f, 0.0f});  // (apart: no two kinds touch)
+        ids.push_back(g->id);
+      }
+      r495_built(ed);
+      const uint64_t bo_id = bo->id;
+      const std::string label = r498_method_name(method);
+      const std::string why = r498_judge(*bo);
+      if (!why.empty()) std::printf("    %s all nine kinds: %s\n", label.c_str(), why.c_str());
+      CHECK(why.empty());
+      const Mesh before = *r495_mesh(*bo);
+      const uint64_t hash = blockout_mesh_hash(before);
+      std::vector<BlockoutPiece> numbers;
+      for (uint64_t id : ids) numbers.push_back(*ed.scene().find(id)->get<BlockoutPiece>());
+      const std::map<std::string, size_t> want = r482_triangles(*bo);
+      const size_t roof_tris = want.count("R500TeAll") ? want.at("R500TeAll") : 0;
+      CHECK(roof_tris > 0);
+      std::printf("    %s all nine kinds: %zu faces, %zu roof triangles, hash %llx\n", label.c_str(), before.face_count(), roof_tris, (unsigned long long)hash);
+      /* Export: one mesh, UVs, the roof's triangles in the roof's material. */
+      for (const char *format : {"obj", "fbx", "glb"}) {
+        const std::string name = std::string("r500te_all.") + format;
+        const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
+        const size_t got = back.triangles.count("R500TeAll") ? back.triangles.at("R500TeAll") : 0;
+        if (!back.ok || back.mesh_nodes != 1 || !back.uvs || got != roof_tris) std::printf("    %s %s: ok %d, %zu mesh nodes, uvs %d, roof triangles %zu (want %zu)\n", label.c_str(), format, (int)back.ok, back.mesh_nodes, (int)back.uvs, got, roof_tris);
+        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs && got == roof_tris);
+      }
+      /* Bake and Unbake. */
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout bake");
+      r477_settle(ed, 3);
+      GameObject *baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<BlockoutBaked>() && r495_mesh(*baked) && r477_same(before, *r495_mesh(*baked)));
+      ed.select_for_test(bo_id, false);
+      ed.command("blockout unbake");
+      r495_built(ed);
+      baked = ed.scene().find(bo_id);
+      CHECK(baked && baked->get<Blockout>() && r495_mesh(*baked) && r477_same(before, *r495_mesh(*baked)) && blockout_mesh_hash(*r495_mesh(*baked)) == hash);
+      for (size_t i = 0; i < ids.size(); i++) {
+        GameObject *g = ed.scene().find(ids[i]);
+        const BlockoutPiece *b = g ? g->get<BlockoutPiece>() : nullptr;
+        CHECK(b && b->preset == numbers[i].preset && b->length == numbers[i].length && b->radius == numbers[i].radius && b->count == numbers[i].count && b->steps == numbers[i].steps && b->turn == numbers[i].turn);
+      }
+      /* Save and open. */
+      const std::string path = te_scene_path(ed, "r500te_all.scene");
+      CHECK(fs::write_file(path, save_scene_text(ed.scene())));
+      ed.command("newscene");
+      CHECK(ed.open_scene_for_test(path));
+      for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+      r495_built(ed);
+      GameObject *back = r477_find(ed);
+      CHECK(back && r495_mesh(*back) && r477_same(before, *r495_mesh(*back)) && blockout_mesh_hash(*r495_mesh(*back)) == hash && r482_scratch_same(*back));
+      fs::remove_file(path);
+    }
+  });
+
+  /* ---- Old scenes ---- */
+  test("architectural pieces (500 te): a Blockout of round 499's pieces (a box, a room, a styled door and window) builds the same bytes whatever a piece without a preset holds in the round's new fields - NaN, infinity, zero, 1e30 - and its hash is printed", [] {
+    for (int method : r498_methods()) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_world_position({0.0f, 0.0f, 0.0f});
+      bo->get<Blockout>()->method = method;
+      bo->get<Blockout>()->cell = 0.05f;
+      r477_piece(ed, *bo, "Box", 0, 0, {6.0f, 0.5f, 0.0f}, {1.5f, 1.0f, 1.0f});
+      GameObject *room = r478_room_by_command(ed, *bo);
+      CHECK(room != nullptr);
+      if (!room) return;
+      room->set_local_position({0.0f, 0.0f, 0.0f});
+      ed.select_for_test(room->id, false);
+      ed.command("blockout add door double");
+      ed.select_for_test(room->id, false);
+      ed.command("blockout add window single");
+      r495_built(ed);
+      const std::string why = r498_judge(*bo);
+      CHECK(why.empty());
+      const Mesh plain = *r495_mesh(*bo);
+      const uint64_t hash = blockout_mesh_hash(plain);
+      std::printf("    %s old-style scene: %zu faces, hash %llx\n", r498_method_name(method), plain.face_count(), (unsigned long long)hash);
+      const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+      size_t changed = 0, pieces = 0;
+      for (const float v : {nan, inf, 0.0f, -3.0f, 1e30f}) {
+        for (GameObject *g : r477_all_pieces(*bo)) {
+          BlockoutPiece *p = g->get<BlockoutPiece>();
+          CHECK(p->preset == 0);
+          p->square = true, p->base_height = v, p->capital_height = v, p->base_width = v, p->capital_width = v, p->taper = v, p->length = v, p->post_spacing = v, p->post_size = v, p->rail_size = v,
+          p->rail_height = v, p->bottom_rail = false, p->roof_style = 2, p->span = v, p->pitch = v, p->overhang = v, p->thickness = v, p->total_height = v, p->stair_width = v, p->turn = v,
+          p->column_width = v, p->arch_thickness = v, p->count = v > 0.0f && v < 1e29f ? 3 : -5;
+          pieces++;
+        }
+        r495_built(ed);
+        const Mesh now = *r495_mesh(*bo);
+        const bool same = r477_same(plain, now) && blockout_mesh_hash(now) == hash;
+        changed += !same;
+        if (!same) std::printf("    %s: the new fields at %g changed the mesh of a scene without presets (%zu faces, hash %llx)\n", r498_method_name(method), (double)v, now.face_count(), (unsigned long long)blockout_mesh_hash(now));
+      }
+      CHECK(pieces > 0 && changed == 0);
+    }
+  });
+}
+
+static void tests_round500_te() {
+  tests_round500_te_kernel();
+  tests_round500_te_measured();
+  tests_round500_te_editor();
+  tests_round500_te_hostile();
+}
+// r500te-end
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -23759,4 +26260,6 @@ void run_blockout_tests() {
   tests_round498_fix();
   tests_round499();
   tests_round499_te();
+  tests_round500();
+  tests_round500_te();
 }

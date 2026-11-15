@@ -168,6 +168,27 @@ work on the spot.
 - **Limits before the kernel:** a styled door over 100 m in any size is left out and named in the status; a swung
   leaf is no thicker than the frame is wide (its outer face would lie in the reveal's plane).
 
+## Amended in round 500 (task 0484): architectural pieces, the same way
+- **A piece's `preset`** (Column, Pilaster, Beam, Railing, Roof, Stairs L, Stairs U, Spiral Stairs, Arcade; None is the
+  piece as before and builds to the same bytes) uses round 498's mechanism: one piece with numbers, its kernel pieces
+  made by `blockout_snapshot` (`blockout_preset_pieces`, in `blockout_presets.cpp`), ids that name the piece; no child
+  objects. The numbers are in the Inspector, F9 and the console (`blockout set <word>`); a preset is a number in the file.
+- **A ninth class, Roof**, after Leaf: a roof's faces that look up (ADR 0128's Convex count); the rest of a preset is
+  Solid. A Blockout material and a piece override, like the others.
+- **Pieces that touch are made to overlap where they can**, because two solids meeting in one plane leave faces on top
+  of each other on the exact path (ADR 0128): a shaft reaches half way into its plinth and capital, a post ends inside
+  its top rail, a railing's corner is a newel post standing above the rails, a stair flight starts inside its landing.
+  What still meets in a plane is named with the numbers (the round's changelog): a spiral's steps (an overlapping
+  wedge puts two bottoms in one plane), overlapping rectangles of an outlined roof, an arcade's columns through a wall.
+- **Over an outline** a roof is one roof over each rectangle the outline cuts into, the ridge along the long side; its
+  handles and Ridge Height follow the widest rectangle, and only the top handle is offered (the others would move the
+  piece, not size it). A railing follows the outline's sides, collinear corners dropped.
+- **Limits:** counts (posts a side, steps, arches) at most 256; a size over 200 m is left out and named; Turn 0, a
+  spiral held at 1440°, an arch rise held at 170° and a shaft the hull refuses are named in the status.
+- **Scale** grows lengths by their axis, and a zero (Roof Thickness, Overhang, Base / Capital Height, Inner Radius)
+  stays zero; Post Spacing scales (the same posts, farther apart); a roof's Pitch follows the slope (tan(pitch) times
+  the Y scale over the span's).
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.

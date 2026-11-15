@@ -20,10 +20,10 @@ extern const char *const kBlockoutMethodNames[3];
 
 /* The classes of face that take a material (round 482), in the fixed order of the slots: a room's Floor, Walls, Ceiling and Outside (the outer
  * faces of its shell), a Subtract piece's Cut faces (a door's reveal, a window's), and a plain Add piece's Solid faces. */
-constexpr int kBlockoutClasses = 8;
+constexpr int kBlockoutClasses = 9;
 /* Round 498 (task 0482): Glass, the pane of a styled window, comes last so the six before it keep their slots and their numbers.
  * Round 499 (task 0483): Leaf, the leaf of a styled door, comes after Glass for the same reason. */
-enum BlockoutClass { kClassFloor = 0, kClassWalls, kClassCeiling, kClassOutside, kClassCut, kClassSolid, kClassGlass, kClassLeaf };
+enum BlockoutClass { kClassFloor = 0, kClassWalls, kClassCeiling, kClassOutside, kClassCut, kClassSolid, kClassGlass, kClassLeaf, kClassRoof };
 extern const char *const kBlockoutClassNames[kBlockoutClasses];
 
 /* The styles of a window (round 498): what it adds to the Blockout besides the hole. Opening Only is today's hole and the default. */
@@ -45,6 +45,20 @@ const char *const *blockout_style_names(int opening, int &count);
 int blockout_style_from_word(int opening, const std::string &word);
 /* The words a wrong style word is answered with ("opening|single|double|..."). */
 const char *blockout_style_words(int opening);
+
+/* Round 500 (task 0484): architectural presets. A preset piece is ONE piece (one object, one set of handles, one undo step) whose numbers the snapshot makes into kernel
+ * pieces (blockout_preset_pieces), as a styled window's are. It is no opening and no room. Round 500 adds Roof, the class of a roof's top faces, after Leaf. */
+enum BlockoutPreset { kPresetNone = 0, kPresetColumn, kPresetPilaster, kPresetBeam, kPresetRailing, kPresetRoof, kPresetStairsL, kPresetStairsU, kPresetSpiral, kPresetArcade };
+constexpr int kBlockoutPresets = 10;
+extern const char *const kBlockoutPresetNames[kBlockoutPresets];
+enum BlockoutRoofStyle { kRoofGable = 0, kRoofHip, kRoofShed };
+constexpr int kBlockoutRoofStyles = 3;
+extern const char *const kBlockoutRoofStyleNames[kBlockoutRoofStyles];
+/* A preset by the words after `blockout add` ("column", "pilaster", "beam" / "lintel", "railing" / "balustrade", "roof", "stairs l", "stairs u", "stairs spiral" / "spiral",
+ * "arcade"): `used` is how many of the words it took (0: none). */
+int blockout_preset_from_words(const std::vector<std::string> &words, size_t first, size_t &used);
+/* The most posts, steps and arches one preset makes: a count above it is held to it. */
+constexpr int kBlockoutPresetMaxCount = 256;
 
 /* A styled window is one piece for the user but several for the kernel (blockout_snapshot makes them). Each of those has an id of its own that holds
  * the window's id and which part it is: the bit says it is made, so no real object's id (they count up from 1) is ever mistaken for it. The faces
@@ -236,6 +250,28 @@ struct BlockoutPiece : ComponentBase<BlockoutPiece> {
   float drum_radius = 1.0f;      // Revolving: the drum's radius, metres
   bool is_styled_door() const { return opening == 1 && style > 0 && style < kBlockoutDoorStyles; }
   bool is_styled_opening() const { return is_styled_window() || is_styled_door(); }
+  /* Round 500 (task 0484): an architectural preset (BlockoutPreset; 0: none - the fields below are not read and a scene from before the round has none). The piece's origin
+   * is the middle of its footprint at its bottom (a Pilaster's: its back, on the wall), +Y up. Shared with the shapes: Radius (a column's shaft half-width, a spiral's outer radius),
+   * Height (a column's, an arcade's columns'), Segments, Steps (a flight's, a spiral's), Fill Under, Inner Radius (a spiral's post), Depth (an arcade's), Size (a beam's:
+   * Length X, Depth Y, Width Z), Outline (a railing's or roof's plan). Every number is held to kBlockoutMinSize..kBlockoutMaxSize, counts to 256 (blockout_preset_pieces). */
+  int preset = 0;
+  bool square = false;                  // Column: a square shaft (else round)
+  float base_height = 0.2f, capital_height = 0.2f, base_width = 0.7f, capital_width = 0.7f;  // Column, Pilaster: the plinth and the capital block (width: across, metres)
+  float taper = 1.0f;                   // Column, Pilaster: the shaft's top radius as a share of its bottom (held to 0.05 .. 2)
+  float length = 5.0f;                  // Railing: its run along X; Roof: its Length along X (the ridge's way); Stairs L / U: each flight's run
+  float post_spacing = 1.0f, post_size = 0.08f, rail_size = 0.05f, rail_height = 1.0f;  // Railing (the posts are at most spacing apart: a run of 5 m at 1 m has 6)
+  bool bottom_rail = true;              // Railing
+  int roof_style = 0;                   // Roof: BlockoutRoofStyle
+  float span = 4.0f;                    // Roof: its Span across (Z); Arcade: the clear width of one arch
+  float pitch = 30.0f;                  // Roof: the slope, degrees (0 .. 85); Ridge Height is worked out from it (blockout_roof_ridge) and sets it (blockout_roof_set_ridge)
+  float overhang = 0.3f;                // Roof: how far the roof's base reaches past the walls it covers on every side
+  float thickness = 0.0f;               // Roof: the thickness of the sheet, straight down; 0: a solid roof
+  float total_height = 3.0f;            // Stairs L / U, Spiral: the height the last step reaches
+  float stair_width = 1.0f;             // Stairs L / U: the flights' and the landing's width
+  float turn = 270.0f;                  // Spiral: how far the steps turn, degrees (negative: the other way; held to 1440 and to 170 a step)
+  float column_width = 0.4f, arch_thickness = 0.3f;  // Arcade (its Arch Rise is the window's field: 0 is a half circle); the ring's width at the springing
+  int count = 4;                        // Arcade: arches (on count + 1 columns)
+  bool is_preset() const { return opening == 0 && preset > 0 && preset < kBlockoutPresets; }
   /* Round 482: this piece's own materials (empty: the Blockout's), for the classes of face it has, and where its faces' texture starts
    * (tiles) and how far it is turned (degrees). */
   std::string material[kBlockoutClasses];
@@ -311,6 +347,31 @@ void blockout_opening_set_style(BlockoutPiece &p, int style);
  * becomes a circle; a piece that is no opening has no style, and one whose Opening changed between Door and Window starts at Opening Only (the style numbers mean
  * something else). `style_before`, `opening_before`: what the piece had before the edit (every caller knows). A file keeps Style as the number: a door's Revolving (5) is a 5 and loads as a door's whatever the window names say; a file of round 498 has windows' numbers only (a door's was always 0) and loads as it did. */
 void blockout_piece_edited(BlockoutPiece &p, int style_before, int opening_before);
+/* ---- Presets (round 500, task 0484) ---- */
+
+/* The numbers a new piece of this preset starts with (what `blockout add <preset>` without numbers makes). */
+void blockout_preset_defaults(BlockoutPiece &p, int preset);
+/* Sets the numbers `blockout add <preset> n n n ...` gives, in each preset's order: Column radius height; Pilaster radius height; Beam length depth width; Railing length height;
+ * Roof length span [pitch]; Stairs L / U width total_height run steps; Spiral radius inner_radius total_height steps [turn]; Arcade count span height. Missing ones keep the defaults. */
+void blockout_preset_numbers(BlockoutPiece &p, const std::vector<float> &n);
+/* The kernel pieces a preset makes, appended to `out` (their ids are generated ones of `owner`). `grid_cell` > 0: the field path - a part finer than 1.5 cells is held at a cell
+ * or left out; `notes` (when given) get a line for each such hold, or why the whole piece was left out (nothing appended then: false). */
+bool blockout_preset_pieces(const BlockoutPiece &bp, uint64_t owner, const Mat4 &to_blockout, std::vector<blockout::Piece> &out, float grid_cell, std::vector<std::string> *notes);
+/* A generated piece's face class: Solid, or Roof for a roof's top faces. */
+int blockout_preset_face_class(const blockout::Piece &piece, uint32_t side);
+/* The number a preset handle (BlockoutHandle::Preset, by its axis) is changing: what the hint line shows while it is dragged. */
+float blockout_preset_handle_number(const BlockoutPiece &p, int axis);
+/* The box a preset occupies in its own space (false: not a preset). */
+bool blockout_preset_bounds(const BlockoutPiece &p, Vec3 &lo, Vec3 &hi);
+/* A roof's Ridge Height from its Pitch, style and sizes (the base grown by Overhang); and Pitch from a Ridge Height (the other way: pitch = atan(ridge / run)). */
+float blockout_roof_ridge(const BlockoutPiece &p);
+void blockout_roof_set_ridge(BlockoutPiece &p, float ridge);
+/* The words after `blockout set` that name a preset's number ("taper", "pitch", "ridge", ...): false when `key` is none. `value`: the number (a switch is 0 or 1). A preset's console edit
+ * and the Inspector's go through the same clamps. Returns false for an unknown key; `ok` false when it is known but the piece's preset does not have it. */
+bool blockout_preset_set(BlockoutPiece &p, const std::string &key, const std::vector<std::string> &values, bool &ok);
+/* The key words (for the usage text). */
+const char *blockout_preset_set_words();
+
 /* How many pieces the user sees in these kernel pieces (a window's made parts count as one). */
 size_t blockout_user_piece_count(const std::vector<blockout::Piece> &pieces);
 
@@ -340,9 +401,9 @@ GameObject *blockout_of_piece(const GameObject &piece);
 
 /* A handle on a piece: a place on one of its faces and the way it pulls, both in the piece's own space. */
 struct BlockoutHandle {
-  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill, OutlinePoint, OutlineAdd, Blend };
+  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill, OutlinePoint, OutlineAdd, Blend, Preset };
   Kind kind = BoxFace;
-  int axis = 0;     // the own axis a box face or a cylinder's cap stands on; an outline's point, or (OutlineAdd) the segment's first point
+  int axis = 0;     // the own axis a box face or a cylinder's cap stands on (a Preset's: 0 length / width along X, 1 its top, 2 across / along Z, 3 its radius); an outline's point, or (OutlineAdd) the segment's first point
   Vec3 at, dir;     // where it is, and the unit way out
   std::string name; // what the console calls it: "+x" "-x" "+y" "-y" "+z" "-z", "top", "bottom", "side", "radius", "wall", "width", "head", "sill", "blend" (a radius outside the face that looks at the viewer)
 };

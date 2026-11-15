@@ -271,6 +271,7 @@ namespace {
 struct PieceWords {
   int shape = 0, op = 0;
   int opening = 0;     // 1 door, 2 window
+  int preset = 0;      // round 500: a BlockoutPreset ("column", "roof", "stairs l", ...): one piece that makes its own solids
   int style = 0;       // a window's style (round 498; BlockoutWindowStyle): "window grid 1.2 1.1 0.9"; a door's (round 499; BlockoutDoorStyle): "door sliding 1.6 2.1"
   bool room = false;
   std::vector<float> numbers;
@@ -283,6 +284,7 @@ bool is_number_word(const std::string &w) { return !w.empty() && (std::isdigit((
 PieceWords parse_piece_words(const std::string &what) {
   PieceWords p;
   bool shape_seen = false, numbers_ok = false, style_seen = false;
+  size_t used = 0;
   const std::vector<std::string> words = split_ws(what);
   static const struct { const char *word; int shape; } kShapes[] = {{"box", 0}, {"cube", 0}, {"cylinder", 1}, {"sphere", 2}, {"wedge", 3}, {"ramp", 3},
                                                                     {"stairs", 4}, {"arch", 5}, {"outline", 6}, {"mesh", 7}};
@@ -296,6 +298,10 @@ PieceWords parse_piece_words(const std::string &what) {
     else if (w == "add") p.op = 0;
     else if (p.opening != 0 && !style_seen && !shape_seen && blockout_style_from_word(p.opening, w) >= 0) p.style = blockout_style_from_word(p.opening, w), style_seen = true;
     else if (p.opening != 0 && style_seen && p.style == 0 && w == "only") continue;  // ("opening only": the second word of Opening Only)
+    else if (!shape_seen && !p.room && p.opening == 0 && blockout_preset_from_words(words, i, used) > 0) {
+      p.preset = blockout_preset_from_words(words, i, used), shape_seen = numbers_ok = true;
+      i += used - 1;
+    }
     else if (!shape_seen && w == "room") p.room = true, numbers_ok = true;
     else if (!shape_seen && (w == "door" || w == "window")) p.opening = w == "door" ? 1 : 2, numbers_ok = true;
     else if (!shape_seen && shape == 7) {
@@ -311,8 +317,9 @@ PieceWords parse_piece_words(const std::string &what) {
   /* A negative size is not a piece the console makes. (A size of 0 is made, as in round 477: the Inspector's status
    * then names the piece as skipped and says why.) An outline's corners are the one place a number may be negative. */
   for (float n : p.numbers)
-    if (!finite_bits(n) || (n < 0.0f && p.shape != 6)) return p;
+    if (!finite_bits(n) || (n < 0.0f && p.shape != 6 && p.preset != kPresetSpiral)) return p;
   if (p.opening) p.room = false, p.shape = 0, p.op = 1;  // (an opening is a box that cuts, whatever else was said)
+  if (p.preset) p.room = false, p.shape = 0, p.op = 0;   // (round 500: a preset is added, whatever else was said)
   if (p.room && (p.shape == 2 || p.shape == 4 || p.shape == 5 || p.shape == 7)) return p;  // (no rooms of spheres from the menus and the console yet; stairs, arches and meshes are never rooms)
   p.ok = shape_seen || p.room || p.opening;
   return p;
@@ -320,6 +327,7 @@ PieceWords parse_piece_words(const std::string &what) {
 
 /* What a piece is called when it is made: "Box", "Subtract Cylinder", "Room", "Room Cylinder", "Door", "Intersect Box", "Wedge", "Room Outline". */
 std::string piece_base_name(const PieceWords &w) {
+  if (w.preset) return kBlockoutPresetNames[std::min(kBlockoutPresets - 1, std::max(0, w.preset))];
   if (w.opening) return w.opening == 1 ? "Door" : "Window";
   if (w.room) return w.shape == 1 ? "Room Cylinder" : w.shape == 3 ? "Room Wedge" : w.shape == 6 ? "Room Outline" : "Room";
   const std::string shape = kBlockoutShapeNames[std::min(7, std::max(0, w.shape))];
@@ -335,6 +343,12 @@ static GameObject *add_piece(Scene &scene, GameObject &parent, const std::string
   BlockoutPiece *bp = g->add<BlockoutPiece>();
   bp->shape = w.shape, bp->operation = w.op;
   const std::vector<float> &n = w.numbers;
+  if (w.preset) {  // (round 500: the preset's own defaults, then the numbers it was given)
+    blockout_preset_defaults(*bp, w.preset);
+    blockout_preset_numbers(*bp, n);
+    if (at) g->set_world_position(*at);
+    return g;
+  }
   if (w.opening) {
     bp->opening = w.opening;
     bp->width = w.opening == 1 ? 0.9f : 1.2f, bp->head = w.opening == 1 ? 2.1f : 2.0f, bp->sill = w.opening == 1 ? 0.0f : 0.9f;
@@ -652,7 +666,8 @@ void Editor::record_blockout_last(GameObject *g) {
   o.op = bp->operation;
   /* n: 0 a box, wedge or stairs (Width, Depth, Height), 1 a cylinder, 2 a sphere, 3 a door or window, 4 an outline (Height), 5 an arch
    * (Radius, Inner Radius, Depth), 6 a mesh piece (nothing to adjust). */
-  if (bp->opening) o.a = bp->width, o.b = bp->head, o.c = bp->sill, o.n = 3;
+  if (bp->is_preset()) o.n = 7, o.pre = *bp;  // (round 500: n 7 a preset - F9 edits a copy of its numbers)
+  else if (bp->opening) o.a = bp->width, o.b = bp->head, o.c = bp->sill, o.n = 3;
   else if (bp->shape == 0 || bp->shape == 3 || bp->shape == 4) o.a = bp->size.x, o.b = bp->size.z, o.c = bp->size.y, o.n = 0;
   else if (bp->shape == 1) o.a = bp->radius, o.c = bp->height, o.n = 1;
   else if (bp->shape == 2) o.a = bp->radius, o.n = 2;
@@ -711,6 +726,23 @@ void Editor::blockout_menu_items(bool child) {
     if (u.menu_item(e.label, nullptr, false, true, ui::Icon::Plus)) create_object(blockout_ui_kind(std::string("Blockout Piece: ") + e.kind));  // (round 499: a Door or Window has the style its dropdown shows)
     u.tooltip(e.tip);
   }
+  /* Round 500: the architectural presets, each one piece with numbers (Inspector, F9, handles). */
+  struct ArchEntry { const char *label, *kind, *tip; };
+  u.submenu("Architecture", u.px(190), [this] {  // (a submenu of its own: nine more entries would make the Blockout menu taller than a small screen)
+    auto &u = ui_;
+    for (const ArchEntry &e : {ArchEntry{"Column", "Column", "A column: a round or square shaft with a plinth and a capital, tapering if you like."},
+                              {"Pilaster", "Pilaster", "A flat column against a wall: against the wall under the mouse in the Scene view, or the selected room's first wall."},
+                              {"Beam", "Beam", "A beam or lintel: a box with a length, a depth and a width."},
+                              {"Railing", "Railing", "Posts and rails along a line (or along every side of an outline you give it)."},
+                              {"Roof", "Roof", "A gable, hip or shed roof over a rectangle (or an outline with square corners), by pitch, with an overhang."},
+                              {"Stairs L", "Stairs L", "Two flights of stairs with a landing, turning a quarter."},
+                              {"Stairs U", "Stairs U", "Two flights of stairs with a landing, turning back."},
+                              {"Spiral Stairs", "Stairs Spiral", "Steps turning round a post."},
+                              {"Arcade", "Arcade", "Arches on columns along a line."}}) {
+      if (u.menu_item(e.label, nullptr, false, true, ui::Icon::Plus)) create_object(std::string("Blockout Piece: ") + e.kind);
+      u.tooltip(e.tip);
+    }
+  });
 }
 
 std::string Editor::blockout_ui_kind(const std::string &kind) const {
@@ -757,12 +789,47 @@ GameObject *Editor::create_blockout_piece(const std::string &what) {
   if (w.opening) return create_opening(*target, w.opening, w.numbers, sel, w.style);
   const Vec3 at = cam_.pivot;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(base), w, &at, wall);
+  if (w.preset == kPresetPilaster) blockout_stand_pilaster(*target, *piece, sel);  // (round 500: against the wall under the mouse or the selected room's first wall; none: where the pivot is)
   expanded_.insert(target->id);
   select(piece->id);
   update_blockouts(true);
   mark_changed(std::string("Create Blockout ") + base);
   record_blockout_last(piece);
   return piece;
+}
+
+/* A Pilaster stood against a wall (round 500): its back on the wall's face at the spot, its +Z out of the wall into the room, its bottom on the room's floor - blockout_stand_opening's
+ * placement without the opening's depth. False (the piece stays where it was): no wall under the mouse and no room to take the first wall of. */
+bool Editor::blockout_stand_pilaster(GameObject &bo, GameObject &piece, const GameObject *sel) {
+  if (const Blockout *b = bo.get<Blockout>())
+    if (!b->state.hash_valid) blockout_jobs_wait(bo.id);
+  BlockoutHit wall;
+  bool found = scene_hovered_ && !ui_.any_popup_open() && blockout_wall_under_mouse(bo, wall);
+  if (!found) {
+    std::vector<const GameObject *> pieces;
+    blockout_piece_objects(bo, pieces);
+    auto is_room = [](const GameObject *p) { return p->get<BlockoutPiece>()->is_room(); };
+    const GameObject *room = nullptr;
+    if (sel && sel->get<BlockoutPiece>() && std::find(pieces.begin(), pieces.end(), sel) != pieces.end() && is_room(sel)) room = sel;
+    for (const GameObject *p : pieces)
+      if (!room && is_room(p)) room = p;
+    found = room && blockout_first_wall(bo, *room, wall);
+  }
+  const GameObject *room = found ? scene_->find(wall.piece) : nullptr;
+  const BlockoutPiece *rp = room ? room->get<BlockoutPiece>() : nullptr;
+  if (!rp || !finite3_bits(wall.point) || !finite3_bits(wall.normal)) return false;
+  const Mat4 m = blockout_piece_matrix(*room, bo);
+  const Vec3 up = normalize(m.dir({0, 1, 0}));
+  Vec3 through = wall.normal - up * dot(wall.normal, up);
+  if (!(length(through) > 1e-4f) || !(length(up) > 0.5f)) return false;
+  through = normalize(through);
+  const Vec3 floor_point = m.point({0.0f, -blockout_floor_below_origin(*rp), 0.0f});
+  const Vec3 origin = wall.point + up * (dot(floor_point, up) - dot(wall.point, up));
+  if (!finite3_bits(origin)) return false;
+  piece.set_local_position(origin);
+  piece.set_local_rotation(quat_from_axes(cross(up, through), up, through));
+  piece.set_local_scale(Vec3(1.0f));
+  return true;
 }
 
 /* A door or window under `bo`: on the wall under the mouse in the Scene view (when it is over the view and no menu is open) or, with
@@ -1017,9 +1084,79 @@ void mesh_piece_wire(const BlockoutPiece &bp, const Mat4 &w, const LineFn &line)
 static constexpr uint32_t kCutYellow = Color::hex(0xF4BC02);
 static constexpr uint32_t kIntersectViolet = Color::hex(0xB06CF5);
 
+/* A preset's outline as it is drawn (round 500): the wire of each kernel piece it makes - posts and rails, a column's plinth, shaft and capital, a roof's hull - so the shape selected is
+ * the shape built, not its bounding box. */
+static void preset_outline(const Mat4 &w, const BlockoutPiece &bp, const LineFn &seg) {
+  std::vector<blockout::Piece> made;
+  if (!blockout_preset_pieces(bp, 1, w, made, 0.0f, nullptr)) {  // (one that cannot be made: its box)
+    Vec3 lo, hi;
+    if (!blockout_preset_bounds(bp, lo, hi)) return;
+    BlockoutPiece box;
+    box.size = hi - lo;
+    piece_wire(wire_box(box, box.size, nullptr), w * Mat4::translate((lo + hi) * 0.5f), seg);
+    return;
+  }
+  for (const blockout::Piece &p : made) {
+    const Mat4 &m = p.to_blockout;
+    if (p.shape == blockout::Shape::Convex) {
+      const std::vector<Vec3> edges = blockout::convex_edges(p.points);
+      for (size_t i = 0; i + 1 < edges.size(); i += 2) seg(m.point(edges[i]), m.point(edges[i + 1]));
+      continue;
+    }
+    BlockoutPiece t;
+    t.shape = (int)p.shape, t.size = p.size, t.radius = p.radius, t.height = p.height, t.segments = p.segments, t.steps = p.steps, t.fill_under = p.fill_under;
+    t.inner_radius = p.inner_radius, t.angle = p.angle;
+    if (p.shape == blockout::Shape::Box || p.shape == blockout::Shape::Cylinder) piece_wire(wire_box(t, t.size, nullptr), m, seg);
+    else shape_wire(t, nullptr, [&](Vec3 a, Vec3 b) { seg(m.point(a), m.point(b)); });
+  }
+}
+
+/* The outline of a Round or Arched window, an Arched door or a Revolving door as its real shape (round 500; rounds 498-499 drew their bounding box): the hole's ellipse, or its
+ * rectangle with the round head, at both faces of its Depth with a line between them at every fourth corner; a Revolving door's drum as two rings and four lines. False: any other opening. */
+static bool styled_opening_outline(const BlockoutPiece &bp, const Mat4 &w, const LineFn &seg) {
+  const bool door = bp.opening == 1;
+  const bool round = !door && bp.is_styled_window() && bp.style == kWindowRound;
+  const bool arched = bp.is_styled_opening() && (door ? bp.style == kDoorArched : bp.style == kWindowArched);
+  const bool drum = door && bp.is_styled_door() && bp.style == kDoorRevolving;
+  if (!round && !arched && !drum) return false;
+  if (!finite_bits(bp.width) || !finite_bits(bp.head) || !finite_bits(bp.sill) || !finite_bits(bp.depth) || !finite_bits(bp.arch_rise) || !finite_bits(bp.drum_radius)) return false;
+  const float a = std::fabs(bp.width) * 0.5f, hz = std::fabs(bp.depth) * 0.5f, h = bp.head - bp.sill, n = 24.0f;
+  if (!(a > 0.0f) || !(h > 0.0f)) return false;
+  if (drum) {
+    const float r = std::min(100.0f, std::fabs(bp.drum_radius));
+    for (float y : {bp.sill, bp.head})
+      for (int i = 0; i < 32; i++) {
+        const float t0 = 2.0f * kPi * (float)i / 32.0f, t1 = 2.0f * kPi * (float)(i + 1) / 32.0f;
+        seg(w.point({r * std::cos(t0), y, r * std::sin(t0)}), w.point({r * std::cos(t1), y, r * std::sin(t1)}));
+      }
+    for (int i = 0; i < 4; i++) {
+      const float t = 0.5f * kPi * (float)i;
+      seg(w.point({r * std::cos(t), bp.sill, r * std::sin(t)}), w.point({r * std::cos(t), bp.head, r * std::sin(t)}));
+    }
+    return true;
+  }
+  std::vector<Vec2> xy;
+  if (round) {
+    for (int i = 0; i < (int)n; i++) xy.push_back(Vec2(a * std::cos(2.0f * kPi * (float)i / n), bp.sill + 0.5f * h + 0.5f * h * std::sin(2.0f * kPi * (float)i / n)));
+  }
+  else {
+    const float rise = std::min(h, bp.arch_rise > 0.0f ? bp.arch_rise : a), spring = bp.head - rise;
+    xy.push_back(Vec2(-a, bp.sill)), xy.push_back(Vec2(a, bp.sill));
+    for (int i = 0; i <= (int)n; i++) xy.push_back(Vec2(a * std::cos(kPi * (float)i / n), spring + rise * std::sin(kPi * (float)i / n)));
+  }
+  for (size_t i = 0; i < xy.size(); i++) {
+    const Vec2 p = xy[i], q = xy[(i + 1) % xy.size()];
+    for (float z : {-hz, hz}) seg(w.point({p.x, p.y, z}), w.point({q.x, q.y, z}));
+    if (i % 4 == 0) seg(w.point({p.x, p.y, -hz}), w.point({p.x, p.y, hz}));
+  }
+  return true;
+}
+
 /* A piece's outline as it is drawn, in the world. */
 static void piece_outline(const Mat4 &w, const BlockoutPiece &bp, const LineFn &seg) {
+  if (bp.is_preset()) return preset_outline(w, bp, seg);
   const bool opening = bp.opening != 0;
+  if (opening && styled_opening_outline(bp, w, seg)) return;
   if (!opening && bp.shape == 7) return mesh_piece_wire(bp, w, seg);
   /* A wedge, stairs, an arch, an outline: lines in the piece's own space, put in the world here. */
   if (!opening && bp.shape >= 3 && bp.shape <= 6) return shape_wire(bp, nullptr, [&](Vec3 a, Vec3 b) { seg(w.point(a), w.point(b)); });
@@ -1039,7 +1176,10 @@ void blockout_piece_wire(const BlockoutPiece &bp, const Mat4 &world, bool shell,
 
 uint32_t blockout_operation_colour(int op, bool room) { return room || op == 0 ? kSelectOrange : op == 1 ? kCutYellow : kIntersectViolet; }
 
-bool blockout_turnable(const BlockoutPiece &bp) { return !bp.opening && (bp.shape == 3 || bp.shape == 4 || bp.shape == 5); }
+bool blockout_turnable(const BlockoutPiece &bp) {
+  if (bp.is_preset()) return bp.preset == kPresetStairsL || bp.preset == kPresetStairsU || bp.preset == kPresetSpiral;  // (round 500: stairs turn about their origin, their sizes stay)
+  return !bp.opening && (bp.shape == 3 || bp.shape == 4 || bp.shape == 5);
+}
 
 bool blockout_outlines_shown(const GameObject &blockout, const std::function<bool(uint64_t)> &selected) {
   if (!blockout.get<Blockout>() || !blockout.active_in_hierarchy()) return false;
@@ -1639,7 +1779,7 @@ bool Editor::blockout_turn_piece(GameObject &g, int quarters) {
   const Vec3 pos = g.world_position(), pivot = arch ? w.point(Vec3(0.0f, bp->radius * 0.5f, 0.0f)) : pos;
   g.set_world_rotation(normalize(q * g.world_rotation()));
   g.set_world_position(pivot + q.rotate(pos - pivot));
-  if (!arch && (quarters & 1)) std::swap(bp->size.x, bp->size.z);
+  if (!arch && !bp->is_preset() && (quarters & 1)) std::swap(bp->size.x, bp->size.z);
   return true;
 }
 
@@ -1971,7 +2111,7 @@ void Editor::blockout_surface_command(const std::vector<std::string> &t) {
   const std::string which = t.size() > 3 ? to_lower(t[3]) : "";
   for (int k = 0; k < kBlockoutClasses; k++)
     if (which == to_lower(kBlockoutClassNames[k]) || (k == kClassWalls && which == "wall")) cls = k;
-  if (t.size() < 5 || cls < 0) return Log::warn("blockout set material floor|walls|ceiling|outside|cut|solid|glass|leaf <material name or path, or none>");
+  if (t.size() < 5 || cls < 0) return Log::warn("blockout set material floor|walls|ceiling|outside|cut|solid|glass|leaf|roof <material name or path, or none>");
   std::string name;
   for (size_t i = 4; i < t.size(); i++) name += (name.empty() ? "" : " ") + t[i];
   std::string path;
@@ -1994,13 +2134,53 @@ void Editor::blockout_surface_command(const std::vector<std::string> &t) {
   update_blockouts(true);
 }
 
+/* blockout set <word> <value> for an architectural preset (round 500, task 0484): the numbers of the selected presets that read that word (blockout_preset_set holds each to its range), one undo
+ * step; a preset that does not read it is left as it is. False: the word is no preset's (the caller goes on). */
+bool Editor::blockout_preset_command(const std::vector<std::string> &t) {
+  const std::string key = to_lower(t[2]);
+  const std::vector<std::string> values(t.begin() + std::min<size_t>(3, t.size()), t.end());
+  bool ok = false;
+  BlockoutPiece scratch;
+  if (!blockout_preset_set(scratch, key, values, ok)) return false;
+  std::vector<BlockoutPiece *> presets;
+  for (GameObject *g : selected_objects(false))
+    if (BlockoutPiece *bp = g->get<BlockoutPiece>(); bp && bp->is_preset() && blockout_of_piece(*g)) presets.push_back(bp);
+  if (presets.empty()) {
+    Log::warn("blockout set %s: select a preset piece first (blockout add column|pilaster|beam|railing|roof|stairs l|stairs u|stairs spiral|arcade)", key.c_str());
+    return true;
+  }
+  bool any_ok = false, changed = false;
+  for (BlockoutPiece *bp : presets) {
+    const BlockoutPiece before = *bp;
+    bool one = false;
+    blockout_preset_set(*bp, key, values, one);
+    any_ok = any_ok || one;
+    changed = changed || before.square != bp->square || before.base_height != bp->base_height || before.capital_height != bp->capital_height || before.base_width != bp->base_width ||
+              before.capital_width != bp->capital_width || before.taper != bp->taper || before.length != bp->length || before.post_spacing != bp->post_spacing ||
+              before.post_size != bp->post_size || before.rail_size != bp->rail_size || before.rail_height != bp->rail_height || before.bottom_rail != bp->bottom_rail ||
+              before.roof_style != bp->roof_style || before.span != bp->span || before.pitch != bp->pitch || before.overhang != bp->overhang || before.thickness != bp->thickness ||
+              before.total_height != bp->total_height || before.stair_width != bp->stair_width || before.turn != bp->turn || before.column_width != bp->column_width ||
+              before.arch_thickness != bp->arch_thickness || before.count != bp->count || before.radius != bp->radius || before.height != bp->height || before.segments != bp->segments ||
+              before.steps != bp->steps || before.fill_under != bp->fill_under || before.inner_radius != bp->inner_radius || before.arch_rise != bp->arch_rise || before.depth != bp->depth;
+  }
+  if (!any_ok) {
+    Log::warn("blockout set %s: that number is not one the selected presets have, or its value is wrong (blockout set %s)", key.c_str(), blockout_preset_set_words());
+    return true;
+  }
+  if (!changed) return true;  // (no undo step for nothing)
+  mark_changed("Edit Blockout Preset");
+  update_blockouts(true);
+  return true;
+}
+
 /* blockout outline <x z> <x z> <x z> ...: the selected Outline piece's corners (metres in the piece's own XZ plane, 3 to 256), as dragging its
  * point handles would set them. With no numbers: the corners it has. */
 void Editor::blockout_outline_command(const std::vector<std::string> &t) {
   GameObject *g = active_object();
   BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
-  if (!bp || !blockout_of_piece(*g) || bp->shape != (int)blockout::Shape::Outline)
-    return Log::warn("blockout outline <x z> <x z> <x z> ...: select an Outline piece first (blockout add outline)");
+  const bool preset_outline = bp && bp->is_preset() && (bp->preset == kPresetRailing || bp->preset == kPresetRoof);  // (round 500: the plan a railing runs along and a roof covers)
+  if (!bp || !blockout_of_piece(*g) || (bp->shape != (int)blockout::Shape::Outline && !preset_outline) || (bp->opening != 0))
+    return Log::warn("blockout outline <x z> <x z> <x z> ...: select an Outline piece (blockout add outline), a Railing or a Roof first");
   if (t.size() <= 2) return Log::info("outline of '%s': %s", g->name.c_str(), blockout_outline_text(bp->outline).c_str());
   std::vector<Vec2> pts;
   for (size_t i = 2; i < t.size(); i++) {
@@ -2031,7 +2211,7 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
               "draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height> | "
               "applyscale [size] (the Blockouts' scale into their pieces; size: the selected pieces' own) | "
               "turn [quarters] (the selected wedges, stairs and arches a quarter turn round the surface's normal) | "
-              "set material floor|walls|ceiling|outside|cut|solid|glass|leaf <material or none> | set texscale <metres> | set style|frame|panes|glass|sillboard (a window's, round 498) | set style|frame|leaf|open|hinge|slide|drum (a door's, round 499) | bake (the selected Blockout or a piece's; nothing selected bakes nothing) | unbake [force] (the selected baked objects; nothing selected unbakes nothing) | rebuild | wait | info");
+              "set material floor|walls|ceiling|outside|cut|solid|glass|leaf|roof <material or none> | set texscale <metres> | set style|frame|panes|glass|sillboard (a window's, round 498) | set style|frame|leaf|open|hinge|slide|drum (a door's, round 499) | bake (the selected Blockout or a piece's; nothing selected bakes nothing) | unbake [force] (the selected baked objects; nothing selected unbakes nothing) | rebuild | wait | info");
   };
   /* The Blockouts a command is about: the selected ones and the ones the selected pieces belong to; with none, every one. */
   std::vector<GameObject *> targets;
@@ -2058,12 +2238,14 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
     const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";
     if (key == "wall" || key == "floor" || key == "ceiling" || key == "walls" || key == "opentop" || key == "blend") return blockout_set_command(t);
     if (key == "material" || key == "texscale") return blockout_surface_command(t);  // (round 482)
+    if (!key.empty() && blockout_preset_command(t)) return;  // (round 500: a preset's number words)
     if (key == "style" || key == "frame" || key == "panes" || key == "glass" || key == "sillboard" || key == "leaf" || key == "open" || key == "hinge" || key == "slide" || key == "drum")
       return blockout_window_command(t);  // (round 498; doors' words round 499)
     if ((key != "cell" && key != "method" && key != "detail") || value.empty())
       return Log::warn("blockout set cell <metres> | method auto|exact|field | detail low|medium|high | blend <metres> | wall|floor|ceiling <metres> | walls merge|keep | opentop on|off | "
-                       "material floor|walls|ceiling|outside|cut|solid|glass|leaf <material or none> | texscale <metres> | style <name> | frame <width> [depth] | panes <across> <up> | "
-                       "glass on|off | sillboard on|off [overhang] | a door's: leaf on|off [thickness] | open <0..1> | hinge left|right | slide left|right | drum <radius>");
+                       "material floor|walls|ceiling|outside|cut|solid|glass|leaf|roof <material or none> | texscale <metres> | style <name> | frame <width> [depth] | panes <across> <up> | "
+                       "glass on|off | sillboard on|off [overhang] | a door's: leaf on|off [thickness] | open <0..1> | hinge left|right | slide left|right | drum <radius> | "
+                       "a preset's: %s", blockout_preset_set_words());
     const bool detail_ok = value == "low" || value == "medium" || value == "high" || value == "0" || value == "1" || value == "2";
     if (key == "detail" && !detail_ok) return Log::warn("blockout set detail low|medium|high");
     if (targets.empty()) return Log::warn("blockout set: no Blockout in the scene");

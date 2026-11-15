@@ -23,7 +23,7 @@ const char *const kBlockoutMethodNames[3] = {"Auto", "Exact", "Field"};
 const char *const kBlockoutBlendDetailNames[3] = {"Low", "Medium", "High"};
 const char *const kBlockoutWallNames[2] = {"Merge with neighbours", "Keep walls"};
 const char *const kBlockoutOpeningNames[3] = {"None", "Door", "Window"};
-const char *const kBlockoutClassNames[kBlockoutClasses] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass", "Leaf"};
+const char *const kBlockoutClassNames[kBlockoutClasses] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass", "Leaf", "Roof"};
 const char *const kBlockoutWindowStyleNames[kBlockoutWindowStyles] = {"Opening Only", "Single", "Double", "Arched", "Fixed", "Grid", "Round"};
 const char *const kBlockoutDoorStyleNames[kBlockoutDoorStyles] = {"Opening Only", "Single", "Double", "Sliding", "Arched", "Revolving"};
 const char *const kBlockoutSideNames[2] = {"Left", "Right"};
@@ -69,7 +69,7 @@ int blockout_window_style_from_word(const std::string &word) {
 namespace {
 
 const char *const kMaterialFieldNames[kBlockoutClasses] = {"Floor Material", "Walls Material", "Ceiling Material", "Outside Material", "Cut Material", "Solid Material", "Glass Material",
-                                                           "Leaf Material"};
+                                                           "Leaf Material", "Roof Material"};
 const char *const kMaterialHelp[kBlockoutClasses] = {
     "The material of every room's floor (a .mat from the project; none: the default material). A piece's own Floor Material wins over it.",
     "The material of the inside of every room's walls.",
@@ -78,7 +78,8 @@ const char *const kMaterialHelp[kBlockoutClasses] = {
     "The material of the faces a Subtract piece cut (a door's or window's reveal, a pocket's sides), and of what an Intersect piece trimmed.",
     "The material of the faces of a plain Add piece that is no room, and of a styled window's or door's frame, bars and sill board (and a Revolving door's ring). A face made of several pieces' faces in one plane takes the material of the first of them.",
     "The material of a styled window's pane (a thin sheet in its light, when its Glass is on).",
-    "The material of a styled door's leaf (one flat box; a Revolving door has none)."};
+    "The material of a styled door's leaf (one flat box; a Revolving door has none).",
+    "The material of the top faces of a Roof preset (the faces that look up; its underside, its gable ends and its eave's edge are Solid)."};
 
 float safe_scale(float v) { return finite_bits(v) && v > 0.0f ? std::min(1000.0f, std::max(0.001f, v)) : 1.0f; }
 
@@ -238,14 +239,108 @@ static void reflect_opening_style(Reflector &r, BlockoutPiece &p, bool all) {
   }
 }
 
-bool BlockoutPiece::is_room() const { return room && opening == 0 && shape_can_be_room(shape); }
+/* A preset's own numbers (round 500): only the rows of the preset in use (`all`: every row, for the file). Radius, Height, Segments, Steps, Fill Under, Inner Radius, Size, Depth and the
+ * outline are the shapes' rows, shown by BlockoutPiece::reflect for the presets that read them. Ridge Height is not a stored number: it is worked out from Pitch (and sets it). */
+static void reflect_preset_rows(Reflector &r, BlockoutPiece &p, bool all) {
+  const int k = p.preset;
+  const bool column = k == kPresetColumn || k == kPresetPilaster, stairs = k == kPresetStairsL || k == kPresetStairsU;
+  if (all || k == kPresetColumn) {
+    r.field("Square Shaft", p.square);
+    r.help("A square shaft instead of a round one (a Pilaster's is always square).");
+  }
+  if (all || column) {
+    r.field("Base Height", p.base_height, 0.01f, 0.0f, 10000.0f);
+    r.help("The plinth under the shaft, in metres (0: none). A plinth and a capital together take at most nine tenths of the height.");
+    r.field("Capital Height", p.capital_height, 0.01f, 0.0f, 10000.0f);
+    r.help("The block on top of the shaft, in metres (0: none).");
+    r.field("Base Width", p.base_width, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("How wide the plinth is across (a square block; never narrower than the shaft). A Pilaster's stands out half as far as it is wide.");
+    r.field("Capital Width", p.capital_width, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("How wide the capital is across (never narrower than the shaft).");
+    r.field("Taper", p.taper, 0.01f, 0.05f, 2.0f);
+    r.help("The shaft's width at its top as a share of its width at the bottom: 1 is straight, 0.8 narrows by a fifth. Held to 0.05 .. 2.");
+  }
+  if (all || k == kPresetRailing || k == kPresetRoof || stairs) {
+    r.field("Length", p.length, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help(k == kPresetRailing ? "The run of the railing along X, in metres, when it has no outline (with one, it runs along each side of the outline)."
+           : k == kPresetRoof  ? "The roof's length along X - the way the ridge runs - not counting the overhang."
+                               : "How long each flight runs, in metres.");
+  }
+  if (all || k == kPresetRailing) {
+    r.field("Post Spacing", p.post_spacing, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("The most the posts stand apart: they stand at both ends and evenly between, so 5 m at 1 m is 6 posts (at most 256 a side, 1024 a railing).");
+    r.field("Post Size", p.post_size, 0.005f, kBlockoutMinSize, 10000.0f);
+    r.help("A post's width, square.");
+    r.field("Rail Height", p.rail_height, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("The top of the top rail above the piece's origin.");
+    r.field("Rail Size", p.rail_size, 0.005f, kBlockoutMinSize, 10000.0f);
+    r.help("The rails' thickness, square.");
+    r.field("Bottom Rail", p.bottom_rail);
+    r.help("A second rail low between the posts.");
+  }
+  if (all || k == kPresetRoof) {
+    r.enumeration("Roof Style", p.roof_style, kBlockoutRoofStyleNames, kBlockoutRoofStyles);
+    r.help("Gable: two slopes meeting at a ridge along X. Hip: four slopes. Shed: one slope rising towards +Z. Over an outline with square corners the roof is the union of one roof over each of its rectangles.");
+    r.field("Pitch", p.pitch, 0.5f, 0.0f, 85.0f);
+    r.help("The slope in degrees (0 to 85). Ridge Height is worked out from it, and setting Ridge Height sets it.");
+    if (!r.serializing()) {
+      float ridge = blockout_roof_ridge(p);
+      const float before = ridge;
+      r.field("Ridge Height", ridge, 0.01f, 0.0f, 10000.0f);
+      r.help("How high the roof rises over its base: the Pitch's tangent times the half span (a Hip: the nearer half side; a Shed: the whole span). Setting it sets Pitch.");
+      if (ridge != before) blockout_roof_set_ridge(p, ridge);
+    }
+    r.field("Overhang", p.overhang, 0.01f, 0.0f, 10000.0f);
+    r.help("How far the roof's base reaches past the Length and the Span on every side; the pitch starts at its edge.");
+    r.field("Thickness", p.thickness, 0.01f, 0.0f, 10000.0f);
+    r.help("The roof sheet's thickness, measured straight down. 0: a solid roof.");
+  }
+  if (all || k == kPresetRoof || k == kPresetArcade) {
+    r.field("Span", p.span, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help(k == kPresetRoof ? "The roof's span across (Z), not counting the overhang." : "The clear width of one arch, between two columns.");
+  }
+  if (all || stairs || k == kPresetSpiral) {
+    r.field("Total Height", p.total_height, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("The height the last step's tread reaches. Stairs L and U climb half of it in each flight, with the landing at the middle.");
+  }
+  if (all || stairs) {
+    r.field("Flight Width", p.stair_width, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("The width of the flights and the landing.");
+  }
+  if (all || k == kPresetSpiral) {
+    r.field("Turn", p.turn, 1.0f, -1440.0f, 1440.0f);
+    r.help("How far the steps turn round the post, in degrees (negative: the other way; at most 170 degrees a step).");
+  }
+  if (all || k == kPresetArcade) {
+    r.field("Count", p.count, 1, 256);
+    r.help("How many arches: they stand on Count + 1 columns.");
+    r.field("Column Width", p.column_width, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("The width of a column along X.");
+    r.field("Arch Thickness", p.arch_thickness, 0.01f, kBlockoutMinSize, 10000.0f);
+    r.help("How wide the arch's ring is at its springing (at most the column's width).");
+    if (!all) {  // (the window's and door's Arch Rise is the same number: the file has it once)
+      r.field("Arch Rise", p.arch_rise, 0.01f, 0.0f, 10000.0f);
+      r.help("How high the arch rises above its springing line: 0 is a half circle (half the Span).");
+    }
+  }
+}
+
+bool BlockoutPiece::is_room() const { return room && opening == 0 && shape_can_be_room(shape) && !is_preset(); }
 
 void BlockoutPiece::reflect(Reflector &r) {
   const bool all = r.all_fields();
   const int k = std::min(7, std::max(0, shape));
   const bool is_opening = opening != 0, is_room = this->is_room();
   const bool room_shape = shape_can_be_room(k);
-  if (all || !is_opening) {  // (an opening is a box that cuts: its shape and operation are not its to choose)
+  const bool pre = is_preset();  // (round 500: a preset's rows - its own numbers and the shared ones it reads - replace the shape's)
+  const int pk = pre ? preset : 0;
+  const auto preset_is = [&](std::initializer_list<int> kinds) { for (int v : kinds) if (pk == v) return true; return false; };
+  if (all || !is_opening) {
+    r.enumeration("Preset", preset, kBlockoutPresetNames, kBlockoutPresets);
+    r.help("An architectural piece that is one object whose numbers make its solids: a Column, Pilaster, Beam, Railing, Roof, Stairs with a landing (L or U), Spiral Stairs or Arcade. None: an ordinary shape. "
+           "Changing it keeps the numbers the new preset shares with the old one (Radius, Height, Steps ...): the other rows start at what they were.");
+  }
+  if (all || (!is_opening && !pre)) {  // (an opening is a box that cuts: its shape and operation are not its to choose)
     r.enumeration("Shape", shape, kBlockoutShapeNames, 8);
     r.help("What the piece is: a box, a cylinder (up Y) or a sphere centred on the object; a wedge (a ramp: tall at -Z, sloping down to +Z), "
            "stairs (climbing towards +Z), an arch (standing in the XY plane), an outline (corners in the XZ plane, pulled up) or any mesh of the "
@@ -278,9 +373,13 @@ void BlockoutPiece::reflect(Reflector &r) {
     r.field("Open Top", open_top);
     r.help("No ceiling: the walls end flat at the air's top.");
   }
-  if (all || !is_room) {
+  if (all || (!is_room && !pre)) {
     r.enumeration("Opening", opening, kBlockoutOpeningNames, 3);
     r.help("A door or a window: a box that cuts through the wall it stands in, sized by Width, Head and Sill. None: an ordinary piece.");
+  }
+  if (!all && pk == kPresetArcade) {
+    r.field("Depth", depth, 0.01f, kBlockoutMinSize, 1000.0f);
+    r.help("How deep the arcade is, along Z: the columns' and the arches' depth.");
   }
   if (all || is_opening) {
     r.field("Width", width, 0.01f, 0.0f, 1000.0f);
@@ -293,43 +392,49 @@ void BlockoutPiece::reflect(Reflector &r) {
     r.help("Through the wall: the wall it was put in plus 0.1 m either side, so it always goes through (Depth = the wall's thickness + 0.2 m). A window's sill board reaches out from the wall's face, 0.1 m in from each end of the Depth, and Scale grows the wall part only.");
   }
   if (all || opening == 1 || opening == 2) reflect_opening_style(r, *this, all);
+  if (all || pre) reflect_preset_rows(r, *this, all);
   const bool shaped = all || !is_opening;
-  if (shaped && (all || k == 0 || k == 3 || k == 4)) {
+  if (shaped && (all || (!pre && (k == 0 || k == 3 || k == 4)) || pk == kPresetBeam)) {
     r.field("Size", size);
-    r.help(k == 3 ? "Width (X), height (Y) at the tall end and length (Z) of the ramp, before the object's own scale."
+    r.help(pk == kPresetBeam ? "A beam's Length along X, Depth (how tall it stands, up from the piece's origin) and Width across (Z), before the object's own scale."
+         : k == 3 ? "Width (X), height (Y) at the tall end and length (Z) of the ramp, before the object's own scale."
                   : k == 4 ? "Width (X), height (Y) and length (Z) of the flight, before the object's own scale."
                            : "Width (X), height (Y) and depth (Z), before the object's own scale.");
   }
-  if (shaped && (all || k == 1 || k == 2 || k == 5)) {
+  if (shaped && (all || (!pre && (k == 1 || k == 2 || k == 5)) || preset_is({kPresetColumn, kPresetPilaster, kPresetSpiral}))) {
     r.field("Radius", radius, 0.01f, 0.0001f, 10000.0f);
-    if (k == 5) r.help("The arch's outer radius.");
+    if (pre) r.help(pk == kPresetSpiral ? "The steps' outer radius." : "The shaft's half-width at the bottom of the shaft (a round shaft's radius, a square one's half side).");
+    else if (k == 5) r.help("The arch's outer radius.");
   }
-  if (shaped && (all || k == 1 || k == 5 || k == 6)) {
+  if (shaped && (all || (!pre && (k == 1 || k == 5 || k == 6)) || preset_is({kPresetColumn, kPresetPilaster, kPresetArcade}))) {
     r.field("Height", height, 0.01f, 0.0001f, 10000.0f);
-    if (k == 5) r.help("How deep the arch is, along Z.");
+    if (pre) r.help(pk == kPresetArcade ? "How tall the columns are, up to where the arches spring." : "The whole height of the column, plinth and capital included.");
+    else if (k == 5) r.help("How deep the arch is, along Z.");
     else if (k == 6) r.help("How far the outline is pulled up, along Y.");
   }
-  if (shaped && (all || k == 1 || k == 2 || k == 5)) {
+  if (shaped && (all || (!pre && (k == 1 || k == 2 || k == 5)) || preset_is({kPresetColumn, kPresetArcade}))) {
     r.field("Segments", segments, 3, 256);
-    r.help(k == 1 ? "Sides of the cylinder." : k == 5 ? "Blocks the arch is cut into (at least one for each quarter turn it spans)." : "Segments round the sphere.");
+    r.help(pre ? "Sides of a round shaft (a tapered one has at most 32); an arcade's arches are cut into half as many blocks." : k == 1 ? "Sides of the cylinder." : k == 5 ? "Blocks the arch is cut into (at least one for each quarter turn it spans)." : "Segments round the sphere.");
   }
   if (shaped && (all || k == 2)) {
     r.field("Rings", rings, 2, 128);
     r.help("Rings from pole to pole.");
   }
-  if (shaped && (all || k == 4)) {
+  if (shaped && (all || (!pre && k == 4) || preset_is({kPresetStairsL, kPresetStairsU, kPresetSpiral}))) {
     r.field("Steps", steps, 1, 256);
-    r.help("How many steps the flight climbs in.");
+    r.help(pre ? "How many steps each flight (or the whole spiral) climbs in: 1 to 256." : "How many steps the flight climbs in.");
     r.field("Fill Under", fill_under);
-    r.help("On: each step stands on the ground. Off: a flight with a slab under its treads.");
+    r.help(pre ? "On: the steps (and the mass a second flight stands on) go down to the ground. Off: a slab under the treads." : "On: each step stands on the ground. Off: a flight with a slab under its treads.");
   }
-  if (shaped && (all || k == 5)) {
+  if (shaped && (all || (!pre && k == 5) || pk == kPresetSpiral)) {
     r.field("Inner Radius", inner_radius, 0.01f, 0.0f, 10000.0f);
-    r.help("The inside of the arch; it has to be less than the outer radius.");
+    r.help(pre ? "The post in the middle of the steps." : "The inside of the arch; it has to be less than the outer radius.");
+  }
+  if (shaped && (all || (!pre && k == 5))) {
     r.field("Angle", angle, 1.0f, 0.0f, 360.0f);
     r.help("How much of a circle the arch spans, in degrees: 180 a half circle, 360 a full ring.");
   }
-  if (shaped && (all || k == 6)) {
+  if (shaped && (all || (!pre && k == 6) || preset_is({kPresetRailing, kPresetRoof}))) {
     std::string text = blockout_outline_text(outline);
     const std::string before = text;
     r.text("Outline", text);
@@ -337,7 +442,7 @@ void BlockoutPiece::reflect(Reflector &r) {
            "view, or click the + between two to add one.");
     if (text != before) blockout_outline_from_text(text, outline);
   }
-  if (shaped && (all || k == 7)) {
+  if (shaped && (all || (!pre && k == 7))) {
     r.object("Mesh Object", mesh_object, "MeshFilter");
     r.help("The object whose mesh is this piece (a closed mesh; an open one is skipped on the exact path). The piece is placed by its own "
            "transform; the object itself is no longer drawn, collided with, baked or exported while the piece is on.");
@@ -361,6 +466,7 @@ void BlockoutPiece::reflect(Reflector &r) {
 }
 
 bool BlockoutPiece::has_class(int cls) const {
+  if (is_preset()) return cls == kClassSolid || (preset == kPresetRoof && cls == kClassRoof);
   if (is_room()) return cls <= kClassOutside;
   if (is_styled_window()) return cls == kClassCut || cls == kClassSolid || (cls == kClassGlass && glass);  // (round 498: the hole's reveal, the frame, the pane)
   if (is_styled_door()) return cls == kClassCut || cls == kClassSolid || (cls == kClassLeaf && leaf && style != kDoorRevolving);  // (round 499: the reveal, the frame or ring, the leaf)
@@ -369,7 +475,7 @@ bool BlockoutPiece::has_class(int cls) const {
 }
 
 bool BlockoutPiece::takes_blend() const {
-  return opening == 0 && !is_room() && operation != (int)blockout::Op::Intersect && (shape == 0 || shape == 1 || shape == 2);
+  return opening == 0 && !is_preset() && !is_room() && operation != (int)blockout::Op::Intersect && (shape == 0 || shape == 1 || shape == 2);
 }
 
 namespace {
@@ -478,6 +584,7 @@ bool blockout_outline_from_text(const std::string &text, std::vector<Vec2> &out)
 }
 
 void blockout_piece_bounds(const BlockoutPiece &p, Vec3 &lo, Vec3 &hi) {
+  if (blockout_preset_bounds(p, lo, hi)) return;  // (round 500: a preset's box: its bottom on the origin)
   const int k = std::min(7, std::max(0, p.shape));
   const float r = std::fabs(finite_bits(p.radius) ? p.radius : 0.0f), h = std::fabs(finite_bits(p.height) ? p.height : 0.0f) * 0.5f;
   if (k == 0 || k == 3 || k == 4) {
@@ -1141,6 +1248,9 @@ void blockout_opening_set_style(BlockoutPiece &p, int style) {
 void blockout_piece_edited(BlockoutPiece &p, int style_before, int opening_before) {
   /* Style is shared by doors and windows (round 499): a piece that is no opening has none, and one switched between Door and Window starts at Opening Only - a window's
    * Grid is no door's Revolving. A door keeps its own. */
+  if (p.opening != 0) p.preset = 0;  // (round 500: a door or window is no preset)
+  if (p.preset < 0 || p.preset >= kBlockoutPresets) p.preset = 0;
+  if (p.preset > 0) p.room = false;
   if (p.opening == 0 || p.opening != opening_before) p.style = 0;
   p.style = std::min(p.opening == 1 ? kBlockoutDoorStyles - 1 : kBlockoutWindowStyles - 1, std::max(0, p.style));
   /* A Round window starts as a circle: Head = Sill + Width. Width or Head may be changed afterwards (an ellipse). */
@@ -1183,6 +1293,23 @@ bool collect_window(const BlockoutPiece &bp, uint64_t id, const Mat4 &m, std::ve
     pieces.push_back(std::move(p));
   }
   return true;
+}
+
+/* A preset: its made pieces, each with the preset's surface notes; what it says about the grid goes to the status as a warning line. */
+void collect_preset(const GameObject &g, const BlockoutPiece &bp, const Mat4 &m, std::vector<blockout::Piece> &pieces, BlockoutSnapshotNotes *notes, float grid_cell) {
+  std::vector<blockout::Piece> made;
+  std::vector<std::string> said;
+  const bool built = blockout_preset_pieces(bp, g.id, m, made, grid_cell, &said);
+  if (!built) {
+    if (notes) notes->refused.push_back({g.id, said.empty() ? "its numbers make nothing" : said[0]});
+    return;
+  }
+  if (notes)
+    for (const std::string &line : said) notes->swing_cuts.push_back(std::string(kBlockoutPresetNames[std::min(kBlockoutPresets - 1, std::max(0, bp.preset))]) + " '" + g.name + "': " + line);
+  for (blockout::Piece &p : made) {
+    if (notes) notes->surface.pieces.push_back(surface_of(bp, p.id));
+    pieces.push_back(std::move(p));
+  }
 }
 
 /* A styled door or window whose size is past what the pieces are held to (kBlockoutMaxSize: the numbers are finite, so the plain hole the kernel gets for a style it cannot
@@ -1268,6 +1395,11 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
       collect(*c, m, pieces, notes, grid_cell);
       continue;
     }
+    if (bp && bp->enabled && bp->is_preset()) {  // (round 500: one piece, several kernel pieces; a preset that cannot be made is left out and named, never a plain box)
+      collect_preset(*c, *bp, m, pieces, notes, grid_cell);
+      collect(*c, m, pieces, notes, grid_cell);
+      continue;
+    }
     if (bp && bp->enabled && bp->is_styled_opening() && collect_window(*bp, c->id, m, pieces, notes, grid_cell)) {
       collect(*c, m, pieces, notes, grid_cell);
       continue;
@@ -1346,6 +1478,7 @@ uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, cons
     h = hash_mix(h, (uint64_t)(uint32_t)p.steps | (uint64_t)p.fill_under << 32 | (uint64_t)p.outline.size() << 33);
     h = mix_float(mix_float(h, p.inner_radius), p.angle);
     for (const Vec2 &q : p.outline) h = mix_float(mix_float(h, q.x), q.y);
+    if (!p.points.empty()) h = mix_bytes(hash_mix(h, p.points.size()), p.points.data(), p.points.size() * sizeof(Vec3));  // (round 500: a convex piece's corners)
     h = hash_mix(h, p.mesh_key);
     h = hash_mix(h, (uint64_t)p.room | (uint64_t)p.keep_walls << 1 | (uint64_t)p.open_top << 2);
     h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
@@ -1473,6 +1606,46 @@ void add_blend_handle(const BlockoutPiece &p, Vec3 toward, std::vector<BlockoutH
 
 }  // namespace
 
+/* A preset's handles (round 500): its box's top, and the faces along X and Z or the radius that its main sizes are - what each does is blockout_handle_apply's preset case. */
+static void preset_handles(const BlockoutPiece &p, std::vector<BlockoutHandle> &out) {
+  using H = BlockoutHandle;
+  Vec3 lo, hi;
+  blockout_preset_bounds(p, lo, hi);
+  const float mx = 0.5f * (lo.x + hi.x), mz = 0.5f * (lo.z + hi.z), my = 0.5f * (lo.y + hi.y);
+  auto add = [&](int axis, Vec3 at, Vec3 dir, const char *name) { out.push_back(make_handle(H::Preset, axis, at, dir, name)); };
+  const int k = p.preset;
+  add(1, {mx, hi.y, mz}, {0, 1, 0}, "top");
+  if (p.outline.size() >= 3 && (k == kPresetRailing || k == kPresetRoof)) return;  // (an outline's sides are its corners', not Length and Span, which it does not read: only the top)
+  if (k == kPresetColumn || k == kPresetPilaster || k == kPresetSpiral) add(3, {hi.x, my, mz}, {1, 0, 0}, "side");
+  if (k == kPresetBeam || k == kPresetRailing || k == kPresetRoof) {
+    add(0, {hi.x, my, mz}, {1, 0, 0}, "+x");
+    add(0, {lo.x, my, mz}, {-1, 0, 0}, "-x");
+  }
+  if (k == kPresetBeam || k == kPresetRoof || k == kPresetArcade) {
+    add(2, {mx, my, hi.z}, {0, 0, 1}, "+z");
+    add(2, {mx, my, lo.z}, {0, 0, -1}, "-z");
+  }
+  if (k == kPresetStairsL || k == kPresetStairsU) add(2, {mx, my, hi.z}, {0, 0, 1}, "+z");
+}
+
+float blockout_preset_handle_number(const BlockoutPiece &p, int axis) {
+  const int k = p.preset;
+  if (axis == 1) {
+    switch (k) {
+      case kPresetColumn:
+      case kPresetPilaster:
+      case kPresetArcade: return p.height;
+      case kPresetBeam: return p.size.y;
+      case kPresetRailing: return p.rail_height;
+      case kPresetRoof: return blockout_roof_ridge(p);
+      default: return p.total_height;
+    }
+  }
+  if (axis == 3) return p.radius;
+  if (axis == 0) return k == kPresetBeam ? p.size.x : p.length;
+  return k == kPresetBeam ? p.size.z : k == kPresetRoof ? p.span : k == kPresetArcade ? p.depth : p.length;
+}
+
 void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *growth, std::vector<BlockoutHandle> &out) {
   out.clear();
   using H = BlockoutHandle;
@@ -1484,6 +1657,7 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
     out.push_back(make_handle(H::OpenSill, 1, {0.0f, sill, 0.0f}, {0, -1, 0}, "sill"));
     return;
   }
+  if (p.is_preset()) return preset_handles(p, out);
   const int shape = std::min(7, std::max(0, p.shape));
   const bool room = p.is_room() && growth;
   if (shape == 7) return;  // (a mesh piece is placed with its object, not stretched)
@@ -1561,6 +1735,42 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
   add_blend_handle(p, toward, out);
 }
 
+/* A preset's handle moved `delta` along its way (round 500). The top is the piece's main height (a roof's: its Ridge Height, which sets Pitch); a face along X or Z its length, width or
+ * span (the opposite face stays, so the origin moves half way; with `both` they move together); "side" its radius. Returns the origin's move. */
+static Vec3 preset_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const BlockoutHandle &h, float delta, bool both) {
+  const int k = before.preset;
+  auto grown = [&](float was, float d) { return std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, std::fabs(was) + d)); };
+  if (h.axis == 1) {
+    switch (k) {
+      case kPresetColumn:
+      case kPresetPilaster:
+      case kPresetArcade: p.height = grown(before.height, delta); break;
+      case kPresetBeam: p.size.y = grown(before.size.y, delta); break;
+      case kPresetRailing: p.rail_height = grown(before.rail_height, delta); break;
+      case kPresetRoof: blockout_roof_set_ridge(p, std::max(0.0f, blockout_roof_ridge(before) + delta)); break;
+      default: p.total_height = grown(before.total_height, delta); break;
+    }
+    return Vec3(0.0f);
+  }
+  if (h.axis == 3) {
+    p.radius = grown(before.radius, delta);
+    if (k == kPresetSpiral && p.inner_radius >= p.radius) p.inner_radius = std::max(0.0f, p.radius - kBlockoutMinSize);
+    return Vec3(0.0f);
+  }
+  const float step = both ? 2.0f * delta : delta;
+  float *field = nullptr;
+  float was = 0.0f;
+  if (h.axis == 0) field = k == kPresetBeam ? &p.size.x : &p.length, was = k == kPresetBeam ? before.size.x : before.length;
+  else if (k == kPresetBeam) field = &p.size.z, was = before.size.z;
+  else if (k == kPresetRoof) field = &p.span, was = before.span;
+  else if (k == kPresetArcade) field = &p.depth, was = before.depth;
+  else field = &p.length, was = before.length;  // (stairs: the run, from the start the piece's origin stands on)
+  const float now = grown(was, step);
+  *field = now;
+  if (both || k == kPresetStairsL || k == kPresetStairsU) return Vec3(0.0f);
+  return h.dir * (0.5f * (now - std::fabs(was)));
+}
+
 Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const BlockoutHandle &h, float delta, bool both, float to_blockout_scale) {
   p = before;
   if (!finite_bits(delta)) return Vec3(0.0f);
@@ -1602,6 +1812,7 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
     case BlockoutHandle::OpenSill:
       p.sill = std::min(before.head - kBlockoutMinSize, std::max(0.0f, before.sill - delta));  // (the handle points down)
       return Vec3(0.0f);
+    case BlockoutHandle::Preset: return preset_handle_apply(p, before, h, delta, both);
     case BlockoutHandle::OutlinePoint:  // (these move in a plane: blockout_outline_move / _insert)
     case BlockoutHandle::OutlineAdd:
       return Vec3(0.0f);
@@ -1614,7 +1825,7 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
 /* ===================================================================== */
 
 int blockout_face_class(const blockout::Piece &piece, uint32_t side) {
-  if (blockout_id_generated(piece.id) && side != blockout::kSideBlend) return window_face_class(piece, side);
+  if (blockout_id_generated(piece.id) && side != blockout::kSideBlend) return window_part(piece.id) & 0x40 ? blockout_preset_face_class(piece, side) : window_face_class(piece, side);
   const bool plain = !piece.room || side == blockout::kSideBlend;  // (a blend only comes from a piece that is no room)
   if (plain) return piece.op == blockout::Op::Add ? kClassSolid : kClassCut;
   switch (blockout::side_class(piece, side)) {
@@ -1869,7 +2080,49 @@ bool blockout_piece_scale(BlockoutPiece &p, Vec3 f) {
     }
     return true;
   }
+  if (p.is_preset()) {
+    /* Round 500: sizes grow along their own axes - Post Spacing too (it is a size: a railing scaled by 2 has the same posts twice as far apart) - and a size of 0 (no plinth, a solid
+     * roof, no overhang, no post) stays 0. Counts, angles and Taper stay. A roof's Pitch follows the ratio of its rise to its run (f.y over f.z); an Arcade's half circle (Arch Rise 0)
+     * is made explicit when the scale is uneven, so that it grows with f.y and not f.x. */
+    const float xz = round_k(f.x, f.z);
+    auto grow = [&](float &v, float k) {
+      if (v == 0.0f) return;
+      if (k == 1.0f || !finite_bits(v)) return;
+      v = std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, std::fabs(v) * k));
+    };
+    switch (p.preset) {
+      case kPresetColumn:
+      case kPresetPilaster:
+        grow(p.radius, xz), grow(p.height, f.y), grow(p.base_height, f.y), grow(p.capital_height, f.y), grow(p.base_width, xz), grow(p.capital_width, xz);
+        break;
+      case kPresetBeam:
+        for (int a = 0; a < 3; a++) grow(p.size[a], f[a]);
+        break;
+      case kPresetRailing:
+        grow(p.length, f.x), grow(p.rail_height, f.y), grow(p.post_size, xz), grow(p.rail_size, xz), grow(p.post_spacing, f.x);
+        for (Vec2 &q : p.outline) place(q.x, f.x), place(q.y, f.z);
+        break;
+      case kPresetRoof:
+        grow(p.length, f.x), grow(p.span, f.z), grow(p.overhang, xz), grow(p.thickness, f.y);
+        for (Vec2 &q : p.outline) place(q.x, f.x), place(q.y, f.z);
+        if (f.y != f.z && finite_bits(p.pitch))
+          p.pitch = std::min(85.0f, std::max(0.0f, std::atan(std::tan(std::min(85.0f, std::max(0.0f, p.pitch)) * 3.14159265f / 180.0f) * f.y / std::max(1e-6f, f.z)) * 180.0f / 3.14159265f));
+        break;
+      case kPresetStairsL:
+      case kPresetStairsU: grow(p.stair_width, xz), grow(p.total_height, f.y), grow(p.length, f.z); break;  // (the second flight's width runs along Z: the width follows the farther of X and Z)
+      case kPresetSpiral: grow(p.radius, xz), grow(p.inner_radius, xz), grow(p.total_height, f.y); break;
+      case kPresetArcade:
+        if (p.arch_rise == 0.0f && f.y != f.x && finite_bits(p.span)) p.arch_rise = std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, 0.5f * std::fabs(p.span) * f.y));
+        else if (p.arch_rise > 0.0f) grow(p.arch_rise, f.y);
+        grow(p.span, f.x), grow(p.column_width, f.x), grow(p.arch_thickness, f.x), grow(p.height, f.y), grow(p.depth, f.z);
+        break;
+      default: break;
+    }
+    return true;
+  }
   switch ((blockout::Shape)p.shape) {
+    case blockout::Shape::Convex:
+      return false;
     case blockout::Shape::Box:
     case blockout::Shape::Wedge:
     case blockout::Shape::Stairs:
@@ -1978,6 +2231,10 @@ Vec3 round_residual(const BlockoutPiece &p, const Vec3 &f) {
       if (k > 0.0f && f[i] > 0.0f && std::fabs(f[i] / k - 1.0f) > 1e-5f) r[i] = f[i] / k;
   };
   if (p.opening != 0) return r;
+  if (p.is_preset()) {  // (round 500: the round things of a preset - a column's shaft, a spiral - stay round)
+    if (p.preset == kPresetColumn || p.preset == kPresetPilaster || p.preset == kPresetSpiral) share(0, 2, round_pick(f.x, f.z));
+    return r;
+  }
   switch ((blockout::Shape)p.shape) {
     case blockout::Shape::Cylinder: share(0, 2, round_pick(f.x, f.z)); break;
     case blockout::Shape::Arch: share(0, 1, round_pick(f.x, f.y)); break;

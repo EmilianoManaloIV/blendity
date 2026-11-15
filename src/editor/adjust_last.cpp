@@ -161,6 +161,18 @@ void Editor::blockout_last_rerun() {
   if (!bp) return;
   auto size = [](float v) { return finite_bits(v) ? std::max(kBlockoutMinSize, std::min(10000.0f, v)) : kBlockoutMinSize; };
   auto thick = [](float v) { return finite_bits(v) ? std::max(0.0f, std::min(1000.0f, v)) : 0.0f; };
+  if (o.n == 7) {  // (round 500: a preset: the numbers are the copy's, from the piece as it was made; its bottom stays where it was)
+    *bp = o.pre;
+    g->set_world_position(o.base_p);
+    if (o.turnable && o.turn != o.turn_done) {
+      const int quarters = o.turn - o.turn_done;
+      o.turn_done = o.turn;
+      blockout_turn_piece(*g, quarters);
+    }
+    edit_epoch::bump();
+    amend_last_step();
+    return;
+  }
   if (bp->opening) {
     bp->width = size(o.a);
     bp->sill = thick(o.c);
@@ -267,6 +279,40 @@ void Editor::draw_obj_last_panel(const Recti &view) {
           if (o.sill_board) rows.push_back({"Sill Overhang", &o.sill_overhang, nullptr, nullptr, 0.005f, 0.0f, mx, 0, 0});
         }
       }
+    }
+    else if (o.n == 7) {  // (round 500: a preset's numbers, as the Inspector shows them: what the preset reads)
+      BlockoutPiece &p = o.pre;
+      const int k = p.preset;
+      const bool column = k == kPresetColumn || k == kPresetPilaster, stairs = k == kPresetStairsL || k == kPresetStairsU;
+      auto f = [&](const char *label, float *v, float speed, float lo, float hi) { rows.push_back({label, v, nullptr, nullptr, speed, lo, hi, 0, 0}); };
+      auto i = [&](const char *label, int *v, int lo, int hi) { rows.push_back({label, nullptr, v, nullptr, 0, 0, 0, lo, hi}); };
+      auto b = [&](const char *label, bool *v) { rows.push_back({label, nullptr, nullptr, v, 0, 0, 0, 0, 0}); };
+      if (column) {
+        f("Radius", &p.radius, 0.01f, mn, mx), f("Height", &p.height, 0.01f, mn, mx);
+        if (k == kPresetColumn) b("Square Shaft", &p.square);
+        f("Base Height", &p.base_height, 0.01f, 0.0f, mx), f("Capital Height", &p.capital_height, 0.01f, 0.0f, mx), f("Base Width", &p.base_width, 0.01f, mn, mx);
+        f("Capital Width", &p.capital_width, 0.01f, mn, mx), f("Taper", &p.taper, 0.01f, 0.05f, 2.0f);
+        if (k == kPresetColumn) i("Segments", &p.segments, 3, 256);
+      }
+      if (k == kPresetBeam) f("Length", &p.size.x, 0.01f, mn, mx), f("Depth", &p.size.y, 0.01f, mn, mx), f("Width", &p.size.z, 0.01f, mn, mx);
+      if (k == kPresetRailing) {
+        f("Length", &p.length, 0.01f, mn, mx), f("Rail Height", &p.rail_height, 0.01f, mn, mx), f("Post Spacing", &p.post_spacing, 0.01f, mn, mx);
+        f("Post Size", &p.post_size, 0.005f, mn, mx), f("Rail Size", &p.rail_size, 0.005f, mn, mx), b("Bottom Rail", &p.bottom_rail);
+      }
+      if (k == kPresetRoof) {
+        rows.push_back({"Roof Style", nullptr, &p.roof_style, nullptr, 0, 0, 0, 0, kBlockoutRoofStyles - 1, kBlockoutRoofStyleNames});
+        f("Length", &p.length, 0.01f, mn, mx), f("Span", &p.span, 0.01f, mn, mx), f("Pitch", &p.pitch, 0.5f, 0.0f, 85.0f), f("Overhang", &p.overhang, 0.01f, 0.0f, mx);
+        f("Thickness", &p.thickness, 0.01f, 0.0f, mx);
+      }
+      if (stairs) f("Flight Width", &p.stair_width, 0.01f, mn, mx), f("Total Height", &p.total_height, 0.01f, mn, mx), f("Length", &p.length, 0.01f, mn, mx);
+      if (k == kPresetSpiral) f("Radius", &p.radius, 0.01f, mn, mx), f("Inner Radius", &p.inner_radius, 0.01f, 0.0f, mx), f("Total Height", &p.total_height, 0.01f, mn, mx), f("Turn", &p.turn, 1.0f, -1440.0f, 1440.0f);
+      if (stairs || k == kPresetSpiral) i("Steps", &p.steps, 1, 256), b("Fill Under", &p.fill_under);
+      if (k == kPresetArcade) {
+        i("Count", &p.count, 1, 256);
+        f("Span", &p.span, 0.01f, mn, mx), f("Height", &p.height, 0.01f, mn, mx), f("Column Width", &p.column_width, 0.01f, mn, mx), f("Arch Rise", &p.arch_rise, 0.01f, 0.0f, mx);
+        f("Depth", &p.depth, 0.01f, mn, mx), f("Arch Thickness", &p.arch_thickness, 0.01f, mn, mx);
+      }
+      if (o.turnable) rows.push_back({"Quarter Turns", nullptr, &o.turn, nullptr, 0, 0, 0, 0, 3});  // (stairs: quarter turns about the origin; a spiral has its own Turn in degrees)
     }
     else if (o.n == 6) rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2, kOperations});  // (a mesh piece's numbers are its mesh's)
     else {

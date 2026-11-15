@@ -66,6 +66,7 @@ std::string handle_text(const BlockoutHandle &h, const BlockoutPiece &p) {
     case BlockoutHandle::OpenHead: v = p.head; break;
     case BlockoutHandle::OpenSill: v = p.sill; break;
     case BlockoutHandle::Blend: v = p.blend; break;
+    case BlockoutHandle::Preset: v = blockout_preset_handle_number(p, h.axis); break;  // (round 500: the number the handle changes, not the box's size)
     case BlockoutHandle::OutlinePoint:
     case BlockoutHandle::OutlineAdd: {
       const size_t i = (size_t)std::max(0, h.axis);
@@ -81,7 +82,8 @@ bool same_numbers(const BlockoutPiece &a, const BlockoutPiece &b) {
   for (size_t i = 0; i < a.outline.size(); i++)
     if (a.outline[i].x != b.outline[i].x || a.outline[i].y != b.outline[i].y) return false;
   return a.size.x == b.size.x && a.size.y == b.size.y && a.size.z == b.size.z && a.radius == b.radius && a.height == b.height && a.wall == b.wall &&
-         a.blend == b.blend && a.width == b.width && a.head == b.head && a.sill == b.sill;
+         a.blend == b.blend && a.width == b.width && a.head == b.head && a.sill == b.sill && a.length == b.length && a.span == b.span && a.pitch == b.pitch &&
+         a.total_height == b.total_height && a.rail_height == b.rail_height && a.depth == b.depth && a.inner_radius == b.inner_radius;
 }
 
 }  // namespace

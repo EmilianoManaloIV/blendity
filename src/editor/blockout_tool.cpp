@@ -600,6 +600,33 @@ void Editor::draw_blockout_style_rows(ui::Layout &lay) {
     u.combo(u.id(r.id), style_rect, *r.style, r.names, r.count);
     u.tooltip(r.tip);
   }
+  /* Round 500: ONE dropdown for the architectural pieces and one Add button (not nine more buttons: round 496's lesson). */
+  {
+    const Recti row = lay.row(u.row_h() + u.px(2));
+    /* The label takes what its text needs and the dropdown the rest; when the longest name still does not fit beside the label (Linux's wider font in a narrow pane at
+     * UI scale 1.5 clipped "Spiral Stairs"), the label stands alone and the dropdown shares the next row with Add - still two rows, so nothing below moves out of
+     * a short window. */
+    int widest = 0;
+    for (int k = 1; k < kBlockoutPresets; k++) widest = std::max(widest, u.font.text_width(kBlockoutPresetNames[k]));
+    const int label_w = std::min(row.w / 2, u.font.text_width("Architecture") + u.px(12));
+    const bool beside = widest + u.px(28) <= row.w - label_w - u.px(10);
+    u.label({row.x + u.px(4), row.y, beside ? label_w : row.w - u.px(8), row.h}, "Architecture");
+    const Recti add_row = lay.row(u.row_h() + u.px(2));
+    const int add_w = beside ? add_row.w - u.px(8) : u.font.text_width("Add") + u.px(24);
+    const Recti add{add_row.x + add_row.w - u.px(4) - add_w, add_row.y, add_w, add_row.h};
+    const Recti pick = beside ? Recti{row.x + u.px(4) + label_w, row.y, row.w - label_w - u.px(10), row.h} : Recti{add_row.x + u.px(4), add_row.y, add_row.w - add_w - u.px(12), add_row.h};
+    if (u.record_buttons) u.button_rects["tools:architecture"] = pick;
+    blockout_architecture_ = std::min(kBlockoutPresets - 2, std::max(0, blockout_architecture_));
+    u.combo(u.id("tools_architecture"), pick, blockout_architecture_, kBlockoutPresetNames + 1, kBlockoutPresets - 1);
+    u.tooltip("Column, Pilaster, Beam, Railing, Roof, Stairs L, Stairs U, Spiral Stairs or Arcade: one piece with numbers (Inspector, Adjust Last Operation, handles). GameObject > Blockout has them too.\n"
+              "Console: blockout add column|pilaster|beam|railing|roof|stairs l|stairs u|stairs spiral|arcade [numbers].");
+    if (u.record_buttons) u.button_rects["tools:architecture_add"] = add;
+    if (u.button(add, "Add")) {
+      const std::string kind = std::string("Blockout Piece: ") + (blockout_architecture_ == kPresetSpiral - 1 ? "Stairs Spiral" : kBlockoutPresetNames[blockout_architecture_ + 1]);
+      create_object(kind);
+    }
+    u.tooltip("Makes the piece chosen in Architecture under the selected Blockout (a new Blockout when none is selected). A Pilaster stands against the wall under the mouse or the selected room's first wall.");
+  }
 }
 
 /* The tool's switch and its options, in the Modeling Tools window (Create > Blockout): the switch, the Shape and, for a room, its wall. */

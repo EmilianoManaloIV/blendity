@@ -225,6 +225,15 @@ bool make_faces(const Cluster &c, Soup &soup, Polys &out, const std::atomic<bool
  * when the outline crosses or touches itself. */
 bool convex_parts(const std::vector<double> &xy, std::vector<std::vector<uint32_t>> &parts);
 
+/* The convex hull of 4 to 64 points (round 500): its corners (only those a face needs) and faces, each anticlockwise from outside, coplanar corners one face,
+ * corners in the middle of an edge left out; faces sorted by the y of their normal (highest first), then x, then z. Null, or why the points make no solid. */
+struct Hull {
+  std::vector<V3> verts;
+  std::vector<std::vector<uint32_t>> faces;
+  std::vector<V3> normals;
+};
+const char *convex_hull(const std::vector<Vec3> &points, Hull &out);
+
 /* A mesh piece's solid (blockout_mesh.cpp). `m`: the piece's matrix as rows of a 3 x 4. Null, or why it can't be. */
 const char *mesh_solid(const Piece &p, const double m[12], Solid &s);
 /* Where the line along `axis` at (u, w) - the next two axes in turn - passes through a mesh solid's triangles.

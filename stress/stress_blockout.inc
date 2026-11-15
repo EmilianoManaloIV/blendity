@@ -1655,6 +1655,260 @@ static void door_live_row(Report &rep, const Options &o) {
            std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
 
+/* Round 500 (task 0484): architectural pieces. Each of the nine kinds, alone and in a room, at many sizes, places and turns, on each path: the pieces are the snapshot's
+ * (blockout_preset_pieces), so the sweep measures what the editor builds. 500 arrangements a kind a path (50 with --quick). An arrangement with an even seed stands in a room
+ * (a Room piece of air, 6 x 2.8 x 6 m, the piece on its floor at a random place), an odd one stands alone; a third of the railings and roofs follow an outline (a rectangle or an
+ * L with square corners). */
+static std::vector<bl::Vec2> preset_outline_for(Rand &r) {
+  const float w = r.in(2.0f, 5.0f), d = r.in(2.0f, 5.0f), cw = r.in(0.8f, 0.6f * w), cd = r.in(0.8f, 0.6f * d);
+  if (r.pick(2)) return {bl::Vec2(0, 0), bl::Vec2(w, 0), bl::Vec2(w, d), bl::Vec2(0, d)};
+  return {bl::Vec2(0, 0), bl::Vec2(w, 0), bl::Vec2(w, cd), bl::Vec2(cw, cd), bl::Vec2(cw, d), bl::Vec2(0, d)};  // (an L)
+}
+
+static bl::BlockoutPiece preset_numbers_for(int preset, Rand &r) {
+  bl::BlockoutPiece p;
+  bl::blockout_preset_defaults(p, preset);
+  switch (preset) {
+    case bl::kPresetColumn:
+    case bl::kPresetPilaster:
+      p.radius = r.in(0.1f, 0.5f), p.height = r.in(1.5f, 4.0f), p.square = r.pick(2) != 0, p.taper = r.pick(3) ? r.in(0.3f, 1.3f) : 1.0f;
+      p.base_height = r.in(0.0f, 0.4f), p.capital_height = r.in(0.0f, 0.4f), p.base_width = 2.0f * p.radius + r.in(0.0f, 0.4f), p.capital_width = 2.0f * p.radius + r.in(0.0f, 0.4f);
+      p.segments = 3 + (int)r.pick(30);
+      break;
+    case bl::kPresetBeam: p.size = {r.in(1.0f, 6.0f), r.in(0.1f, 0.6f), r.in(0.1f, 0.6f)}; break;
+    case bl::kPresetRailing:
+      p.length = r.in(1.0f, 8.0f), p.rail_height = r.in(0.6f, 1.4f), p.post_spacing = r.in(0.3f, 1.5f), p.post_size = r.in(0.04f, 0.15f), p.rail_size = r.in(0.03f, 0.1f);
+      p.bottom_rail = r.pick(2) != 0;
+      if (r.pick(3) == 0) p.outline = preset_outline_for(r);
+      break;
+    case bl::kPresetRoof:
+      p.length = r.in(2.0f, 8.0f), p.span = r.in(2.0f, 6.0f), p.pitch = r.in(5.0f, 60.0f), p.overhang = r.pick(3) ? r.in(0.0f, 0.6f) : 0.0f;
+      p.thickness = r.pick(2) ? 0.0f : r.in(0.05f, 0.3f), p.roof_style = r.pick(3);
+      if (r.pick(3) == 0) p.outline = preset_outline_for(r);
+      break;
+    case bl::kPresetStairsL:
+    case bl::kPresetStairsU:
+      p.stair_width = r.in(0.8f, 1.6f), p.total_height = r.in(1.5f, 4.0f), p.length = r.in(1.0f, 4.0f), p.steps = 4 + (int)r.pick(13), p.fill_under = r.pick(3) != 0;
+      break;
+    case bl::kPresetSpiral:
+      p.radius = r.in(0.6f, 1.6f), p.inner_radius = r.in(0.05f, 0.3f), p.total_height = r.in(1.5f, 4.0f), p.steps = 8 + (int)r.pick(17);
+      p.turn = (r.pick(2) ? 1.0f : -1.0f) * r.in(90.0f, 540.0f), p.fill_under = r.pick(3) != 0;
+      break;
+    case bl::kPresetArcade:
+      p.count = 1 + (int)r.pick(6), p.span = r.in(1.5f, 3.5f), p.height = r.in(2.0f, 4.0f), p.arch_rise = r.pick(2) ? 0.0f : r.in(0.5f, 2.0f), p.depth = r.in(0.3f, 0.8f);
+      p.arch_thickness = r.in(0.15f, 0.5f), p.column_width = r.in(0.3f, 0.7f);
+      break;
+    default: break;
+  }
+  return p;
+}
+
+static std::vector<Piece> preset_arrangement(int preset, uint32_t seed, float grid_cell) {
+  Rand r{seed * 2654435761u + 500u + (uint32_t)preset * 7919u};
+  bl::BlockoutPiece bp = preset_numbers_for(preset, r);
+  const bool in_room = seed % 2 == 0;
+  std::vector<Piece> pieces;
+  if (in_room) {
+    Piece a = box(1, {6.0f, 2.8f, 6.0f}, {0.0f, 1.4f, 0.0f});
+    a.room = true, a.wall = a.floor = a.ceiling = 0.2f;
+    pieces.push_back(a);
+  }
+  const float spread = in_room ? 2.0f : 3.0f;
+  const int turn = r.pick(6);
+  const float angle = turn < 4 ? 90.0f * (float)turn : r.in(1.0f, 359.0f);
+  const Mat4 at = Mat4::trs({r.in(-spread, spread), 0.0f, r.in(-spread, spread)}, Quat::euler({0.0f, angle, 0.0f}), Vec3(1.0f));
+  std::vector<std::string> notes;
+  bl::blockout_preset_pieces(bp, 2, at, pieces, grid_cell, &notes);
+  const Mat4 building = Mat4::trs({r.in(-60.0f, 60.0f), r.in(-3.0f, 3.0f), r.in(-60.0f, 60.0f)}, Quat::euler({0.0f, r.in(0.0f, 360.0f), 0.0f}), Vec3(1.0f));
+  for (Piece &p : pieces) p.to_blockout = building * p.to_blockout;
+  return pieces;
+}
+
+static void preset_sweep(Report &rep, const Options &o, bool crisp) {
+  const uint32_t cases = o.quick ? 50 : 500;
+  const float cell = 0.08f;
+  rep.table({"sweep of architectural pieces (round 500), alone and in a room", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
+  for (int preset = bl::kPresetColumn; preset < bl::kBlockoutPresets; preset++)
+    for (int k = 0; k < 2; k++) {
+      const Path path = k == 0 ? Path::Crisp : Path::Field;
+      if (path == Path::Crisp && !crisp) continue;
+      const std::string name = std::string(bl::kBlockoutPresetNames[preset]) + (path == Path::Crisp ? " on the exact path" : strprintf(" on the grid (cell %g)", cell));
+      Tally t;
+      const char *one = std::getenv("BLENDITY_BLOCKOUT_PRESET_SEED");  // (one arrangement alone of the kind BLENDITY_BLOCKOUT_PRESET names (1 to 9), its pieces and overlapping faces listed)
+      const char *kind = std::getenv("BLENDITY_BLOCKOUT_PRESET");
+      if (kind && std::atoi(kind) != preset) continue;
+      for (uint32_t seed = 1; seed <= cases; seed++) {
+        if (one && (uint32_t)std::atoi(one) != seed) continue;
+        std::vector<Piece> pieces = preset_arrangement(preset, seed, path == Path::Field ? cell : 0.0f);
+        bl::blockout::Settings st;
+        st.path = path, st.cell = cell;
+        if (one) list_arrangement(seed, path, 0, pieces, st);
+        Mesh m;
+        bl::blockout::Report rp;
+        bl::blockout::Faces named;
+        if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+          t.refused++;
+          if (std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  preset %d seed %u (%s) refused: %s\n", preset, seed, name.c_str(), rp.why.c_str());
+          continue;
+        }
+        judge(seed, name.c_str(), m, named, rp, t);
+      }
+      rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved)});
+      if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+    }
+}
+
+/* Round 500: hostile numbers on every kind - each number the kind reads set, one at a time, to NaN, infinity, 0, a negative, a tiny and a huge value, and the counts to
+ * 0, -5 and 100,000 - on each path (the grid at cell 0.1). A piece the generator refuses is counted refused; nothing may be a problem. */
+static void preset_hostile_row(Report &rep, const Options &o, bool crisp) {
+  (void)o;
+  const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+  const float values[] = {nan, inf, 0.0f, -1.0f, 1e-6f, 1e9f};
+  using Field = float bl::BlockoutPiece::*;
+  const std::vector<Field> fields = {&bl::BlockoutPiece::radius, &bl::BlockoutPiece::height, &bl::BlockoutPiece::base_height, &bl::BlockoutPiece::capital_height, &bl::BlockoutPiece::base_width,
+                                     &bl::BlockoutPiece::capital_width, &bl::BlockoutPiece::taper, &bl::BlockoutPiece::length, &bl::BlockoutPiece::post_spacing, &bl::BlockoutPiece::post_size,
+                                     &bl::BlockoutPiece::rail_size, &bl::BlockoutPiece::rail_height, &bl::BlockoutPiece::span, &bl::BlockoutPiece::pitch, &bl::BlockoutPiece::overhang,
+                                     &bl::BlockoutPiece::thickness, &bl::BlockoutPiece::total_height, &bl::BlockoutPiece::stair_width, &bl::BlockoutPiece::turn, &bl::BlockoutPiece::column_width,
+                                     &bl::BlockoutPiece::arch_thickness, &bl::BlockoutPiece::arch_rise, &bl::BlockoutPiece::depth, &bl::BlockoutPiece::inner_radius};
+  rep.table({"hostile numbers on architectural pieces (round 500)", "cases", "built", "refused", "problems"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    Tally t;
+    size_t made = 0;
+    auto build_one = [&](bl::BlockoutPiece &bp, uint32_t id) {
+      Piece room = box(1, {6.0f, 2.8f, 6.0f}, {0.0f, 1.4f, 0.0f});
+      room.room = true, room.wall = room.floor = room.ceiling = 0.2f;
+      std::vector<Piece> pieces{room};
+      made++;
+      if (!bl::blockout_preset_pieces(bp, 2, Mat4::identity(), pieces, path == Path::Field ? 0.1f : 0.0f, nullptr)) {
+        t.refused++;
+        return;
+      }
+      bl::blockout::Settings st;
+      st.path = path, st.cell = 0.1f;
+      Mesh m;
+      bl::blockout::Report rp;
+      bl::blockout::Faces named;
+      if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+        t.refused++;
+        return;
+      }
+      judge(id, "hostile presets", m, named, rp, t);
+    };
+    for (int preset = bl::kPresetColumn; preset < bl::kBlockoutPresets; preset++) {
+      for (size_t f = 0; f < fields.size(); f++)
+        for (float v : values) {
+          bl::BlockoutPiece bp;
+          bl::blockout_preset_defaults(bp, preset);
+          bp.*fields[f] = v;
+          if (preset == bl::kPresetBeam) bp.size.x = v, bp.size.z = v;
+          build_one(bp, (uint32_t)(preset * 1000 + f * 10));
+        }
+      for (int count : {0, -5, 100000, 1}) {
+        bl::BlockoutPiece bp;
+        bl::blockout_preset_defaults(bp, preset);
+        bp.steps = count, bp.count = count, bp.segments = count;
+        build_one(bp, (uint32_t)(preset * 1000 + 900));
+      }
+      for (int style = -3; style < 6; style++) {
+        bl::BlockoutPiece bp;
+        bl::blockout_preset_defaults(bp, preset);
+        bp.roof_style = style;
+        build_one(bp, (uint32_t)(preset * 1000 + 950 + style + 3));
+      }
+    }
+    rep.row({path == Path::Crisp ? "architectural pieces on the exact path" : "architectural pieces on the grid (cell 0.1)", std::to_string(made), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems)});
+    if (!t.first.empty()) rep.note(std::string("hostile presets: the first problem is ") + t.first);
+  }
+}
+
+/* Round 500 (criterion 7): `benchscene blockout` - the 100-piece bench interior, live in a headless editor with workers on - with one of each kind added (the bench itself is not
+ * changed: the pieces are added here). The verdicts are the bench's: its first build lands, the mesh is sound, and a door slid along its wall for 120 frames still gives no frame over
+ * 16.7 ms, a landing within 100 ms and no kernel call on the main thread. A miss is reported, not hidden. */
+static void preset_bench_row(Report &rep, const Options &o) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  ed.command("benchscene blockout");
+  ed.command("blockout wait");
+  GameObject *bo = nullptr, *door = nullptr;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!bo && g.get<Blockout>()) bo = &g;
+    if (!door && g.name.rfind("Door X 0.", 0) == 0) door = &g;
+  });
+  if (!bo || !door) return rep.row({"benchscene blockout with one of each architectural piece: the bench scene has no such piece", "", "", "", "", "", "", "OVER"});
+  const size_t before = bo->get<MeshFilter>() && bo->get<MeshFilter>()->mesh ? bo->get<MeshFilter>()->mesh->face_count() : 0;
+  int kind = 0;
+  for (int preset = bl::kPresetColumn; preset < bl::kBlockoutPresets; preset++, kind++) {
+    GameObject *g = ed.scene().create(bl::kBlockoutPresetNames[preset], bo);
+    bl::BlockoutPiece *bp = g->add<bl::BlockoutPiece>();
+    bl::blockout_preset_defaults(*bp, preset);
+    g->set_local_position(Vec3(-30.0f + 4.5f * (float)kind, -1.4f, -20.0f));  // (in the open beside the building: the bench's own pieces keep their verdicts)
+  }
+  ed.command("blockout wait");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const Mesh *m = bo->get<MeshFilter>()->mesh.get();
+  const bool grew = m && m->face_count() > before + 100;
+  const std::string bad = m ? problem(*m) : "no mesh";
+  const BlockoutStatus &st = bo->get<Blockout>()->state.status;
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), main0 = ed.blockout_main_builds_for_test();
+  const int frames = o.quick ? 30 : 120;
+  const Vec3 home = door->local().position;
+  BenchDrag d;
+  d.landed = landed0, d.start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
+    d.frame(ed, f, {});
+  }
+  ed.command("blockout wait");
+  std::sort(d.frame_ms.begin(), d.frame_ms.end());
+  const double worst = d.frame_ms.back(), land_median = median(d.landing_ms);
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = bad.empty() && grew && st.skipped.empty() && st.refusal.empty() && (o.quick || (worst <= 16.7 && !d.landing_ms.empty() && land_median <= 100.0 && main_builds == 0));
+  rep.table({"benchscene blockout with one of each architectural piece (round 500), a door slid along its wall for " + std::to_string(frames) + " frames", "faces before", "faces after", "mesh", "skipped",
+             "frame median ms", "frame worst ms", "move to landing median ms", "main-thread builds", "verdict"});
+  rep.row({std::to_string(bo->get<Blockout>()->state.status.pieces) + " pieces", std::to_string(before), std::to_string(m ? m->face_count() : 0), bad.empty() ? "closed" : "PROBLEM: " + bad,
+           std::to_string(st.skipped.size()), f2(median(d.frame_ms)), f2(worst), d.landing_ms.empty() ? "none" : f2(land_median), std::to_string(main_builds), o.quick ? "-" : ok ? "ok" : "OVER"});
+  (void)started0;
+}
+
+/* Round 500 (fix pass): what a piece's wire costs a frame. `benchscene blockout` with 20 tapered columns (a hull each) under it, all selected - every selected piece draws its
+ * outline every frame - and the frame time printed over 120 frames. A measurement: no verdict. */
+static void preset_wire_row(Report &rep, const Options &o) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  ed.command("benchscene blockout");
+  ed.command("blockout wait");
+  GameObject *bo = nullptr;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!bo && g.get<Blockout>()) bo = &g;
+  });
+  if (!bo) return rep.row({"20 tapered columns selected in the bench interior: no Blockout", "", "", ""});
+  std::vector<uint64_t> ids;
+  for (int k = 0; k < 20; k++) {
+    GameObject *g = ed.scene().create("Tapered", bo);
+    bl::BlockoutPiece *bp = g->add<bl::BlockoutPiece>();
+    bl::blockout_preset_defaults(*bp, bl::kPresetColumn);
+    bp->taper = 0.7f, bp->segments = 32;
+    g->set_local_position(Vec3(-30.0f + 1.5f * (float)k, -1.4f, -20.0f));
+    ids.push_back(g->id);
+  }
+  ed.command("blockout wait");
+  for (size_t i = 0; i < ids.size(); i++) ed.select_for_test(ids[i], i != 0);
+  for (int i = 0; i < 5; i++) ed.step_frame_headless();
+  std::vector<double> ms;
+  for (int f = 0; f < (o.quick ? 30 : 120); f++) {
+    ScopedTimer t;
+    ed.step_frame_headless();
+    ms.push_back(t.ms());
+  }
+  std::sort(ms.begin(), ms.end());
+  rep.table({"wire of 20 selected tapered columns (32 sides) in benchscene blockout (round 500)", "frames", "frame median ms", "frame worst ms"});
+  rep.row({"every selected piece draws its outline every frame; the hulls are kept per thread", std::to_string(ms.size()), f2(median(ms)), f2(ms.back())});
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -1674,6 +1928,8 @@ static void test_blockout(Report &rep, const Options &o) {
   if (std::getenv("BLENDITY_BLOCKOUT_OUTLINE")) return outline_room_sweep(rep, o, crisp);  // (round 497: the outline rooms' sweep alone)
   if (std::getenv("BLENDITY_BLOCKOUT_WINDOWS")) return window_style_sweep(rep, o, crisp), window_hostile_row(rep, o, crisp), window_cost_row(rep, o, crisp), window_live_row(rep, o);  // (round 498: the styled windows' sweep, hostile and cost rows and live row alone)
   if (std::getenv("BLENDITY_BLOCKOUT_DOORS")) return door_style_sweep(rep, o, crisp), door_hostile_row(rep, o, crisp), door_live_row(rep, o);  // (round 499: the styled doors' sweep, hostile row and live row alone)
+  if (std::getenv("BLENDITY_BLOCKOUT_PRESETS") || std::getenv("BLENDITY_BLOCKOUT_PRESET") || std::getenv("BLENDITY_BLOCKOUT_PRESET_SEED"))
+    return preset_sweep(rep, o, crisp), preset_hostile_row(rep, o, crisp), preset_bench_row(rep, o), preset_wire_row(rep, o);  // (round 500: the architectural pieces' sweep, hostile row and bench row alone; BLENDITY_BLOCKOUT_PRESET=<1 to 9> one kind, BLENDITY_BLOCKOUT_PRESET_SEED=<n> one arrangement of it)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -1843,4 +2099,8 @@ static void test_blockout(Report &rep, const Options &o) {
   door_style_sweep(rep, o, crisp);
   door_hostile_row(rep, o, crisp);
   door_live_row(rep, o);
+  preset_sweep(rep, o, crisp);
+  preset_hostile_row(rep, o, crisp);
+  preset_bench_row(rep, o);
+  preset_wire_row(rep, o);
 }

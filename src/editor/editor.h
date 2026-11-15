@@ -4175,6 +4175,9 @@ class Editor {
   void blockout_window_fit_lines(const Blockout &b, std::vector<std::pair<std::string, bool>> &lines) const;  // (round 498: windows the grid held coarse)
   int blockout_window_style_ = 0;  // (round 498: the Modeling Tools window's Style dropdown: the next window made from a button or a menu has it; per editor, not saved)
   int blockout_door_style_ = 0;    // (round 499: the same for the Door button's Door Style dropdown)
+  int blockout_architecture_ = 0;  // (round 500: the Architecture dropdown's choice, 0 .. 8: Column to Arcade - kBlockoutPresetNames from 1; the Add button makes it)
+  bool blockout_preset_command(const std::vector<std::string> &t);  // (round 500: blockout set <a preset's number word> <value>; false: no such word)
+  bool blockout_stand_pilaster(GameObject &bo, GameObject &piece, const GameObject *sel);  // (round 500: a Pilaster against the wall under the mouse, else the selected room's first wall)
   /* Round 499: what a Door or Window button or menu entry creates: `kind` with the dropdown's style word (nothing added for Opening Only and for any other kind). The console's
    * `create Blockout Piece: Door` does not go through this: it makes Opening Only whatever the dropdown shows. */
   std::string blockout_ui_kind(const std::string &kind) const;
@@ -6011,6 +6014,7 @@ class Editor {
     int style = -1, panes_across = 3, panes_up = 3;
     float frame_width = 0.06f, frame_depth = 0.1f, arch_rise = 0.0f, sill_overhang = 0.04f;
     bool glass = true, sill_board = true;
+    BlockoutPiece pre;  // a preset just made (round 500, n 7): its numbers - F9 edits this copy and puts it back on the piece
     /* A door (round 499): style is then BlockoutDoorStyle (-1: not a door or window), `opening` says which (1 door, 2 window); these are its leaf's numbers. */
     int opening = 0, hinge = 0, slide = 0;
     bool leaf = true;

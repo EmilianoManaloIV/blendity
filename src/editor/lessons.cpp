@@ -2464,6 +2464,39 @@ A door in a Blockout does not have to be a bare hole either. Give it a Style and
 ? A Revolving door's Drum Radius is wider than its wall is long. What do you get? | A drum cut through all of the wall with a ring round it: the numbers are held to what can be built and the mesh stays closed and valid, or the Blockout's status says what it left out.
 ? Why is a door's leaf not simply added in the doorway? | A Blockout adds before it subtracts, so the cutters that make the doorway would cut a leaf added inside it. The door is built from cutters that leave the leaf's footprint out, so the leaf is what is left.
 )"},
+    {"Architectural pieces", "A column, pilaster, beam, railing, roof, stairs with a landing, spiral stairs and an arcade: each one piece made from numbers", R"(
+Walls and floors are not all a building has. The Blockout has nine architectural pieces - a Column, a Pilaster, a Beam, a Railing, a Roof, Stairs L, Stairs U, Spiral Stairs and an Arcade - and each is ONE piece: one object in the Hierarchy, one set of handles, one undo step to change it. Its numbers make its solids, as a window's style makes a frame. They are blockout shapes, not finished architecture: no fluting, mouldings or dormers. Every one stands on its origin (the middle of its footprint, at its bottom), with +Y up.
+# Where to make one
+- The Modeling Tools window, Create > Blockout: the Architecture dropdown and its Add button. GameObject > Blockout has an entry for each. The console: `blockout add column|pilaster|beam|railing|roof|stairs l|stairs u|stairs spiral|arcade [numbers]`. Each goes under the selected Blockout (a new one when none is selected). Adjust Last Operation (F9) shows its numbers right after it is made; the Inspector shows only the rows of its Preset; `blockout set <word> <value>` changes the selected pieces' numbers (the words are in the console's usage).
+- A Pilaster stands against a wall: the wall under the mouse in the Scene view, or the selected room's first wall, with its back on the wall and its front out into the room.
+# What each builds
+- Column: a round or square shaft with a plinth (Base Height, Base Width) and a capital (Capital Height, Capital Width). Taper is the shaft's top width as a share of its bottom: 0.8 narrows it by a fifth. Radius, Height and Segments are the shaft's.
+- Pilaster: the square column cut in half, flat against the wall.
+- Beam: a box with a Length, a Depth (how tall it stands) and a Width. Railing: posts at both ends and evenly between, never more than Post Spacing apart - 5 m at 1 m is 6 posts - joined by a top rail at Rail Height and, with Bottom Rail on, a low one. With an outline the posts and rails run along every side of it.
+- Roof: Gable, Hip or Shed over a Length by a Span, by Pitch in degrees; Ridge Height is worked out from it and, edited, sets it. Overhang is how far the base reaches past the walls; Thickness 0 is a solid roof, above 0 a sheet of that thickness. Over an outline with square corners the roof is the union of one roof over each rectangle of it, so a roof over an L has a valley, not an exact one. Its top faces are the new Roof class of face, so a Roof Material can be given on the Blockout or the piece.
+- Stairs L and U: two flights of Steps each, a landing between them at half the Total Height, the last tread at the Total Height; Turn 90 turns them. Spiral Stairs: Steps round a post, Turn degrees in all (at most 170 a step), up to Total Height. Arcade: Count arches on Count + 1 columns, each arch Span wide, with an Arch Rise (0: a half circle).
+# Scale and the grid
+- Scaling one grows its sizes, not its counts or angles: a railing scaled along its length has more posts at the same spacing. On the field path a part under one and a half Field Cells (a thin railing, a roof sheet) is held at one cell and the Blockout's status says which Field Cell shows it; the exact path shows it at any cell.
+# Try it
+! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 6 5 2.6 | 1. A room 6 m by 5 m and 2.6 m high, in a new Blockout
+! cmd:blockout add column 0.2 2.6 | 2. A round column 2.6 m high with a plinth and a capital
+! cmd:blockout set taper 0.8 | 3. Its shaft narrows to four fifths of its width at the top
+! cmd:blockout add pilaster 0.2 2.6 | 4. A pilaster against the selected room's first wall
+! cmd:blockout add beam 4 0.3 0.3 | 5. A beam 4 m long
+! cmd:blockout add railing 5 1 | 6. A railing 5 m long: 6 posts at the default 1 m spacing
+! cmd:blockout set spacing 0.5 | 7. Posts at most half a metre apart: 11 posts
+! cmd:blockout add roof 6 4 35 | 8. A gable roof over 6 m by 4 m at 35 degrees
+! cmd:blockout set roofstyle hip | 9. The same roof, hipped
+! cmd:blockout add stairs l 1 3 2 8 | 10. Stairs with a landing turning a quarter, 8 steps a flight
+! cmd:blockout add stairs spiral 1 0.1 3 16 270 | 11. Spiral stairs turning 270 degrees in 16 steps
+! cmd:blockout add arcade 4 2.5 3 | 12. An arcade of 4 arches on 5 columns
+# From the console
+- `blockout add column [radius height]`, `pilaster [radius height]`, `beam [length depth width]`, `railing [length height]`, `roof [length span pitch]`, `stairs l|u [width total_height run steps]`, `stairs spiral [radius inner_radius total_height steps turn]`, `arcade [count span height]`. `blockout set taper|shaft|baseheight|capitalheight|basewidth|capitalwidth|spacing|postsize|railsize|railheight|bottomrail|roofstyle|pitch|ridge|overhang|thickness|length|span|totalheight|flightwidth|steps|fill|innerradius|turn|count|columnwidth|archrise|archthickness|depth|radius|height|segments <value>`; `blockout outline <x z> ...` gives a railing or a roof its plan; `blockout set material roof <material>` is the Roof Material.
+? A railing 5 m long has Post Spacing 1 m. How many posts, and what if you set the spacing to 0.4 m? | 6 posts: one at each end and one every metre. At 0.4 m the posts stand at most 0.4 m apart, evenly: 14 posts (13 gaps of 0.385 m). At most 256 posts a side are made.
+? You set a Roof's Pitch to 45 degrees and then type a Ridge Height. What happens to the Pitch? | It follows: Ridge Height is not a separate number but the Pitch worked out for the roof's sizes, and typing it sets the Pitch from it (the ridge's rise over the half span, a Hip's over the nearer half side, a Shed's over the whole span).
+? Why does a Column's Taper stop at 0.05, and a Spiral's steps at 170 degrees each? | A shaft that narrows to nothing has no top to stand a capital on, and a step is one convex block: turned more than half a circle it would not be convex. The numbers are held to what can be built, so the mesh stays closed and valid.
+? You scale a Railing to twice its length. Does it have twice the posts? | Its Length doubles and its Post Spacing stays, so yes: about twice as many posts at the same spacing. Its Rail Height and the posts' and rails' sizes scale with the other axes.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, what the editor keeps between frames, and what still costs", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the moved bones is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. This lesson shows how to place a slow frame, what the editor keeps from one frame to the next so a small pose change stays small, and what a pose of the whole body still costs.
 # The Posing block

@@ -1336,8 +1336,9 @@ void Editor::draw_menubar(const Recti &r) {
                          : "Off: select a Blockout, or one of its pieces, first. Console: blockout bake.");
       const bool baked = bo && bo->get<BlockoutBaked>();
       if (u.menu_item("Unbake Blockout", nullptr, false, baked)) run_console_command("blockout unbake");
-      u.tooltip(baked ? "A baked mesh becomes the Blockout again, built from its pieces; a mesh edited since the bake asks first. Console: blockout unbake [force]."
-                      : "Off: select an object that was baked with Bake to Mesh first. Console: blockout unbake [force].");
+      u.tooltip(baked ? "A baked mesh becomes the Blockout again, built from its pieces; a mesh edited since the bake asks first. The same as the Unbake button in the baked object's\n"
+                        "Inspector. Console: blockout unbake [force]."
+                      : "Off: select an object that was baked with Bake to Mesh first (this entry, or the Unbake button in its Inspector, then brings the Blockout back). Console: blockout unbake [force].");
     }
     u.submenu("Draw", u.px(200), [this] {
       for (int k = 0; k < kDrawShapeCount; k++)
