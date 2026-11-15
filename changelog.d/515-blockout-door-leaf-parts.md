@@ -40,12 +40,23 @@ remade. The Unity bridge is not covered by a test.
 
 **Numbers** (`blendity_stress --only blockout`, untimed counts at below-normal priority beside other work), against
 round 500:
-- **The 2,000-door sweep** on the grid: 2,000 built, 0 problems, 18 with faces of no area - the same as round 500.
-- **Hostile numbers on styled doors** (180 cases on the grid): 127 built, 53 refused (round 500: 123 / 57), 0 problems -
-  the four more built are doors with a NaN Leaf Thickness, which no longer refuses the doorway.
-- Every other count row the same; the build and landing counts of the live rows differ by timing under load.
+- **The 2,000-door sweep** on the grid: 2,000 built, 0 problems, 18 with faces of no area - the same as round 500. On
+  the exact path: 2,000 built, **1 problem** (round 500: 0), small faces on top of others 70 (94), faces of no area 0
+  (2), unresolved places 85 (163). The one problem is seed 1927, a Sliding door in a turned building: flat faces on top
+  of each other - the kernel's coplanar contact class (ADR 0128); where in the doorway was not chased this round
+  (`BLENDITY_BLOCKOUT_DOOR_SEED=1927` lists it). The rest fell with the leaf's solids gone.
+- **Hostile numbers on styled doors** (180 cases a path): grid 127 built, 53 refused (round 500: 123 / 57); exact 129 /
+  51 (125 / 55); 0 problems on both - the four more built are doors with a NaN Leaf Thickness, which no longer refuses
+  the doorway.
+- Every other count row the same on both builds; the build and landing counts of the live rows differ by timing under
+  load.
 
-**Checked:** CHECKED_LINE
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each, with main (e0c8fcef) merged in:
+Windows without the libraries 22,682 / 2,331 / 9,782 / 190 / 24 checks, with them 29,929 / 2,357 / 9,838 / 208 / 24,
+Linux 22,685 / 2,331 / 9,784 / 190 / 24. Coverage map clean. Two code reviews (the first found two undo steps for a
+deleted leaf, a static collider in Play mode, preview poses written back, a moved leaf deleted - all fixed) and a
+test-engineer's 16 edge tests (a NaN Open Amount's rebuild loop and a leaf dropped under another door - fixed). The
+round's tests are in a new `tests/test_blockout_leaf.cpp`: test_blockout.cpp reached MSVC's object-section limit.
 
 <!-- README -->
 replace: a **Room tool** that draws a room on the ground or a face (round 479)
