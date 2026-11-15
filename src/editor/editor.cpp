@@ -780,7 +780,10 @@ void Editor::frame_body(std::vector<Event> &events) {
    * state holding the tick had refitted at once, Ctrl+Z stuck). */
   if (scene_) update_collider_fits();
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
+  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) {  // (an extrude: one step, on its click)
+    if (scene_ && !playing_) blockout_sync_leaves();  // (round 515: a leaf made, removed or turned by what the step holds lands in the step, not in one after it)
+    commit_undo();
+  }
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
