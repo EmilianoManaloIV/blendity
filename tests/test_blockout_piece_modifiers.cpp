@@ -1089,10 +1089,12 @@ void tests_round514_engineer_b() {
         std::printf("      method %d: %zu faces, %zu open edges, %zu skipped, refusal '%s'\n", method, m ? m->face_count() : 0, m ? r514_open_edges(*m) : 0, st.skipped.size(), st.refusal.c_str());
         CHECK(m && r514e_valid(*m));
         if (m) CHECK(r514_open_edges(*m) == 0);  // (whatever the path decided, the Blockout's own mesh is closed)
-        if (method == 1) {  // (the exact path: an open mesh piece is skipped, and the status says which piece and why)
-          CHECK(!st.skipped.empty() || !st.refusal.empty());
-          CHECK(log.find("Skipped '" + p->name + "'") != std::string::npos || log.find("Refused:") != std::string::npos);
-        }
+        /* Changed after round 514's code review (ADR 0138 "As built", decision 5 refined): an open result is refused before the kernel, on
+         * every path - the piece builds from its numbers and the status says why - instead of being skipped on the exact path and sending
+         * its cluster to the grid on Auto. */
+        (void)st;
+        CHECK(r514_numbers_build(*bo));
+        CHECK(log.find("'" + p->name + "': its modifiers leave the surface open") != std::string::npos);
       }
     }
     CHECK(open_found > 0);  // (if no candidate opens the surface, the spec's example is not reachable and the test needs a new one)
@@ -1854,6 +1856,130 @@ void tests_round514_engineer() {
     bool warned = false;
     for (const auto &l : lines) warned = warned || (l.second && l.first.find("thinner than the Field Cell") != std::string::npos);
     CHECK(warned);
+  });
+
+  /* ---- Round 514's code review ---- */
+  test("blockout piece modifiers: a refusal follows the stack in use - undo back to a good stack shows it built as a mesh again, and a refused stack is not run again at every build", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *box = r514_box(ed);
+    CHECK(box != nullptr);
+    if (!box) return;
+    GameObject *bo = blockout_of_piece(*box);
+    const std::string box_name = box->name, bo_name = bo ? bo->name : std::string();
+    ed.command("select " + box_name);
+    ed.command("component BevelModifier");
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("bevel");
+    r514_settle(ed, 2);
+    ed.command("component DecimateModifier");
+    box->get<DecimateModifier>()->ratio = 0.01f;
+    ed.command("blockout wait");
+    auto said = [&](const char *what) {
+      GameObject *b = ed.scene().find_by_name(bo_name);
+      std::vector<std::pair<std::string, bool>> lines;
+      if (b) blockout_piece_stack_status(*b, lines);
+      for (const auto &l : lines)
+        if (l.first.find(what) != std::string::npos) return true;
+      return false;
+    };
+    CHECK(said("built from its numbers"));
+    const uint64_t e0 = blockout_piece_stack_evaluations();
+    for (int k = 1; k <= 4; k++) {  // (moves of the refused piece: the refusal is kept, nothing runs again)
+      box->set_local_position(Vec3(0.3f * (float)k, 0.0f, 0.0f));
+      ed.command("blockout wait");
+    }
+    CHECK(blockout_piece_stack_evaluations() == e0);
+    ed.command("undo");
+    ed.command("blockout wait");
+    CHECK(!said("built from its numbers"));  // (the Bevel alone again: no stale refusal)
+    CHECK(said("built as a mesh"));
+  });
+
+  test("blockout piece modifiers: Copy to Selected copies a piece's Bevel to the other selected pieces by real clicks, and names a room it cannot take", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(1500, 1400);
+    GameObject *a = r514_box(ed);
+    CHECK(a != nullptr);
+    if (!a) return;
+    ed.command("blockout add box 1 1 1");
+    ed.command("blockout add box 1 1 1");
+    std::vector<GameObject *> pieces;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<BlockoutPiece>()) pieces.push_back(&g);
+    });
+    CHECK(pieces.size() == 3);
+    if (pieces.size() != 3) return;
+    GameObject *room = pieces[1], *src = pieces[2];
+    room->get<BlockoutPiece>()->room = true;
+    ed.command("select " + a->name);
+    ed.command("selectadd " + room->name);
+    ed.command("selectadd " + src->name);  // (the last selected: the Inspector's object)
+    ed.command("component BevelModifier");  // (the console adds to every selected object: take it off the others)
+    for (GameObject *g : {a, room})
+      for (size_t i = 0; i < g->components.size(); i++)
+        if (std::string(g->components[i]->type_name()) == "BevelModifier") g->components.erase(g->components.begin() + (std::ptrdiff_t)i), i--;
+    CHECK(r514_count(*src, "BevelModifier") == 1 && r514_count(*a, "BevelModifier") == 0);
+    ed.record_buttons_for_test(true);
+    r514_settle(ed, 2);
+    size_t at = 0;
+    for (size_t i = 0; i < src->components.size(); i++)
+      if (std::string(src->components[i]->type_name()) == "BevelModifier") at = i;
+    const Recti m = ed.inspector_menu_rect_for_test("mod" + std::to_string(at));
+    CHECK(m.w > 0);
+    r514_click(ed, m.x + m.w / 2, m.y + m.h / 2);
+    r514_settle(ed, 2);
+    CHECK(r514_click_key(ed, "menu:Copy to Selected"));
+    CHECK(r514_count(*a, "BevelModifier") == 1);     // (a piece takes it)
+    CHECK(r514_count(*room, "BevelModifier") == 0);  // (a room does not: named in the log)
+  });
+
+  test("blockout piece modifiers: touching Array copies and a Mirror of a centred piece build on the exact path as one closed solid, not on the grid", [] {
+    if (!blockout::crisp_available()) return std::printf("    (no exact path in this build)\n"), void();
+    for (const char *type : {"ArrayModifier", "MirrorModifier"}) {
+      blockout_piece_stack_cache_clear();
+      Editor ed;
+      ed.init_headless(900, 600);
+      GameObject *box = r514_box(ed);
+      CHECK(box != nullptr);
+      if (!box) return;
+      GameObject *bo = blockout_of_piece(*box);
+      ed.command("select " + box->name);
+      ed.command(std::string("component ") + type);
+      ed.command("blockout wait");
+      const BlockoutStatus &st = bo->get<Blockout>()->state.status;
+      std::printf("    %s: path '%s', %zu faces\n", type, st.path.c_str(), r514_mesh(*bo) ? r514_mesh(*bo)->face_count() : 0);
+      CHECK(st.path == "exact");
+      CHECK(r514_mesh(*bo) && r514_mesh(*bo)->face_count() == 6);  // (one box: three long, or the box itself mirrored onto itself)
+    }
+  });
+
+  test("blockout piece modifiers: an Array that fits a curve and a Boolean put on a piece by the console are named in the status as doing nothing", [] {
+    blockout_piece_stack_cache_clear();
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *box = r514_box(ed);
+    CHECK(box != nullptr);
+    if (!box) return;
+    GameObject *bo = blockout_of_piece(*box);
+    ed.command("select " + box->name);
+    ed.command("component ArrayModifier");
+    box->get<ArrayModifier>()->fit_type = 2;
+    ed.command("component BooleanModifier");
+    ed.command("blockout wait");
+    CHECK(!blockout_piece_stack_live(*box));
+    std::vector<std::pair<std::string, bool>> lines;
+    if (bo) blockout_piece_stack_status(*bo, lines);
+    bool array = false, boolean = false;
+    for (const auto &l : lines) {
+      std::printf("    status: %s\n", l.first.c_str());
+      array = array || l.first.find("its Array does nothing on a piece") != std::string::npos;
+      boolean = boolean || l.first.find("its Boolean does nothing on a piece") != std::string::npos;
+    }
+    CHECK(array && boolean);
+    CHECK(bo && r514_numbers_build(*bo));
   });
 }
 

@@ -30,8 +30,16 @@ Cube primitive.
 
 **Changed for old scenes:** a modifier already saved on a piece (inert until now) works when the scene is opened.
 
+**After review:** a stack's result is tidied (copies of an Array that touch lose the faces between them; a face twice
+is kept once) and refused - the piece built from its numbers, the status saying why - when it is not one closed solid,
+is flat or has fewer than four faces (a Decimate to two flat faces made the piece vanish silently before); refusals are
+kept with the cache so a refused stack does not run again at every build; Copy to Selected copies a modifier between
+pieces (and names a piece that refuses it); an Array that fits a curve is said to do nothing on a piece; a modifier a
+piece does not take, put there by the console, is named in the status; a stacked piece's faces shade smooth by angle;
+the picking names a piece by the meshes the build used.
+
 **Limits:** a piece with a stack builds as a mesh - on the exact path through Manifold, on the grid path as coarse as
-the cell; its Blend radius is not read; stairs, arches and outlines are united by a build of the piece alone before the
+the cell; its Blend radius is not read, nor that of the pieces in its cluster (round 480's rule for mesh pieces); stairs, arches and outlines are united by a build of the piece alone before the
 stack (on builds without Blender's libraries, by the grid). No stacks on rooms, doors / windows and Intersect pieces.
 
 **Checked:** CHECKED_514

@@ -1986,7 +1986,8 @@ void Editor::draw_inspector(const Recti &r) {
         if (on_blockout) refuse_apply_on_blockout("Apply All");
         else apply_all = true;
       }
-      u.tooltip(on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
+      u.tooltip(mod_piece ? "Refused on a Blockout piece: Bake the Blockout to Mesh to keep the result as a mesh."
+                : on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
       if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
         const std::string why = blockout_piece_stack_refusal(*mod_piece);
@@ -1994,8 +1995,8 @@ void Editor::draw_inspector(const Recti &r) {
         u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, why.empty() ? "Runs on this piece's own shape before it is added or cut." : "This piece takes no modifiers: " + why + ".",
                 why.empty() ? u.theme.text_dim : u.theme.warning);
         u.tooltip(why.empty() ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
-                                "as a mesh: slower and less exact than its numbers, and its Blend radius is not used. The other pieces stay as they are. Moving the piece does "
-                                "not run them again; changing a number or a modifier does."
+                                "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
+                                "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
                               : "Modifiers on a room, a door or window, or an Intersect piece are not built yet: a stack put on one stays on it and does nothing.");
       }
       if (on_blockout && !mod_piece && !mods.empty()) {
@@ -2196,11 +2197,18 @@ void Editor::draw_inspector(const Recti &r) {
           }
           case CopyToSelected: {
             int n = 0;
-            for (GameObject *o : selected_objects(false))
-              if (o != g && o->get<MeshFilter>()) {
-                o->add_component(g->components[act_ci]->clone());
-                n++;
+            const char *type = g->components[act_ci]->type_name();
+            for (GameObject *o : selected_objects(false)) {
+              const BlockoutPiece *to_piece = o->get<BlockoutPiece>();  // (round 514: a piece takes a stack too - one that cannot is skipped and named)
+              if (o == g || (!o->get<MeshFilter>() && !to_piece)) continue;
+              const std::string no = !to_piece ? std::string() : !blockout_piece_modifier_refusal(type).empty() ? blockout_piece_modifier_refusal(type) : blockout_piece_stack_refusal(*to_piece);
+              if (!no.empty()) {
+                Log::warn("Copy to Selected: not to '%s' - %s", o->name.c_str(), no.c_str());
+                continue;
               }
+              o->add_component(g->components[act_ci]->clone());
+              n++;
+            }
             Log::info("Copied %s to %d object(s)", g->components[act_ci]->type_name(), n);
             mark_changed("Copy Modifier to Selected");
             break;

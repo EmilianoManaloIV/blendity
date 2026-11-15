@@ -38,6 +38,10 @@ void blockout_piece_stack_note(const GameObject &piece, const blockout::Piece &n
  * cache by key when it was evaluated before (a moved piece keeps its key). A piece whose shape or stack gives no mesh is left as its
  * numbers. Returns how many stacks were evaluated (not taken from the cache). */
 size_t blockout_piece_stacks_apply(std::vector<blockout::Piece> &pieces, const BlockoutSurface &surface);
+/* The picking's part (main thread): the noted pieces made mesh pieces from the cache only, never evaluating - so the faces' owners are
+ * named from the meshes the build used. Whether the piece at `index` of a snapshot carries a stack (its faces shade smooth by angle). */
+void blockout_piece_stacks_cached(std::vector<blockout::Piece> &pieces, const BlockoutSurface &surface);
+bool blockout_piece_stacked(const BlockoutSurface &surface, size_t index);
 /* What the Blockout's status says about its pieces' stacks: each piece that carries one and is built as a mesh, and each whose
  * modifiers do nothing (a room, a door or window, an Intersect piece) and why. Lines as `blockout_status_lines` makes them. */
 void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pair<std::string, bool>> &lines);

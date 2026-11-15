@@ -55,6 +55,23 @@ inert and the Inspector shows no Modifiers section for it.
 9. **Old scenes:** a piece with no modifier builds bit for bit as before. A scene saved with a modifier on a piece (inert
    until now) shows that modifier's effect from this round on - the change is named in the changelog.
 
+## As built (round 514, after review)
+- The snapshot only notes a stacked piece (its place in the piece list, the key, clones of its modifiers, carried by the
+  `BlockoutSurface` the build already receives); `to_piece` is unchanged. The build (its worker, or the synchronous
+  build of tests and scripts) turns the noted piece into a mesh piece just before the kernel runs.
+- The evaluated meshes are kept in one process-wide cache keyed by the piece's numbers and its stack (so the same column
+  in two Blockouts is evaluated once), bounded at 512 entries and 64 MB with the least recently used half dropped past
+  either, guarded by one mutex, emptied by a new or opened scene. A stack that gives no shape is kept too, as its reason,
+  so it is not run again at every build; the status names the piece and why, and the piece builds from its numbers.
+- Decision 5 refined: a stack's result is tidied (points at one place made one, faces exactly on top of each other the
+  opposite way round dropped - copies of an Array that touch - and the same face twice kept once), then refused, with the
+  piece built from its numbers, when it is not one closed surface, is flat or has fewer than four faces. The kernel is
+  not left to send the cluster to the grid for an open mesh.
+- A stacked piece is a mesh piece for the kernel, and a mesh piece turns off the Blend radius of the pieces in its
+  cluster (round 480's rule): a Bevel on a column beside a blended piece removes that neighbour's rounding; the kernel's
+  note reaches the status. Its faces shade smooth by the 40-degree Auto Smooth angle (a stacked cylinder is not faceted).
+- An Array that fits a curve does nothing on a piece (the clone has no scene to find the curve); the status says so.
+
 ## Consequences
 - A piece's Inspector gets the Modifiers section an object has; the kernel gains one public function (a piece's shape as
   a mesh) and reads nothing new; the build job evaluates stacks and caches them by key.

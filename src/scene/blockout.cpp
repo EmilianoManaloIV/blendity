@@ -1631,9 +1631,12 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
 /* Round 514 (ADR 0138): a piece's own shape as a mesh, for the modifier stack it carries. */
 bool piece_shape_mesh(const Piece &piece, Mesh &out) {
   out = Mesh();
-  if (piece.shape == Shape::Mesh) {
+  if (piece.shape == Shape::Mesh) {  // (its geometry only: the source's caches may be filled on the main thread meanwhile)
     if (!piece.mesh || piece.mesh->face_count() == 0) return false;
-    out = *piece.mesh;
+    out.positions = piece.mesh->positions;
+    out.face_offsets = piece.mesh->face_offsets;
+    out.corner_verts = piece.mesh->corner_verts;
+    out.touch();
     return true;
   }
   Piece p = piece;
@@ -1643,7 +1646,19 @@ bool piece_shape_mesh(const Piece &piece, Mesh &out) {
   const double identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
   const bool one = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : p.shape == Shape::Sphere ? local_sphere(p, s)
                    : p.shape == Shape::Wedge ? local_wedge(p, identity, nullptr, s) : false;
-  if (!one) return build({p}, Settings(), out) && out.face_count() > 0;  // (stairs, an arch, an outline: several convex parts, united)
+  if (!one) {  // (stairs, an arch, an outline: several convex parts, united - on the grid, by a cell fine enough for the piece's smallest part)
+    double small = std::min((double)std::fabs(p.height), 1e30);
+    if (p.shape == Shape::Stairs) small = std::min({(double)std::fabs(p.size.x), (double)std::fabs(p.size.y) / std::max(1, p.steps), (double)std::fabs(p.size.z) / std::max(1, p.steps)});
+    if (p.shape == Shape::Arch) small = std::min((double)std::fabs(p.height), (double)std::fabs(p.radius - p.inner_radius));
+    for (size_t i = 0; p.shape == Shape::Outline && i < p.outline.size(); i++) {
+      const Vec2 a = p.outline[i], b = p.outline[(i + 1) % p.outline.size()];
+      const double len = std::sqrt((double)(b.x - a.x) * (b.x - a.x) + (double)(b.y - a.y) * (b.y - a.y));
+      if (len > 0.0) small = std::min(small, len);
+    }
+    Settings st;
+    if (small > 0.0 && small < 1e29) st.cell = (float)std::max(0.002, std::min(0.1, small / 4.0));
+    return build({p}, st, out) && out.face_count() > 0;
+  }
   for (const V3 &v : s.verts) out.positions.push_back(Vec3((float)v.x, (float)v.y, (float)v.z));
   out.corner_verts.assign(s.face_verts.begin(), s.face_verts.end());
   out.face_offsets.assign(s.face_offsets.begin(), s.face_offsets.end());

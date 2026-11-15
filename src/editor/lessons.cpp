@@ -2413,14 +2413,15 @@ A Blockout piece can carry modifiers of its own. They run on that piece's shape 
 # Try it
 ! cmd:blockout new | 1. A Blockout with its 2 m box selected
 ! cmd:component BevelModifier; set BevelModifier.Width 0.2 | 2. Bevel just this piece: every edge of the box gets a 20 cm chamfer, in the Blockout's mesh
-! cmd:component ArrayModifier; set ArrayModifier.Count 4 | 3. Then an Array of 4: four bevelled boxes in a row along the piece's own X - touching copies become one long block
+! cmd:component ArrayModifier; set ArrayModifier.Count 4 | 3. Then an Array of 4: four bevelled boxes in a row along the piece's own X, joined where their flat ends touch (the chamfers between them stay as grooves)
 ! cmd:blockout info | 4. The status names the piece, says it is built as a mesh, and how full the cache of evaluated stacks is
 
 # How it works
 - The stack runs on the piece's own shape, in its own axes: a Mirror mirrors across the piece's planes, an Array steps along its X, Y and Z. Turn the piece and the whole row turns with it.
 - It runs on the build's background worker, and the result is kept: moving or turning the piece takes it from there and runs nothing; changing one of its numbers or a modifier's field runs the stack once.
 - Order: each piece's stack first, then the pieces are combined, then the Blockout's own modifiers (if it has any) run over the combined result.
-- A piece with a stack is built as a mesh: slower and less exact than its numbers, and its Blend radius is not used. Flat faces it makes still merge with its neighbours' in one plane.
+- A piece with a stack is built as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches (a mesh piece turns off the rounding of its cluster; the status says so). Flat faces it makes still merge with its neighbours' in one plane, and its curved faces shade smooth.
+- A stack that leaves no closed solid (Decimate to a sliver, a Screw part way round) is not used: the piece is built from its numbers and the status says why.
 
 # What a piece takes
 - Every modifier that changes a mesh by itself: Bevel, Array, Mirror, Solidify, Subdivision Surface, Displace, Decimate, Triangulate, Weld, Wireframe, Screw, Cast, Simple Deform, Smooth.
