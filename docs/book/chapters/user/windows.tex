@@ -125,6 +125,49 @@ moves on. \textbf{Tablet Mode} (the tab menu, or Preferences $>$ Pen and touch: 
 keyboard folds away) makes the targets half as big again, and then fingers navigate (one orbits, two pinch, pan and
 twist) while the pen selects, moves, draws and paints (chapter~\ref{ch:pen}).
 
+\section{Using the keyboard alone}
+Every control the editor draws can be reached without the mouse, and Tab keeps meaning Edit Mode while you model: a bare
+\key{Tab} over a window does what the keymap says. The keyboard is entered on purpose.
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.27\textwidth}X}
+\toprule
+Key & What it does \
+\midrule
+\key{F6} / \key{Shift+F6} & put the focus on the first control of the window under the mouse; again, on the next (or
+  previous) window in docking order \
+\key{F10}, or \key{Alt} pressed and let go alone & put it on the menu bar's first menu (\key{Alt}+drag still orbits) \
+\key{Tab} in a dialog or a popup & puts it on the first control there; nothing else wants the key in a dialog \
+\key{Tab} / \key{Shift+Tab} & with something focused, the next or the previous control in drawing order, of any kind \
+\key{Space} or \key{Enter} & press the focused button, tick the checkbox, open the dropdown or the colour, fold or unfold \
+\key{Left} / \key{Right} & step a slider; on the menu bar, change menu; in a menu, close or open a submenu \
+\key{Up} / \key{Down} & move in an open list or menu, stepping over its headings and separators \
+\key{Esc} & lets the focus go; a second \key{Esc} closes a popup \
+\bottomrule
+\end{tabularx}
+\end{center}
+A focused control wears a ring in the theme's focus colour with a thin outline in the text colour, so it is visible in
+every theme, High Contrast included. A press of the mouse, or a modal tool starting (G, Push/Pull, Bevel), lets the focus
+go: the mouse user never sees the ring, and the tool's \key{Enter}, \key{Esc} and \key{Space} are the tool's. The
+Hierarchy's and Project's rows, the Console and the Scene view keep their own keys; \key{F6} lands in their window.
+
+\begin{example}{set a Blockout's Open Amount without the mouse}
+\begin{enumerate}
+  \item Select the door; press \key{F6} with the pointer over the Inspector: the first control is focused.
+  \item \key{Tab} to \ui{Open Amount} (a field: type \code{0.5} and press \key{Tab} again to keep it), or \key{Tab} to a
+    slider and step it with \key{Left} and \key{Right}.
+  \item \key{Esc} gives the keys back to the Scene view.
+\end{enumerate}
+\end{example}
+
+\section{The Blockout section of Modeling Tools}
+Under \ui{Create}, \ui{Blockout (pieces that build one mesh)} holds the buttons for the pieces: \ui{Blockout} (a new one),
+\ui{Door} and \ui{Window}, \ui{Add Box}, \ui{Add Cyl} and \ui{Add Sph}, \ui{Cut Box}, \ui{Cut Cyl} and \ui{Cut Sph} (pieces that
+subtract), \ui{Room Box} and \ui{Room Cyl}; their tooltips say the whole name. The buttons sit three to a row and drop to two
+or one when the pane is too narrow for a label, instead of cutting it. Below them are the \ui{Door Style} and \ui{Window
+Style} dropdowns, the \ui{Architecture} dropdown with its \ui{Add}, and the Draw Piece tool (\key{Shift+R}) with its Shape
+list, which is grouped: the solids, then a heading ``Openings'' with Door and Window. In a dropdown the arrow keys step over
+a heading and a separator. Chapter~\ref{ch:plan} says how to use them.
+
 \section{Themes}
 Preferences $>$ Theme: Dark, Light, Emiliano Light, Emiliano Dark (the palette of the author's site: paper, charcoal
 and an amber accent) and High Contrast (white on near-black with every text at WCAG's 4.5:1 or more
@@ -133,5 +176,5 @@ and an amber accent) and High Contrast (white on near-black with every text at W
 \begin{fromnote}{Learn}
 \emph{The Editor Layout}, \emph{Navigating the Scene View}, \emph{GameObjects, Components and Objects},
 \emph{Hierarchy, Parenting and the Scene Graph}, \emph{Move, Rotate, Scale}, \emph{Customizing the Editor},
-\emph{Undo, Selection and Memory}.
+\emph{Undo, Selection and Memory}, \emph{Blockout: pieces that build one mesh}.
 \end{fromnote}

@@ -2,7 +2,7 @@
 \label{ch:performance}
 
 \section{The budget}
-\code{docs/PERFORMANCE.md} is the record of fifteen passes, each with its limits found, efficiencies applied, design
+\code{docs/PERFORMANCE.md} is the record of the passes, each with its limits found, efficiencies applied, design
 choices the numbers confirm, and honest negatives. The rule behind them: the editor stays interactive (Q-04), a frame
 within the budget for ordinary scenes, heavy work off the per-frame path (\adr{0095}); a unit test may print a time but
 never asserts one (\adr{0056}); every measurement names the machine.
@@ -43,3 +43,46 @@ one gets a quarter of the RAM for it. Thread, texture and undo budgets are ceili
 the shadow map, the UI, the present; the parts inside an Edit Mode drag), shown by the Profiler window, the stress
 suite and the tests; \code{MeshCounts} tallies the mesh caches' work process-wide. The Profiler's Budget ranks a scene
 or avatar against VRChat's PC and Quest performance ranks \cite{VRChatCreators2026}.
+
+\section{Since the books were first written: Passes 16 to 25}
+Rounds 413 to 515 kept the same rule and added the following (the numbers are in \code{docs/PERFORMANCE.md}, each naming its
+machine).
+\begin{itemize}
+  \item \textbf{Never halt the editor} (rounds 411--415): a render, a bake, a geometry operation or a file import runs on a
+    worker and the views keep their last picture; the Scene view of a Unity world stays on the card, and the CPU's own
+    share of a card frame was itself measured and cut. \adr{0105} is the budget: 16.7~ms for a live drag, 50~ms for a frame
+    while a job runs, 100~ms for the one frame an indivisible operation lands in.
+  \item \textbf{Baking} (Passes 17--21): an allocator (mimalloc) on Windows and Tracy for developers (\rnd{419}), a light
+    tree that picks the emitters, Owen-scrambled Sobol samples and a denoiser driven by the noise the bake measured
+    (\adr{0121}, \adr{0122}), the bake on every ticked graphics card in batches that keep a card working (\rnd{487}).
+  \item \textbf{Pass 22: posing} (rounds 468--475, \adr{0124}--\adr{0127}). Posing an avatar cost what the avatar cost,
+    whatever was moved. A skinned mesh is deformed once and only when its own bones moved (a skin's key is kept while the
+    structure, its mesh and the transforms under its character hold); a posed mesh follows in place, splitting a corner
+    only where its normal leaves the shared vertex; the card's instances are kept by object while a character moves; the
+    full-body solver reads the scene into a pose buffer, solves and writes each changed joint once; the springs in Play
+    no longer build meshes whole. The pose that results is the one the solver gave before (the goldens stand). On the
+    stand-in avatar of a real one's size (292 bones, about 140{,}000 triangles) an IK drag met 16.7~ms (Q-07; 48--56~ms
+    before, 10--13 after); whole-body poses are still 35--53~ms, the rest being the moved meshes sent to the card, their
+    normals and the outline shells, and skinning on the card is left to the owner as an open decision. The Profiler's Posing
+    block shows each part and \code{perf drag} plays a drag as real events.
+  \item \textbf{Pass 23: the Blockout} (rounds 476--515): its stress rows (\code{blockout} section, interiors of 100 and
+    400 pieces) are the measurement of B-06; a build of the 100-piece interior is still about 180~ms on a worker, which is
+    why nothing builds in a frame.
+  \item \textbf{Pass 25: the speed survey} (rounds 504--511). Seven new named-only stress sections time what had no row
+    (\code{image\_edit}, \code{sculpt\_paint}, \code{sequencer}, \code{importers}, \code{unity\_export},
+    \code{asset\_windows}, \code{cold\_first\_use}) and an eighth the Scene view (\code{scene\_views}); each row ends in ok or
+    OVER against the budget. The findings were ranked by how far over budget a row is times how often an artist meets
+    it, and fixed from the top: the Scene view's work that did not change is kept while the scene holds (the card's
+    per-instance buffers, the lights, the draw-item list; a keep that does not move the frame by 0.5~ms is taken out
+    again), the image filters keep what they work out from their input and a picture opens on a worker, a sculpt dab
+    names the vertices it moved, and the landing frames above are split. A Scene view of 50{,}000 cubes orbiting went from
+    32.6--39.8~ms a frame to 9.6--10.2; a 4096-pixel picture opens in a 33~ms frame (181 before). Round 511's timed run of
+    the whole suite on the joined tree is the final column: TBD(511).
+\end{itemize}
+
+\section{What is still over budget}
+A part with no row has no time on record, so the lists are the survey's. Still over at the time of writing: the Scene
+view and the Game view both drawn at 50{,}000 cubes and one object moved every frame at that size (their cost is the work per
+object that changes, not the kept work), a Unity scene's import at 10{,}000 objects, whole-body posing, the Blockout
+kernel at 100 interior pieces, and a few first uses (the Render and Textures windows). TBD(511): which of these the joined
+tree's timed run confirms and the count of rows over budget before and after.

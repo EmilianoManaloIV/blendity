@@ -46,15 +46,16 @@ practised, with every artifact named by its path, so that someone can repeat it 
     run the stress sections and their counts may not rise unexplained.
   \item \textbf{Review.} The reviewer's findings are fixed in a second pass, each with a test, or answered in the task's
     ``Review'' section. Some rounds took three passes; the record says so.
-  \item \textbf{Document.} Every change: a CHANGELOG entry (asked / added / changed / checked, with the numbers), the
-    README's count and feature paragraph, an ARCHITECTURE row for a new subsystem, a USABILITY row for a user-facing
+  \item \textbf{Document.} Every change: a changelog fragment holding the entry (asked / added / changed / checked, with the numbers, folded into
+    \code{CHANGELOG.md} and the README's count and feature paragraph by the pass's write-up), an ARCHITECTURE row for a new subsystem, a USABILITY row for a user-facing
     problem solved, the manual, a Learn lesson with Try-it buttons and questions for every new feature, the spec marked
     done with its PR link.
   \item \textbf{Publish.} A subtree commit of \code{blendity/} is pushed to a branch \code{task/NNNN-slug} and a pull
     request opened on \code{main} with the template (\code{.github/pull\_request\_template.md}): the task, what changed,
     the tests with their counts, the review's verdict, the documentation boxes. Commits end with the model's
     \code{Co-Authored-By} trailer; pull requests say they were generated with Claude Code. A round's PR is stacked on the
-    previous round's branch when the rounds depend on each other, and the body says which PRs a merge also merges.
+    previous round's branch when the rounds depend on each other, and the body says which PRs a merge also merges;
+    parallel passes' changelog and README changes travel as fragments (below).
   \item \textbf{CI.} \code{build.yml} builds Windows, Linux and macOS, runs the unit tests and a quick stress pass, takes
     a headless screenshot, and runs the tests under AddressSanitizer and UndefinedBehaviorSanitizer on Linux; the four
     jobs are required checks. \code{main} is protected: pull requests only, no force pushes.
@@ -94,6 +95,38 @@ walkthrough steps from 24 to 7, wrong shortcut labels to 0; the comparison repor
 and a short film made in Blendity beside Blender, Unity, Godot, Unreal and Adobe from their documentation, with the
 findings ranked for the user to choose from; the 118-task checklist carries target times. The think-aloud study with
 SUS is written (\code{docs/hci/study-protocol.md}) and not yet run; the record says so.
+
+\section{Parallel passes, fragments and integration}
+Rounds are grouped into \emph{passes}, a pass being a theme (posing speed, the Blockout, the speed and usability
+surveys) worked by one session of its own, each producing a stack of pull requests on \code{main}. Several passes can run
+at once, so the process grew four rules, each a decision record.
+\begin{itemize}
+  \item \textbf{The hub.} One main-interface session, the \emph{hub}, starts and relays the worker sessions, keeps the board
+    of what runs and what waits on the user, splits jobs along file boundaries (every plan carries a table of which
+    passes own which files and an overlap check against the passes already running) and queues the timed runs, because
+    on one development machine a build or a suite makes a neighbour's measurement untrustworthy. Workers run at medium
+    effort; only the hub works at the highest. The user still approves each plan and each merge.
+  \item \textbf{Changelog fragments} (\adr{0123}). Two passes' pull requests used to conflict in the top of
+    \code{CHANGELOG.md} and the README's unit-check line, every time. A round now never edits \code{CHANGELOG.md},
+    \code{README.md} or the four shared documents (USABILITY, ARCHITECTURE, PERFORMANCE and the tools README): it adds
+    one file \code{changelog.d/<round>-<slug>.md} holding its entry and a section for each shared document it adds to, in
+    a format \code{tools/dev/changelog.py} can check and apply. The pass's write-up runs \code{changelog.py fold} once
+    its pull requests are on \code{main}: the entries go in, newest first, the README operations apply, the count is
+    measured, the fragments are removed. A \code{docs-fragments} CI job fails any other commit that edits those files.
+  \item \textbf{Stacks and the integration pull request} (\adr{0132}). Every pull request targets \code{main}; a round's
+    branch may be built on the previous round's, and merging the top of a stack merges every pull request below it.
+    \code{tools/dev/stack\_check.sh}, run after every publish and by the \code{stack} CI job, requires exactly one top
+    per stack. When several stacks are green at once, \code{tools/dev/integrate.sh} merges their tops (merge commits only,
+    never a rebase or a squash, never a conflict resolved for you) into one \code{integration/<n>} branch and opens one pull
+    request that carries them all, so CI runs once on the combination that will be on \code{main} and the user merges once.
+  \item \textbf{Nothing waits on a pull request.} No round, fix, write-up or verification is held until a pull request is
+    merged or even published: work builds on the open pull request's head and publishes stacked on it, and a job that needs
+    several open stacks builds on a local merge of their tops and publishes as the single top of the joined stack, naming
+    the stacks it joins. Only the user's merges wait on the user; \code{CLAUDE.md}'s workflow item 7 says so.
+\end{itemize}
+Locally a round runs its own test groups and the \code{editor} group, which starts the whole program (\adr{0134}); the
+whole suite is CI's, and a change is done when its groups passed locally and the four required checks passed on the pull
+request (chapter~\ref{ch:build}).
 
 \section{AI disclosure}
 \code{docs/AI\_DISCLOSURE.md} states, for anyone reading, using or building on the project: the direction is human; the

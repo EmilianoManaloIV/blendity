@@ -35,7 +35,7 @@ rise without an explanation in the CHANGELOG.
 As in Unity, everything in a scene is a \code{GameObject} with a \code{Transform}; what it does comes from components:
 \code{MeshFilter}, \code{MeshRenderer}, \code{Light}, \code{Camera}, \code{Rigidbody}, \code{Animation},
 \code{Armature}, \code{Bone}, modifiers (\code{SubdivisionSurface}, \code{Mirror}, \code{Array}, \code{Boolean}, \ldots,
-\adr{0022}), \code{CameraFilters} (\adr{0008}), \code{ProbeVolume}, \code{ReflectionProbe}, \code{SpringBone}
+\adr{0022}), \code{CameraFilters} (\adr{0008}), \code{Blockout} and \code{BlockoutPiece} (below), \code{ProbeVolume}, \code{ReflectionProbe}, \code{SpringBone}
 (\adr{0049}), \code{Collider}, \code{LODGroup}, \code{AvatarDescriptor} and VRChat's others (\adr{0100}), and
 \code{EngineComponent} for what another engine's file held that Blendity does not interpret (\adr{0101}). A component
 says what the views read of it (\code{render\_role}), so the scene hash takes one virtual call instead of a
@@ -68,3 +68,61 @@ the vertices or the 64$\times$64 texture tiles it touched (\adr{0074}, \adr{0081
 board keep histories of their own. Vertex groups and custom normals are mended by position at each commit so a
 topology change does not lose them (\adr{0024}). Undo covers the scene, materials, textures and clips as one step per
 operation (Q-05), and the budget of kept steps is bytes, oldest out (\adr{0026}).
+
+\section{The Blockout}
+A Blockout is a level designer's way to model: not a mesh edited by hand but \emph{pieces} (boxes, cylinders, spheres,
+wedges, stairs, arches, outlines pulled up, convex solids and any mesh) that each Add to, Subtract from or Intersect the
+shape, built into one closed mesh that follows them (R-02, B-01 to B-06 in \code{docs/requirements.md}). It has three
+layers, kept apart on purpose.
+\begin{itemize}
+  \item \textbf{The kernel} (\code{scene/blockout.h}, \adr{0128}) is \code{blockout::build}, a function of the pieces and
+    the settings with no scene and no global: the same bytes on one thread or many, a cancel flag, and a refusal that
+    leaves the caller's mesh untouched. Each piece becomes a closed convex solid whose faces are numbered as sides;
+    solids that touch form a cluster that shares one table of planes (so a door's sill and the floor it reaches are one
+    plane to the bit). Two paths build a cluster: the crisp one through Manifold \cite{libManifold} when Blender's
+    libraries are present, and a field path on a brick grid that is in every build; both hand their labelled
+    triangles to one face maker, which merges coplanar regions into n-gons, cuts a concave outline into convex faces and
+    repeats with fewer merges when a rule's outcome would not be a closed surface. The result is closed whatever the
+    geometry.
+  \item \textbf{The object} (\code{scene/blockout\_object.h}, \adr{0129}) is two components: \code{Blockout} beside the
+    \code{MeshFilter} and \code{MeshRenderer} that carry the result, and \code{BlockoutPiece} on the objects below it. The
+    pieces are the document; the mesh is derived and saved only so a scene shows at once when opened. A snapshot of the
+    enabled pieces is hashed, and a hash that is not the mesh's asks for a build on a worker
+    (\code{Editor::update\_blockouts}); the landing is on the main thread, so the mesh follows a drag one build behind
+    and no kernel call is ever made in a window's frame (B-02; a counter pins it). Whatever writes a mesh by hand
+    would be undone by the next build, so Edit Mode, Sculpt and the rest refuse a Blockout
+    (\code{blockout\_refuses\_edit\_mode}) and Bake to Mesh is the way out: it keeps the mesh, its materials and UVs
+    and moves the pieces under a disabled child, and Unbake brings the Blockout back.
+  \item \textbf{What the snapshot adds.} Everything the rounds after the first added to what the snapshot hands the
+    kernel, or to what the editor does around the landing; the kernel stays a kernel of solids with roles.
+\end{itemize}
+
+\paragraph{Rooms and openings.} A room is a piece of air whose walls, floor and ceiling the kernel makes around it
+(Default Wall Thickness 0.2~m); two rooms that overlap lose the wall between them unless one keeps its walls. A door or
+window is a pair of pieces, a blank and the hole that carves it, stood in a wall by one rule: \code{blockout\_opening\_feet}
+finds the floor an opening of that width stands on, and the Create buttons and Draw Piece both ask it, both holding a wall
+to 2 degrees of upright (B-04). A \emph{style} (frame, bars, sill board, glass; sliding, arched, revolving) is made into
+kernel pieces at snapshot time and never stored; a made piece's id has bit 63 set so that
+\code{blockout\_piece\_owner} can name the opening that made it. The nine architectural presets (column, pilaster, beam,
+railing, roof, two stairs with a landing, spiral stairs, arcade) are generated at snapshot time from their numbers the
+same way.
+
+\paragraph{Scale and the Blend radius.} Scale goes into a piece's numbers and never into its matrix, so a piece is never
+sheared (\adr{0135}). A Blend radius melts a piece into what it touches: a box of its own is meshed by the field path and
+stitched to the crisp rest (\adr{0130}).
+
+\paragraph{Door leaves.} A door's leaf is an object under it with its origin at the hinge (\code{BlockoutLeaf},
+\adr{0136}): Open Amount is a transform write, not a build, so swinging a door does not rebuild the wall; the kernel
+makes only the frame and the reveals so the doorway is clear. Turning a leaf by hand writes Open Amount back in the same
+undo step. Open Amount, Hinge Side, Leaf and Leaf Thickness are therefore not in the snapshot hash.
+
+\paragraph{Snap, join and modifiers.} Pieces snap to the planes and corners of other Blockouts; touching Blockouts are found
+once per edit epoch and \code{blockout join} makes them one. A modifier stack on the Blockout runs on the landed mesh through
+the evaluated-mesh worker; a stack on a \emph{piece} (\adr{0138}) runs on the build's worker on the piece's own shape before
+the piece is added or cut, kept by a key of numbers and modifiers (never the place) in a bounded cache, and a result that is
+not one closed solid is refused with the reason in the status. The order is piece stacks, the pieces combined, the
+Blockout's stack.
+
+Every part is reachable from the console (\code{blockout new | add | draw | set | join | bake | \ldots}) and from the
+interface (B-03), and each has a test in the \code{blockout} groups named for what the user sees; the stress section
+\code{blockout} measures the interiors of 100 and 400 pieces.

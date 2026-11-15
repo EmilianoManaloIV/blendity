@@ -561,6 +561,20 @@ SHOTS = [
     ("layout-animation", "Animation", ["select Cube", "anim new"]),
     ("layout-learning", "Learning", ["lesson 1"]),
     ("layout-drawing", "Drawing", []),
+    # The Blockout figures (round 512): each builds its Blockout from the console, as the Learn lessons' Try-it buttons do;
+    # "blockout wait" lands the worker's mesh before the picture is taken.
+    ("blockout-rooms", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout add window 1.2 2 0.9",
+                                       "blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door", "blockout wait"]),
+    ("blockout-draw-piece", "Blocking Out", ["blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2",
+                                            "blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5",
+                                            "blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1",
+                                            "blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2",
+                                            "blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1", "blockout wait"]),
+    ("blockout-door-leaf", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6", "blockout add door single 1 2.1",
+                                           "blockout set open 0.5", "blockout wait"]),
+    ("blockout-architecture", "Blocking Out", ["blockout draw room auto at 0 0 0 normal 0 1 0 size 6 5 2.6", "blockout add column 0.2 2.6",
+                                              "blockout add pilaster 0.2 2.6", "blockout add railing 5 1",
+                                              "blockout add stairs spiral 1 0.1 3 16 270", "blockout wait"]),
 ]
 
 

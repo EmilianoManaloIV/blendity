@@ -61,6 +61,129 @@ surface under the mouse.
 \end{enumerate}
 \end{example}
 
+\section{Blocking out a level with a Blockout}
+A \textbf{Blockout} is how a level designer blocks out a building: you do not edit a mesh, you place \emph{pieces} (boxes,
+cylinders, spheres, wedges, stairs, arches, rooms, doors, windows, columns and more) that each add to the shape or cut from
+it, and Blendity builds one closed mesh from them that follows every change. Move, turn, resize, switch off or delete a
+piece and the mesh is made again in the background, so the editor never waits for it. Because the pieces are the model, Edit
+Mode, Sculpt and the Apply buttons are refused on a Blockout (the toast says why); \ui{Bake to Mesh} turns it into an
+ordinary mesh whenever you want one. Everything below is in \menu{GameObject > Blockout}, in \ui{Modeling Tools $>$ Create $>$
+Blockout} and on the Console's \code{blockout} command; the Blocking Out layout shows it first.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth, alt={The Blocking Out layout with a Blockout of two rooms side by side in the Scene view: the rooms' walls with a door between them and a window in the outside wall; the Modeling Tools window beside it with the Blockout buttons.}]{blockout-rooms.png}
+  \caption{A Blockout of two rooms with a door between them and a window in the outside wall: the Scene view, and the
+  Modeling Tools window's Blockout section with its buttons.}
+  \label{fig:blockout-rooms}
+\end{figure}
+
+\subsection*{Rooms, step by step}
+\begin{enumerate}
+  \item \menu{GameObject > Blockout > New Blockout} (or \ui{Blockout} under Modeling Tools $>$ Create $>$ Blockout): a Blockout
+    with one 2~m box, selected. For a building, start from a room instead.
+  \item \ui{Room Box} makes a room: a piece of \emph{air} whose walls, floor and ceiling Blendity builds around it (the
+    Blockout's Default Wall Thickness, 0.2~m, applies to all three). Or press \key{Shift+R} for \textbf{Draw Piece}, choose
+    \ui{Room} in its Shape list, drag a footprint on the ground and move the mouse up for the height; type a number to set it
+    exactly, click to confirm, \key{Esc} to cancel.
+  \item Draw a second room beside the first so that their air touches or overlaps: the wall between them becomes one wall,
+    and a Blockout of rooms reads as a plan. A room with \ui{Walls: Keep walls} keeps all its own walls even inside another.
+  \item \key{F9} (Adjust Last Operation) changes the size, wall and height of the piece you just drew as the same undo step.
+\end{enumerate}
+
+\subsection*{Drawing pieces on faces}
+Draw Piece is not only for rooms. Drag a rectangle (or a circle) on any face of a Blockout and pull the height out or push it
+in: the operation is \emph{Auto}, so a piece pushed into a face cuts a pocket or a doorway and one pulled out adds a
+step, a column or a ledge; hold \key{Shift} while you pull for the other one. While you drag, the piece is drawn faintly, and
+while you pull it is drawn in the colour of what it will do (Add orange, Subtract yellow, Intersect violet). \key{R} turns
+it a quarter. The Shape list holds Room and the solids (Box, Cylinder, Wedge, Stairs, Arch, an Outline and more), then under
+\textbf{Openings} Door and Window. A piece belongs to the Blockout of the face it was drawn on; a footprint on the ground
+goes to the selected Blockout or a new one. Handles on a selected piece's faces (six small squares) pull one face and
+leave the opposite face where it is.
+
+\subsection*{Doors and windows}
+\begin{itemize}
+  \item \textbf{By button.} Select a room and press \ui{Door} or \ui{Window}: it goes into the room's first wall, or into the
+    wall you pointed at in the Scene view before pressing. The \ui{Door Style} and \ui{Window Style} dropdowns beside the
+    buttons choose what the next one looks like: single, double, sliding, arched and revolving doors; single, double,
+    arched, fixed, grid and round windows, each a frame, bars, a sill board and a pane made from numbers. The Inspector
+    changes the width, head, sill, frame and panes afterwards; changing a style keeps the numbers.
+  \item \textbf{Drawn.} With Draw Piece choose \ui{Door} or \ui{Window} in the Shape list and drag a rectangle on a wall.
+    The opening is the size of the drag, upright, a door standing on the floor the wall stands on and a window's sill at the height
+    you dragged it. It is the very same piece the button makes.
+  \item A wall that leans more than 2 degrees from upright refuses an opening and says how much it leans
+    (chapter~\ref{ch:trouble}).
+\end{itemize}
+
+\subsection*{Door leaves, F9 and the rest of the pieces}
+A door's leaf is an object of its own under the door, with its pivot at the hinge. \ui{Open Amount} in the door's
+Inspector (0 closed, 1 open) swings it, \ui{Hinge Side} picks the jamb, and turning the leaf with the Rotate tool writes
+the angle back into Open Amount in the same undo step. Swinging a door does not rebuild the wall, so it is as quick as moving
+any object, and animating Open Amount opens a door in a clip. The \ui{Architecture} dropdown and its \ui{Add} button make a
+Column, Pilaster, Beam, Railing, Roof (gable, hip or shed), L- and U-shaped Stairs, Spiral Stairs and an Arcade, each one
+piece made from its numbers: \key{F9} changes them, and scaling one grows its sizes, never shearing it.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth, alt={A room of a Blockout with a single door in its wall: the leaf swung half way open into the room, turned about its hinge at one jamb, the doorway clear; the Modeling Tools window beside the Scene view.}]{blockout-door-leaf.png}
+  \caption{A door with Open Amount 0.5: its leaf, an object of its own, swung 45 degrees about the hinge into the room. The
+  wall was not built again.}
+  \label{fig:blockout-leaf}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth, alt={A room of a Blockout with architectural pieces in it: a round column with a plinth and a capital, a pilaster against a wall, a railing of posts and rails and a spiral staircase.}]{blockout-architecture.png}
+  \caption{Architectural pieces in a room: a column, a pilaster against the wall, a railing and spiral stairs, each one
+  piece made from its numbers.}
+  \label{fig:blockout-architecture}
+\end{figure}
+
+\subsection*{Snap, join, modifiers and finishing}
+\begin{itemize}
+  \item \textbf{Snap and join.} Dragging a piece or a handle snaps it to the planes and corners of other Blockouts; lay one
+    Blockout's wall flush against another's and the Inspector of either says it \emph{touches} the other and offers
+    \ui{Join Blockouts} (also \menu{Mesh > Join Blockouts}): the two become one mesh, in one undo step.
+  \item \textbf{Modifiers.} The Inspector's Modifiers section works on a whole Blockout (a Bevel on the building, a Mirror
+    over half a plan, an Array of a bay) and on a single piece (bevel just the arches, array one column into ten).
+    They stay live. \ui{Apply} needs \ui{Bake to Mesh} first.
+  \item \textbf{Blend Radius} on a piece rounds its join with what it touches. \textbf{Materials} are set for each class of
+    face (walls, floor, ceiling, outside, glass, leaf), with a Texture Scale in metres so a tile is the same size
+    everywhere. \ui{Bake to Mesh} keeps the mesh, its materials and UVs and puts the pieces under a disabled child;
+    \ui{Unbake} brings the Blockout back from them.
+\end{itemize}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth, alt={The Scene view of a Blockout box with a square pocket pushed into its top, a column standing on one corner, an arched opening and a flight of stairs against one side, each drawn on a face with Draw Piece.}]{blockout-draw-piece.png}
+  \caption{Pieces drawn on the faces of a box with Draw Piece: a pocket pushed in, a column pulled up, an arched opening
+  pushed through and a flight of stairs.}
+  \label{fig:blockout-draw}
+\end{figure}
+
+\begin{example}{a two-room flat with a door and a window}
+\begin{enumerate}
+  \item Layout $>$ Blocking Out. \key{Shift+R}; Shape: \ui{Room}; drag a footprint of about 4 $\times$ 4~m and pull it 2.6~m
+    up. (Console: \code{blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6}.)
+  \item Draw a second room beside it (\code{blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6}): their shared wall
+    is one wall.
+  \item With the second room selected press \ui{Door}: the door is in its first wall, the one it shares with the first room.
+    Select the first room and press \ui{Window}: it goes into that room's first wall, an outside wall; set its sill to 0.9~m in the Inspector.
+  \item Select the door, set \ui{Open Amount} to 0.5 and watch its leaf swing; press \key{Ctrl+Z} and leaf and number go back
+    together.
+  \item Add a column from the Architecture dropdown, then \ui{Bake to Mesh} when the plan is right: the result is an
+    ordinary mesh with your materials, ready for Edit Mode.
+\end{enumerate}
+\end{example}
+
+\begin{fromnote}{Learn}
+\emph{Blockout: pieces that build one mesh}, \emph{Rooms: air, walls, doors and windows}, \emph{Dragging rooms out},
+\emph{Ramps, stairs, arches and odd-shaped rooms}, \emph{Drawing pieces on faces}, \emph{Rounding joins: the Blend radius},
+\emph{Materials, baking and export of a Blockout}, \emph{Snapping and joining Blockouts}, \emph{Modifiers on a Blockout},
+\emph{Modifiers on a piece}, \emph{Building rooms with Blockout}, \emph{Windows with a style}, \emph{Doors with a style} and
+\emph{Architectural pieces}.
+\end{fromnote}
+
 \section{Drawing in perspective, building from the construction}
 For a drawing pad or a pen: \menu{Draw > Sketch (pen)} draws over the Scene view with SketchBook's aids under
 \menu{Draw > Guides} \cite{SketchBookDocs2026}: a ruler, an ellipse, French curves, symmetry, and 1-, 2- and 3-point

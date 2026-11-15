@@ -52,7 +52,7 @@ history, answers an unknown command with the nearest known ones, and since \rnd{
 there: a test keeps every one reachable from a menu, a button or a field.
 
 \section{The Learn tab}
-\code{editor/learn.cpp} renders 45 lessons from \code{lessons.cpp}, each connecting a Unity concept, the Blender
+\code{editor/learn.cpp} renders 61 lessons from \code{lessons.cpp}, each connecting a Unity concept, the Blender
 concept with the source folder it lives in, and the theory in the reference books \cite{MarschnerShirley2021,
 Gregory2018vol1, Gregory2018vol2}, with Try-it buttons that run console commands, questions that reveal their
 answers, and a References lesson of the papers behind the features. Every new feature adds a lesson; the user guide
@@ -67,4 +67,41 @@ prompts, a History window, a colour-vision-safe palette and a High Contrast them
 test suite (the Fitts dump, the coverage map, the label audit, the hint completeness test, the contrast test) and the
 artefacts in \code{docs/hci/} (walkthroughs, the KLM table recounted by \code{tools/hci\_klm.py}, the comparison reports
 against Blender, Unity, Godot, Unreal, Adobe and VRChat's limits, the 118-task checklist, the study protocol written
-but not yet run \cite{Brooke1996Sus}).
+but not yet run \cite{Brooke1996Sus}). Pass~25 added the live sweep and its numbers (\code{docs/hci/sweep-505.md}
+before, \code{sweep-509.md} after) and wrote the usability requirements U-01 to U-07 so each is checkable.
+
+\section{Draw Piece and the Blockout's tools}
+The Blockout's Room tool of \rnd{479} became \textbf{Draw Piece} (\rnd{495}, \rnd{496}; \code{editor/blockout\_tool.cpp}, Shift+R
+or Modeling Tools $>$ Create $>$ Blockout): a footprint dragged on any surface, a height pulled, the preview drawn by the
+very function that makes the piece, so what is shown is what is built. One Shape list holds the solids and, under an
+``Openings'' heading, Door and Window (\rnd{513}); a drag on a wall stands the opening in it by the same rule as the
+Create buttons. The operation is Auto (pushed into a face it cuts, pulled out it adds; Shift gives the other), the piece goes to the Blockout of the face it
+was drawn on, and F9 changes its numbers afterwards. Handles on a piece's faces, snapping to other pieces and the outlines
+that pick a piece by its mesh (\code{blockout\_pick\_piece}) sit in \code{blockout\_handles.cpp} and
+\code{blockout\_editor.cpp}. Every drag has a console twin (\code{blockout draw box auto at \ldots\ normal \ldots\ size
+\ldots}) that makes what the two drags make, which is how the tests drive it.
+
+\section{The toolkit's recorded controls and keyboard focus}
+Pass~25 gave the toolkit a record of itself. Every control it draws writes its kind, rectangle, label, layer, clip and
+whether Tab stops on it into \code{ui::Context::ControlRec}, and the widgets a window draws by hand record themselves too.
+The \emph{HCI live sweep} (\code{tests/test\_hci.cpp}, \code{tools/hci\_sweep.py}) opens every layout, window, menu, dialog
+and Inspector as the artist does, in one configuration in the suite and in twelve (three window sizes, two themes, two UI
+scales) on request, and judges the record: the suite asserts zero for cut labels, controls without a tooltip, controls on
+other controls, targets under the limit and a Tab step that goes backwards (U-01 to U-07).
+
+\adr{0145} gave every toolkit control a keyboard stop without taking Tab from the modeller, since Tab is Edit Mode over
+the Scene view. Focus is entered on purpose: F6 and Shift+F6 enter the window under the pointer and then the next or
+previous window, F10 or Alt pressed and let go alone the menu bar, a click in a field, or Tab inside a dialog or a popup.
+Once something is focused Tab and Shift+Tab walk the controls in drawing order, Space or Enter presses, Left and Right step
+a slider, the arrows walk menus and lists, Esc lets go; a press of the mouse or a modal tool starting drops the focus, so
+the mouse user never sees the ring. A new widget calls \code{record\_control} and \code{focus\_stop} where it is drawn, and
+the audits then see it. A dropdown can be grouped: an option that starts with \code{ui::kComboHeading} or
+\code{kComboSeparator} is drawn but not chosen and the arrows step over it.
+
+\section{The job tray and the landing frame}
+A long job (a bake, a remesh, a render, an export, a Blockout build) is one row of the job tray with its progress and
+Cancel; it runs on a worker and \emph{lands} on the main thread in one frame. The responsiveness budget (\adr{0105}) is the
+rule behind the tray: a frame while a job runs stays under 50 ms, and the one frame an indivisible job lands in under
+100 ms. Pass~25 therefore judged an import or a bake by its longest frame, not its total, and split what ended in one
+big frame (the Unity export's folder walk, \code{budget pc}'s count, a bake's files, the lightmap pages sent to the card
+before the bake lands, \adr{0140}).

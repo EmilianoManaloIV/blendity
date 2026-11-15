@@ -3,7 +3,7 @@
 
 \section{The Learn tab}
 \key{F1} (or the orange \ui{Learn} button) opens the Learn tab; the Learning layout puts it beside the Scene view. Each
-of its 45 lessons connects three layers: the Unity concept you can see on screen, the equivalent Blender concept with
+of its 61 lessons connects three layers: the Unity concept you can see on screen, the equivalent Blender concept with
 the folder in Blender's source where it lives, and the theory behind it, cited from the reference books
 \cite{MarschnerShirley2021, Gregory2018vol1, Gregory2018vol2} and the papers behind the features (the
 \emph{References} lesson). Pick a lesson on the left; your progress is saved; \ui{Try it} buttons drive the editor for
@@ -27,7 +27,11 @@ and Tone Mapping; Editing: Develop a Render; Baked and Realtime Lighting; Advanc
 Performance; Bevel, Bridge and Push Through; Rendering on the GPU; Points, Lines, N-gons and Booleans; Drawing in
 Perspective; Customizing the Editor; Sculpting; Painting the Surface; The Hand-painted Look; Stylized Environments;
 Drawing like SketchBook; Papers; Blender's Shader Nodes in the Textures Window; Fog with a Volume Material; Working
-Faster with Textures and Materials; Flatten to the Camera; Shapes by the Camera's Angle; Animating Any Property; The Books and the References.
+Faster with Textures and Materials; Flatten to the Camera; Shapes by the Camera's Angle; Animating Any Property; The Books and the References; Where the Time Goes; Blockout: pieces that build one mesh; Rooms: air,
+walls, doors and windows; Dragging rooms out; Ramps, stairs, arches and odd-shaped rooms; Drawing pieces on faces; Rounding
+joins: the Blend radius; Materials, baking and export of a Blockout; Snapping and joining Blockouts; Modifiers on a Blockout;
+Modifiers on a piece; Building rooms with Blockout; Windows with a style; Doors with a style; Architectural pieces; Where a
+Posing Frame Goes.
 
 \section{The console}
 Every tool can be driven from the Console's command line (type \code{help}; \key{Up} and \key{Down} recall what you
@@ -37,7 +41,7 @@ handy by hand:
 
 \begin{center}
 \small
-\begin{tabularx}{\textwidth}{lX}
+\begin{tabularx}{\textwidth}{p{0.56\textwidth}X}
 \toprule
 Command & Does \\
 \midrule
@@ -56,6 +60,15 @@ Command & Does \\
 \code{libs}, \code{jobs}, \code{budget pc}, \code{keymap table} & the build's libraries, the running jobs, the VRChat budget, every preset's keys \\
 \code{update check}, \code{update history}, \code{update install <tag>} & the updater \\
 \code{vr start}, \code{vr sketch on}, \code{vr paint on} & the VR View \\
+\code{blockout new}, \code{blockout add box|cylinder|sphere|wedge|stairs|arch [subtract|intersect] [sizes]} & a Blockout, and pieces under it \
+\code{blockout add room box 4 3 4}, \code{blockout add door single 1 2.1}, \code{blockout add window grid 1.6 2 0.9} & a room of air, a door, a window with a style \
+\code{blockout draw room|box|cylinder|wedge|stairs|arch add|subtract|auto at 0 0 0 normal 0 1 0 size 4 4 2.6} & what Draw Piece's two drags make on that surface point \
+\code{blockout roomopt piece solid}, \code{roomopt operation intersect}, \code{blockout turn} & Draw Piece's Shape list and fixed operation; a quarter turn \
+\code{blockout add column|pilaster|beam|railing|roof|stairs l|stairs spiral|arcade} & the architectural pieces \
+\code{blockout set open 0.5}, \code{set hinge right}, \code{set style arched}, \code{blockout leaf select} & a door's or window's numbers; its leaf object \
+\code{blockout set blend 0.1}, \code{set material walls Brick}, \code{set texscale 0.5} & Blend Radius, a material for a class of face, Texture Scale \
+\code{blockout join}, \code{blockout bake}, \code{blockout unbake}, \code{blockout wait}, \code{blockout info} & join touching Blockouts, Bake to Mesh and back, wait for the build, its status \
+\code{perf drag gizmo x 80}, \code{perf status}, \code{benchscene avatarlike} & a drag played as real events, timed; a stand-in avatar \
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -63,7 +76,9 @@ Command & Does \\
 \section{Headless runs and scripts}
 \code{Blendity --headless-screenshot out.png --size 1600x900 --cmd "<command>" \ldots --frames N} runs the commands
 with no window and writes a picture; \code{BLENDITY\_PROJECT} and \code{BLENDITY\_TRASH} point it at a scratch project,
-never your \code{Assets}. The figures in this guide, the tests and the Unity comparison harness are made that way.
+never your \code{Assets}. The figures in this guide, the tests and the Unity comparison harness are made that way. A script gets the newest
+Blockout mesh before its picture is taken (\code{blockout wait} does it by hand), and \code{perf wait} steps frames until no job
+runs.
 
 \section{Checking how it works for you}
 \code{docs/hci/checklist.md} lists 118 tasks across the editor, each with its steps, what should happen and a target
