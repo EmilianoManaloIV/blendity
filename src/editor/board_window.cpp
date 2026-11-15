@@ -1323,7 +1323,7 @@ void Editor::draw_board_window(const Recti &r) {
   draw_board_selection();
   if (board_.items.empty()) {
     const Vec2 m = board_middle();
-    u.label({board_rect_.x, (int)m.y - u.row_h(), board_rect_.w, u.row_h()}, "Drop images here, or paste one (Ctrl+V)", u.theme.text_dim, ui::Align::Center);
+    u.label({board_rect_.x, (int)m.y - u.row_h(), board_rect_.w, u.row_h()}, with_key("Drop images here, or paste one", "board.paste"), u.theme.text_dim, ui::Align::Center);
     u.label({board_rect_.x, (int)m.y, board_rect_.w, u.row_h()}, "or drag them from the Project window", u.theme.text_dim, ui::Align::Center);
   }
   u.canvas.pop_clip();
@@ -1346,7 +1346,8 @@ void Editor::draw_board_toolbar(const Recti &bar) {
   if (u.button(put(u.px(96), "board:Add Image"), "Add Image...")) defer([this] { board_add_image_dialog(); });
   u.tooltip("Pick an image file to put on the board (images from outside the project are copied into Assets/Textures/References).");
   if (u.button(put(u.px(60), "board:Paste"), "Paste")) run_console_command("board paste");
-  u.tooltip("The image on the clipboard onto the board (Ctrl+V over the board): a screenshot, a picture copied from a browser.");
+  const std::string paste_key = key("board.paste");
+  u.tooltip("The image on the clipboard onto the board" + (paste_key.empty() ? std::string() : " (" + paste_key + " over the board)") + ": a screenshot, a picture copied from a browser.");
   const Recti zoom{bar.right() - gap * 2 - u.px(64), y, u.px(64), h};
   const bool room = zoom.x >= x + gap;  // (a narrow board: the zoom button goes first - Home still fits)
   const std::string state = board_.name + (board_job_.phase ? "  (exporting...)" : board_dirty_ ? "  (unsaved)" : board_file_.empty() ? "" : "  (saved)");

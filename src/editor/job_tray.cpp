@@ -214,7 +214,9 @@ int Editor::draw_job_tray(int right_x, int y, int h, const std::vector<JobView> 
   const int tw = u.font.text_width(text) + u.px(16);
   const int nw = j.now ? u.font.text_width("Export Now") + u.px(22) : 0;  // (review 354)
   const int w = tw + (bw ? bw + u.px(6) : 0) + u.px(12) + nw;
-  const Recti bar{right_x - w + u.px(6), y + u.px(3), tw, h - u.px(6)};
+  /* Round 509: the tray is a row high (it was 14 px, the smallest target in the program) and its Export Now sits inside the
+   * slot `w` takes from `right_x` leftward (it was drawn left of it, on the status hint). */
+  const Recti bar{right_x - w + nw + u.px(6), y, tw, h};
   u.frame(bar, u.theme.well, u.theme.border, u.px(3));
   const Recti inner{bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 2};
   if (j.progress >= 0.0f) u.canvas.fill_rect({inner.x, inner.y, (int)((float)inner.w * clamp01(j.progress)), inner.h}, u.theme.progress);  // (task 0261: the theme's, under text_bright)
@@ -233,14 +235,14 @@ int Editor::draw_job_tray(int right_x, int y, int h, const std::vector<JobView> 
   u.tooltip(all);
   if (u.record_buttons) u.button_rects["job:tray"] = bar;
   if (bw) {
-    const Recti cb{bar.right() + u.px(6), y + u.px(3), bw, h - u.px(6)};
+    const Recti cb{bar.right() + u.px(6), y, bw, h};
     if (u.button(cb, "Cancel")) jobs_cancel(j.label);
     u.tooltip(j.now ? "Don't write this file (the job it waits for goes on)." : "Stop this job; what it made so far is dropped.");
     if (u.record_buttons) u.button_rects["job:Cancel"] = cb;
   }
   if (j.now) {  // (review 354: a waiting export's Export Now, left of the bar)
     const int nw = u.font.text_width("Export Now") + u.px(16);
-    const Recti nb{bar.x - nw - u.px(6), y + u.px(3), nw, h - u.px(6)};
+    const Recti nb{bar.x - nw - u.px(6), y, nw, h};
     if (u.button(nb, "Export Now")) j.now();
     u.tooltip("Write the file at once, with the mesh as it is now (the job it waits for hasn't finished).");
     if (u.record_buttons) u.button_rects["job:Export Now"] = nb;

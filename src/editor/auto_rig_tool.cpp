@@ -275,7 +275,7 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
     const Recti a{row.x + u.px(4), row.y, bw, row.h}, b{a.right() + u.px(4), row.y, bw, row.h};
     if (u.button(a, "Humanoid")) autorig_start(mesh_obj, RigKind::Humanoid);
     u.tooltip("Mixamo's markers (chin, wrists, elbows, knees, groin) on the selected mesh; a skeleton fitted to them, IK on\n"
-              "the limbs, and the mesh bound with inpainted weights. Console: autorig humanoid.");
+              "the limbs, and the mesh bound with inpainted weights.");
     if (u.button(b, "Quadruped")) autorig_start(mesh_obj, RigKind::Quadruped);
     u.tooltip("Markers on a four-legged animal seen from its left side (nose, skull, withers, hips, tail, paws, knees and\n"
               "hocks).");
@@ -291,8 +291,7 @@ void Editor::draw_autorig_section(ui::Layout &lay, GameObject *mesh_obj) {
       const Recti br{vr.x + u.px(4) + k * (vw + u.px(3)), vr.y, vw, vr.h};
       if (u.button(br, views[k], autorig_.view == views[k])) autorig_set_view(views[k]);
     }
-    u.tooltip("Place markers from any side: each keeps its depth through the body, so a side view fixes a knee's or an elbow's depth.\n"
-              "Console: autorig view front|left|right|back|top.");
+    u.tooltip("Place markers from any side: each keeps its depth through the body, so a side view fixes a knee's or an elbow's depth.");
   }
   const std::string next = autorig_next();
   u.label(lay.row(), next.empty() ? "Every marker placed. Drag one in the Scene view to move it." : "Next: click the " + next + " on the mesh.",

@@ -21,7 +21,8 @@ import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 DIRS = ["src/editor", "src/texture", "src/scene"]
-MARKERS = ("u.tooltip(", "br.help(", "r.help(", "u.label(", "toast(", "refuse(", "Log::warn(", "Log::error(", "help(", "tooltip(")
+MARKERS = ("u.tooltip(", "br.help(", "r.help(", "u.label(", "toast(", "refuse(", "Log::warn(", "Log::error(", "help(", "tooltip(",
+           "button_grid(", "icon_button(")  # (round 510 review: a tooltip passed as an argument was invisible to the audit)
 BASELINE = os.path.join(ROOT, "tools", "hci_console_baseline.txt")
 LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -58,7 +59,7 @@ def offends(literals, cmds):
         if tick.split(" ")[0] in cmds:
             return True
     # (the Console window, not a games console: "Console: x", "the console still reaches", "the console's `x`")
-    if re.search(r"\bConsole: |\bthe console\b(?!'s (look|own|small))", joined, re.I):
+    if re.search(r"(?:\b|\\n)Console: |\bthe console\b(?!'s (look|own|small))", joined, re.I):
         return True
     for paren in re.findall(r"\(([a-z_0-9]+) ([^)]*)\)", joined):
         if paren[0] in cmds and ("<" in paren[1] or "|" in paren[1]):

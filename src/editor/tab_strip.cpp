@@ -82,18 +82,21 @@ bool Editor::draw_tab_strip(DockNode *n, const Recti &bar) {
   auto full = [&](const TabItem &it) { return u.font.text_width(it.label) + a + u.px(22); };
   int total = 0;
   for (const TabItem &it : items) total += full(it);
-  const bool icons = total > bar.w;
+  /* Round 509: the "+N" button of the tabs the stage hides takes its place at the strip's end whether or not the rest
+   * overflow, so the tabs have the strip less that (the last one, Sculpt in the Stylized layout, lay under it). */
+  const int room = bar.w - (hidden.empty() ? 0 : more_w);
+  const bool icons = total > room;
   auto width = [&](const TabItem &it) { return !icons || it.active ? full(it) : icon_w; };
   total = 0;
   for (const TabItem &it : items) total += width(it);
-  bool overflow = total > bar.w && items.size() > 1;  // (one tab wider than the strip is cut: nothing to list)
+  bool overflow = total > room && items.size() > 1;  // (one tab wider than the strip is cut: nothing to list)
   if (overflow) {
     int used = more_w;
     for (TabItem &it : items)
       if (it.active) used += width(it);
     for (TabItem &it : items) {
       if (it.active) continue;
-      it.in_strip = used + width(it) <= bar.w;
+      it.in_strip = used + width(it) <= bar.w;  // (used starts at the » button's room, which is the "+N" button's too)
       if (it.in_strip) used += width(it);
       else
         for (int t : it.tabs) tab_overflow_.push_back(n->tabs[(size_t)t]);
@@ -220,6 +223,7 @@ int Editor::draw_member_strip(DockNode *n, const Recti &r) {
     const WindowKind k = n->tabs[(size_t)t];
     const int w = u.font.text_width(window_title(k)) + u.px(16);
     if (u.button({x, strip.y + u.px(2), w, sh - u.px(4)}, window_title(k), t == n->active)) n->active = t, focused_ = k;
+    u.tooltip(strprintf("Show the %s window in this tab (the %s group).", window_title(k), m.group));  // (round 509)
     x += w + u.px(4);
   }
   u.canvas.pop_clip();
