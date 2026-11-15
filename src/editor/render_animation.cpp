@@ -386,16 +386,21 @@ void Editor::draw_render_animation_button(ui::Layout &lay) {
     return;
   }
   const bool backwards = ranim_last_ > 0 && ranim_first_ > ranim_last_;
-  if (u.button_enabled(r, with_key("Render Animation", "render.animation"), !backwards, "First Frame is after Last Frame: change one below.", false, ui::Icon::Camera))
-    start_render_animation_from_fields();  // (task 0288: the range below)
+  const bool go = u.button_enabled(r, with_key("Render Animation", "render.animation"), !backwards, "First Frame is after Last Frame: change one below.", false, ui::Icon::Camera);
+  /* The tooltip belongs to the button, so it is set before the range's fields are drawn (they were the last widget when it
+   * was, and it never showed). Round 509: the sentence is there at every frame; the PATH is searched only while hovered. */
+  std::string tip = "Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"
+                    "Renders/<scene>_animation_<time>/0001.png..., then a video next to them (the preset below)";
+  if (!u.hovered(r)) tip += ".";
+  else {
+    const std::string ffmpeg = video::available() ? std::string() : ffmpeg_program();
+    tip += video::available() ? " made here by " + video::description() + "."
+           : !ffmpeg.empty()  ? " made by " + ffmpeg + "."
+                              : std::string(" once there's a video maker (this build has none: its finish offers Blender's libraries).");
+  }
+  u.tooltip(tip);
+  if (go) start_render_animation_from_fields();  // (task 0288: the range below)
   draw_render_range(lay);
-  if (!u.hovered(r)) return;  // (the PATH is searched only for the tooltip)
-  const std::string ffmpeg = video::available() ? std::string() : ffmpeg_program();
-  const std::string maker = video::available() ? "made here by " + video::description() + "."
-                            : !ffmpeg.empty()  ? "made by " + ffmpeg + "."
-                                               : std::string("once there's a video maker (this build has none: its finish offers Blender's libraries).");
-  u.tooltip("Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"
-            "Renders/<scene>_animation_<time>/0001.png..., then a video next to them (the preset below) " + maker);
 }
 
 }  // namespace bl
