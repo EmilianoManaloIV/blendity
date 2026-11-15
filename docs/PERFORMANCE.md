@@ -4150,3 +4150,108 @@ miss in the world by 1 to 8 ms: there the cheaper view or the shells would do.
 Still over an ADR 0105 budget: the first Puppet drag's longest frame (103 ms against 100: the body model, built on
 the frame; a job would take it off), AutoPhysics (58 ms against 50), the scrub with trails, onion skins and the
 zoetrope (98 ms a frame), and the drag beside a path-traced view (829 ms: the path tracer restarts on every pose).
+
+## Pass 23: more shapes (round 480)
+
+Round 480 adds wedges, stairs, arches, outlines pulled up and meshes as pieces. The questions for the numbers: what do
+the shapes of several solids cost a building, what does a mesh piece cost, and do hostile arrangements of them leave
+a sound mesh? `blendity_stress --only blockout`, release builds, this machine (AMD Ryzen 9 5900XT, 32 threads),
+2026-11-11 23:50-23:55 with nothing else building or running. `interior 100 + stairs + arch` is round 476's building
+with a flight of stairs and an arch in it; `interior rooms 100 + a 10k-face mesh` is round 478's with a 10,000-face
+mesh as one more piece.
+
+| ms from a piece moving until the mesh can be drawn | exact (Manifold) | grid, cell 0.2 m | grid, cell 0.1 m | grid, cell 0.05 m |
+|---|---|---|---|---|
+| `interior 100`, with Blender's libraries | 11.6 | 13.2 | 41.9 | 183 (over) |
+| `interior 100 + stairs + arch`, with the libraries | **15.6** | 13.6 | **41.7** | 184 (over) |
+| `interior rooms 100 + a 10k-face mesh`, with the libraries | **72.7** | 35.8 | 60.4 | 207 |
+| `interior 100`, dependency-free | - | 15.6 | 48.2 | 198 (over) |
+| `interior 100 + stairs + arch`, dependency-free | - | 14.9 | **48.0** | 195 (over) |
+| `interior rooms 100 + a 10k-face mesh`, dependency-free | - | 44.1 | 68.0 | 218 |
+
+Of the mesh row's 72.7 ms on the exact path 16.6 ms make the solids (the mesh's triangles), 33.1 ms are Manifold and
+10.2 ms the render mesh of the 16,704 faces that come out; on the grid the mesh costs 8 ms to make and the result is
+as coarse as the cell (897 faces at 0.2 m).
+
+| live, `interior 100` in the editor, 120 frames | frame median ms | frame worst ms | move to landing, median ms | worst ms | landings |
+|---|---|---|---|---|---|
+| a door moved every frame, with the libraries | 2.87 | 3.38 | 2.93 | 37.2 | 110 |
+| a face handle dragged, with the libraries | 2.97 | 3.27 | 3.03 | 80.3 | 109 |
+| a door moved every frame, dependency-free | 0.98 | 10.5 | 47.7 | 89.1 | 31 |
+| a face handle dragged, dependency-free | 1.18 | 10.7 | 48.5 | 103 | 30 |
+
+| sweep, 2,000 arrangements a kind | pieces skipped | refused | problems | with small faces on others | with flat faces meeting at a ridge | with faces of no area | unresolved places |
+|---|---|---|---|---|---|---|---|
+| exact, wedges, stairs, arches and outlines | 738 | 0 | **0** (see below) | 165 | **2** | 96 | 405 |
+| exact, hostile meshes among boxes, rooms and wedges | 1,805 | 0 | **0** | 183 | 0 | 122 | 352 |
+| grid 0.08 m, wedges, stairs, arches and outlines | 738 | 0 | **0** | 26 | 0 | 48 | 158,703 |
+| grid 0.08 m, hostile meshes among boxes, rooms and wedges | 346 | 0 | **0** | 123 | 0 | 31 | 13,200 |
+
+The eight older rows are 0 problems as before, with 0 in the new column, and their other counts are the same to
+the number. The timed rows are of 2026-11-11 on main `d03f3f4c`; the sweep's rows are of the rerun on main
+`e978001a` with the judge as it is now (the kernel's files are the same in both).
+
+**What changed in the judge, and what did not change in the kernel.** The timed run's exact row of the new shapes
+read 2 problems - seeds 475 and 1337, "flat faces on top of each other". Both are a flat side against a round room's
+wall, an outline of 256 points, along the ridge between two facets 1.4 degrees apart:
+
+- **seed 475:** a stairs' side touches the ridge. The ridge is a float's rounding past the side at one end (a
+  millionth of a metre) and on it at the other; a needle of the side 2.5 m long and 0.18 mm wide is left, back to
+  back with the two facets - a closed crack a micron thick.
+- **seed 1337:** a cutter's end is 0.04 mm short of the ridge. That is the pieces' own numbers, not rounding: the
+  room's inner outline is mitred, 0.5 m x (1 / cos(pi / 256) - 1) = 0.038 mm past its circle. A skin of wall 0.04 mm
+  thick and 3.1 mm wide is left between the cutter's end and the facets.
+
+Both meshes are closed and are what was asked for; neither is a doubled wall. The check for faces on top of each
+other takes two back-to-back faces for one plane within a hundred-thousandth of the result's size and names these
+pairs because the strip stays inside that distance; the two planes are 0.7 degrees apart and cross in a line. The
+judge (`meet_at_a_ridge`, `stress/stress_blockout.inc`) now sets such a pair apart when all of this holds: the two
+faces are back to back; each is flat to that distance and 0.1 mm wide or more (so the angle is the planes' own and
+not the rounding of a needle's corners); their planes are 5e-3 (0.3 degrees) or more apart. At that angle the check
+itself cannot name a strip wider than four thousandths of the size (2 cm of a 5 m result). Pairs that look the same
+way - a pocket or a doubled skin - and two faces of one plane are problems as before. The set-apart pairs have a
+column of their own. A kernel pass that snaps a round piece's corners onto another piece's flat side within the
+tolerance would close seed 475's crack; it is not in this round (it would move every row, and seed 1337's skin is
+eight tolerances thick - how rooms are offset, not a defect).
+
+The exact path skips more mesh pieces than the grid (1,805 against 346): a mesh Manifold refuses is skipped by name
+there, and the grid takes it.
+
+## Pass 23: the goal on a whole interior (round 483, task 0459)
+Timed 2026-11-13 13:47, alone on the machine (AMD64, 32 threads, RTX 4070 SUPER), the section's bench rows
+(`BLENDITY_BLOCKOUT_BENCH=1 blendity_stress --only blockout`; the whole section at 12:22, before the L room moved 0.1 m), with
+Blender's libraries / without. `benchscene blockout`: 100 pieces, 16,438 faces; `benchscene blockout 400`: 400 pieces,
+18,222 faces. A drag is 600 frames, one every 16.7 ms; a frame is the main thread's whole `step_frame_headless`; a
+landing is timed from the first move whose mesh had not yet been shown. The goal: no frame over 16.7 ms, the mesh
+within 100 ms.
+
+| drag | frame median ms | 1 % slowest ms | worst ms | frames a second, 1 % low | move to mesh median ms | worst ms | landings | verdict |
+|---|---|---|---|---|---|---|---|---|
+| libraries, 100 pieces, a door slid | 1.91 | 17.57 | 20.20 | 56.9 | 32.85 | 60.37 | 245 | OVER (the frame) |
+| libraries, 100 pieces, a face handle | 1.64 | 16.36 | 17.18 | 60.0 | 32.70 | 92.64 | 237 | OVER (the frame) |
+| libraries, 400 pieces, a door slid | 2.05 | 20.35 | 21.06 | 49.1 | 65.25 | 112.60 | 123 | OVER (the frame) |
+| libraries, 400 pieces, a face handle | 1.78 | 19.50 | 19.98 | 51.3 | 65.08 | 143.99 | 124 | OVER (the frame) |
+| no libraries, 100 pieces, a door slid | 1.72 | 21.70 | 26.57 | 46.1 | 33.43 | 75.40 | 202 | OVER (the frame) |
+| no libraries, 100 pieces, a face handle | 1.36 | 21.05 | 26.53 | 47.5 | 33.10 | 105.54 | 202 | OVER (the frame) |
+| no libraries, 400 pieces, a door slid | 1.87 | 28.87 | 36.85 | 34.6 | 159.94 | 208.79 | 56 | OVER (both) |
+| no libraries, 400 pieces, a face handle | 1.61 | 27.88 | 33.42 | 35.9 | 159.54 | 250.80 | 56 | OVER (both) |
+
+No kernel call ran on the main thread in any row. The old test interior (`interior 100`, 392 faces) in the 12:22 run:
+frame median 3.0 ms, worst 4.7 ms with the libraries (ok); 1.1 / 9.4 ms without, its mesh in 48 ms. The slow frames
+are those that first draw a newly landed mesh of 16 to 18 thousand faces (read from the code, not profiled). The 14
+robustness sweeps (28,000 + 1,000 arrangements) are the same as round 482's row for row: 0 refused, 0 problems.
+
+## Round 504: the performance survey's sections
+
+`blendity_stress --only image_edit | sculpt_paint | sequencer | importers | unity_export | asset_windows | cold_first_use`
+(named-only; `--quick` for the smallest size). Their numbers and the ranked list are `docs/perf/sweep-504.md`.
+
+## Round 508: the image editor's heavy sliders, sculpting 500k faces, the bake's pages
+
+The four blur-based filters (Clarity, Dehaze, Sharpen, Noise Reduction) redid their whole filter each slider move although the
+blur does not depend on the amount: their parts are kept per step (`FilterKeep`), the blur's vertical pass runs in blocks over
+the job threads, and Dehaze's airlight is a histogram's bin sorted, not the plane. Sliders 30 - 51 -> 10.1 - 10.4 ms (Noise
+Reduction 18.3). Opening a 4096 x 4096 picture: the decode on a worker, 181 -> 33 ms. A sculpt dab on 500k faces scanned the
+whole mesh for what moved, made every face's normals and the whole box again; it now tells the render mesh what it moved
+(`Mesh::note_moved`): 19.6 - 20.6 -> 15.4 - 16.6 ms on CPU views, 6 - 8 ms on the card. A finished bake's lightmap pages go to
+the card before it lands (ADR 0140): the landing frame 78 -> 41 ms at 4.19 M texels, 28 -> 19 ms at 0.26 M.

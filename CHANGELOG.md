@@ -2,164 +2,1350 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
-## 2026-11-12 (round 475): Pass 22's write-up - what posing costs now, and what is left to decide
+## 2026-11-15 (round 515): a door's leaf is its own object - it swings about its hinge without rebuilding the wall (task 0497, ADR 0136, ADR 0129 amended)
 
-**Asked:** Pass 22's last round (task 0451): the pass in one place - every row of round 468's baseline beside its
-number after rounds 469 to 474, whether posing holds 16.7 ms a frame, and for every row that does not, what is left
-in the frame and what the options are.
+**Asked** (the owner, 2026-11-14, Pass 23b through the hub): "Doors should also come in parts, so I can "swing" the door
+open without modifying the mesh so much." - then "Approve 514 and 515", with the three recommended choices: the leaf is
+dynamic (the lightmap is baked with the doorway open), a Revolving door's wings only with Leaf on (off by default),
+turning a leaf by hand writes Open Amount back.
 
-**The short answer**
-- **Met (16.7 ms, a window on the card, the stand-in alone):** dragging an IK target, its pole, or G on it (48 to 56
-  ms before, 10 to 13 ms now), orbiting, a prop moved in the world.
-- **Not met:** every pose that moves the whole body - turning the chest (50 -> 35 ms), a Puppet handle (63 -> 53),
-  a scrub (55 -> 46), Play with the springs (87 -> 44.5) - and, in a world, the IK drags too (67 -> 18 ms: close).
-- **The owner's avatar in the owner's world (measured locally):** an IK target dragged 61.7 -> 23.9 ms, the chest
-  turned 81.1 -> 40.9 ms, a scrub 103.9 -> 50.0 ms, the clip playing with the Game view beside the Scene view 191.8
-  -> 51.8 ms, Play with the springs 108.4 -> 45.0 ms, the whole avatar moved 82.8 -> 11.5 ms. Between a seventh and
-  a half of the frame time of the pass's start, and not 60 frames a second for a whole-body pose.
-- **Why it stops there:** in a whole-body frame the solve is under 2 ms. What is left is the body itself: the moved
-  meshes sent to the card (11 to 18 ms on the stand-in), their positions, normals and tangents moved on the CPU (8
-  to 11 ms) and the outline shells built whole (7 to 10 ms).
+**Changed:** a styled door's leaf is no longer faces of the Blockout's mesh. A Single door has one **leaf object** under
+its piece, a Double two (Leaf L, Leaf R), a Sliding door one, an Arched door one (square at the springing line, the arch
+above stays open), a Revolving door one **Wings** object (four wings in a cross) when its Leaf is on; Opening Only has
+none. Each leaf's origin is its hinge (a Sliding leaf's: its closed place; the wings': the drum's axis), so:
+- **Open Amount turns the leaf** (90 degrees at 1; a Sliding leaf moves its width) - a transform write, **no Blockout
+  build**, the Blockout's mesh bytes the same at every Open Amount.
+- **Turning a leaf by hand** with the Rotate tool (gizmo or R Y) **writes Open Amount back** in the same undo step; one
+  undo returns both. A Double follows the last leaf turned; a leaf turned past open is put back at the end of the range.
+- **The doorway is clear:** the kernel makes the frame, the reveals and the opening only, so an open door cuts nothing
+  that stands in its swing (round 499's swing cut and its status notes are gone).
+- The door owns its leaves: they follow the door, its wall, its room and the Blockout; duplicate, delete and undo carry
+  them; deleting a leaf by hand (Delete key, Hierarchy, Edit menu) turns the door's Leaf off in one undo step. A leaf
+  copied with Ctrl+D, moved out of its door or under another piece becomes an ordinary object (its mark dropped, never
+  deleted), and the door makes a new leaf if it still wants one. A name the user gave a leaf is kept.
+- A leaf is lit by light probes (Contribute GI off, the wall's lightmap baked with the doorway open), has a Box collider
+  and a **kinematic Rigidbody** without gravity, so in Play mode its body moves with it.
+- **Bake to Mesh** keeps the leaves as separate objects at the same world place; Unbake returns them under the door.
+- **Export** (OBJ, FBX, GLB): each leaf is its own node beside the Blockout's (the exporters keep no parents), its pivot
+  at the hinge and, with Keep Transforms, turned as far as Open Amount says.
+- The leaf's Inspector shows its door's Open Amount and Hinge Side and "Made by Door 'X' - its shape follows the door's
+  numbers"; `blockout leaf select` selects the selected door's leaves, `blockout leaf door` the leaf's door.
+- The Leaf material colours the leaf objects; changing it no longer rebuilds the Blockout.
+- Scenes saved with round 499's styled doors open with their leaf objects made, the doors looking the same.
+- Learn: "Doors with a style" swings a leaf with Open Amount, then with the Rotate tool.
 
-**For the owner to decide** (numbers and estimates in `docs/PERFORMANCE.md`, "Pass 22 in one table")
-1. **Skinning on the card** - the largest part: the uploads and the CPU's normals and tangents leave the frame (19
-   to 29 of the stand-in's 35 to 53 ms; what the card then spends deforming is not estimated). Alone it leaves a
-   Puppet drag near 24 ms; with the outline shells in place (option 2) the estimate is 8 to 15 ms - the one
-   combination that brings a whole-body pose under 16.7 ms. A pass of its own, with an ADR: picking, bounds,
-   snapping, the path tracer and exports still need the posed shape on the CPU, on demand.
-2. **Outline shells following in place** (or on the card): 7 to 10 ms of every whole-body frame; a round or two.
-3. **A cheaper view while posing** (outlines, shadows or probes off during a drag): it changes the picture while
-   the mouse is down - the owner's call.
-4. **One window's redraw at a time** (Pass 19's open item): the Game view beside the Scene view costs a scrub 24 ms.
+**Fixed on the way:** a NaN Open Amount made the door look changed every frame (a float compare); a NaN Leaf Thickness
+turned the door into a plain hole. A collider's wire cache key converted `centre * 10000` to an unsigned number, which
+is undefined for a negative centre (a leaf's collider sits off its hinge) and stopped the sanitizer build; the key now
+uses the fields' bits (`world_kit.cpp`, round 362's code).
 
-**Changed (task 0451)**
-- The Learn lesson "Where a Posing Frame Goes" in full: what the editor keeps between frames, what a frame still
-  costs, three more questions and a fifth Try-it step.
-- `tools/dev/changelog.py fold`: the fragments of rounds 472 to 475 are in `CHANGELOG.md`, `README.md` and the
-  shared docs.
+**Limits, said plainly:** a leaf turned during an animation or Sequencer preview, or while playing, is not written back
+(the preview's pose is not the user's); after the preview the leaf goes back to Open Amount. A leaf's shape follows the
+door's numbers: edits to its mesh are lost when those numbers change. A removed Rigidbody comes back when the leaf is
+remade. The Unity bridge is not covered by a test.
 
-**Left open by the pass** (from the rounds' entries, their task files and their reviews)
-- Round 468: zero-area faces' normals (found there, not taken up in this pass).
-- Round 472: the rig registry is not built. It was under its line when measured then; in round 474's baseline the
-  constraints cost 0.29 to 0.43 ms a frame in the world, at or just over the 0.3 ms line - a candidate again. An
-  Inspector drag is still drawn a frame late. Three caches compare a raw pointer and a counter (a pointer reused by
-  a new object with the same counter would be taken for the old one).
-- Round 473: no early exit for the full-body solver (ending 32 iterations at 24 moves bones by up to 122 mm); the
-  body model is not built on a job (the first Puppet drag's longest frame is 103 ms against 100); the solver does not
-  converge under a rotated, non-uniformly scaled parent (the old one neither); a goal at 1e20 is not refused; the
-  body model is dropped when the buffer is built again mid-drag and its bones differ; the stand-in is not compared
-  against the reference solver; with the pose prior in use the start pose is still written.
-- Round 474: an enabled Rigidbody in the scene's own physics loses Play's saving; trails still pose the live scene;
-  the springs' own step (3.8 ms); the release frame and the analyses on a timer were not looked at; AutoPhysics 58
-  ms against 50; `rig_ends()` is keyed on the scene's serial only; with Record on a keyed frame samples about 13
-  trail frames again and compares every key of the clip (it grows with the clip); the trail keeps a copy of the
-  clip's tracks; sampling part of a trail again is untried on long IK chains.
-- The bench: on the owner's avatar "FK: an upper arm turned" did not drag in round 468's window run, and "Puppet:
-  the left hand's handle" drags in neither window run (a still frame's time); headless it is 50.3 ms a frame. The stand-in's
-  "the clip playing, Scene view only" rows read one of two values from run to run (18.9 or 28.1 ms alone).
-- Housekeeping: the dependency-free `editor` group's check count varies by a few from run to run (0 failed);
-  `tools/dev/chain.sh`'s `TEST_GROUPS` with two differently configured trees; the `stack` job that failed once on
-  PR 385; the merged branch `task/0448-record-scrub-play` is still on GitHub.
+**Numbers** (`blendity_stress --only blockout`, untimed counts at below-normal priority beside other work), against
+round 500:
+- **The 2,000-door sweep** on the grid: 2,000 built, 0 problems, 18 with faces of no area - the same as round 500. On
+  the exact path: 2,000 built, **1 problem** (round 500: 0), small faces on top of others 70 (94), faces of no area 0
+  (2), unresolved places 85 (163). The one problem is seed 1927, a Sliding door in a turned building: flat faces on top
+  of each other - the kernel's coplanar contact class (ADR 0128); where in the doorway was not chased this round
+  (`BLENDITY_BLOCKOUT_DOOR_SEED=1927` lists it). The rest fell with the leaf's solids gone.
+- **Hostile numbers on styled doors** (180 cases a path): grid 127 built, 53 refused (round 500: 123 / 57); exact 129 /
+  51 (125 / 55); 0 problems on both - the four more built are doors with a NaN Leaf Thickness, which no longer refuses
+  the doorway.
+- Every other count row the same on both builds; the build and landing counts of the live rows differ by timing under
+  load.
 
-**Checked:** the `editor` and `animation` groups, 0 failed: Windows without the libraries 2,331 and 2,229 checks, with them 2,352 and 2,230, Linux 2,331 and 2,229 (the lessons' audit is in `editor`). The whole suite is CI's (round 493's rule). No timed run was made for the stand-in in this round: its numbers are round 474's session; the owner's avatar alone and the owner's world alone were measured again in this round's own window. Code review: changes needed, all text - the options table overstated what skinning on the card saves alone and gave the card's picture a number from the wrong setup; both corrected, with the ranges, the lesson's wording and the list of what is left open.
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each, with main (e0c8fcef) merged in:
+Windows without the libraries 22,682 / 2,331 / 9,782 / 190 / 24 checks, with them 29,929 / 2,357 / 9,838 / 208 / 24,
+Linux 22,685 / 2,331 / 9,784 / 190 / 24. Coverage map clean. Two code reviews (the first found two undo steps for a
+deleted leaf, a static collider in Play mode, preview poses written back, a moved leaf deleted - all fixed) and a
+test-engineer's 16 edge tests (a NaN Open Amount's rebuild loop and a leaf dropped under another door - fixed). The
+round's tests are in a new `tests/test_blockout_leaf.cpp`: test_blockout.cpp reached MSVC's object-section limit.
 
-## 2026-11-12 (round 474): Play with the springs stops building meshes whole; pins and trails do less each frame
+## 2026-11-14 (round 514): modifiers on a Blockout piece (task 0496, ADR 0138)
 
-**Asked:** Pass 22's seventh round (task 0450): what sits around a posed frame - trails, the assistants' views,
-AutoPosing's pins, Play with an avatar's springs - should stop costing more than the pose.
+**Asked** (the owner, 2026-11-14, through the hub): "Yes, per piece modifiers would be a great implimentaiton to add." -
+approved with "Approve 514 and 515" and the three recommended choices.
 
-**Measured first** (the stand-in, round 473's baseline; a part is built only when it is over 0.3 ms a frame or over
-its budget): Play with the springs 82 ms a frame with 20 render meshes built whole every frame (a playing clip
-builds none); trails, onion skins and the zoetrope add about 6 ms to a drag frame (the trail 2.6 ms, the constraints
-1.7 ms instead of 0.4); the Puppet controls 2.9 ms a frame. Under the line and left alone: Centre of Mass (0.24
-ms), the Avatar window (0.17 ms), the Rigging window (0.27 ms); the first Preview, the first Record and entering
-Play (92, 71 and 96 ms: under their 100).
+**Added**
+- **A Blockout piece carries a modifier stack of its own** - ordinary modifier components on the piece's object, so
+  saving, undo, Ctrl+D and Copy to Selected work as for any object. The stack runs on the piece's own shape, in its own
+  axes, before the piece is added or cut: Bevel just the arches, an Array of ten columns from one, a Mirror on one wing.
+  The rest of the Blockout keeps its exact numeric pieces.
+- **Where it runs:** on the Blockout build's worker (and in the synchronous build of tests and scripts). The snapshot
+  notes each stacked piece with clones of its modifiers; the build turns it into a mesh piece - its shape from its
+  numbers (`blockout::piece_shape_mesh`, new), then the stack. Evaluated meshes are kept by a key of the piece's numbers
+  and its stack, never its place: moving or turning a piece runs nothing; changing a number or a modifier runs it once.
+  The cache is bounded (512 entries and 64 MB, the least recently used half dropped past either), guarded by one mutex,
+  emptied by a new or opened scene; `blockout info` says how full it is.
+- **Order:** piece stacks, then the pieces combined, then the Blockout's own stack (round 502).
+- **The Inspector:** a selected piece has the Modifiers section an object has. Modifiers a piece does not take are off
+  in its Add Modifier list with the reason in the tooltip (Boolean - use a Subtract piece; Curve, Lattice, Mesh Deform,
+  Armature, Normal Transfer read another object; Smooth Normals only changes shading). A room, a door or window and an
+  Intersect piece, and a preset (round 500's column, beam, railing, roof or stair), take no stack yet: their section says why, and a stack put on one by the console does nothing (the
+  Blockout's status names the piece). Apply on a piece is refused with Bake to Mesh offered.
+- **The status** names the stacked pieces ("built as a mesh: slower and less exact than its numbers").
+- A Learn section "Modifiers on a piece".
 
-**Changed (task 0450)**
-- **Play with the springs**: the scene's own physics step looked up every mesh's bounds at the start of each Play
-  frame, even with no rigid body in the scene. That deformed every skinned mesh before the springs had moved the
-  pose, and the Game view then built its meshes whole. With no body the step now does nothing; with one it is as it
-  was.
-- **AutoPosing's pins** are kept until what they are read from changes (the objects, the clip's contacts at the
-  playhead, the locks), where every frame walked the scene up to three times.
-- **Motion trails**: a key edit samples again only the frames around the edited keys (two keys either side), where
-  it sampled the whole trail again - Record keys on every frame of a drag. Turning trails off releases what they kept.
+**Fixed on the way:** the kernel's local box, cylinder, sphere and wedge are not wound one way before they are placed;
+handed to a modifier as they were, a Bevel left four corners of a box open and the piece was meshed on the grid (1,249
+faces for a bevelled 2 m box). `piece_shape_mesh` winds every face outward: the bevelled box is 26 faces, as on the
+Cube primitive.
 
-**Not in this round**
-- **Trails still pose the live scene** when they sample (the spec's private copy of the rig would have to repeat
-  the constraint solves exactly: too large here). What changed is how many frames an edit samples again.
-- **With a rigid body in the scene's own physics** (every build without the libraries; with them only a body added
-  during Play) the bounds are looked up as before, and the meshes are built whole again.
-- **The springs' own step** (4.9 ms a frame on the stand-in: three scans of the scene and a body fit hashed every
-  frame) is read and listed, not changed. The release frame, the analyses on a timer, the first Puppet drag's
-  longest frame (110 ms) and AutoPhysics (58 ms against 50) are not touched.
+**Changed for old scenes:** a modifier already saved on a piece (inert until now) works when the scene is opened.
 
-**Checked:** the `animation`, `editor` and `physics` groups, 0 failed: Windows without the libraries 2,229, 2,331 and 190 checks, with them 2,230, 2,349 and 208, Linux 2,229, 2,331 and 190; `round 474` alone 342 checks (338 with the libraries, where one test steps aside: under Jolt a mesh without a collider is no floor); the `gpu` group with the libraries 886 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: no blocking finding. Its notes, kept here: the pins come from a cache, so a frame that commits an undo step walks once; an enabled Rigidbody in the scene's own physics loses the Play saving (follow-up: leave skinned objects out of the statics, or use last frame's bounds); with Record on, a keyed frame samples about 13 trail frames again on the test rig and compares every key of the clip (work that grows with the clip's keys); the trail keeps one copy of the clip's tracks; sampling part of a trail again could differ from sampling all of it where a constraint starts from its last answer (not seen in 37 kinds of edit on the test rig, not tried on long IK chains).
+**After review:** a stack's result is tidied (copies of an Array that touch lose the faces between them; a face twice
+is kept once) and refused - the piece built from its numbers, the status saying why - when it is not one closed solid,
+is flat or has fewer than four faces (a Decimate to two flat faces made the piece vanish silently before); refusals are
+kept with the cache so a refused stack does not run again at every build; Copy to Selected copies a modifier between
+pieces (and names a piece that refuses it); an Array that fits a curve is said to do nothing on a piece; a modifier a
+piece does not take, put there by the console, is named in the status; a stacked piece's faces shade smooth by angle;
+the picking names a piece by the meshes the build used.
 
-**Measured:** the stand-in, round 473's build against this one on a quiet machine (a window on the card). **Play with the springs: 82.3 -> 44.5 ms a frame alone, 101.5 -> 69.8 ms in its world** (longest frame 93 -> 61 and 108 -> 81); evaluations a frame 27 -> 10.9, tangents built whole 5.3 -> 0 ms, mesh uploads 28.1 -> 17.0 ms, the interface's part (where the physics step sat) 18.9 -> 5.0 ms; entering Play 83.5 -> 70.6 ms. The row is still over its budget: what is left is the springs' own step (3.8 ms), the outline shells built whole and the uploads. **Pins and trails: nothing a row shows.** The drag with trails, onion skins and the zoetrope reads 31.8 -> 28.7 ms (within what a row is good for), its trail part 2.16 -> 2.10 ms: the bench's drag keys on every frame, where the trail was already sampled a few frames at a time. The Puppet handle's row is unchanged (52.4 -> 52.6 ms alone, 61.5 -> 62.0 in its world; controls 1.36 -> 1.39 ms). One check finding, leaving Play 5.3 -> 8.2 ms, did not repeat (5.1 ms in the round's own baseline). The owner's avatar in the owner's world, measured locally, round 472's run against this round's (Unity signed in for both; rounds 473 and 474 together): Play with the springs reads the same in a window (45.5 -> 45.0 ms) and 67.7 -> 55.0 ms headless (normals 11.5 -> 6.6 ms, meshes moved in place 10.3 -> 5.7 ms); the Puppet handles 56.2 -> 52.5 ms (hips) and 55.5 -> 52.2 ms (head); the other rows within a tenth. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+**Limits:** a piece with a stack builds as a mesh - on the exact path through Manifold, on the grid path as coarse as
+the cell; its Blend radius is not read, nor that of the pieces in its cluster (round 480's rule for mesh pieces); stairs, arches and outlines are united by a build of the piece alone before the
+stack (on builds without Blender's libraries, by the grid). No stacks on rooms, doors / windows, presets and Intersect pieces.
 
-## 2026-11-12 (round 473): Puppet Posing's solver works on a pose buffer, not on the scene
+**Checked:** the round's groups (`blockout_piece_modifiers` new, `blockout_modifiers`, `blockout_join`, `blockout`,
+`modeling`, `editor`), not the full suite: Windows with Blender's libraries 38,547 checks, dependency-free Windows
+31,201 and Linux 31,207, 0 failed (the editor test "Browse... without a file dialog: said so" failed once under load -
+its toast expires by the clock - and passes alone; not this round's code). Three code reviews, the last two's findings
+fixed (a false warning on every plain piece's Modifiers section among them). Tests that need the exact path or Decimate
+(meshoptimizer's) say so where a build has neither. `blendity_stress --only blockout_piece_modifiers` in a timed window,
+exact path: a stacked column in `interior 100` changed to the drawn mesh in 19.6 ms median (Bevel) and 24.6 ms (Array of
+10), budget 100 ms, one evaluation a change; a drag of the column or of a door, 120 frames: worst frame 5.2 - 6.5 ms,
+0 stack evaluations, 0 main-thread builds. Untimed sweep, every allowed modifier on every shape, added and subtracted,
+in a small building: 448 cases, 448 built, 0 problems on each path. Faces newly on top of each other: 6, in three cases
+(a new section, so no earlier count; the sweep now prints each case, its face pairs and the stacked mesh's own count):
+- **sphere + Bevel, cut through the wall between two rooms (exact path), 2 pairs:** tiny back-to-back triangles
+  (0.0015 m2) where the bevelled sphere's surface nearly grazes the wall's planes. The stacked mesh itself has none
+  (482 faces, 0 pairs): it is the exact path's boolean meeting a nearly tangent surface - the kernel's contact class
+  for any mesh piece (round 480), not the stack.
+- **outline + Wireframe, cut through that wall (exact path), 2 pairs:** a sliver in the plane of the wall's face and
+  one in the cut's floor. The Wireframe's own output already holds 4 pairs on top of each other (its struts' ends
+  overlap at the outline's sharp corners) - the Wireframe modifier's result, the same on an ordinary object; round 514
+  passes it to the kernel as it is (it is closed, so it is not refused). A follow-up for the Wireframe modifier.
+- **cylinder + Decimate, cut through that wall (grid path), 2 pairs:** slanted faces of the decimated cylinder finer
+  than the 0.2 m cell; the stacked mesh has none (18 faces) - the grid's known class.
+(On the dependency-free build the grid counted 2 with Solidify instead: the same grid class.) Extremes (an Array of 6,000 faces, Subdivision 4 of a sphere, 70,656
+faces) build, 0 problems. `--only blockout`: every count the same as round 500 recorded.
 
-**Asked:** Pass 22's sixth round (task 0449, ADR 0127): dragging a Puppet handle should cost about what turning one
-bone costs.
+## 2026-11-14 (round 513): draw a door or a window onto a wall with Draw Piece (task 0495)
 
-**Read first:** every frame of a Puppet or AutoPosing drag put the whole start pose back into the scene, built the
-joint list again, and wrote two transforms per bone into the scene on each of 32 to 92 iterations - thousands of
-scene writes that nothing draws, each one marking a subtree dirty.
+**Asked** (the owner, 2026-11-14, through the hub): "Let do add door and window to draw piece, but make sure HCI isn't compromised."
 
-**Changed (task 0449, ADR 0127)**
-- **A pose buffer** (`autopose::Rig`): everything under the armature as plain numbers, parents first, built once per
-  drag. The solver reads and writes only the buffer; an iteration allocates nothing and touches no scene object.
-- **The scene is written once a frame**: after the solve each joint whose turn changed gets one write (the hips'
-  place and a joint's scale too, when they differ). The start pose
-  is no longer written back first (it is, as before, when the pose prior is used: the prior reads the scene).
-- **The pose is the same**: the buffer solver leaves every bone within 0.002 mm of the old solver's on 25 recorded
-  drags (each handle, pins on and off, a limit hit, a target out of reach, the hips with both feet pinned). The old
-  solver stays in the code as the tests' reference (`autopose::solve_reference`).
-- **Arms with support bones**: an avatar whose arms carry `_sup` bones placed further out than the next limb bone
-  now maps its arms, so Puppet Posing shows its hand handles there.
+**Added (task 0495)**
+- **Door and Window in Draw Piece's Shape dropdown**, under an "Openings" heading after the nine shapes (the toolkit's grouped list, round 513; the nine
+  keep their rows and the console's words). Drag a rectangle on a wall of a Blockout - a room's wall or the side of a piece - and the opening stands in that
+  wall: one piece, the size of the drag, upright by the Blockout's up (as round 499's fix places the buttons' openings), facing the wall's normal, in the Door
+  Style or Window Style the Create section shows. A door's bottom is on the floor the wall stands on (an upper room's floor, an Add piece's foot); a window's
+  sill is the drag's lower edge. The grid snaps along the wall and up it, in the wall's own frame (a turned room's or a turned Blockout's too); Ctrl: none.
+  A drag past the wall's edge is held to the wall - inside the thickness of the walls that meet it, on the room's outer face - and the status says so. The preview is the opening's rectangle in the wall in a Subtract's colour, its size beside
+  the mouse. F9 right after changes Width, Head, Sill and Style; one undo step takes it away.
+- **Refusals say why and what to do**: a floor or a ceiling, nothing of a Blockout under the pointer, a wall that leans more than 2 degrees (how many, to a tenth), a window whose drag starts more than 5 cm under the floor (a few
+  centimetres under are raised to it, and the status says so), a drag under 0.2 x 0.2 m, a door whose drag starts more than 0.6 m above its floor (or ends under it). R does nothing for an opening (it turns with its wall) and the
+  status says so.
+- **Console:** `blockout roomopt piece door|window` sets the shape; `blockout draw door|window auto at <x y z> normal <x y z> size <width height 0>` draws one
+  (the tool sends the same words when the button is let go, so a script makes what the mouse makes).
 
-**Not in this round**
-- **The early exit** of ADR 0127 (decision 3). Measured: the pose a drag reaches depends on the whole schedule of
-  iterations - ending the 32 main iterations at 24 moves bones by up to 122 mm and 15 degrees, at 16 by 323 mm - so
-  no exit can keep the pose within the task's 1 mm. The solve still runs 32 iterations, or up to 92 with pins.
-- **The body model on a job** when it takes over 50 ms (scope 6).
+**Changed (the toolkit, for every window)**
+- **A dropdown's list can be grouped** under headings and separators that are not choices: Up / Down step over them, a click on one
+  keeps the list open, and the closed dropdown never shows one (ADR 0145's line of 2026-11-14).
+- **A dropdown's open list is as wide as its longest row**, at least the dropdown's own width and 120 px (a long option in a
+  narrow dropdown was cut). Lists that got wider in the full sweep: the Sequencer's sequence picker, the Animation window's motion
+  filter and Always Animate, the Avatar window's presets (Align Player With Spawn Point, Skinning & Weight Painting, Viseme
+  Parameter Only), the background gradient, the Game view's camera (at x1.5), Merge with neighbours, Set Origin, the export
+  format (x1.5), the render resolution presets and aspect ratios, the Rasterized / Path Traced engine (x1.5), Smart / Safe
+  apply, the colour management view (x1.5) and Toward the Camera. The full 12-configuration sweep is the same with and without
+  this round.
+- **The status bar names a drawn door or window** ("Door: release to cut the opening | R does nothing: it turns with its wall"),
+  not "Box".
+- **Two Blockout tooltips found by the HCI audits** (texts of Pass 23's, cleared by the hub): Turn 90's names Adjust Last
+  Operation's key from the keymap (Ctrl+F9 in Maya, where F9 is a mode - it said F9 everywhere), and neither Turn 90's nor
+  Join Blockouts' ends in "Console: ..." (the button is the control). The console audit is back at its baseline (6), the
+  label audit at 0.
 
-**Checked:** the `animation` and `editor` groups, 0 failed: Windows without the libraries 1,887 and 2,326 checks, with them 1,892 and 2,340, Linux 1,887 and 2,330; `round 473` alone 380 checks; the `gpu` group with the libraries 886 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: the buffer solver read against the old one line by line, no difference found; one major finding fixed (a bone destroyed mid-drag left the body model and the prior's rig pointing at freed objects when the buffer was built again), with the armature's parent read every frame, a joint's scale put back, and tests that fail if a frame writes the start pose again.
+**Fixed (tests)** Pass 23's style tests pick the Tools window's style dropdowns after scrolling them into view (in their
+900 x 600 window they sit below the fold since round 509; at 1366x768 and larger they show without scrolling).
 
-**Measured:** the stand-in, round 472's build against this one on a quiet machine (a Puppet handle dragged, a window on the card): the solver's own part 1.95 -> 1.11 ms a frame, the controls around it 3.56 -> 2.87 ms, 44.5 scene writes a frame by the solver where it made two a bone on each of 31 iterations; the frame itself reads the same (alone 50.3 -> 55.5 ms, in its world 63.4 -> 57.9: within what a row is good for). The solve was 2 ms of a 50 ms frame: a Puppet drag costs what moving the whole body costs (skinning, normals, uploads), not what the solver costs. The owner's avatar, measured locally: its left hand's handle exists now (a drag frame 49.7 ms headless; the solver 2.6 ms, 219 scene writes a frame); the solver's part for the hips' handle is unchanged there (4.65 -> 4.91 ms: on 200 joints it is the arithmetic per joint, not the scene writes). The avatar-in-the-world rows could not be compared with round 472's: Unity had no licence that morning, so the world came in without Unity's lightmaps and the avatar without its part numbers. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+**Checked:** Windows with Blender's libraries, fresh folders: hci 1,849, blockout 29,281, editor 2,359, 0 failed; Linux: hci
+1,847, blockout 22,065, editor 2,333, 0 failed; the full 12-configuration HCI sweep identical with and without the round (at or below the baseline);
+the test-engineer's eleven edge tests; two code reviews (changes needed, all made: the floor from Pass 23's
+`blockout_opening_feet`, a shape switch mid-drag dropped, the wall found at the press kept by id for that drag only) and an
+approval. Not run: stress (no geometry kernel changed - the opening is Pass 23's piece).
 
-## 2026-11-12 (round 472): Record, scrubbing and the Animation window cost what the pose costs; the limb is drawn where the solver puts it
+## 2026-11-14 (round 510): the survey's ranked findings that are fixes (task 0494)
 
-**Asked:** Pass 22's fifth round (task 0448, ADR 0126): posing with Record on, scrubbing and playing a clip should
-cost what the pose costs, and a dragged IK target's limb should be drawn where the solver puts it for that frame.
+**Asked** (the hub, Pass 25's HCI stream): what round 505's survey ranked after the sweep's own faults and is a fix, not a
+feature - no text sends the artist to the Console where a control does the job, no shortcut is written into a string,
+the smaller things the pictures showed are right, and what round 509 left.
 
-**Measured first** (round 471's runs, the owner's avatar, 275 bones keyed): Record cost 10.5 ms a frame and
-serialised the clip once a frame; on a scrub the clip's apply was 1.4 ms and the Animation window 1.5 to 1.9 ms;
-the constraints 0.2 ms. On the stand-in the hand was drawn up to 16.5 mm behind its IK target on 30 of 35 frames
-of a drag.
+**Fixed**
+- **Texts that send the artist to the Console (finding 7), 13 to 5.** Fix Model and Create Visemes name no command (the
+  buttons are the text); Decimate to fit's refusal says "Profiler window > Budget"; the UI file's tooltip says the
+  Console window lists what a loaded file brings; the polygon sides tooltip says 5, 6 or 8; the ID mask warning says
+  "Bake All Maps (Textures window, on the surface)"; VR paint says "Paint in the Modeling Tools window's Paint
+  section"; the CPU-view tooltip says the Profiler window lists what the card can't draw. The baseline is 5: Blockout's
+  three, Unbake's help, and the Lights Gamma warning (no control for Lights Gamma exists; the command is its only way).
+- **Shortcut labels written into strings (finding 8), 16 to 0.** The Board's Paste text and tooltip, the Sequencer's Add
+  Edit / Ripple Delete rows, the Draw window's Undo and Redo tooltips and More menu rows, the Profiler's "F12 stays
+  exact", the Send to Blendity toast take the keymap's text, and read as a sentence with no key. The Sketch Pad's
+  selection keys (Alt+Backspace, Ctrl+D, Ctrl+T) and the Draw tool's Tab (Project: View / Closest) are keys those tools
+  read themselves - no keymap action - and join the label audit's fixed gestures.
+- **Finding 13.** Preferences' Animation Assistants has its five switches at one x, the heading the first one's label; "not installed" no
+  longer repeats the Install... button beside it; the Animation window's Play button says Play (Pause while it runs) and
+  the arrows stay the key steps, each with its own name and a tooltip.
+- The Sequencer's toolbar wraps item by item, so every control is inside its pane at 1024x640 x1.5 and the body starts
+  under the last row; the Game view's camera dropdown stays in a narrow header, down to a control's height (its name
+  then in the tooltip; under that it is left out and the Hierarchy picks the camera). The Profiler lists "Scene view on
+  the CPU" with the card's reason also when no view is on the card (the row the CPU badge's tooltip sends you to).
 
-**Changed (task 0448, ADR 0126)**
-- **Record** takes the clip's text once per undo step instead of on every frame, and reads only the objects that
-  moved since it last looked (`transform_version`), where it read nine numbers of every object under the root
-  through a map keyed by text. The keys written are the same.
-- **A clip's tracks stay bound to their objects** (`apply_clip`): found once per clip and root, kept while the
-  clip's tracks and the objects under the root (which, hung from what, called what) are the same - no map of paths
-  built per call. Blend-shape tracks are bound by index. `AnimationClip::track` / `find` use an index from 24 tracks.
-- **The Animation window** keeps its rows and each row's keys while only the playhead moves.
-- **G / R / S** apply and redraw only when an input changed (the mouse, a typed number, an axis, a modifier, the
-  camera): a held modal with a still mouse costs nothing.
-- **The limb is drawn where the solver puts it**: the constraints are solved once more right after the Scene
-  view's tools moved something, before the view gathers (not in Play).
+**Added**
+- The toolkit records its hand-drawn widgets (`mark_widget`, `text_area`, `drag_label`, `curve_field`, `color_ramp`) as
+  controls of kinds mark, textarea, draglabel, curve and ramp, with no Tab stop; the sweep counts them and judges them
+  for `covered` and size, and prints "hand-drawn, no keyboard stop" per configuration. The X, Y, Z letters of a vector
+  field (10 px wide scrub handles, the number field beside each being the full target) are reported as `small-handle`.
 
-**Not in this round:** the rig registry (the constraints cost 0.2 ms a frame, under the spec's 0.3 ms line - with
-the second solve a drag now pays 0.5 ms for them, so the registry is worth a look again in the write-up); the
-second solve after an Inspector drag (the Scene view's tools only); what a scrub mostly costs - the meshes moved
-in place, their normals and uploads, and the card.
+**Checked:** the whole unit suite on Windows with Blender's libraries in a fresh folder (36,857 checks: the three card-picture
+tests of the `gpu` group that fail on main too, and two load-timed tests that passed when run again on a quiet
+machine); the `hci` and `editor` groups dependency-free (1,083 and 2,328, the same load-timed bake test passing on a
+rerun) and on Linux (1,082 and 2,333), with animation, board, assets and render 0 failed there; the five static
+audits at their baselines; one code review (changes needed, all made) and the test-engineer's six tests. The numbers
+and what is left, each with its owner, are in the write-up of `docs/tasks/0494-hci-ranked-findings.md`.
 
-**Checked:** the `animation` and `editor` groups on main e978001a with the round on it, 0 failed: Windows without the libraries 1,507 and 2,327 checks, with them 1,512 and 2,342, Linux 1,507 and 2,331; `round 472` alone 255 checks; the `gpu` group with the libraries 795 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: one major finding fixed (two animated roots rebuilt each other's bindings on every frame); one nit left for the write-up (three caches compare a raw pointer and a counter).
+## 2026-11-14 (round 509): the sweep's faults to zero - the keyboard reaches every control, nothing lies on anything (task 0493, ADR 0145)
 
-**Measured:** measured locally, the owner's avatar in the owner's world (275 bones keyed; a window on the card): an IK target dragged with Record on 41.3 -> 25.3 ms a frame (the same drag with Record off: 23.7), Record's own part 10.5 -> 0.85 ms, clip serialisations 1 -> 0 a frame. On a scrub the clip's sampling 0.64 -> 0.05 ms, its apply 0.77 -> 0.17 ms, the Animation window 1.5 -> 0.4 ms (1.9 -> 0.7 with the Game view): about 2.3 ms of a 50 ms frame, so the scrub and play rows read the same (50.0 -> 49.4, 49.8 -> 50.0). The stand-in: the hand was drawn up to 16.5 mm behind its IK target on 30 of 35 frames of a drag, now 0.000 mm on all 35; `AnimationClip::find` on a 201-track clip 0.74 -> 0.009 ms (the `animation` section's row, over its budget before). The second solve doubles the constraints on a drag: 0.24 -> 0.48 ms, 46 -> 92 name walks. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+**Asked** (the owner, 2026-11-13): "Do an HCI and Performance sweep across the program to test, verify, and optimize
+components." Round 505 surveyed; this round fixes what its sweep lists. The owner's answers to the survey's two
+questions (2026-11-14, "A & A", relayed by the hub): keyboard focus as proposed; mouse density stays and every target
+is at least 7 mm in Tablet Mode.
+
+**Added**
+- **Keyboard focus for every control (ADR 0145).** F6 puts the focus on the first control of the window under the
+  pointer, again on the next window's (Shift+F6 the previous); F10, or Alt pressed and let go alone, on the menu bar.
+  Then Tab and Shift+Tab walk every control in drawing order - buttons, icon buttons, checkboxes, dropdowns, sliders,
+  colours, foldouts, fields - Space or Enter presses, ticks, opens or folds, Left and Right step a slider, the arrows
+  walk menus, submenus and lists, Esc lets go. In a dialog or popup a bare Tab starts the walk and it stays inside.
+  With nothing focused Tab is still Edit Mode; a mouse press drops the focus, and so does a modal tool starting. A focused control scrolled out of sight
+  is scrolled to. The ring is the theme's focus colour with a one-pixel outline in the text colour (the themes' focus
+  colours are unchanged). Two keymap actions: `ui.focus_window` (F6, Shift+F6), `ui.menu_bar` (F10; the Maya preset
+  keeps F10 for edge mode and the menu bar keeps Alt). A Learn section, "Keys for the controls".
+- **`ui::Context::button_cells`**: a row of buttons that goes side by side when the labels fit and wraps when they
+  do not; in `Editor::button_grid` a label too long for its cell takes a row of its own, the rest keep their columns.
+
+**Fixed** (round 505's findings, in all 12 configurations)
+- The Inspector at narrow widths: Position, Rotation and Scale had no field left at 1024x640 x1.5 (they start right
+  after the label's word, or, where even that is too narrow, take a row of their own under it), the name field lay under Fold and Pin (they have their own row), a property's field was
+  22 px wide in Tablet Mode's side pane (it keeps 48 px at scale 1, 72 px in Tablet Mode; the label gives way).
+- Play, Pause and Step lay on other toolbar buttons (at 1024x640 x1.5 everywhere, in Edit Mode at the default size):
+  the transport stands right of the left group, the right group shrinks, and Edit Mode's left group compacts to icons.
+- The Scene view's header drew labels over buttons when narrow, and Overlays on Unwrap in the UV Unwrapping layout;
+  the job tray lay on the status hint; the Draw window's More on its size field; the Game view's camera dropdown on
+  Guides and Stats; Sculpt under the tab overflow's "+1".
+- 47 of 49 cut labels: grids and pairs of buttons wrap; a button whose word fits only without its icon keeps the
+  word; Update Lighting leaves its key to the tooltip in a narrow pane.
+- The 11 buttons without a tooltip have one.
+- Targets under a row at mouse density (the job tray, a bare checkbox's hit area, the Scene and Game headers, the
+  status bar's buttons, the breadcrumbs, the Console's and Hierarchy's strips, Preferences' Install / Remove) are a
+  row (20 px); at UI scale 1.5 - the scale Tablet Mode sets - every recorded target is at least 26 px.
+
+**Changed**
+- The sweep's check: `small` is judged as decided (20 px at scale 1, 26 px at 1.5); overlaps, `covered` and the Tab
+  order compare what each control's clip lets through (three of round 505's six overlaps were the check's own
+  mistakes). The suite's configuration asserts zero for `elided`, `no-tooltip`, `overlap`, `covered`, `no-key`,
+  `small`, `tab-order` and names what it finds. `tools/hci_sweep_baseline.json`: `{"elided": 2}` (was covered 18,
+  elided 49, no-key 328, no-tooltip 11, overlap 6, small 473).
+- Tests that pinned a cut label or a place now say why they changed: "the sweep's fixes (task 0293)" (Update Lighting
+  is whole in the side pane now) and round 505's two keyboard tests (Tab goes on to the controls after a field).
+
+**Known limits** (`docs/hci/sweep-509.md`): "Generate Lighting" and "Clear Baked Data" still end in "..." in the
+Lighting window docked left at 1024x640 x1.5 (the pane is narrower than the label; the tooltip says it whole), as
+does "Edit Origin with Handles..." there. A label too long for its grid cell takes a row of its own (up to two rows each). While a
+field is being edited F6, F10 and Alt wait for Esc or Enter. Widgets drawn by hand are not keyboard stops yet, and
+the Sequencer's toolbar is cut by its pane at 1024x640 x1.5 (round 510).
+
+**Checked:** the `hci` and `editor` groups - with Blender's libraries 644 and 2,340; dependency-free 644 and 2,331 (Windows)
+and 643 and 2,333 (Linux); the 12-configuration sweep (2,140 screens) before and after; the consistency audit and the
+coverage map clean; one code review (changes needed, all made) and the test-engineer's 19 tests (one found a fault,
+fixed); the fixes made after the review were tested, not reviewed again; stress `--only editor` ran (6,000 fuzz frames: no crash, 0 stale pictures).
+After CI found eight tests of other groups red (the panels had grown; see `docs/hci/sweep-509.md`): the whole unit
+suite on Windows with the libraries, in a fresh folder, 36,450 checks - the only failures the three card-picture
+tests of the `gpu` group that fail on main too; on Linux hci 674, editor 2,333, animation 2,229, render 2,550,
+physics 190, sketch 521, sculpt 179, 0 failed; a second code review (changes needed, all made). The whole suite on
+every system is CI's.
+
+## 2026-11-14 (round 508): the image editor's heavy sliders, opening a 4K picture, sculpting a dense mesh, the bake's page upload (task 0492)
+
+**Asked:** Pass 25 Speed, `docs/perf/sweep-504.md` lines 4 and 15: dragging Clarity, Dehaze, Sharpen and Noise Reduction (the
+slider's longest frame 30 - 51 ms against 16.7) and opening a 4096 x 4096 picture in the Editing window (the frame 181 ms, the
+decode 152 ms, against 100); line 5, sculpting a 500k-face mesh (part D); and round 507's limit, the card's lightmap page upload
+after a bake (part C: measured first, changed only if its landing frame is over 100 ms).
+
+**Changed:**
+- **The four filters keep what they work out from their input** (`FilterKeep` in `image/adjustments.h`, one a step in
+  `Pipeline::keeps`): the luminance and its blur (Clarity, Sharpen), the blurred dark channel and the airlight (Dehaze), the
+  luminance on the display axis, the bilateral-smoothed luminance and the blurred chroma (Noise Reduction). A drag of the amount
+  makes none of them again; each carries what it was made with (the blur radius, the range sigma, the chroma radius), so Sharpen's
+  Radius or Noise Reduction's Luminance / Color remakes only its own part. The picture is the keep's to trust: `Doc::run` clears
+  the keeps of every step after the first whose settings changed (so an earlier step edited, its mask changed or painted, undo and
+  redo, another picture and another preview size all remake them), and `Pipeline::clear` clears all. Only pictures up to 4.2 M
+  pixels keep parts (a preview; a 4K picture's would be hundreds of MB): the full-size result (export) works as it did. A filter
+  whose amount is 0 (a step just added) makes its parts while it does nothing, so the first move of its slider is as cheap as the
+  rest (Noise Reduction is not made ahead: its parts depend on both strengths).
+- **The blur's vertical passes go by blocks of 64 columns** (`blur_plane`): a pass down one column at a time touched a new cache
+  line a pixel. Each column's sum is added in the same order as before, so the blurred plane is bit for bit the old one. The
+  running-sum box (3 passes each way) was already O(1) a pixel whatever the radius; Blender's compositor box / fast Gaussian blur
+  is the same method, so nothing was ported (no `licenses/README.md` row).
+- **Dehaze's airlight** (the value at the top thousandth of the blurred dark channel) is found by a histogram and a partial sort of
+  one bin (`ranked_value`) instead of `std::nth_element` on the whole plane: the same value, a tenth of the time (5 ms of a
+  1 M pixel call).
+- **Noise Reduction**: the bilateral filter's row and column offsets are made once a row / pixel, not once a tap, and the chroma
+  subtraction runs on the job threads; same arithmetic, same picture.
+- **A picture opens in the Editing window on a worker** (`Doc::open_file_async`, `poll_open`, `cancel_open`; `Editor::edit_open_file`):
+  when the editor runs its jobs on workers (the app; `set_async_jobs_for_test`) `develop open <image>`, Open... and a drop start
+  the decode and return; the canvas says "Loading <file>..." (over the old picture when one is open) and the picture opens in the
+  first frame after the read ends, polled by the window's draw and by the next console command. Another open, a render opened,
+  an .edit loaded or `cancel_open` drops the read in flight (joined later, result thrown away); the document joins its reads when it
+  is destroyed. A headless editor without workers (the tests) still reads in the call. An `.edit` file reads synchronously.
+
+**Added (unit checks, `tests/test_editor.cpp`, "round 508"):**
+- Clarity, Dehaze (both signs) and Sharpen after a drag of the amount equal the plain formula with a straight-summed blur written
+  in the test, at two radii each; Noise Reduction (two colour radii) and all four through the preview equal the one-call picture.
+- A drag of the amount makes no part again (`filter_parts_made()` counts them; no time is asserted); an earlier step edited, its
+  mask changed, undo and another picture make them again and the picture is the one-call one each time; Sharpen's Radius and
+  Noise Reduction's two strengths each remake exactly one part.
+- A worker-read picture has the pixels of the one-call open; A then B at once shows B; opening something else while a read is out,
+  a missing file and `cancel_open` leave the document as it was; in the window "Loading" shows, the picture lands in a later frame
+  with the same pixels, a command meanwhile is refused, and an editor destroyed mid-read ends cleanly.
+
+**Part D: sculpting a 500k-face mesh** (task 0492; sweep line 5: each working frame 19.6 - 20.6 ms, longest 22 - 60, any brush;
+100k faces 6 - 9 ms). The stress `sculpt_paint` section now has a parts table (a stroke's frame mean and each part, ms).
+Blender's sculpt keeps per-node dirty flags and updates only the touched nodes' normals and buffers; Blendity already did the
+normals (task 0099: the faces around what moved) and the card upload (a partial update of the moved ranges), so what grew with the
+mesh was what *found* the moved vertices: `Mesh::moved_faces` compared every vertex with the render mesh, `rm.bounds` was a
+single-thread pass over every vertex, `retriangulate` walked every face. Nothing was ported (no `licenses/README.md` row).
+- **A dab says which vertices it moved** (`Mesh::note_moved(ids)`, called right after `deform_version++` by `sculpt_dab`, Grab's
+  follow, a stroke's cut-off restore and an undo / redo of a stroke; not by a Dyntopo stroke, whose tessellation moves more). The
+  notes are a short chain keyed on `deform_version` (a copy starts without them, as the normal state does); a render cache that is
+  behind by a few frames is served from them, a bump nobody noted breaks the chain and that cache scans every vertex as before, so
+  an unnoted change is always safe. `moved_faces` then compares only the noted vertices and gathers their faces (sort + unique, no
+  face-sized table).
+- **The render mesh's bounds** follow the noted vertices too: the old box grown by their new positions, exact whenever no moved
+  vertex stood on the old box's sides (then another one still does) and every new position is a number; else the box is found by
+  `Mesh::positions_bounds` (the old pass, a chunk of 32768 vertices on each thread; same min / max, so the same bits).
+- **`retriangulate`** takes the list of moved faces and walks those (it walked every face, testing a flag).
+- `MeshCounts` has `normal_faces` (faces whose normals an in-place move worked out) and the in-place parts `ms_in_place_scan`,
+  `_retri`, `_bounds`; `FrameProfile::ms_sculpt` (the dabs' own work).
+
+Parts of a working frame at 500k faces (stress `sculpt_paint`, one untimed run each on a quiet machine, ms, mean over the stroke's
+frames; Draw / Inflate / Scrape):
+
+| part | before | after |
+|---|---|---|
+| frame (median of the working frames, the row's number) | 28.5 / 25.9 / 24.6 | 20.0 / 20.8 / 19.6 |
+| render mesh followed in place (inside the scene's draw items) | 9.4 / 8.2 / 7.5 | 3.4 / 2.8 / 1.7 |
+| - finding the moved faces | 1.8 / 1.6 / 1.5 | 0.8 / 0.7 / 0.5 |
+| - normals (the faces around the dab, of 500k) | 1.7 / 1.0 / 0.6 | 1.6 / 1.0 / 0.6 |
+| - bounds | 5.3 / 5.2 / 5.1 | 0.8 / 0.8 / 0.4 |
+| the dabs' own work (gather, brush, delta) | 1.8 / 1.6 / 1.8 | 1.6 / 1.4 / 1.5 |
+| card upload | 0 (the stress's headless view draws on the CPU: no card in these rows) | 0 |
+| the rest of the scene's 3D time (the CPU rasteriser over all 500k faces) | about 16 - 17 | about 16 - 17 |
+
+The 100k rows (11 - 12 ms before and after on this machine; the sweep's 6 - 9 ms was a quieter one) did not move: there the mesh part
+was already 2 ms. What is left at 500k is the CPU rasteriser drawing every face each frame (`src/render`, not this round's files; a
+card draws a sculpted mesh with the partial upload that already exists), about 16 ms; the rows stay OVER on the CPU path.
+
+**Part C: the bake's lightmap pages** (task 0492; round 507's named limit; ADR 0140). Measured first with the views on the card
+(stress `scene_views`, its new last tables): the frame a bake lands in grew with the texels - 28 ms at 0.26 M, 40 ms at 1.05 M,
+78 - 81 ms at 4.19 M (four pages), SideRail's 1.2 s on record - and `bake_job_land` itself was 0.1 ms: the cost was the card
+converting and sending every page in that frame (5 - 58 ms) beside building the baked corners for the new UVs (6 - 10 ms).
+- **The pages go up before the bake lands** (`Editor::bake_pages_ready`, `editor/lighting.cpp`): once the worker is done, each
+  frame sends the pages not yet on the card - colour, direction (Directional mode) and shadowmask - at least one a frame, more
+  while the meshes' upload budget (`mesh_budget_ms_`) lasts; the bake lands in the frame after the last. Until then nothing of
+  the scene's lighting changes, so the views draw the old lighting whole and no frame mixes new UVs with old texels. The card
+  finds its copies at the landing because moving the `LightingData` keeps each page's address and serial. Only with the card
+  drawing the views and the jobs on workers; a headless editor and the CPU views land at once as before.
+- `view_perf::pages_ahead` switches it off (the stress table's before / after in one build); `view_perf::Counters` counts the
+  pages sent and those sent ahead.
+
+**Fixed after review:**
+- A headless script's line after `develop open` ran before the picture had landed and was dropped ("still reading"): the read is
+  now one of the file jobs the runner waits for between its lines (`file_jobs_running`), `perf wait` waits for it, and every frame
+  polls it (`edit_open_poll` beside the other job polls), so a picture opened with the Editing window hidden lands too and a failed
+  read warns at once.
+- Opening many large pictures in a row: a dropped read decodes to its end, each holding a picture; at most two run on, a third
+  drop waits for the oldest.
+- The told-moves path of the render mesh trusted its notes after an edit that bumped `version` (touch()) and not
+  `deform_version`; a `version` change since the cache now breaks the chain (one whole scan at a stroke's start).
+- A Dehaze on a picture whose values are all near 1e-36 crashed (the airlight's histogram scale overflowed a float; found by the
+  test-engineer's test): the scale is a double.
+
+**Added (unit checks, `tests/test_sculpt.cpp`, "round 508", part D):**
+- A 100k-face sphere: dabs at the texture seam, both poles, the middle, one inside the box and one that grows it, told to the
+  render mesh, leave its positions, normals and indices bit for bit what the whole scan gives (a twin that was never told) and a
+  rebuild from scratch's within 1e-5, with the box exactly the vertices'; a dab's normals are worked out for the faces around it
+  (a count: at most 4 % of the mesh at a pole, `MeshCounts::normal_faces`), no full build; a bump nobody told of between two told ones
+  is found by the scan.
+- A mesh with an isolated vertex, a loose edge and a separate triangle moved by a told dab follows like the rest.
+- A stroke on a subdivided sphere, its undo and redo, and a mirrored dab (both sides move): the render mesh, normals and bounds are a
+  rebuild's each time; a sphere with an Array modifier: the evaluated copies show the base's stroke and render like a rebuild.
+  (The checks pin behaviour the old path also had; the told / untold twin and the counter are new.)
+
+**Checked** (quiet timed windows the hub gave, Windows with Blender's libraries, normal priority):
+
+| row | before | after | budget |
+|---|---|---|---|
+| Clarity slider, 4096 (longest frame) | 30 - 51 | 10.2 | 16.7 ok |
+| Dehaze slider, 4096 | 30 - 51 | 10.1 | ok |
+| Sharpen slider, 4096 | 30 - 51 | 10.4 | ok |
+| Noise Reduction slider, 1024 / 4096 | 30 - 51 | 18.3 / 18.3 | OVER by 1.6 |
+| `develop open`, 1024 / 4096: longest frame | - / 181 | 20.0 / 33.3 | 100 ok |
+| Sculpt, 100k faces, median working frame (any brush) | 6 - 9 | 7.9 - 9.9 | ok |
+| Sculpt, 500k faces, CPU views | 19.6 - 20.6 | 15.4 - 16.6 | ok (just) |
+| Sculpt, 500k faces, card views (new row) | - | 6.0 - 8.1 (longest 45: the first dab) | ok |
+| Bake landing frame, card views, 0.26 M texels (off / on / off) | 27.9 / 27.2 | 18.8 | 100 ok |
+| Bake landing frame, 1.05 M texels | 39.6 / 36.2 | 18.8 | ok |
+| Bake landing frame, 4.19 M texels (4 pages) | 78.4 / 81.1 | 40.6 | ok |
+| the frames sending pages before it (0.26 / 1.05 / 4.19 M) | - | 7.3 / 13.3 / 19.4 | 50 ok |
+
+Unit groups: see the PR. Stress `image_edit`, `sculpt_paint`, `scene_views --quick`: every row ends ok / OVER, no problem counts.
+
+**Left (named):** Noise Reduction's slider is 1.6 ms over (its Luminance drag runs the bilateral filter each move); the
+full-size `apply` / export of the four filters (102 - 332 ms at 4096) is one call; the baked corners for a new bake's UVs are
+still built in the landing frame (6 - 7 ms here; spreading them would need draw items for lighting not yet landed); sculpting
+500k faces on the CPU views is at the budget's edge (the CPU rasteriser's ~16 ms).
+
+## 2026-11-14 (round 507): landing frames and long single calls (task 0491, parts A, B, E, C, D)
+
+**Asked:** "Do an HCI and Performance sweep across the program to test, verify, and optimize components." (Pass 25 Speed:
+`docs/perf/sweep-504.md`'s list of things the user waits for in one frame or one call. This round: the Unity package export,
+the video render's timing, `budget pc`, the bake's landing, and the Unity scene import's cost (part B, below). Edit Mode
+entry at 500k on the CPU views (part F, 101.7 ms against 100) is left as the spec says.)
+
+**Fixed:**
+- **`export unitypackage` of a package with nested folders threw `bad allocation` or wrote wrong path names** (round 504's sweep
+  found it): the folder walk took the parent folder's Unity path by reference into `job->items` and kept pushing children into
+  the same vector, so the reference dangled when the vector grew. The path is now copied before the recursion. The new test
+  (three folders deep, 40 entries each, 1,639 entries, read back from the package, every path name compared) fails on the old
+  walk (restored for one run: the export stops with an error, 0 of 1,639 entries written) and passes on the new.
+- **The video-render stress row timed only the start frame**: it waited on `rendering_for_test()`, which falls after each
+  frame's picture lands. It now waits on the animation's own `active` flag, prints the frames actually rendered, and splits into
+  the start frame, the steady frames and the end frame.
+
+**Changed:**
+- **`export unitypackage` does its folder walk on the worker** (`ExportJob::walk_folder`, run first by `ExportJob::run`): the two
+  filesystem calls a file (the `.unity-meta` read, the `LightingData.bin` check) are the job's, over copies it owns (`known`,
+  `edits`, `abs_folder`, `folder_rel`). On the main thread stay `save_dirty_clip_assets` and `unity_edits` (they read the scene).
+  An empty folder is said from `poll_unity_export` (the job ends "... is empty", no package) as it was said by the call. A
+  headless editor still runs the whole job in the call and returns whether anything was written.
+- **`budget pc` in a window counts on a job** (`Editor::budget_start_count`, `poll_budget_job`, `budget_print`): the objects' facts
+  (lights, spring chains, skin joints, material slots, each drawn map's size) are taken on the main thread with the evaluated
+  meshes held (`scene/budget.cpp`'s `budget_snapshot`; meshes are copy-on-write); the count (`budget_count_snapshot`: every
+  triangle, every texture's header or `.meta`) runs on a worker; the command prints "Budget: counting N object(s) ..." and the
+  report follows when it is done, polled once a frame. `budget_count` is the two in a row, so the windowed report and the headless
+  one are the same code and the same text. The Profiler's recount every 0.5 s starts the same job and shows the last result (a
+  "Counting ..." row before the first); a `budget pc` typed while that count runs is reported when it lands. Headless stays one
+  call (`set_budget_wait_for_textures`). An object deleted while it counts changes nothing: the report is of the scene as the
+  command found it.
+- **A windowed bake's files are moved into the scene's lighting folder on a job of their own** (`move_baked_files`,
+  `lighting_move_poll`): the landing used to rename every page and map file on the main thread (about a millisecond a file: 60
+  files over older ones took 36 - 58 ms here). The landing frame starts the move, the next frames' poll finishes it (the scene's
+  "saved to" folder is set then, and a scene that moved meanwhile has its lighting written where it is); a second bake or Clear Baked
+  Data waits for it first (both use the same folder); `save_lighting_data` leaves the lightmaps to it. Headless without workers
+  still moves them in the landing.
+- `BakeTimes` has `land_move_ms` and `land_save_ms`, and the phases line of the log says them (the landing frame's two file jobs).
+
+- **A Unity scene's import (part B: `import X.unity`, `open X.unity`, drag and drop) is a third to a quarter of what it was, the same
+  scene object for object.** The importer fills a parts table (`Editor::unity_import_parts_`, `UnityImport::pass_ms`; the stress
+  section `unity_export` prints it at 100, 1,000 and 10,000 objects) and it named two causes. (1) The materials: a scene's renderers
+  asked the library for their `.mat` once an object (`material_asset`: path normalised, redirects followed, 190 us a call - 1.9 s of
+  the 2.4 s at 10,000 objects); the importer now asks once a GUID (`ImportCache::materials`: the library hands out one shared
+  instance a path, so the answer cannot differ within an import). (2) The GUID index was walked afresh on every import (every folder
+  of Assets listed and every `.meta` read); `unity_guid_index_checked` keeps it while a fingerprint of Assets (every entry's name,
+  and each file's size and write time, the hidden `.unity-guids` / `.unity-stats` / `.unity-meta` files too) is the same, and walks
+  again when anything differs - a file added, removed, renamed or edited outside the editor between two imports is found (tested). A
+  folder's own time is left out of the fingerprint: NTFS shows it late in its parent's listing, so it differed between two walks of
+  an untouched folder (found by the first test). No other pass of `build_unity_objects` was quadratic or did a linear lookup an
+  object (the table: all the other passes together are 85 ms at 10,000 objects).
+  **Left (part B step 3, not done, by the numbers):** the one call is 111 ms at 1,000 objects (a second import; 160 ms the first, which
+  walks Assets) against the 100 ms budget, and 533 ms at 10,000 (578 ms) against 250. What is in it at 10,000 objects: reading and
+  parsing the 7.8 MB scene file 190 ms (`unity_yaml.cpp`, outside this round's files), the build 220 ms (130 of them the 200
+  materials' first loads and the components, 36 `add_mesh`, 50 the make / place / parent passes), the rest the importer's walks and
+  the frame. Moving the parse onto a worker would take a third off; the rest needs the objects made in slices, which needs the builder
+  to make them in a scene of its own and move them in (nothing in `Scene` does that today): a round of its own, with its rule for a
+  second import / New Scene / Play while slices are pending (finish or drop whole).
+
+**Added (unit checks):**
+- `tests/test_assets.cpp`: a Unity scene imported again keeps the GUID index (`unity_import_index_reused_for_test`) and comes out as
+  the same scene text as the first import and as one with the index walked afresh; a material file added to Assets between two
+  imports is found by the second (the index walked again). On the old code both tests' first checks (the scene text equal, the
+  material found) hold too - the old path walked every time - so what they pin is that the faster path changes nothing; the
+  reuse check itself has no old-code equivalent.
+- `tests/test_assets.cpp`: the nested export (above) and an empty folder said to be empty with no package.
+- `tests/test_editor.cpp`: `budget pc` in a window says "counting" at once and then reports the same lines as the one-call
+  count; an object deleted while it counts leaves the report unchanged and nothing crashed.
+- `tests/test_lighting.cpp`: the lightmaps of a bake that lands on a worker equal those of the inline landing (memcmp of every page),
+  a bake started the moment the first landed waits for its files and lands whole, a third bake's files arrive and no `.baking`
+  folder is left.
+- Stress: `unity_export` has nested folders in its package (Extras/A/B, 40 files each), a row for the export call itself (what blocks
+  before the worker starts) beside the whole job, and three `budget pc` rows (the whole count in the call, the windowed call, the
+  longest frame while it counts); `sequencer`'s video row is the three rows above.
+
+**Checked (one untimed run each, `--quick`, below-normal priority, this machine; indicative, not a measurement):**
+- Export call (100 objects, 19 KB package with nested folders): the call 0.4 - 0.9 ms (the walk and its filesystem calls are the
+  worker's now); the whole job inline 55 - 200 ms (the first run was cold).
+- `budget pc` over the stress package's 101 objects (5 materials): the whole count in the call 2.0 ms, the windowed call 1.1 ms,
+  the longest frame while it counts 0.0 ms. That scene is too small to show the gain; SideRail's 10 s on record is what the job is for
+  (not re-measured here: the world isn't in the scratch project).
+- Video render, an 8-strip sequence at 640 x 360, 6 frames (the old row's 181 ms longest frame was the start frame alone). Two runs:
+  a cold first run: start 2,325 ms, steady frames median 4.3 / longest 111.6 ms, end 128.7 ms (the steady outlier and the end are over
+  their budgets 50 and 100); a warm second run: start 348.8 ms (OVER 100), steady median 2.0 / longest 6.2 ms over 45 frames (ok), end
+  34.1 ms (ok). So a steady frame is under 50 ms once the first use is paid, and the card composite stays where it is (it is
+  `seq_cards.cpp`'s, outside this round's files, and the spec asks for it only if a warm steady frame is over 50 ms). The start
+  frame's 349 ms - 2.3 s (the folder, the preview, the snapshot, the first render and composite, first use of everything) is the
+  figure left for a round on the render's start.
+- The bake's landing, a four-object scene, one page, CPU: the landing frame 5.8 ms inline, 8.4 ms with a worker, of which the file
+  moves 5.7 and 8.4 ms (the hashes were moved to the worker in round 422); with the follow-up job the windowed landing frame is
+  0.1 ms. The page conversion and upload on the card (`gpu_lightmap`, the next frame) is not changed: spreading pages needs the old
+  page set kept whole until the new one is up (a pending `LightingData` every reader of `lighting_data_` would have to know), which is
+  a data-model question for the card, not a loop; it needs a card's numbers first.
+- Groups on Windows (release, with libraries): `editor` 2,670 checks, `lighting` 9,849, `assets` 2,989 (with part B's two tests), `render` 2,639, no failures (the new
+  checks are in `assets`, `editor` and `lighting`). Stress `unity_export`, `sequencer` and `bake` `--quick`: no problem counts. Not run: Linux and the dependency-free tree (the task said so).
+
+### docs/USABILITY.md ("fixed" row)
+| Problem | Fixed |
+|---|---|
+| Export Unity Package failed ("bad allocation") or put assets at the wrong Unity path when the package had folders inside folders with more than a few files each | the folder walk copies each folder's path before descending into it; a package of nested folders exports whole (round 507) |
+
+**Found by the test engineer:**
+- Fixed: `budget quest` typed while a `budget pc` count ran changed the target before it was refused, so the running count's report
+  said "VRChat Quest" (and the Profiler ranked against Quest). A count under way is now refused before anything changes.
+- Fixed: a folder skipped for being deeper than 16 was reported as "left out (couldn't be read)"; each skipped entry now carries its
+  own reason.
+- Left (not this round's, and not a regression): a Unity `.mat` edited outside the editor between two imports keeps its first colour,
+  because the material library keeps a path's first load for the session (`material_asset`), as before this round. The kept GUID index
+  still finds the material; re-reading an edited file belongs to the library (`forget_material_assets`), so it is a follow-up.
+- Not tested: the windowed export runs on a detached thread with no test hook, so a folder removed while an export runs is untested.
+
+**Fixed in review:**
+- Fixed: opening, reverting or New-Scene-ing the scene the moment a bake landed read a half-moved lighting folder and set the saved folder with nothing loaded; loading the lighting now waits for the files' move job first.
+- Fixed: a Budget count that landed after New Scene / Open reported and cached the old scene as "the scene"; the count is tied to its scene and dropped ("Budget: the scene changed while counting - type budget pc again"), and the Profiler recounts.
+- Changed: the kept GUID index's comment no longer claims every edit is seen (one that keeps size and write time is not); on Linux / macOS the change time joins the fingerprint.
+- Fixed: `export unitypackage` of an empty folder is refused at once again ("<folder> is empty"), before the job starts.
+- Fixed: the export job releases its folder-walk copies of the GUIDs and edits once the walk has run, not at the next export.
+
+## 2026-11-14 (round 506): the Scene view's per-frame work kept while the scene holds (task 0490)
+
+**Asked:** "Do an HCI and Performance sweep across the program to test, verify, and optimize components." (Pass 25 Speed:
+the sweep's top row - the Scene view of 50,000 cubes on the card, 33-34 ms a frame with only the camera moving, budget
+16.7 ms - the CPU doing for every object, every frame, work whose result did not change.)
+
+**Added (task 0490):**
+- **`scene_views`, a named-only stress section** (`blendity_stress --only scene_views [--quick]`; also in `tools/perf_suite.py`'s
+  default sections): 50,000 and 10,000 cubes on the card, six actions (the camera orbiting in Shaded and in Solid, a Scene view and
+  a Game view both drawn every frame, one object moved every frame, the pointer over a panel with the view still, the Hierarchy
+  shown with the pointer over it), each run off / on / off again in one process (a warm cache alone can't flatter "on"), with
+  where a frame went (the editor's profile and the new timers) and what it did a frame (counts, and each keep's frames kept /
+  missed), and a last table with each keep turned off alone. A machine with no card prints a note and no rows.
+- **`src/core/view_perf.h`**: plain counters and `ScopedTimer`s at the places below, `view_perf::keeps` (the switch that turns
+  every keep off at once; `BLENDITY_VIEW_KEEPS=0` starts a run with them off), `disabled` (one keep off alone) and
+  `stale_for_test` (the unit tests skip a keep's invalidation to prove their pictures can tell a stale keep).
+- **`src/editor/view_keeps.h`**: what the keeps hold between frames - the Editor's `keeps_` member, freed with it.
+
+**Changed (each keep behind `view_perf::keeps`; ADR 0115's change counter, and Blender's own split of syncing objects from
+redrawing a view - its draw manager fingerprints a sync with a counter, a redraw with a moved camera only updates the view):**
+1. **The card's per-instance buffers** (`gpu_raster.cpp`): `set_instances` advances a generation; the instance rows and the toon /
+   baked / lilToon tables are written once a generation, straight into the buffer, per buffer with the buffer's own id (it is
+   shared by every view's slot); the lilToon tables are not written while no instance is lilToon; the validation loops and the
+   "which passes does the array need" scans run when the array or a mesh / texture changes.
+2. **The lights, probes and sun** `make_lighting` gathered (three scene walks): kept while the scene, its serial and what else they
+   are made from hold - and while the change counter moved only by transforms (a cube dragged) and the lights' and probes' own
+   world matrices did not; one entry for the views' lights, one for the path tracer's and the bakes'. The headlight, exposure and
+   view transform are made every frame.
+3. **`instances_key`**: not hashed again when the draw items are the kept list under the generation the slot's array was stored for.
+4. **`collect_items`**: `collect_items_ref` returns the kept list itself, a reference into the cache (13 MB a copy for 50,000
+   cubes); `collect_items` is a copy of it; a copy only where `render_deferred` writes realtime-GI lightmaps into the items.
+5. **`gpu_view_unsupported`**: kept per list on the items' generation and the materials' textures' generation, without a heap
+   allocation for each item; a Scene view and a Game view drawn together each keep their own.
+6. **Solid shading's item list** (`solid_items_ref`): kept on the scene hash with its own generation, so the card's keeps work there
+   too, and the lights its environment is made from with it; not kept in Edit Mode, Weight Paint or Sculpt (their items carry
+   per-frame state).
+7. **The Hierarchy's flattened rows** (`draw_hierarchy`): kept between frames and made again when the scene, its structure counter
+   (an object added, deleted, re-parented, renamed, re-ordered, activated), the folds or the search text change, and on the check
+   interval; under a search the names are part of the key (a name typed in the Inspector lists its row the same frame).
+
+**Numbers (one timed run on a quiet machine, 2026-11-14 07:55; `docs/perf/sweep-506-scene-views.md` has every table).** 50,000
+cubes on the card, keeps off -> on (off again):
+
+| what the user does | before | after | | budget 16.7 ms |
+|---|---|---|---|---|
+| the windowed app, the camera orbiting, Shaded | 32.6 - 39.8 ms | 9.6 - 10.2 ms | 3.3x | ok (was OVER; Pass 19's target was 25) |
+| the stress row: the camera orbiting, Shaded | 31.4 (35.7) | 13.3 | 2.7x | ok |
+| the camera orbiting, Solid | 53.6 (52.7) | 18.0 | 3.0x | OVER by 1.3 ms |
+| a Scene view and a Game view both drawn | 121.4 (121.3) | 77.2 | 1.6x | OVER |
+| one object moved every frame | 243.3 (242.6) | 206.1 | 1.2x | OVER (not slower: the criterion) |
+| the Hierarchy shown, the pointer over it | 4.5 (4.5) | 3.5 | 1.3x | ok |
+| 10,000 cubes: orbit Shaded / Solid / both views / a drag | 6.9 / 9.0 / 25.1 / 46.2 | 3.7 / 3.4 / 18.4 / 39.6 | 1.9x / 2.6x / 1.5x / 1.2x | ok / ok / OVER / OVER |
+
+Each keep turned off alone over the Shaded orbit at 50,000 cubes is worth: the lights 7.6 ms, the card's buffers 5.6, the refusal
+check 3.4, the item copy 1.2, the instance key 1.0. A camera-only frame now writes 0 instance rows (50,000), 0 tables (3), makes 0
+validations (1), 0 item hashes (1), 0 refusal walks (2), 0 item copies (1) and walks the lights once in 8 frames (every frame).
+
+**Taken out again (the rule: a keep that does not move the frame by 0.5 ms does not stay):** the casters' bounds kept for
+`update_shadow_map(frame_only)` (-0.1 ms: the card's path does not fit the shadow map in these frames at all) and the every-8th
+walks each in a frame of their own (-0.4 ms median, the longest frame 29.9 ms with it against 31.0 without: noise).
+
+**No regression:** `editor_render`, `gpu_viewport`, `world_like` in the same window - no row newly OVER and none slower than the baseline but one, which is faster than round
+504's timed run (the working scene's drag in Solid on the card: 12.35 in the old baseline, 19.68 in round 504's run, 14.85
+now). `posing --quick` with the keeps off and on reads the same row for row.
+
+**Checked:** unit tests (`tests_round506*`, and the test engineer's `tests_round506_engineer*`: two editors in lockstep, one with
+the keeps on and the scene checked every 8th frame as a window does, one with them off and checked every frame, compared pixel for
+pixel after every frame - Scene view, Game view, Hierarchy): an object moved / added / deleted / duplicated / hidden / re-parented,
+a material, a texture, a light's every setting, lights and probes dragged with the Move gizmo by real mouse events (released and
+cancelled), a parent turned, a clip scrubbed, Play mode with a falling body, Save / New / Open, the world, the shading modes, the
+Scene-lighting button, Lights Gamma, Edit / Sculpt / Paint entered and left, the Camera Preview, layouts, 5,000 objects and a
+200-level nest in the Hierarchy, rows dragged and dropped, NaN and empty meshes, undo and redo of each; on the card with two views
+and with 10,000 instances; a camera-only frame does none of the work (counts); each keep that can go stale is caught by a test
+that skips its invalidation. `editor` / `render` / `gpu` groups: see the PR.
+
+**Fixed after the test engineer's run:** with a Hierarchy search on, a name typed in the Inspector that starts to match was listed
+up to 8 frames late (the name changes with every key, the structure counter only when the rename is committed): the names are now
+folded into the kept rows' key while a search is on.
+
+**Fixed in review (second round):**
+- The instance key's record follows a kept array when it is confirmed for a list that was regathered with the same contents (a
+  light edited, Solid and back): before, every later frame hashed all the items again. Tested: 0 item hashes after the first
+  frame following a light moved, a light's intensity, Solid and Shaded again.
+- Solid's kept lights are keyed on Unity's Lights Gamma too (it is not in the scene hash). Tested: `unity lightsgamma on / off` in
+  Solid and Shaded, picture equal with the keeps off.
+- The lights keep's "the change counter moved only by transforms" branch is tested on the CPU path: a light dragged by transform
+  writes alone, its parent dragged, a probe dragged, a light's intensity by the console's `set`, a cube dragged (0 light walks), and
+  with only the placement comparison skipped (`kStaleTrackedBit`) the dragged light is drawn where it was. A constraint moving a
+  light is not tested (none was easy to set up).
+- The Game view, the Camera Preview and every other game gather have a draw-item list of their own (3 variants x tangents; the
+  keeps' list slots follow), so with a Scene view, a Game view and the selected camera's preview drawn every frame no list is
+  gathered, no refusal check made and no item hashed after the first frame (tested; the instance key was kept 12
+  times in 4 frames, missed 0).
+- The Hierarchy's fold key is a sum of a mixed (splitmix64) id, so {5, 7} is not {4, 8}.
+
+**Left, with its numbers:** two views drawn every frame still rewrite the shared card buffer (150,000 rows a frame with a Scene
+view, a Game view and a Camera Preview at 50,000 cubes: 77 ms) - a buffer per view slot is the fix, about 43 MB a slot at 50,000;
+a drag of one object among 50,000 makes the item list, the instance array and the static overlays whole (206 ms with three views
+drawn; collect 80 ms, the instance gather 43 ms) - per-object updates are the fix; Solid at 50,000 is 1.3 ms over (its instance
+array is gathered by rows each frame).
+
+## 2026-11-14 (round 505): the HCI survey - what is wrong with the interface, ranked (task 0489)
+
+**Asked** (the owner, 2026-11-13): "Do an HCI and Performance sweep across the program to test, verify, and optimize
+components." This is the usability half's survey (Pass 25, stream 3): it measures and fixes nothing; rounds 509 and
+510 fix from the top of its list.
+
+**Added**
+- **The sweep runs all 12 configurations** (`BLENDITY_SWEEP=full`: 1920x1080, 1366x768, 1024x640 x Dark, Light x UI
+  scale 1, 1.5 - it ran six), with a picture of every screen of every configuration (`BLENDITY_SWEEP_SHOTS`, a
+  folder a configuration; submenus and Inspectors too) and 15 scenario screens for what the plain windows do not
+  show: Blockout (selected, a room, stairs, the Draw Piece tool, baked), a humanoid in Puppet posing, Rigging and the
+  Avatar window, a Light Probe Group, a Mixed light, a reflection probe, Shadowmask, a budget, Edit Mode, the
+  command palette.
+- **A keyboard-reach and focus-order check.** While `record_buttons` is set the toolkit records every control it
+  draws (`ui::Context::controls`: kind, rectangle, layer, label, whether Tab stops on it, the clip it was drawn
+  under) and the field being edited (`edit_rect_for_test`). The sweep reports controls drawn, controls with a
+  keyboard stop and Tab steps that go backwards; a check with real key events walks the Inspector's and Preferences'
+  fields by Tab and Shift+Tab.
+- **Three new kinds of finding:** `no-key` (a control Tab cannot stop on), `small` (a target under 7 mm: 26 px at
+  scale 1, 40 px at 1.5 - named now, not only counted), `covered` (any control lying on another of its layer; the old
+  check compared labelled buttons only). `tools/hci_sweep.py` prints a table by configuration.
+- **The checklist:** 20 tasks for what came after round 313's sweep - Blockout (R1-R12), lighting (I10-I15), posing
+  (K14-K15); 141 tasks.
+- **`docs/hci/sweep-505.md`:** the ranked list with pictures, `fitts-505.md` and `labels-505.md` beside it.
+
+**Found** (Windows, with Blender's libraries; 2,140 screens, about a minute without pictures and eight with)
+- The keyboard reaches one control in six: 1,810 of the 11,508 controls drawn at 1366x768 have a stop - text and
+  number fields; no button, checkbox, dropdown, slider or menu. Tab order: 0 steps backwards in a column in all 12 configurations.
+- At 1024x640 x1.5 the Inspector's Transform fields have no width; Play / Pause / Step lie on other toolbar buttons
+  there, and on Proportional Editing in Edit Mode at the default size.
+- Distinct findings: 49 cut labels (15 in round 313, all still there; 11 of the 49 are Blockout's), 11 buttons
+  without a tooltip (16), 6 overlapping buttons (3; three of the six are the old check's own mistakes), 18 controls
+  on another, 328 names of controls without a keyboard stop, 473 names of small targets (unlabelled controls of a
+  kind share a name). No popup outside the window, no disabled
+  button without a reason.
+- The static audits: consistency 0; 13 texts send the artist to the Console (baseline 1); 16 hard-coded shortcut
+  labels (0 after round 274); the KLM and checklist checks pass. Contrast passes in all five themes.
+
+**Changed:** `tools/hci_sweep_baseline.json` is rewritten to the 12-configuration counts (covered 18, elided 49,
+no-key 328, no-tooltip 11, overlap 6, small 473); round 509 takes it down. The suite's own sweep (one configuration)
+now opens the 15 scenario screens too - 179 screens - and judges only the screens it judged before.
+
+**Checked:** the `hci` and `editor` groups - with Blender's libraries 48 and 2,357; dependency-free 48 and 2,327 (Windows)
+and 48 and 2,331 (Linux); the whole suite on CI.
+
+## 2026-11-14 (round 504): the performance survey - seven new stress sections and the sweep's ranked list (task 0488)
+
+**Asked:** "Do an HCI and Performance sweep across the program to test, verify, and optimize components." (Pass 25
+Speed's first round: every part of the program gets a time on record before anything is optimized.)
+
+**Added (task 0488):**
+- **Seven timed stress sections** in `stress/stress_survey.inc`, for the parts the suite did not time: `image_edit` (each
+  adjustment, mask operation and a mask paint stroke at 1024^2 and 4096^2), `sculpt_paint` (every Sculpt brush on a 100k-
+  and a 500k-face sphere, a texture-paint and a weight-paint stroke, by real mouse events; the times are the frames in
+  which the brush worked), `sequencer` (1, 8 and 32 strips added, scrubbed and played, a cross-fade, a render to video,
+  the encoder), `importers` (VRM, MMD PMX and VMD, Godot `.tscn`, files the section writes itself; the landing frame timed
+  on its own), `unity_export` (100, 1,000 and 10,000 objects imported, exported to a package and imported again),
+  `asset_windows` (the Materials and Textures windows with 10 / 200 / 2,000 things, the History window with 10 / 200 undo
+  steps - its cap - and the command palette) and `cold_first_use` (the first and the second use of every window of the
+  registry and of every tool and mode, from an editor that has drawn nothing). Every row ends in `ok` / `OVER` (or `-`)
+  against ADR 0105's budgets. Each is named-only (`--only <name>`); `--quick` runs it at its smallest size.
+- **`docs/perf/sweep-504.md`: the ranked list** of what the user would notice, from one timed run of the whole suite on a
+  quiet machine (28 minutes, all 23 sections; its tables in `docs/perf/sweep-504-tables.md`), with the misses already on
+  record. Its top: the Scene view of 50,000 cubes (33-34 ms a frame, round 506); the image editor's Clarity / Dehaze /
+  Sharpen sliders (30-51 ms a frame) and sculpting at 500k faces (20 ms a frame) (round 508); a Unity scene's import in
+  one frame (1.74 s at 10,000 objects), `export unitypackage`, `budget pc`, Generate Lighting's landing frame and a
+  render to video's frames (round 507). Most of the newly timed parts are inside their budgets: the sequencer, the
+  History window, the command palette, the paint strokes, the VRM / PMX imports, every cold first use but the Render
+  window's.
+- **Found, not fixed here:** `export unitypackage` on a folder with sub-folders of several files can throw `bad
+  allocation` or write wrong path names (a reference kept into a list that grows during the folder walk). Round 507's,
+  with a unit test.
+
+**Changed**
+- `tools/perf_suite.py` runs the seven by default (`DEFAULT_SECTIONS`), and a seconds column counts as slower from a
+  tenth of a second (it needed a whole second: a 0.9 s import that doubled was not reported). `tools/test_perf_suite.py`
+  pins the new tables' shapes: the first time column is the time, a changed frame count alone is no regression.
+
+**Checked:** no file under `src/` changed. The seven sections `--quick` to their end on Windows (with Blender's
+libraries and dependency-free) and Linux, and at full size with the libraries; the `editor` test group - with Blender's
+libraries 2,333 checks; dependency-free 2,331 (Windows) and 2,330 (Linux); `py tools/test_perf_suite.py`,
+`py tools/test_coverage_map.py --check`. The whole suite is CI's.
+
+## 2026-11-13 (round 502): modifiers live on a Blockout (task 0486, ADR 0129 amended)
+
+**Asked** (the owner, 2026-11-11, of Pass 23b's proposal): "Yes, modifiers should work on the blockout."
+
+**What was there:** a modifier added to a Blockout object was already evaluated over the mesh its pieces build (the
+build lands on the MeshFilter; the stack runs over it as over any mesh), and Bake to Mesh and Unbake already kept the
+stack - but none of it was specified or tested, a small stack ran on the main thread in the frame that adopted each
+landing of a drag, a click on a mirrored or bevelled Blockout named a piece from faces that were not the drawn ones,
+and Apply was refused without a way on.
+
+**Changed**
+- **The stack follows the pieces on a worker.** Once a Blockout shows a result of its stack, every later evaluation -
+  after each landing of a build, after a modifier's number changed - goes to the evaluation worker whatever the stack's
+  size (`blockout_stack_follows` in `src/scene/scene.cpp`, through ADR 0107's hook); the last result stays up until
+  the new one is adopted, so the bare mesh is never shown in between. The first evaluation (a modifier just added) and
+  a stack that reads another object (Boolean, Curve) follow the old rule. The worker's copy of the object leaves the
+  Blockout component out (its face origins were copied with it). In Play a Blockout's stack is evaluated on the spot,
+  so colliders read the exact mesh.
+- **What reads the modified mesh:** the Scene and Game views, Generate Lighting, colliders and the scene's ray casts,
+  the OBJ / FBX / GLB exports. **What reads the pieces:** the handles, the outlines, the Draw Piece tool, the faces'
+  origins.
+- **Picking:** a click or a box on a Blockout whose shown modifiers change the faces (anything that is no deformer)
+  selects the Blockout and the status says "modifiers change the faces: click selects the Blockout" (once while it
+  stays selected). While the worker is still making the stack over a new landing, no piece is named either. With deformers only, the piece is named from the DRAWN face - the ray is cast at the
+  deformed mesh, whose faces are the base's in the base's order, and the hit is taken back to the base's flat face
+  to name the piece among several that made one face (`blockout_pick_piece_shown`). With no modifier it is as before
+  (`src/editor/blockout_modifiers.cpp`, the two call sites in `scene_pick.cpp`).
+- **A drag whose landings come faster than its stack evaluates** still shows results: a finished evaluation of a
+  Blockout is adopted although the pieces moved on (it is of a later landing than what is shown), and the newest is
+  asked for at the next draw (`eval_jobs_poll`).
+- **`blockout wait`** also brings the stacks to the meshes that landed (`Editor::blockout_stacks_settle`; one line
+  in the command, cleared by the hub), so a script's next command reads the modified mesh of the pieces as they are.
+- **The stack's cache key holds the base mesh's identity** (`uid`), not only its address and version: a Blockout's
+  base is a new mesh at every landing, and a new mesh standing at the address of one that went, with the same version,
+  passed for it - the result of an earlier landing stayed up as if it were current (seen once in the drag test).
+- **Limits, said plainly:** between a landing and the adoption of its stack's result, ray casts, bounds and the
+  views read the result before it (a frame or a few); export, Generate Lighting, Apply and Play's start wait and
+  evaluate exactly. More than four evaluations at once, a stack that reads another object, and any Blockout stack
+  in Play run on the main thread.
+- **Apply and Apply All on a Blockout** are refused with a "Bake to Mesh" button on the message (`blockout bake`); the
+  baked object keeps the stack and Apply works there. The Inspector's modifier section on a Blockout says "Live over
+  the Blockout's result: runs again when a piece moves."
+- Objects that are not Blockouts evaluate their stacks as before.
+
+**Fixed (older than this round, found by its tests):** Apply All in the Inspector on any mesh whose last component
+was a modifier crashed - the stack was applied while the modifier rows were still being drawn from the old list. It
+now runs after the rows.
+
+**Also fixed (older than this round, round 477's - found by CI's sanitizer shard through this round's counters):** a
+Blockout's mesh could freeze for a whole drag. When the pieces came back to exactly the state the shown mesh was built
+from - an undo, or a snapped drag passing over the piece's own start - the running build was cancelled, and the next move
+started a new one from scratch; when one build took longer than the time between two passes (a big Blockout, a slow
+machine, ASan) every build was stopped before it finished: 667 started and 0 landed in the sanitizer run. Now the
+running build always finishes and lands unless the pieces are still back at the shown mesh when it returns (round 477's
+rule: "a running build finishes and lands"), then the newest starts (`Editor::blockout_unwant`, one line of
+`blockout_editor.cpp`, cleared by the hub). Test: "blockout builds: dragging back over the piece's start while builds
+are slow still shows the new mesh" - with each build slowed to 0.6 s, 7 started and 0 landed before the fix.
+
+**Not changed, seen by the tests:** an Array with a NaN or infinite offset gives a structurally valid mesh with
+non-finite points, on any object (a follow-up for the modifiers, not this round's).
+
+**Added:** the Learn lesson "Modifiers on a Blockout" (Bevel the whole building, Mirror half a plan, Array a bay); the
+test group `blockout_modifiers` (`tests/test_blockout_modifiers.cpp`); the stress section `--only blockout_modifiers`
+(`stress/stress_blockout_modifiers.inc`).
+
+**Numbers** (`blendity_stress --only blockout_modifiers`, a timed window on a quiet machine, with Blender's
+libraries; `interior 100`, a door moved every frame for 120 frames, one every 16.7 ms, workers on):
+
+| stack on the Blockout | frame median / worst ms | move to landing median ms | move to evaluated mesh median / worst ms | results adopted in the drag | wait after the last move ms | main-thread evaluations | frames of the bare mesh | faces base / shown |
+|---|---|---|---|---|---|---|---|---|
+| Bevel (defaults) | 5.31 / 8.75 | 5.58 | 5.61 / 57.54 | 95 | 9.79 | 0 | 0 | 393 / 1693 |
+| Mirror (X) | 5.04 / 7.02 | 5.17 | 5.26 / 56.73 | 98 | 11.86 | 0 | 0 | 393 / 786 |
+| Subdivision Surface (1 level) | 4.83 / 6.33 | 5.02 | 5.03 / 56.59 | 97 | 17.89 | 0 | 0 | 393 / 1790 |
+
+After each drag the evaluated mesh is the stack run by hand over the pieces' mesh, 0 problems. `--only blockout`:
+every sweep row's problems 0 as in round 497 and no count of faces on top of each other above round 497's (the kernel
+is not touched). `--only modifiers_ngon`: 11,514 operations on odd meshes, 0 problems; 510 shapes built, 0 problems.
+
+**Checked:** the groups `blockout_modifiers` (40 tests), `blockout`, `modeling` and `editor` - with Blender's
+libraries on Windows 16,460 checks, 0 failed; dependency-free 14,611 (Windows) and 14,611 (Linux), 0 failed. `tools/test_coverage_map.py --check`: 378 entries, 0
+empty. On the dependency-free builds Decimate at its default ratio leaves the test's grid-path mesh at 658 triangles (the test
+asks for fewer only where the exact path builds the base; a question for the modifiers, not this round). Not covered by a test: the cache key's identity fix directly (no test could force a mesh to land at a freed
+mesh's address), the Inspector's dim line, the lesson's text.
+
+## 2026-11-14 (round 501): Blockouts snap to each other, and touching Blockouts join (task 0485, ADR 0129 amended)
+
+**Asked** (the owner, 2026-11-11, through the hub): "Touching blockouts should have a button to combine them." The
+hub's reading: snapping between Blockouts, plus the join button.
+
+**What was there:** a moved piece or a dragged face handle snapped to the face planes and corners of the other pieces
+of its own Blockout only; a whole Blockout moved with the Move gizmo or the modal G took the grid and nothing else; two
+Blockouts that meet stayed two meshes with two walls.
+
+**Added**
+- **A moved Blockout snaps to other Blockouts.** Dragged along one axis (the Move gizmo's X / Y / Z arrow, or G and an
+  axis key), a corner of any of its pieces' boxes - a room counts with its shell - lands in the plane of a corner of
+  another live Blockout's pieces when it comes within the piece snap's pixel reach (8 px at the UI scale); the gizmo
+  draws its snap mark at the corner that landed. Ctrl turns it off (the grid's step takes over, as for a piece).
+  **Only single-axis drags snap:** a plane handle, the free (view plane) drag and a modal move with no axis lock take no
+  Blockout snap at all (without Ctrl the grid does not apply there either, as before). An object that is no Blockout and
+  holds none is unchanged. Several Blockouts moved together snap as one set against the Blockouts not moved; a piece
+  moved along with them does not make its own Blockout a target.
+- **A piece snaps across Blockouts.** A moved piece (the Move gizmo, and now the modal G with an axis lock - which
+  also snaps to the piece's own Blockout, as the gizmo does) and a dragged face handle also take the other Blockouts'
+  face planes and corners as targets, after their own Blockout's pieces (ties keep their own). The piece snap itself
+  draws no mark today and still does not.
+- **The targets are kept for the length of a drag** (`Editor::blockout_targets`): the other Blockouts' corners are
+  collected once and then cost one dot product a point per frame (a binary search for a moved Blockout). The cache is
+  keyed on the scene, the set of moving Blockouts, the scene's object count and continuity of use (used in the frame
+  before) - not on `edit_epoch::structure()`, which the gizmo's own `mark_changed` bumps every frame. A new drag always
+  begins with a press of the mouse, at which they are collected again; a scene opened or an object made or removed also does.
+  The Inspector's "touches" answer is kept per edit epoch and so is worked out again every frame while a selected
+  Blockout is dragged (the answer changes then).
+- **Join Blockouts.** `blockout join [name, name ...]`, Mesh > Join Blockouts and the button in the Blockout's Inspector:
+  the other Blockouts' pieces move under the active one, each keeping its place in the world, and the emptied objects
+  are removed - one Blockout, one mesh, the shared wall one wall. Names are the rest of the line separated by commas
+  (a name has spaces: "Blockout (1)"; a single name needs no comma; a line that names no object as a whole is still read
+  word by word). With two or more selected (or pieces of them), the others join the active one; with one selected,
+  every Blockout that touches it joins, and what touches those (`Editor::blockout_join`, `blockout_join_command`).
+  One Undo step: undo brings both objects back with their ids. A mirrored piece keeps its world matrix (the mirror's
+  axis is not flipped).
+- **Scale.** A joined-in Blockout that is scaled has its scale taken into its pieces' numbers first (ADR 0135, as
+  Apply Scale to Pieces does). Then the scale of the active Blockout and of what is above it is taken into each moved
+  piece's numbers as Apply Scale to Size does (a mesh piece and a plain object keep their Scale; a mirror's sign
+  stays), and a room's Wall / Floor / Ceiling and a Blend radius - metres in the Blockout's space - are scaled by the
+  ratio of the two Blockouts' world scales (an uneven ratio by ADR 0135's rule: a wall by the root of the X and Z
+  factors, floor and ceiling by Y, a blend by the smallest). So under an even scale (the active Blockout scaled, or
+  under a parent at 0.01 or 100) every moved piece keeps its world box and its wall thickness, with Scale 1 1 1. The
+  active Blockout's own Scale is never changed. **Limit:** when the active Blockout (or what is above it) is scaled
+  unevenly, a moved piece square to its axes still keeps box and Scale 1, but a piece that is turned against it is
+  sheared by that scale exactly as the Blockout's own turned pieces are - round 496's status line and the join's log say so
+  (this is how criterion 4's "the status line of round 496 then applies" is met). A Blockout with a zero or non-finite
+  scale axis is refused; a piece whose place is not finite moves with its own numbers and the log names the count.
+- **Touching.** `Editor::blockout_touching` / `blockout_touches`: two results touch or overlap when the world bounds of
+  their matter meet (1 mm of slack) and a solid piece of one meets one of the other (separating axes on the turned
+  boxes, 1 mm; flat pieces too). What counts is an Add piece, or a room's wall, floor and ceiling slabs (the shell
+  minus the air): a Blockout standing in a room's air does not touch it, one on its floor or against its wall does.
+  **A Blockout of cutters alone (Subtract / Intersect pieces) has no matter and touches nothing**, even where it
+  overlaps another. The check reads the pieces, not the built meshes. It is kept per edit epoch.
+  The Inspector shows "touches 'Name'" (a second name, then "and N more") and the button only when something touches.
+- **Settings, materials, components.** Field Cell, Blend Detail, Texture Scale, Method and Default Wall that differ take
+  the active Blockout's (one log line names them). Where the class materials differ, a piece that had no override of its
+  own for a class it makes gets its old Blockout's material as its override. **Limits:** (1) where the two Blockouts'
+  outer faces lie in ONE plane the joined mesh makes one face, which carries one material (round 482's rule: the first
+  piece's), so those faces take the active Blockout's material although the piece has its override - **spec criterion 4
+  ("no face changes its material") is not met there; reported to the owner**; every other face keeps its material
+  (measured in the test). (2) A piece's empty override means "the Blockout's", so where the old Blockout's material for a
+  class was the default and the active one's is not, those faces take the active one's - the log counts them; no new
+  data field. The removed Blockout's modifiers and other components (colliders, scripts...) are deleted with it (two
+  log lines); the ACTIVE Blockout's modifiers (Mirror, Array...) now apply to the pieces that came in. The pieces that
+  came in follow the active Blockout's own in the build order, so their Subtract pieces and rooms' air cut the active
+  Blockout where they overlap it.
+- **Refused, with the reason:** fewer than two Blockouts; a baked Blockout in the selection ("Unbake first"); a
+  Blockout that holds the active one in the Hierarchy; Play mode; Edit Mode. Blockouts that do not touch still join when
+  named or selected, and the log says they did not touch; one Blockout selected that touches nothing says so and does nothing.
+- A Learn section "Snapping and joining Blockouts" (a Try-it with two Blockouts and `blockout join`, run by a test; three questions).
+
+**Numbers** (`blendity_stress --only blockout_join`, a timed window on a quiet machine, with Blender's libraries; 10
+Blockouts of 100 pieces in the scene, the frames are the main thread's whole frame with the Scene view drawn):
+- **A Blockout dragged 120 frames with the Move gizmo's X arrow:** mean frame 2.17 ms with the snap, 2.06-2.14 ms with
+  Ctrl held (no snap); longest 4.38-4.79 ms and 4.29-4.53 ms; the press frame 4.3-4.4 ms. Budget 16.7 ms: met.
+- **The snap call alone** (900 other pieces): 0.41 ms the first time (the targets are collected), then 0.025 ms
+  (worst 0.15 ms).
+- **The Inspector's touch check:** 0.13 ms the first time after an edit - a drag pays that every frame - and nothing
+  after; frames with the row showing 1.34-1.36 ms median, 1.53 ms worst, a miss and a hit alike.
+- **A sweep of 216 joins** of two interiors (9 x offsets, 4 z, 2 y, turned 0 / 30 / 90 degrees; 102 touching or
+  overlapping, 114 apart): all joined to one Blockout of 18 pieces, **0 problems** in the result, 0 pieces whose world
+  box moved more than 1e-4, 0 pieces with a Scale, 0 faces newly on top of each other, the touching verdict the same as
+  an independent test's every time.
+
+**Tests changed:** `tests/test_blockout.cpp`, "blockout handles (te): pieces of ANOTHER Blockout are no snap
+candidates..." pinned round 479's rule that this round reverses on purpose (criterion 2); it now expects the snap, its
+same-Blockout half untouched (cleared by the hub).
+
+**Checked:** the groups `blockout_join` (new: the snaps by real mouse events on the gizmo, the modal G and a face
+handle; the join's places, undo, refusals, scales, mirrors, materials, the Inspector row and the menu; the lesson's
+commands), `blockout_modifiers`, `blockout`, `modeling` and `editor` - with Blender's libraries on Windows 16,963
+checks, dependency-free 15,095 (Windows) and 15,118 (Linux), 0 failed. `tools/test_coverage_map.py --check`: 378
+entries, 0 empty. Not met, and reported to the owner: criterion 4's "no face changes its material" where the two
+Blockouts' outer faces lie in one plane; a snap for plane and free drags; a drawn mark for the modal G's snap.
+
+## 2026-11-14 (round 500): architectural pieces - columns, pilasters, beams, railings, roofs, stairs with a landing, spiral stairs and arcades, each one piece with numbers (task 0484, ADR 0128 and 0129 amended)
+
+**Asked** (the owner, 2026-11-11, Pass 23b through the hub): "Yes, more architectural pieces is good." - kept
+blockout-level, "so I can texture and add materials later".
+
+**Added:** a Blockout piece can be one of nine **architectural pieces**, each **one piece with numbers** (no child
+object, no object per solid), made through round 498's generator:
+- **Column** (round or square shaft, Base and Capital Height and Width, **Taper**, Segments) and **Pilaster** (a half
+  column standing against the wall under the mouse or the selected room's first wall).
+- **Beam** (Length, Depth, Width).
+- **Railing** along a line or an outline's sides: a post every Post Spacing, Post Size, Rail Height, Rail Size, a bottom
+  rail on / off; at an outline's corner a newel post a little wider and taller than the rails.
+- **Roof** over a rectangle or an outline: **Gable, Hip, Shed**, Pitch or Ridge Height, Overhang, Thickness (0: a solid
+  roof). Its faces that look up are a ninth material class, **Roof** (a Blockout material and a piece override).
+- **Stairs L** and **Stairs U** (two flights and a landing), **Spiral Stairs** (Radius, Inner Radius, Total Height,
+  Steps, Turn in degrees).
+- **Arcade** (Count arches on Count + 1 columns: Span, Column Width, Arch Rise, Depth).
+Each is made by the Create section's **Architecture** dropdown and its **Add** button (one dropdown, not nine buttons),
+GameObject > Blockout > Architecture, and the console (`blockout add column|pilaster|beam|railing|roof|stairs l|stairs
+u|stairs spiral|arcade [numbers]`, `blockout set <word> <value>`); its numbers are in the Inspector and in F9 after it is
+made, and the handles of round 479 change the number each is named for. A Learn section, "Architectural pieces", with a
+Try-it for each.
+- **A new kernel shape, Convex** - a solid given by its corners (4 to 64), its faces the convex hull's - for a tapered
+  shaft, a hip roof's ends and a spiral step (ADR 0128 amended). The hull is kept per thread, so a selected tapered
+  column's outline costs nothing after the first frame.
+
+**Limits, said plainly:**
+- Over an outline a roof is a roof over each rectangle the outline cuts into, the ridge along its long side; its
+  handles and Ridge Height follow the widest rectangle, and only the top handle is offered. Outlined roofs whose
+  rectangles overlap can leave a face on top of another where their bottoms meet (below).
+- Counts (posts a side, steps, arches) are held to 256; a size over 200 m is left out; Turn 0, a spiral held at 1440
+  degrees, an arch rise held at 170 degrees and a shaft whose corners make no solid are named in the status.
+- Scale grows lengths, keeps counts and angles, keeps a zero a zero (Roof Thickness, Overhang, a plinth of 0); Post
+  Spacing grows (the same posts, farther apart); a roof's Pitch follows the slope, tan(pitch) times the height's scale
+  over the span's.
+- On the grid path at the default Field Cell, posts and rails finer than a cell are held at one cell and the status
+  names the cell that shows them.
+
+**Numbers** (`blendity_stress --only blockout`, untimed counts at below-normal priority beside other work):
+- **The new sweep, each kind alone and standing in a room** (500 arrangements a kind a path: sizes, places, turns; a
+  third of the railings and roofs over an outline). Problems (a result with faces on top of each other) on the exact
+  path / on the grid (cell 0.08): Column 0 / 9, Pilaster 0 / 12, Beam 0 / 0, Railing 26 / 10, Roof 1 / 9, Stairs L 3 / 3,
+  Stairs U 1 / 4, Spiral Stairs 1 / 13, Arcade 3 / 8. The causes:
+  - **Railing (exact 26):** in a room turned against the railing, the room's floor face, split round many small post
+    footprints standing on it, lies on top of itself (seed 16: the floor's top face, 20 corners, over another piece of
+    the same floor) - the kernel's coplanar contact (ADR 0128), not the railing's own solids. The newel posts took the
+    corner cases away (28 -> 26 exact) at the cost of 2 on the grid (8 -> 10).
+  - **Stairs, spiral steps, the roof:** two solids meeting in one plane - a flight on its landing, two spiral steps on
+    their shared bottom plane, the bottoms of an outlined roof's overlapping rectangles. The fix pass moved what could
+    overlap (L stairs 11 -> 3 exact, 18 -> 3 grid; U stairs 4 -> 1 exact, 15 -> 4 grid); a spiral's steps overlapping
+    gave 36 instead of 1, so they meet.
+  - **Arcade (exact 3, and 250 with small faces on top):** arcades standing in the room, whose columns reach through
+    its walls.
+  - **The grid path:** features finer than the 8 cm cell (posts, a pilaster's thin plinth) and turned faces.
+- **Hostile numbers** (0 or 1,000 posts, a pitch of 0 or 90, a taper of 0, 500 steps, an arcade of 0, NaN, 1e9):
+  exact 1,413 cases, 1,232 built, 181 refused, **0 problems**; grid 1,413, 1,233 built, 180 refused, **0 problems**.
+- **The 100-piece bench interior with one of each piece added** (109 pieces): the mesh closed, no build on the main
+  thread on either path. Its times were taken under load and say OVER; the timed row comes with round 503's window.
+- **20 tapered columns selected** in the bench interior: frame median 1.78 ms with the libraries (under load).
+- **Every sweep that existed, and rounds 498 and 499's rows: the same counts row for row** on both builds (only the
+  live rows' build counts, which follow the machine's load, moved).
+
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each: Windows without the libraries
+(blockout 21,188 checks), Windows with them (28,407) and Linux (21,191). The Linux run found the Architecture dropdown
+cut by its wider font ("Spiral Stairs") - the label now takes what it needs, and in a narrow pane the dropdown shares
+the Add button's row. The test-engineer's 20 tests found a face-centre corner the hull refused, a railing cap of 257
+posts, a solid roof that scaling made a 1 cm sheet - fixed - and two exact-path faces of a spiral the UV measure could
+not lay flat (a 5e-6 m sliver where two steps share a plane; the measure now leaves out faces that are not flat or are
+slivers, and prints how many). A code review: the hull rebuilt every frame (now kept), outlined handles that moved the
+piece, silent omissions, scale rules - fixed. The coverage map: no command, action or window without a test. The full
+suite, macOS and the sanitizers are CI's.
+
+## 2026-11-14 (round 499): doors with a style - a frame, a leaf, sliding, arched, and the space of a revolving door (task 0483, ADR 0129 amended)
+
+**Asked** (the owner, 2026-11-11, Pass 23b through the hub): door styles as presets of parameters, blockout-level -
+"No, just the blockout of space for a rotating door. I want a preset of parameters. No, keep things like a blockout
+so I can texture and add materials later." And, from the HCI survey of round 505 (through the hub): the Blockout
+buttons of the Create section were cut at the default window size, and three texts sent the artist to the Console.
+
+**Added:** a door piece of a Blockout has a **Style**: Opening Only (the hole as before, the default), **Single**
+(a frame and one leaf), **Double** (two leaves), **Sliding** (a leaf on the wall's face), **Arched** (a round head)
+and **Revolving** - the space of a revolving door only: a round drum through the wall with a ring round it standing
+proud of both faces and an entry each side, nothing inside. Its numbers - Frame Width and Depth, Leaf (on / off) and
+Leaf Thickness, **Open Amount** (0 to 1: the leaf swung about its hinge, or slid), Hinge Side, Slide Direction, Arch
+Rise, Drum Radius - are in the Inspector, in F9 after the door is made, and in the console
+(`blockout add door [style] [width head]`, `blockout set style | leaf | open | hinge | slide | drum`). A leaf is one
+flat slab in a new material class, **Leaf** (a Blockout material, a piece override, `blockout set material leaf`); the
+frame is Solid. A closed leaf separates the two rooms; with Leaf off or the door open they are joined. A styled door
+is still one piece, made as round 498's windows are. A Learn section, "Doors with a style".
+
+**Changed:**
+- **Door Style and Window Style** dropdowns now stand under the Blockout buttons of the Create section, and the Door
+  and Window buttons (and GameObject > Blockout) make the style they show. The console's
+  `create Blockout Piece: Door | Window` makes Opening Only whatever the dropdowns show (round 498 had it follow the
+  dropdown).
+- **The Blockout buttons are no longer cut** (the HCI survey): short labels - Blockout, Door, Window, Add Box / Cyl /
+  Sph, Cut Box / Cyl / Sph, Room Box, Room Cyl - with the whole name in each tooltip, and as many to a row as the
+  widest label allows (three at the default size; fewer with a wider font or a narrow pane at UI scale 1.5).
+- Turn 90's help also says where the turn is in the interface (the Turn row of F9 after a piece is drawn); the Room
+  tool's fixed-operation line says "(fixed)" and its tooltip says there is no button for it.
+- `blockout set style` and `set frame` change every selected opening that knows the word (a door's word the doors, a
+  window's word the windows); the Inspector's Style on a mixed selection changes only the pieces of the edited kind.
+- Hinge Left / Right: "Left: the hinge is on your left when you stand in the room the door opens into, facing the
+  door".
+
+**Limits, said plainly:**
+- **An open hinged leaf cuts what stands in its swing.** With Open Amount above 0 the doorway's width is cleared in
+  front of the wall as far as the leaf reaches (a 0.9 m door fully open: about 0.9 m): a column there loses a slab,
+  and a wall closer than the leaf is long is cut through. The Blockout's status names each piece and room it cuts
+  ("Door 'X': its open leaf cuts 'Y'"); Open Amount 0, the default, cuts nothing. Why: the kernel adds before it
+  subtracts, so the leaf is what a cut leaves; a leaf added in front of the wall instead left 2-4 unresolved places a
+  build on the exact path, and with a 1 mm overlap 414 problems of 2,000 (ADR 0129's round 499 amendment). The spec
+  did not ask for this cut; **it is put to the owner** (keep it as a swing clearance, or wait for a kernel change
+  that lets an added leaf stay).
+- An Arched door's leaf is closed only (Open Amount is not read). A selected Arched or Revolving door is outlined as
+  its box. A swung leaf is no thicker than the frame is wide; a styled door over 100 m is left out and named.
+- On the grid path at the default Field Cell a 4 cm leaf is left out and the frame held at a cell; the status names
+  the Field Cell that shows the door whole (as round 498's windows).
+
+**Numbers** (`blendity_stress --only blockout`, untimed counts at below-normal priority beside other work; the
+times of this run are not a measurement):
+- **The new sweep, styled doors in a wall between two rooms** (2,000 arrangements a path: styles, sizes, places,
+  turns, Open Amounts, hinge sides): **exact path 0 problems** (94 results with small faces on top of others, 2
+  with faces of no area, 163 unresolved places); **grid path (cell 0.08) 0 problems** (0 / 18 / 49,423). Before the
+  review's fixes the exact path had 2 problems (a swung leaf thicker than its frame).
+- **Open Amount 0 to 1 in twenty steps** (Single both hinges, Double, Sliding both ways; exact path): every step
+  sound, 0 unresolved places.
+- **Hostile numbers on styled doors** (180 cases a path): exact 125 built, 55 refused, **0 problems**; grid 123
+  built, 57 refused, **0 problems**.
+- **A Single door at Open 0.5 dragged along its wall in interior 100, 120 frames:** no build on the main thread on
+  either build. This run's times were taken under load and say OVER; the implementer's quieter run said ok (frame
+  median 1.4 ms without the libraries, 3.9 ms with). The timed row comes with round 503's window.
+- **Existing sweeps and round 498's window rows: the same row for row as round 498's**, on both builds.
+
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each: Windows without the
+libraries, Windows with them and Linux (counts in the PR). The Linux run found what Windows could not - with its
+wider font three labels were still cut at three to a row - hence "as many to a row as fit". The coverage map: no
+command, action or window without a test. The test-engineer's 12 tests (they found the revolving door's ring was a
+closed tube that joined nothing, a closed Double's 2 cm crack, and a 1e9 m arched door the exact path could not
+build - all fixed) and a code review (the swing's cut, Hinge Left / Right mirrored against their help, mixed
+selections taking each other's styles - fixed or, for the swing, named and put to the owner). The full suite, macOS
+and the sanitizers are CI's.
+
+**Fixed after the owner tried it** (2026-11-14, through the hub: "I want all doors and windows to be vertical ... Or
+at least added, vertical by default." and "the double door width isn't the width of a double door"):
+- **A door or window added to a room that lies on its side or leans lay flat.** The one placement path took the room's
+  up as the opening's up; a room drawn onto a wall or a slope has another up. Now an opening is added upright by the
+  Blockout's up, whatever the room's turn, and only in a wall that is vertical within 2 degrees in the Blockout's frame:
+  a wall that leans more is refused with a status line saying how much it leans, and a face within 30 degrees of
+  horizontal (a floor, a ceiling) is no wall under the mouse. The feet stand on the floor under the opening (the higher
+  of the two jambs' floors; an upright room keeps its floor line, bytes unchanged). Turning it afterwards on purpose is
+  left alone.
+  The mouse test that picks the wall judged floors against the room's up too, and now against the Blockout's.
+  Reproduced before the fix with real mouse events and the console on rooms turned 90 and 30 degrees about X, 45 about
+  Z, a cylinder room on its side, in an upright, a turned and a turned-and-scaled Blockout: every one lay flat; rooms
+  turned about Y only were fine. Windows share the path and the fix.
+- **With the mouse on a floor, a ceiling or nothing** a door or window goes in the middle of the room's MOST UPRIGHT wall
+  (-X of an upright room as before; not -X of a room turned 90 degrees about Z, which is a floor), and the status says
+  the mouse was not on a wall and where it went; a room with no side within 2 degrees of vertical (a room leaning on two
+  axes; a cylinder on its side has its end caps) refuses with a status line. The feet's floor rays start on the room's side
+  of the wall (also for a click on the outer face), count only faces the room itself made and a hit inside its own air.
+- **Limits:** (1) the wall under the mouse and the floor rays read the mesh shown, which can be one build behind while a
+  newer build runs (a click at once after an edit can use the old mesh). (2) A sphere room is refused on every mouse click
+  (its wall is curved, no face is within 2 degrees of vertical) while the Door button's fallback still puts the opening
+  in its most upright side. (3) Switching away from a Round window keeps its size (its Head is its circle's); a Round
+  window is the one style that takes no preset on leaving.
+- **Each style carries its size:** a Double door is 1.8 x 2.1 m (two 0.9 m leaves, against a Single's 0.9 x 2.1), a
+  Revolving door's entries 1.2 m, a Double window 1.5 x 2.0 m (the others 1.2 x 2.0). A new opening takes its style's
+  size (a size typed in the console wins); switching style in the Inspector, F9 or `blockout set style` takes the new
+  style's size only while the size is still the old style's - a size the user typed is kept. Saved scenes load
+  unchanged.
+
+## 2026-11-13 (round 498): windows with a style - a frame, bars, a sill board and glass from numbers (task 0482, ADR 0129 amended)
+
+**Asked** (the owner, 2026-11-11, Pass 23b through the hub): pre-made window styles "(arch, single, double ...)",
+everything parametric - "I want a preset of parameters. No, keep things like a blockout so I can texture and add
+materials later."
+
+**Added:** a window piece of a Blockout has a **Style**: Opening Only (the hole as before, the default), **Single**,
+**Double** (two lights and a mullion), **Arched** (a round head, Arch Rise), **Fixed** (a frame and a pane, no sill
+board), **Grid** (Panes Across x Panes Up with glazing bars) and **Round** (a porthole; a circle when it is made).
+Its numbers - Frame Width, Frame Depth, Panes, Arch Rise, Glass, Sill Board and its overhang - are in the Inspector,
+in F9 after the window is made, and in the console (`blockout add window [style] [width head sill]`,
+`blockout set style | frame | panes | glass | sillboard`). The Modeling Tools window's Blockout section has a
+**Window Style** dropdown: the Window button makes the style it shows. A styled window is still **one piece** (one
+object, one set of handles, one undo step): what it adds to the mesh - the frame, the bars, the board, a thin pane -
+is made from its numbers each time the Blockout is built, as flat blockout-level solids. Frame, bars and board are in
+the piece's Solid material; the pane is in a new class, **Glass** (a Blockout material, a piece override,
+`blockout set material glass`). Changing Style keeps the numbers the styles share. A Learn section, "Windows with a
+style".
+
+**How it is built** (ADR 0129's round 498 amendment): no child objects; `blockout_snapshot` turns a styled window
+into kernel pieces (a blank that fills the opening, reveals and one light a pane cut out of it), each with an id that
+names its window (`blockout_piece_owner`). The kernel is not changed. Opening Only gives the same mesh bytes as
+before the round.
+
+**Limits, said plainly:**
+- **On the grid path** (the build without Blender's libraries, or Method = Field) a frame of 6 cm and a pane of 3 cm
+  are finer than the default Field Cell (0.1 m) can show. There the window is made as the grid can show it - no pane,
+  the frame and bars one cell wide and as deep as the wall, a standing sill board left out - or, when a light itself
+  would close, as the plain hole; the Blockout's status says so and names the Field Cell that shows the window whole
+  (0.02 m for the default window). The spec's "a pane thinner than the frame on each path" is met on the grid only at
+  such a cell. With Blender's libraries (Auto) the default window is exact.
+- A cluster that Auto sends to the grid because of a Blend radius or an open mesh makes its windows for the exact
+  path (not known when the pieces are made): they may come out ragged there.
+- The Window Style dropdown stands above Draw Piece, not beside the Window button, and the console's
+  `create Blockout Piece: Window` follows the dropdown (`blockout add window` does not): the button's row is in
+  `tools_window.cpp`, which was not among the round's files; round 499 moves it.
+- A selected Round or Arched window is outlined as its box. A window in a room made of box pairs (not a Room piece)
+  can have its sill board cut by that room's air.
+- Many panes cost build time on the exact path: 20 Grid windows of 12 x 12 panes with glass are 5,840 kernel pieces.
+
+**Changed:** scaling a door or window (round 496's rule) grows only the wall's part of its Depth (Depth is the wall
+plus 0.1 m each side), so a sill board's reach past the wall stays the scaled overhang; a styled window's frame
+numbers scale with it (ADR 0135).
+
+**Numbers** (`blendity_stress --only blockout`, untimed counts, run at below-normal priority; times are not a
+measurement here):
+- **The new sweep, styled windows in a room's wall** (2,000 arrangements a row: every style, sizes, places, turns and
+  numbers): **exact path 0 problems** (65 results with small faces on top of others, 4 with faces of no
+  area, 123 unresolved places); **grid path (cell 0.08) 0 problems** (3 / 15 / 8,289 - before the grid fit of the
+  first review: 3 problems and 279,537 unresolved places).
+- **Hostile numbers on styled windows** (210 cases a path: frames wider than the window, 0 and 500 panes, negative,
+  NaN, huge): exact 120 built, 90 refused, **0 problems**; grid 113 built, 97 refused, **0 problems**.
+- **Cost of many panes** (interior 100 with 20 windows, one build, untimed): exact path 16 ms with plain cuts against
+  644 ms with 20 Grid 12 x 12 windows; grid (cell 0.1) 50 ms against 100 ms; 0 problems.
+- **A Grid window dragged along its wall in interior 100, 120 frames** (criterion 8): verdict **ok** on both builds -
+  no build on the main thread; without the libraries frame median 1.1 ms, worst 10.8 ms, 30 landings; with them 61
+  landings. (Untimed: the timed rows come with round 503's window.)
+- **Existing sweeps: the same row for row as round 497's**, on both builds (problems, small faces on top, faces of
+  no area, unresolved places - every row).
+
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each: Windows without the libraries
+(blockout 15,785 checks), Windows with them (20,563) and Linux (15,787). The coverage map: no command, action or
+window without a test. The test-engineer's 26 tests (no product fault found) and two code reviews: the first asked
+for the grid fit, the arched window's bottom rail and a shorter suite (the full hostile grid moved to the stress row
+above); the second found a regression of this round (`blockout add window 1.0 0.8` had lost its low-window rule) and
+four smaller faults - all fixed, each with a test. The full suite, macOS and the sanitizers are CI's.
+
+## 2026-11-13 (round 497): an L-shaped room's wall is one face again on the exact path (task 0481, ADR 0128 amended)
+
+**Asked** (the owner, 2026-11-13, through the hub, of the fault round 483 found): "Fix L-shaped room fault."
+
+**Fixed:** with Blender's libraries, an L-shaped outline room - any room or piece whose parts meet at a diagonal cut -
+could come out with a wall that was two layers: one face that was not a simple polygon and six small faces on top of
+it, at some places and not 5 cm further on. **The cause:** an outline's air is cut into convex parts along diagonals;
+the corner of a part where its diagonal ends on the wall has no face of its own in the wall's plane, so its coordinate
+was computed from three other planes and landed a rounding away from the coordinate the wall's own solids write - and
+the exact path only cancels faces that agree to the bit. **The fix** (the kernel: `SquareCoords` in
+`src/scene/blockout_internal.h`, used by `snap_to_planes` and `solid_manifold`): a corner within the tolerance of an
+axis-square plane of the table, along an axis none of its own faces is square to, is put on that plane - in the
+Blockout's frame and in the turned frame. A corner's own planes are left alone. Deterministic; nothing else of the
+kernel changed.
+
+**Numbers** (`blendity_stress --only blockout`, untimed counts, 2,000 arrangements a row, with Blender's libraries):
+- **The new sweep, outline rooms** (L, T, U and a slot one wall thick; six turns, two of them odd angles): on the
+  exact path **0 problems, 0 with small faces on top of others, 0 with a non-simple face** - before the fix 587 and
+  422 of 2,000.
+- **On the grid path the same sweep has 2 problems of 2,000** (the first is seed 534: flat faces on top of each
+  other - turned thin rooms; 4 results with faces of no area and 8,483 unresolved places over the row), with and
+  without the libraries, **the same before and after this change**: a limit of the grid path this round does not
+  touch (the spec asked for 0 on both paths: not met there, and left for the owner's decision). `--quick`, CI's run,
+  does not reach those arrangements.
+- **Existing sweeps, the exact path - the counts fell, none rose, problems 0 before and after** (small faces on top
+  of others / faces of no area / unresolved places): any pieces 1 -> 0 / 9 -> 4 / 61 -> 57; rooms and Intersect
+  pieces 51 -> 39 / 36 -> 15 / 234 -> 177; wedges, stairs, arches and outlines 165 -> 94 / 96 -> 66 / 405 -> 230;
+  hostile meshes among boxes, rooms and wedges 183 -> 177 / 122 -> 98 / 352 -> 324. The two box rows, the six grid
+  rows, the two Blend rows and every row of the build without the libraries are the same row for row.
+
+**Changed:** round 483's bench interior has its L room back where it first stood (it had been moved 0.1 m to stand
+clear of this fault); the baseline's four bench rows were timed with it 0.1 m further in.
+
+**Checked:** the tests failed before the fix (3 of the 7 places; 47 of the 840 sampled) and pass after. The groups
+blockout, editor, lighting, physics and hci, 0 failed on each: Windows without the libraries (blockout 6,711), Windows
+with them (8,476) and Linux (6,713). The Blockout stress section on both Windows builds (the counts above; the build
+without the libraries is the same row for row as round 483's). A code review (the fix sound and at the cause; its
+suggestion to narrow the snap in the turned frame was tried and made one row worse, so it is not kept) and the
+test-engineer's ten tests (no fault found). The full suite, macOS and the sanitizers are CI's.
+
+## 2026-11-13 (round 496): the Blockout's Draw Piece tool - one Shape list, a preview that is the piece, scale that never shears (task 0480, ADR 0135)
+
+**Asked** (the owner, 2026-11-12, through the hub): "Improve HCI for the blockout pieces, really looks crowded to work
+with. And is confusing between selection and drawing." - "I feel that having the Draw: and Operation: tag with so many
+options is too much." - "I also don't think it should be included in the main board on the top next to "center"
+"global" etc." - "Scaling for the block out objects is weird, especially when I want to scale the object using the
+local axis." - "It sheared." - "Drawing an arch, stair, or other draw method needs a preview." The owner chose "A and B
+together" of the proposal, and for the direction: "The default is fine, objects are parametric anyways."
+
+**Changed - the panel:**
+- **The Draw Piece tool's button is off the Scene view's top toolbar.** The tool is in the Modeling Tools window's
+  Blockout section, on Shift+R, in the menu and in the console (`tool room`).
+- **One Shape dropdown** of the nine things the tool draws - Room, Round Room, Outline Room; Box, Cylinder, Outline;
+  Wedge, Stairs, Arch - in place of the two footprint ticks and the Draw: row. The switch reads "Draw Piece (Shift+R)"
+  and is lit while on. Room Wall Thickness shows only for a room shape.
+- **No Operation row.** Pulled out adds, pushed in subtracts; **Shift held at the click makes the other one**, and the
+  label beside the mouse says which ("height 0.500 m  Subtract  (Shift: Add)"). A room has no operation.
+- **F9's Operation row shows words** (Add, Subtract, Intersect); Intersect is reached there and from the console.
+- A console operation that sticks (`blockout roomopt operation ...`, the old `subtract on`) shows one dim line,
+  "Operation: Intersect (console) - click to clear". Choosing a room shape forgets it. Every older `blockout roomopt`
+  word still works and moves the dropdown.
+
+**Changed - scale (ADR 0135):**
+- **Scaling a piece changes its own numbers** along its own axes (the Scale handles, S with or without an axis): a
+  box's Width / Height / Depth, a cylinder's radius and height, an outline's points... Its transform's Scale stays as
+  it was (1 1 1 for a piece never scaled). A cylinder and a sphere stay round. A room keeps its wall's thickness.
+- **Scaling a Blockout, a folder in it or a parent piece scales what is under it** - places and numbers - instead of
+  its own Scale, so a turned piece inside is not sheared: it grows along its own axes by how much each of them grew.
+- A Scale an older scene left on a piece is folded into its numbers at its first scale, or by **Apply Scale to Size**
+  in its Inspector. A Blockout or folder saved with an uneven Scale shows "scaled unevenly: turned pieces are sheared"
+  and a button, **Apply Scale to Pieces** (`blockout applyscale`), that folds it once. A fold keeps the shape in the
+  world: rooms' walls, floors and ceilings, Blend radii and the Texture Scale take the Blockout's own factor; a round
+  piece under an uneven scale keeps what is left of it on its own Scale (a piece's own Scale never shears).
+- Numbers a scale makes stop at 10,000 m (F9's limit). With the Scale or Transform tool, the gizmo's scale handle wins
+  the press over a piece's own handle under it.
+- `perf drag gizmo` knows the Scale handles: `sx`, `sy`, `sz`, `sall`.
+- **What can still shear:** an uneven Scale on an object ABOVE the Blockout (the status line names it; not the
+  Blockout's to change); a Scale typed into the Inspector's Scale field or set by the console's `scale` (literal - the
+  status line then offers the button); a Scale already in a scene until the button is pressed. A mesh piece, and any
+  object with a mesh of its own, keeps scaling by its transform as before.
+
+**Added - the preview:**
+- **The preview is the piece.** While the footprint is dragged and the height pulled the view shows the piece itself
+  as a wireframe - stairs with their steps, a wedge's slope, an arch's ring - from the same function that makes the
+  piece at the click, so the two cannot disagree; fainter with a provisional height during the footprint, in the
+  operation's colour (Add orange, Subtract yellow, Intersect violet) with an arrow for its direction during the height.
+- **R turns it** a quarter turn round the surface's normal while a piece is in progress; the way is kept for the next
+  piece of that shape.
+- **The direction by itself:** a wedge and stairs rise away from where the drag started along the rectangle's LONGER
+  side; an arch spans the longer side with its feet on the edge where the drag started. (A square keeps the old rule.)
+- **Afterwards:** F9 has a **Turn** row after a drawn wedge, stairs or arch, the Inspector a **Turn 90** button,
+  the console `blockout turn [quarters]`. A wedge and stairs stay in their rectangle, the two sizes swapping; an arch
+  spans the other way over the same centre.
+
+**Changed in older tests** (each said in the test): round 479's reachability test clicks the panel's switch, not the
+toolbar; the F9 tests pick Subtract from the dropdown instead of typing 1; round 495's panel test picks shapes in the
+dropdown; four of round 495's wedge checks are swapped because a wedge now rises away from the press; the "Dragging
+rooms out" lesson test counts 4 questions and 5 commands (the Scaling paragraph's Try-it line and question).
+
+**Known limits:** what can still shear is listed above. Folding an unevenly scaled Blockout uses one factor for a
+room's wall (the square root of the two horizontal factors), so walls along its two axes cannot both be exactly what
+they were; Field Cell is not scaled by a fold. A round piece scaled by hand along one round axis grows its radius (it
+stays round); after an uneven FOLD it keeps a Scale that is not 1 1 1. Turn under an unevenly scaled parent does not
+keep the piece's box in the world; an arch turned spans the other way over the same centre. The scale handle that
+takes the press is the one under the mouse on the frame before. A turned box beyond about 100 km stalls the kernel
+itself (found here: over 150 s at 1,000 km, built directly; not this round's code - a follow-up), which is why
+scale-made numbers stop at 10,000 m. The preview is pinned by its lines and numbers, not by pixels. The move of round
+495's `BlockoutDrawChoice` into `Editor::RoomTool` (one set of choices an editor, not one for the program) is in this
+round's commit, not one of its own: its lines are shared with the panel's.
+
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each: Windows without the libraries
+(blockout 6,400, editor 2,329), Windows with them (7,903, 2,346) and Linux (6,402, 2,331);
+`tools/test_coverage_map.py --check` 378 entries, 0 empty. Two code reviews (both "changes needed", every finding
+made) and the test-engineer's 33 tests (3 found faults, fixed); the changes made after the second review were not
+reviewed again. No stress section was run: the kernel is not changed. The full suite, macOS and the sanitizers are
+CI's.
+
+## 2026-11-12 (round 495): a piece - a Subtract box and the rest - drawn on a face of a Blockout (task 0479)
+
+**Asked** (the user, 2026-11-12): "Make it so that you can "draw" subtract box, etc. Onto faces other blockout
+objects." And, asked whether the direction of the pull should choose the operation: "Yes, that's right."
+
+**What was there:** the Room tool (Shift+R) could already drag a footprint on any face and pull it into a solid, with
+a Subtract tick - but the piece went into the *selected* Blockout, the tool said "Room", it knew a box, a cylinder
+and an outline only, and the console drew on the ground only.
+
+**Added:**
+- **A piece drawn on a face of a Blockout is a piece of that Blockout**, whatever is selected (on the ground or on a
+  mesh that is no Blockout: the selected Blockout or a new one, as before).
+- **Draw:** Room, Solid, **Wedge, Stairs, Arch** in the tool's options (Modeling Tools > Create > Blockout). A wedge is
+  tall where the drag began, stairs climb the way the rectangle was dragged, an arch lies in the surface - pushed
+  through a wall with Subtract it is an arched opening.
+- **Operation:** **Auto** (the default, on the user's word: pushed into the face a solid subtracts, pulled out it
+  adds), Add, Subtract, **Intersect**. The label beside the mouse says which it will be while the height is pulled.
+- **Console:** `blockout draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal
+  <x y z> size <du dz height>` - what the tool's drags make on that surface point; `blockout roomopt piece ...` and
+  `blockout roomopt operation ...` set the tool's rows.
+- The Learn section "Drawing pieces on faces".
+
+**Changed** (what the Room tool did differently before):
+- the tool's button reads "Draw Piece (Room) Tool"; the Solid Piece and Subtract ticks are the Draw and Operation
+  rows;
+- **a solid dug into a surface with no operation chosen is now a Subtract piece** (Auto) where it was an Add piece
+  inside the surface - unless its Blockout has nothing in it yet (a new one too), where Auto adds, since there is
+  nothing to cut. Choose Operation: Add for the old result;
+- `blockout roomopt subtract off` now means Auto, not Add (`on` is Subtract as before; `solid`, `circle` and
+  `polyline` mean what they did);
+- **a room drawn on a face of a Blockout joins that Blockout** too, where it joined the selected one or a new one;
+- a wedge or stairs pushed into a face is turned over - a ramp or a stairwell going down into the face, open at it.
+
+**Found and fixed before publishing:** the test-engineer: Solid switched off and on kept the operation chosen
+before. The code review (changes needed, all made but the two named under the limits): a pushed-in wedge or stairs
+cut a hollow closed under the face; the Learn section's lines did not do what they said (the box of `blockout new`
+stands where the camera looks, and the arch came out upside down) - they are five `blockout draw` lines now, run by
+a test; a console command run while a footprint waited for its height took its Blockout away; the tool's choices
+were reset by whoever read them - they are forgotten where Solid goes off; Auto into an empty Blockout made a lone
+cutter; the face is now the one under the press itself, not found again by a short ray; the Operation rows are
+greyed for a room. The second review, of those fixes (approve with changes, made): **F9 on a pocket dug with a
+rectangle moved it sideways onto the corner the drag began at** (older than this round - rounds 479 and 480's solids
+dug down did it too - and met at once now that pushing in cuts); the label beside the mouse said Subtract where Auto
+would add; "nothing to cut" now looks for a piece that is on and adds; the Learn test runs the lesson's own lines;
+**F9's Depth on an arch drawn on a face keeps the face** (`adjust_last.cpp`, freed by the hub).
+
+**Known limits:** the footprint snaps to the grid, not to the face's edges and corners; an arch's rise is half its
+width and the rectangle's second side only says which way it bulges (its other numbers are the Inspector's and
+F9's); an arch ring thinner than about two grid cells can come out with faces on top of each other on the
+grid path (seen with a ring 0.125 m thick at the 0.1 m cell; a drawn arch's ring is half its radius, as the
+component's own default, which was clean); `blockout draw` from the console finds the
+Blockout by a 5 cm ray at the point given, which is too long in a Blockout scaled to a hundredth and too short
+300 km from the origin (the tool itself uses the press's own ray); a face of a Blockout nested in another gives the
+piece to the outer one; the tool's Draw and Operation choices live outside the editor's own state this round
+(`blockout_pick.h` says why) and are one set for the program; a sphere has no footprint and is not drawn
+(`blockout add sphere`).
+
+**Checked:** on main `f36d411d` (the round's groups and `editor`, ADR 0134; the full suite is CI's). Windows with Blender's libraries: `blockout` 5,582 checks, `editor` 2,346, 0 failed; Windows dependency-free: 4,081 and 2,331, 0 failed; Linux (GCC, dependency-free): 4,083 and 2,330, 0 failed. 24 tests for this round, the tool's with real mouse events. Pockets 0.25, 0.5 and 0.75 m deep in a box wall and one in a room's wall: 0 faces on top of each other, volumes exact, on both builds. Not run here: the ASan + UBSan group and the stress sections (no kernel change; CI's jobs run them). Audits: the coverage map (378 entries, 0 empty), `changelog.py check`, `docs_check.sh`. Test-engineer: 14 tests, one fault found; code review twice: changes needed, then approve with changes - made as listed above (the second review's changes were not reviewed a third time).
+
+## 2026-11-12 (round 494): a Blockout's pieces show their outlines and are clicked by them (task 0478)
+
+**Asked** (the user, after round 479's picking fix: "Yes, add outlines."): a door, a window or a piece that cuts is air
+where it is seen head-on - a click in it selects what is behind, and the piece could only be clicked on its reveal or
+in the Hierarchy; its outline was drawn only while the Blockout itself or that piece was selected.
+
+**Added:** while the Blockout or any of its pieces is selected, **every piece shows its outline** - the selected ones
+as before, the others fainter and thinner, in the piece's colour (orange Add, yellow cut / opening, violet Intersect),
+hidden behind matter as before. **A click within 6 px of the outline of a door, a window, a Subtract or an Intersect
+piece selects that piece** (the nearest outline wins; an outline behind the picture is not clicked; Shift / Ctrl as
+any click). Add pieces and rooms are clicked on their surface as before: their outlines run along edges two pieces
+share, where an outline click would guess.
+
+**Changed:** nothing while no outline is shown, in Edit Mode, in Play or with a tool active; box select is round
+479's. New `src/editor/blockout_pick.h` (`blockout_outlines_shown`, `blockout_pick_outline`), called from
+`Editor::pick` before the wire pick.
+
+**Known limits:** a click within 6 px of a cutter's visible outline that meant the surface behind it selects the
+cutter (the trade Wire and Bounds objects make); **only doors, windows, Subtract and Intersect pieces are clicked by
+their outline** - every piece's outline is drawn, Add pieces and rooms are clicked on their surface; an outline's line
+that runs past the eye (the camera inside a room, a door's edge on the wall beside it) is drawn but not clicked, as
+with Wire objects; the Learn lesson's lines come with round 483's write-up (another
+pass has the lessons file open).
+
+**Fixed on the way** (found by the tests and the code review, before any of it was published): an outline behind a
+surface was clickable - the depth buffer's numbers were compared with a fixed allowance; they are compared in metres
+now, and in an orthographic view (whose rays start a kilometre behind the eye) the allowance is a share of the view's
+height, not of the ray; a click with several Blockouts shown asked each about the ones before it again.
+
+**Checked:** on main `c1c634cc` (the round's groups and `editor`, ADR 0134; the full suite is CI's). Windows with Blender's libraries: `blockout` 5,215 checks, `editor` 2,349, 0 failed; Windows dependency-free: 3,714 and 2,311, 0 failed; Linux (GCC, dependency-free): 3,716 and 2,330, 0 failed. The nine outline tests 30 runs in a row on Windows, 0 failed (they failed 8 runs of 25 before the click helper waited a double click out). Printed, not asserted: 100 rooms and 20 doors, a frame with one piece selected about 1 ms more than with nothing selected. Not run here: the ASan + UBSan group (stopped for another pass's timed window; CI's `linux-sanitizers` runs it). Audits: the coverage map (378 entries, 0 empty), `changelog.py check`, `docs_check.sh`. Test-engineer: six tests added; code review: changes needed, all made (above).
 
 ## 2026-11-11 (round 493): The round chain runs the round's test groups; the whole suite is CI's
 
@@ -244,6 +1430,90 @@ then "Yes, lets do it that way from now on." and, for `CLAUDE.md`, "Yes, i want 
 
 **Checked:** documentation only - no code, no tests changed; `tools/dev/changelog.py check` passes.
 
+## 2026-11-11 (round 490): Parallel passes stop conflicting - shared-docs fragments and the integration PR
+
+**Asked:** three passes (22, 23, 24) run side by side, each a stack of pull requests on `main`, and every merge made
+the others conflict again - in `docs/USABILITY.md`, `tools/README.md`, `docs/PERFORMANCE.md` and
+`docs/ARCHITECTURE.md` - and wait for a rebuild. The owner approved a plan (2026-11-10) with two parts: the four files
+join the changelog fragments, and one script builds a single pull request that carries every green stack. **Tooling
+and docs only: no product code, no build, nothing in the editor changes.**
+
+**Changed (task 0465, ADR 0123 amended)**
+- **A round's lines for the four shared docs go in its fragment.** `changelog.d/<round>-<slug>.md` may end with
+  sections `<!-- docs/USABILITY.md -->`, `<!-- tools/README.md -->`, `<!-- docs/ARCHITECTURE.md -->` and
+  `<!-- docs/PERFORMANCE.md -->` beside `<!-- README -->`, each taking `after:` + lines, `replace:` / `with:` and the
+  new **`append:`** (a whole block at the file's end, one blank line above it; refused when its first line is already
+  there). `tools/dev/changelog.py check` verifies every operation applies exactly once and names the fragment and
+  the file when one does not; `fold` applies them in ascending round order, keeps each file's line endings, writes
+  every file or none, and deletes the fragments.
+- **`tools/dev/docs_check.sh` holds the four files to the `Docs-fold: yes` rule, for commits newer than the rule.**
+  The rule's start is the day it reached `main`: the committer date of the commit on the base's first-parent line
+  in which the script gained its `SHARED_DOCS=` list (found with `git log -S`). A commit dated earlier is exempt for
+  these four files and printed as `exempt:`; a later one is checked whether or not its branch ever merged `main`
+  (review: an exemption by ancestry would have lasted for as long as a branch stayed unmerged). Until the rule is on
+  the base, a commit is checked only when it descends from the commit of its own history that brought the list. The
+  open passes' rounds that already edited the files directly stay green; a round written after the rule reached
+  `main` is checked. The block sits apart from PR #369's exemption for commits older than the fragment rule itself:
+  `git merge-file` of this version, `main`'s and #369's merges without a conflict, and the result holds both.
+
+**Added (task 0465, ADR 0132)**
+- **`tools/dev/integrate.sh`: the integration PR.** From `origin/main` it merges the top branch of every open stack
+  whose `windows`, `linux`, `macos` and `linux-sanitizers` jobs all passed (a job gh lists twice must have passed
+  twice) - merge commits only - pushes `integration/<n>` and opens one PR on `main` whose body has "Merging this
+  also merges #..." for every PR carried, and what was left out and why. The merges are made with `git merge-tree`
+  in the object store, so no working tree is touched and a conflict leaves nothing half merged: it stops the run
+  before anything is pushed, names the two pull requests and the files, and says where it is settled (two PRs': by
+  hand on the integration branch, which the next run continues; one with `main`: on that PR's branch; or `SKIP`).
+  `git merge-tree` failing for another reason is an error, not a conflict. `CHECK=1` only reports (with `ANY=1`: as
+  if every stack were green, to see today's conflicts); `SKIP="n"` leaves a stack out; while an integration PR is
+  open a later run continues its branch with a fast-forward push and rewrites the PR's body even when there is
+  nothing to push (what is left out may have changed); `SKIP` of a stack already carried says it does nothing;
+  `NEW=1` starts the next number. It never merges a
+  PR, and every PR still targets `main` and can be merged on its own.
+- **`tools/dev/stack_check.sh` and the `stack` job accept an integration PR** (head `integration/*`) as the one
+  allowed top over several stacks. Each stack still needs exactly one top of its own, and a stack the integration PR
+  holds only part of is noted while that stack's top is not green yet and fails once it is, naming
+  `integrate.sh`; a stack wholly outside it is noted. gh failing is now an error
+  instead of "no open pull requests". The grouping and the "required jobs passed" test moved to `tools/dev/stack_lib.sh`, which both scripts source.
+- **`tools/dev/stack_selftest.sh`**: both scripts on a throwaway repository with a local bare origin and a stand-in
+  gh (never GitHub); the `stack` job runs it before the check.
+- CLAUDE.md (Documentation duties, workflow step 6), `changelog.d/README.md`, `tools/dev/README.md`, the PR and
+  task templates say the two rules. The agents' prompts (`.claude/agents/*.md`) are unchanged.
+
+**Checked:** `changelog.py --self-test` 91 passed, 0 failed on Windows and on Linux (49 before); `stack_selftest.sh`
+95 passed, 0 failed on Linux (WSL); on Windows (Git Bash) 77 of 77 before the review's fixes, not rerun after them. A fold on a copy of the tree with a sample fragment
+for all four files: `--dry-run` wrote nothing, the fold changed exactly the lines the fragments named, CRLF kept.
+`integrate.sh` was not run for real. `CHECK=1 bash tools/dev/integrate.sh` against the open PRs (2026-11-11, read-only):
+
+```
+integration/1: new, from origin/main 04f45fd1
+stack: #366 #367 #369 #371 -> left out: #371 is not green (windows: pending, linux: pass pending, macos: pending, linux-sanitizers: pending)
+stack: #372 -> left out: #372 is not green (windows: pending, linux: pending, macos: pending, linux-sanitizers: pending)
+stack: #373 -> left out: #373 is not green (windows: pending, linux: pass pending, linux-sanitizers: pending)
+nothing to integrate: no stack is green
+```
+
+and with `ANY=1` (the jobs not read): #371 and #373 merge, and #372 conflicts with #371 in `docs/USABILITY.md` -
+the kind of conflict part 1 ends for rounds written from here on.
+
+## 2026-11-10 (round 489): the docs check exempts commits older than its rule
+
+**Asked:** the `docs-fragments` job was red on Pass 24's PRs for three round commits written before the changelog
+fragments rule (ADR 0123, #365) was on `main`; of the two options put to the owner - (a) the check skips commits older
+than the rule, (b) the red is accepted - the owner chose "Option a".
+
+**Changed (ADR 0123 amended)**
+- `tools/dev/docs_check.sh` no longer fails a commit that edits `CHANGELOG.md` or `README.md` when that commit was
+  written before the rule reached its own history (it does not descend from the commit that added the script to the
+  base). It prints an `exempt:` line for each. A commit made after its branch merged `main` is checked as before.
+- What it does not check, said in the ADR: that an exempt commit's entry was moved to a fragment. Pass 24's were
+  (`changelog.d/484-`, `485-`, `486-*.md`).
+
+**Checked**
+- `tools/dev/changelog.py --self-test`: two new cases (an older commit is exempt and named; a commit after the merge
+  still fails), all passing. `docs_check.sh` on Pass 24's two open branches: three `exempt:` lines, no error.
+- No source, test or stress file changes.
+
 ## 2026-11-11 (round 488): An addendum - Pass 24's table with round 487 in it
 
 **Asked:** "Continue and finish all remaining tasks" - round 487 came after the pass's write-up (round 488, task 0464)
@@ -255,6 +1525,29 @@ and the write-up said it had not run.
 - Task 0464 has an addendum with the same.
 
 **Checked:** `changelog.py check`; nothing is built.
+
+## 2026-11-10 (round 488): Pass 24's write-up
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
+Pass 24's last round: what the pass did about both, in one table. The owner, through the hub: "Thank you, continue and
+finish all tasks."
+
+**Added (task 0464)**
+- `docs/PERFORMANCE.md`, "Pass 24 in one table": the mirror finish (the owner's two views against Unity's own
+  pictures: 13.71 / 0.702 and 12.50 / 0.697 in the owner's session, where the maps were lost, 3.71 / 0.905 and 3.57 /
+  0.912 now, mean difference / SSIM; a fresh import that kept its maps was already 3.75 / 0.898 and 3.67 / 0.902) and
+  the splotches (147 and 133 specks before, 11 and 39 now, the bake no longer by a like-for-like pair), what each round built, the
+  marks missed, the open items ranked and each round's wall time.
+- Before / after pictures of the two views, in the sessions' notes folder and not in the repository (the world is its
+  author's).
+
+**Not done**
+- Round 487 (light cookies, the Light Volume mist, OIDN's lightmap weights) was not run: each waits for the owner to
+  ask for it.
+- The lights a texel keeps by chance spread evenly - what the 11 and 39 specks left are - is a round of its own.
+
+**Checked**
+- No source, test or stress file changes; the suites are round 486's. `tools/dev/changelog.py check` passes.
 
 ## 2026-11-11 (round 487): Generate Lighting's gather on every ticked graphics card, in batches that keep a card working
 
@@ -338,6 +1631,589 @@ Review: three passes of the code-reviewer - the first on the split (all findings
 for a whole large batch's direct light - both fixed, with five minors), the third approved the fixes (its minor is the
 8,388,608 line above). The tests are the main session's with the reviewer's gaps added; no separate test-engineer
 pass ran (the card tests need the machine's one card window).
+
+## 2026-11-10 (round 486): the bake's specks
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
+Pass 24's third round: the splotches. Round 484 measured them as specks (small round spots one bake has and the next
+has not) and named a lead; the owner approved the pass's specs ("Continue and finish all tasks, I approve all specs
+from all passes.").
+
+**Fixed (task 0462, ADR 0122 amended)**
+- **A bake leaves far fewer specks.** A texel lit by two or three of its thousand gather rays - the ones that met a
+  small bright patch - is luck, and the bake's filter should spread it into its neighbours. It did not: since round 465
+  the filter took a Sobol-sampled texel's measured noise for an eighth of itself (at 1024 samples), which is right for
+  light that fills the hemisphere and wrong for light a few rays carry, so the lucky texel passed for steady light.
+  The filter (and the firefly clamp) now read each texel's noise by how many of its samples carry its light - its
+  light squared over its samples' variance: the samples' own noise up to 16 such samples, round 465's scale from the
+  sample count on, a smooth curve between. On SideRail (lights linear, round 485's materials, two seeds) the specks at
+  the owner's two views fall from **90 and 71 to 11 and 39**, the grain from 0.190 to 0.181, the blotch from 0.055 to
+  0.053; the bake takes what it took (38.8 s against 38.9 s, like for like in one queue).
+- What is left - 11 and 39 - is about what round 484 measured for the direct light alone: the lights a texel keeps
+  by chance. That is the next round's (the picking spread evenly), not this filter's.
+
+**Bake again.** A saved bake is not marked out of date by this change: Generate Lighting once more to get it.
+
+**Changed**
+- Preview Lighting's filter reads the noise the same way.
+- The change is in Blendity's own filter. Where OIDN's lightmap filter runs instead (not today: it has no lightmap
+  weights), the specks must be measured again before it becomes a bake's own.
+
+**Added**
+- `lighting variancescale auto|on|off` (console; as `lighting pick`: the next Generate Lighting, not saved, not in the
+  scene's key): `on` is rounds 465 to 485's reading - round 485's SideRail bake byte for byte, both seeds - `off` the
+  samples' own noise everywhere (it blurs detail in dim places: the tunnel's error 7 % up); `clamp`, `snr` and `step`
+  are the round's measured candidates.
+- `gather_variance_read` (`render/lightmapper.h`): the rule, on its own for tests.
+- Stress `lightmap_quality`: a table of the old and the new reading on every scene.
+- Learn, "A bake's noise, measured": what a speck is, why the filter let it through, two questions, two Try-it steps.
+
+**Not built, and said in the task:** the largest-sample sums and batch means (the texel's own signal to noise does
+it, with nothing new from the card); a lower gate for the firefly clamp (the clamp changes no texel under any
+reading); the lights kept by chance spread evenly (a round of its own, `lamp_hall` its mark).
+
+**Marks missed, and said in the task:** at 2048 samples the tunnel view counts 47 specks against 39 at 1024 - one
+past "within a fifth" (grain and blotch fall: 0.146 / 0.047); against Unity with Blendity's own bake the dark station
+`spawn_back` reads SSIM 0.798 against 0.804, 0.001 past the mark, its grid correlation up from 0.953 to 0.959 - the
+other five stations are within it and the owner's two views a hair better (6.80 / 0.879 and 6.15 / 0.899 against 6.81
+/ 0.877 and 6.15 / 0.898). On the CPU path, where the sky lights a texel, the rule leans towards the old reading (the
+review's finding; a follow-up).
+
+**Checked**
+- Unit: 11 tests for the round (`tests_round486`, `tests_round486_independent`: two seeds' bakes of a small lamp only
+  the gather finds differ by less than 0.6 of what they did, more samples make fewer specks, a steady glow keeps its
+  peak, the rule on hostile numbers, few-sample and plain-random bakes bit for bit as before, the verb's words). Full
+  suite: Windows dependency-free 24,430 checks, 0 failed; Windows with Blender's libraries 25,344 checks in 1,918
+  tests, 4 failed - the four GPU picture comparisons that fail on this machine's card on `main` too; Linux 24,436, 0
+  failed. `tools/test_coverage_map.py --check`: nothing untested.
+- Stress `lightmap_quality` (relative RMSE against the reference, old reading -> new): room 0.0133 -> 0.0133 (1024
+  samples: 0.0119 -> 0.0119), corridor 0.0039 -> 0.0039, tunnel 0.1033 -> 0.1061 (1024: 0.0581 -> 0.0569), courtyard
+  0.0071 -> 0.0071, hall 0.0433 -> 0.0433; bias unchanged to 0.0001; the tunnel's grain 0.062 -> 0.052. No problem
+  counts in this section.
+- test-engineer: five tests, one finding (a few-sample bake one float step off the old one) - fixed, the test made
+  bit for bit. code-reviewer: approved; its five minor findings and three nits fixed or written into the task and
+  the ADR.
+
+## 2026-11-10 (round 485): Unity materials keep their maps and their gloss
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
+Pass 24's second round, cut from round 484's tables: the mirror finish. The owner approved the pass's specs ("Continue
+and finish all tasks, I approve all specs from all passes.").
+
+**Fixed (task 0461, ADR 0131)**
+- **A world no longer comes in as mirrors after importing its package.** A Unity material read while its package was
+  still unpacking found none of its textures (the package's GUID table is written last) and kept Metallic 1, Roughness
+  0 and no maps until Blendity restarted - the Materials window, open, read every `.mat` it saw. Now the list of the
+  project's materials leaves out a folder that is still unpacking, and where the import ends every Unity material
+  already read under it is read again, in place: the objects wearing it, the Inspector and the Materials window follow
+  with nothing to redo. In the real window, with the Materials window open as the owner has it, five imports of
+  SideRail's package: no material read early, all 38 linked with their maps (round 484: maps lost in 6 of 7 runs).
+- **Deleting an imported folder and importing the package again** in one session brings its materials back (the
+  folder's "deleted this session" marks are cleared where the import ends). Before, none loaded until a restart.
+- **The shader's keyword decides, as in Unity** (Standard, Filamented, URP Lit): a texture left in the Metallic slot
+  without `_METALLICGLOSSMAP` (URP: `_METALLICSPECGLOSSMAP`) is ignored and the sliders count; a slot a keyword names
+  and nothing fills is Unity's white texture.
+- **A smoothness kept in a map comes in**, as one number a material: Roughness = 1 - the mean of the alpha Unity's
+  shader samples (the metallic map's, or the albedo's under `_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A`) x its scale. A worn
+  wall is as rough as Unity shades it on average; it is not yet glossier in its polished patches than in its dust
+  (ADR 0131: a channel on the texture slot is the later step). On SideRail, of the 38 Unity materials the scene wears,
+  "smoothness dropped" goes from 10 to 0, and the two views the owner looks from read 3.71 / 0.905 and 3.57 / 0.912
+  against Unity with Unity's bake (3.75 / 0.898 and 3.67 / 0.902 before) - round 484's by-hand mark.
+- **16-bit PNGs read as stored in the build with Blender's libraries** (libpng is asked for the file's own samples):
+  one half reads 128 / 255 in both builds, not 186.
+- **A Unity `.mat` is never written over** (found by the round's review, older than the round): a scene opened while
+  its package's folder was missing kept its own copies of the materials, and once the folder was back the next edit
+  wrote Blendity's text over each Unity file. Such a copy is now read from the Unity file where an import ends (or on
+  Reimport Unity Materials), and is not written while a Unity file is at its path.
+
+**Bake again.** Lightmaps baked while the materials had no maps, or with the brighter 16-bit textures, were lit by
+those materials, and a bake is not marked out of date by a material's maps: Generate Lighting once more after this
+round.
+
+**Added**
+- **`.unity-stats`** beside a package folder's `.unity-guids`: a line for each texture a material reads its gloss
+  from - GUID, the file's bytes, width, height, mean R G B A. The unpack's worker writes it; for a package unpacked by
+  an older Blendity the maps are measured by one background job when its scene opens (the job tray: "Reading Unity
+  materials' gloss"; at once in a headless run) and the materials that asked follow - no others. No image is decoded
+  on the main thread for a material's values. On SideRail the unpack's worker took 2.3 to 3.4 s for its 14 maps and
+  the job 2.3 to 2.6 s for 13 (both with two other passes building beside them; the decode alone is 1.6 s), and the
+  frame that takes the job's result cost 30 to 40 ms, once. Opening the scene takes what it took: 2.23 s against
+  2.23 s for round 484's build over the undisturbed turns of eight.
+- **Assets > Reimport Unity Materials** (`unity rematerials`): every Unity material read again from its file, at once;
+  it says how many changed. Reading again is not an edit - no undo step, the scene not marked changed, and the copies
+  the undo history and Play's Stop keep take the new reading too, so neither brings the early one back. A value typed
+  on a Unity material in the session is replaced by the file's, as at a restart; the Materials window's tooltip on a
+  Unity material says so.
+- **Learn:** "A Unity material's gloss, and reading materials again" (a Try-it, two questions).
+
+**Changed**
+- Round 484's tests that pinned the faults now pin Unity's numbers, each saying what it pinned before; the committed
+  set gains its `.unity-stats`, and `blendity_today.txt` / `expected.json` hold round 485's reading.
+  `tools/unity_materials.py` counts a texture left in the slot as a fault only when Blendity went by it, checks the
+  committed table against its own reading of the PNGs, and keeps round 484's reading as a case of its self-test.
+- `unity materials all` in a headless run measures the gloss maps of the materials it has just loaded before it lists
+  them.
+- A scene that wears a material whose Metallic slot held a texture without its keyword asks for a new bake once: its
+  lighting was baked with that surface as metal.
+
+**Not done (by design):** smoothness per texel; reflections off, highlights off and occlusion maps (Blendity's material
+has no property for them); the lamps', glass's and mirrors' own shaders; URP Lit's and Standard's specular setups; a
+scene saved while its materials were the models' own (opening the `.unity` again is the repair); the lights' intensity
+in a project made from a package (the owner's decision, as round 484 put it). Not reached by a test: Cancel in the job
+tray itself (the landing of a cancelled job is tested).
+
+**Checked:** both Windows suites - dependency-free 23,541 checks, 0 failed; with Blender's libraries 24,455 with the
+four worktree `gpu` picture comparisons failing as in rounds 463 to 484 (the same four, not this round's); Linux (WSL,
+GCC) 23,547 checks, 0 failed; the audits; both tools' self-tests; the test-engineer's ten independent tests (two
+packages sharing a GUID, a package imported over itself, hostile tables, unreadable maps, 16-bit PNGs of every colour
+type, the import settings' Alpha Source; no product fault found); the code review (changes needed, all applied: a
+landing read every Unity material again, Stop undid a landing made in Play, a stand-in copy could be written over a
+Unity `.mat`, a landing could write the table beside an unpack; and one fault the round's own tests found after it -
+a mean held more digits in the session that measured it than in the table). SideRail in scratch copies: the five
+windowed imports, delete-and-import-again (38 linked), a project unpacked by round 484's build (the job, 38 linked),
+the materials table (smoothness dropped 12 -> 0, slot without keyword 1 -> 0, decoders differ 4 -> 0 of 57), the six
+stations with Unity's bake (the owner's two at round 484's by-hand mark, the other four unchanged). The owner's four
+folders have no file changed; the tests' own import cache left four small folders in `~/.blendity/cache/import`, as
+earlier rounds' did (a follow-up). Not done on a quiet machine: every timing above.
+
+## 2026-11-10 (round 484): SideRail's mirror finish and splotches, reproduced and measured
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." (the
+owner's imported VRChat world SideRail, against its reference). Pass 24's first round: name each cause with evidence
+before anything is fixed. **This round changes no behaviour** - one log line apart (below).
+
+**Found (task 0460; the tables are in `docs/tasks/0460-siderail-look-measured.md`, "Results")**
+- **The mirror finish in the owner's screenshots is materials read without their textures.** A Unity `.mat` read before
+  its package's GUID table exists gets Metallic 1, Roughness 0 and no map; the table is written last while a package
+  unpacks, the Materials window loads every `.mat` it sees meanwhile, and the asset library keeps what it read until
+  Blendity restarts. Reproduced on main in the real window: `ConcretePanel` without its maps in 6 of 7 runs, 17 to 37 of
+  the scene's 38 Unity materials without any (10 is right). At the owner's two stations the picture goes from 3.75 /
+  0.898 and 3.67 / 0.902 (MAE / SSIM against Unity) to 13.71 / 0.702 and 12.50 / 0.697. **Until round 485: restart
+  Blendity after importing a package** (or keep the Materials window closed while it unpacks).
+- **Deleting a package's folder and importing it again in one session** leaves a Unity scene with none of its Unity
+  materials (the models' own instead), until a restart.
+- **Smoothness is dropped** where Unity keeps it in the metallic map's alpha: 10 of the 38 Unity materials the scene
+  wears (181 renderer slots) come in at roughness 0 where Unity shades roughness 0.24 to 0.76. Set right by hand, F12's
+  picture moves little (3.74 / 0.905 and 3.58 / 0.912).
+- **16-bit PNGs are read brighter by the build with Blender's libraries** (libpng's simplified interface takes them as
+  linear light: one half reads 186 / 255, not 128): 14 of SideRail's textures, 7 of them on materials - the plank
+  floor's colour, mask and normal map among them. The dependency-free build reads them as Unity does.
+- **The lights' intensity:** a project made from a package has no Unity `ProjectSettings`, so its lights are taken in
+  gamma, silently; SideRail's own project is linear. With Blendity's own bake the owner's two stations then read 17.76
+  / 0.734 and 16.40 / 0.761 against Unity where the linear bake reads 6.64 / 0.863 and 5.97 / 0.885, and are 2.9 and
+  2.6 times as bright - the largest single fault there. Whether such a project should take its lights linear is the
+  owner's decision.
+- **The splotches are mostly not the lights kept by chance** (the plan's cause, and Pass 21's note): with every light
+  kept at every texel SideRail's bake has the same grain and blotch (0.384 / 0.251 against 0.382 / 0.251). They are
+  **specks** - small round spots in one seed's bake and not the other's, about 140 a view at the owner's stations (800
+  unfiltered, 330 in the owner's own session with no maps and the lights in gamma). About 100 are in the gathered
+  bounce and about 20 are lights kept by chance; the emitters and the texels filled from their neighbours are not it.
+  **More samples make them worse** (271 and 210 at 2048 samples, 59 and 78 at 256): the lead for round 486 is that the
+  bake scales the noise it measures for Sobol samples (to an eighth at 1024), so its firefly clamp and its filter take
+  a texel's few rare bright samples for steady light.
+
+**Added (measuring only)**
+- **`unity materials [all] [to "<file>"]`**: what Blendity made of every material the scene wears, as text;
+  **`unity mapstats [decoders] "<image>"...`**: an image's channel means as it is decoded, and with `decoders` as
+  Blendity's own decoder reads it (a script's verb: refused in a window).
+- **`lighting pick on|off|<rays>`**: how many Baked point and spot lights a texel keeps by chance in the next Generate
+  Lighting (8: the bake as before; `off`: every light); a bake that picks says how many lights a texel kept and
+  dropped - the one line a default bake's log gains.
+- **`tools/unity_materials.py`**: every Unity `.mat` of a project beside what Blendity made of it - Unity's metallic
+  and roughness by the shader's own rule, Blendity's, a fault class per material, the images two decoders read
+  differently; `state` puts a scratch project into a test state (no maps; Unity's values by hand; 16-bit PNGs as
+  8-bit).
+- **`tests/fixtures/unity_gloss/`**: twelve small Unity materials of our own, one per fault, with Unity's values worked
+  out by hand; the folder is checked out byte for byte (`.gitattributes`).
+- **`tools/unity_compare.py`**: `--bake-cmd`, `--lights-as-imported`, `--reuse-unity-lightmaps`; `noise`, a bake's
+  noise at seeds 0 and 1 without Unity; and at each station the two bakes' own grain, blotch and **specks** (spots
+  where the two pictures differ by over half the picture's mean light).
+- **Stress `lightmap_quality`: `lamp_hall`** - a hall lit by 72 Baked lights whose reference keeps every light, with the
+  bake at `pick` off / 8 / 16 / 32: there the picking is the noise (4.8 times the blotch of keeping every light), which
+  on SideRail it is not. The four older scenes' rows are unchanged to the last digit.
+- **`decode_image_own`** (`image.h`): Blendity's own decoders whatever the process's codec switch says.
+- **Learn:** "A Unity material beside Unity's own values" (a Try-it, two questions); "Many lamps" in "A bake's noise,
+  measured" (two questions, two Try-its).
+
+**Kept exactly:** a bake at the defaults saves the same pages, byte for byte, from main's build and from this round's
+(a room with twelve Baked lights; four files). It did not at first: with the rays a run-time number MSVC ordered one
+expression another way and two bytes of one page differed, so the default path keeps the constant and the measuring
+path is a function of its own, never inlined.
+
+**Not done (by design):** nothing is fixed; rounds 485 and 486 are specified from these tables, and 486 is cut again
+(the plan's stratified light picking would not touch most of SideRail's specks). Not taken as timings: the bake at
+`pick off` and 16 (another worker's build ran beside them) and the stress section's times. Not run: the reproduction
+with the Project window in place of the Materials window. The lights' intensity in a project made from a package is put
+to the owner, not changed.
+
+**Checked:** both Windows suites - dependency-free 23,199 checks, 0 failed; with Blender's libraries 24,114 (the four worktree `gpu` picture comparisons, as rounds 463-466, and in one of two runs
+the slow-open test while another worker used the card);
+Linux (WSL) 23,205 checks with one failure while the machine was baking - "Live Link never pauses the editor", round
+382's tick-time bound - which passes alone; the audits; both tools' self-tests; the code review (changes needed, all
+applied: the committed materials checked out byte for byte, a decoder entry that leaves the process's switch alone, the
+tools refusing a project that is not a scratch copy); stress `lightmap_quality` - `lamp_hall` 0.043 / 0.0327 / 0.0096
+(relative RMSE / grain / blotch), 4.8 times the blotch of every light kept, the four older scenes as Pass 21 left them;
+SideRail in scratch copies - the tables of the task's results; the owner's folders untouched.
+
+## 2026-11-13 (round 483): a whole interior as a bench scene, the pass measured on it, the lesson that walks the path (task 0459)
+
+**Asked:** the pass's last round (the specs approved 2026-11-10): the goal - a piece dragged at 60 frames a second, the
+mesh following within 100 ms - checked on something the size of real work, and the pass written up.
+
+**Added:**
+- **`benchscene blockout`** builds, from code and the same every time, an interior of exactly 100 pieces in one
+  Blockout: two storeys of box rooms that share walls, a round room, an L-shaped outline room, a room that keeps its
+  own walls behind a double wall, 35 doors (two arched), 19 windows, a staircase under its well, a gate arch, a
+  colonnade and one column with a Blend radius, floor / wall / ceiling / outside materials, two Mixed lamps, the Main
+  Camera in front of the gate. **`benchscene blockout 400`** is the 400-piece version; any other count is refused.
+  The four materials are written to `Assets/Materials/BenchBlockout/` of the project **only when they are missing**.
+- **The Learn lesson "Building rooms with Blockout"**: from an empty scene to a baked interior in eleven Try-it steps
+  (two materials, two rooms that share a wall, a door, a window, a column with a Blend radius, Bake to Mesh), with the
+  other Blockout lessons as its chapters and four questions. Its steps act on what the drawing leaves selected, so
+  they run twice in a row and after the lesson before it.
+- **Stress rows** for the pass's goal: on the bench interior, a door slid along its wall and a room's face handle
+  dragged with real mouse events for ten seconds (600 frames, one every 16.7 ms), 100 and 400 pieces
+  (`BLENDITY_BLOCKOUT_BENCH=1` runs them alone; `--quick` runs the 100-piece pair for 30 frames, without a verdict).
+- **`blockout` is one of `tools/perf_suite.py`'s default sections**, and `stress/results/baseline.md` holds its rows
+  (from this round's timed run with Blender's libraries; held back since round 476 while Pass 22 changed both files).
+- Pictures of the bench interior beside the README's: `docs/images/blockout_outside.png`, `blockout_pieces.png`,
+  `blockout_inside.png`.
+- Every task spec of the pass (0452-0459, 0478-0480) says done with its PR.
+
+**The pass's goal, measured** (timed, alone on the machine, 2026-11-13, AMD64 32 threads, RTX 4070 SUPER;
+`blendity_stress --only blockout`; frames are the main thread's whole frame; the full table is PERFORMANCE.md's):
+
+| the bench interior, a ten-second drag | frame median ms | frame 1 % slowest ms | frame worst ms | mesh follows a move in (median / worst) ms | verdict |
+|---|---|---|---|---|---|
+| 100 pieces, a door, with Blender's libraries | 1.9 | 17.6 | 20.2 | 33 / 60 | the mesh: met; the frame: over on about one frame in a hundred |
+| 100 pieces, a face handle, with the libraries | 1.6 | 16.4 | 17.2 | 33 / 93 | the mesh: met; the frame: over by half a millisecond on its worst frame |
+| 400 pieces, a door, with the libraries | 2.0 | 20.4 | 21.1 | 65 / 113 | the frame missed; the mesh met at the median |
+| 400 pieces, a face handle, with the libraries | 1.8 | 19.5 | 20.0 | 65 / 144 | the same |
+| 100 pieces, a door, without the libraries | 1.7 | 21.7 | 26.6 | 33 / 75 | the mesh: met; the frame missed |
+| 100 pieces, a face handle, without | 1.4 | 21.1 | 26.5 | 33 / 106 | the same |
+| 400 pieces, a door, without | 1.9 | 28.9 | 36.9 | 160 / 209 | missed |
+| 400 pieces, a face handle, without | 1.6 | 27.9 | 33.4 | 160 / 251 | missed |
+
+**The verdict, said plainly:** a piece dragged in a 100-piece interior feels live - the median frame is under 2 ms and
+the mesh follows within two frames with Blender's libraries - but **the goal as written is missed**: about one frame
+in a hundred, the frame that first draws a newly landed mesh, takes 17 to 27 ms at 100 pieces and 20 to 37 ms at 400.
+No kernel call runs on the main thread (the rows count them: 0); the landing itself is a pointer swap. The slow frame
+is the first one that draws a new mesh of 16 to 18 thousand faces - that is my reading of the code, **not a
+profile**. At 400 pieces without the libraries the build itself (about 160 ms on the grid) is over the 100 ms. The
+old test interior (392 faces) hid this: its rows are within the goal with the libraries (worst frame 4.7 ms).
+
+**Found, not fixed (the kernel, with Blender's libraries only):** an L-shaped Outline ROOM standing alone on the exact
+path can come out with one outer wall face that is not a simple polygon (the notch's wall run together with the edges
+of the floor and ceiling slabs, which lie in its plane) and the slabs' edges again as six small faces on top of it. It
+depends on where the room stands (float rounding: at -22.4, -10.5 it happens, 5 cm away it does not); the grid path is
+right. The mesh stays closed and valid; the faces lie on top of each other. The 400-piece bench interior hit it; its L
+room was moved 0.1 m (no kernel change, no test loosened; said in a comment at `Interior::joined_rooms`,
+`src/editor/bench_blockout.cpp`). First in the list below. **The smallest case:** one piece and nothing else - a room
+(`room = true`), shape Outline, the outline (-2,-2), (2,-2), (2,0), (0,0), (0,2), (-2,2) in metres, height 2.6, wall,
+floor and ceiling 0.2, its centre at (-22.4, 1.3, -10.5) in the Blockout - built by `blockout::build` with
+`Path::Crisp`: `meshops::overlapping_faces` finds 6 pairs, all in the plane of the notch's wall (the outline's x = 0
+side), where one 12-corner face with two zero-width spikes and two repeated corners lies under six triangles of the
+floor's and the ceiling's edges. At (0, 1.3, 0), (-22.4, 1.3, 0), (-22.4, 1.3, -10.45) and (-22.3, 1.3, -10.5) there are
+none; at (-9.8, 1.3, -4.2) and (-22.4, 1.3, -10.4) there are 6 again. No failing test is left in the suite for it: the
+project has no convention for a known-failing test.
+
+**Checked:** the groups blockout, editor, lighting, physics and hci, 0 failed on each: Windows without the libraries
+(blockout 6,661, editor 2,331), Windows with them (8,164, 2,357) and Linux (6,663, 2,331);
+`tools/test_coverage_map.py --check` 378 entries, 0 empty; `tools/test_perf_suite.py`; `perf_suite.py --compare` of the
+timed report against the new baseline rows (0 findings). The whole Blockout stress section timed on both Windows builds
+at 12:22 (its 14 robustness sweeps equal round 482's row for row: 0 refused, 0 problems), its bench rows again at
+13:47 after the layout moved. A code review (approved, its findings made) and the test-engineer's 11 tests (2 found
+faults, fixed); the changes after them were not reviewed again. The full suite, macOS and the sanitizers are CI's.
+
+**Known limits and not done:** the pictures are headless screenshots of the editor, not renders, and there is none of
+the baked and lit version; the README does not show them yet. The slow landing frame was not profiled. The baseline's
+Blockout rows are from the build with Blender's libraries (the build `perf_suite.py` runs by default); 9 of its rows
+are over their budget and are listed by `--check` as "still over", not as failures. A default `perf_suite.py` run is
+about 12 minutes longer with the section in it. `docs/requirements.md` was not changed. The fold of the pass's
+fragments into CHANGELOG.md and the shared documents comes after its PRs are on `main` (`changelog.py fold`).
+
+**What is left, for the owner's decision** (each with what it would cost, from the pass's notes):
+0. **An L-shaped outline room's wall on the exact path** (above): a kernel fix and a regression test - a small round,
+   and the one with a user-visible fault behind it.
+1. **The landing frame** (this round's miss): build the new mesh's render data on the worker as well, so the frame that
+   first draws it only swaps it - a round; it would bring the 100-piece interior inside the goal on both builds.
+2. **A partial rebuild inside a cluster** (ADR 0129): only the pieces near the one that moved - one to two rounds; what
+   the 400-piece numbers ask for, most of all without the libraries.
+3. **A turned box beyond about 100 km stalls the kernel** (found in round 496: over 150 s at 1,000 km) - a small round:
+   refuse or clamp in the kernel.
+4. **Realtime GI on Automatic with a sun:** each landing redoes the realtime lightmap's layout on the main thread
+   (round 482: frames of 20 to 35 ms) - a round.
+5. Curved walls with a thickness along a path; roofs; a floor-plan top view - a round each, new shapes and a view.
+6. An exact boolean of our own for the dependency-free build (ADR 0128's option B) - several rounds; only if the grid's
+   limits on small round pieces matter there.
+7. Per-face materials of mesh pieces; smooth shading for mesh pieces (round 482's limits) - a round.
+8. Round 496's leftovers: the modal S on a global axis for a turned object (any object); the chip naming the tool with
+   "Keep drawing"; the merged grid (alternative C).
+9. The two faults noticed in passing in the Boolean modifier and the exporter (`scene.cpp:2670`, `editor.cpp:3322`).
+Pass 23b (approved, after this round) is not part of this list.
+
+## 2026-11-12 (round 482): a Blockout's materials, UVs and lightmaps; Bake to Mesh and back; export as one mesh (task 0458)
+
+**Asked** (the user's answer to the pass's plan: "bake to a normal mesh; materials per surface; collision and
+lightmaps; Unity / VRChat export"; the pass's specs approved 2026-11-10).
+
+**Added:**
+- **A material a class of face.** A Blockout has six materials - Floor, Walls, Ceiling, Outside, Cut, Solid - and each
+  piece may override them for its own faces. The build puts every face in its material's slot (a blended face takes
+  its piece's Solid, or Cut for a piece that cuts) and the mesh and its slots land together.
+- **UVs at a real-world scale:** every face is projected on its own plane in the Blockout's space (a turned wall and a
+  ramp's slope too), metres divided by **Texture Scale** (metres a tile). A texture is the same size on every wall,
+  runs on across pieces that meet in a plane, and does not slide when a piece moves. U and V run the way the Cube
+  primitive's do on each of its six faces, so a texture reads the same on a Blockout wall as on a cube beside it. A
+  piece's Texture Offset and Rotation shift its own faces.
+- **Shading:** flat faces are flat whatever angle they meet at; blended faces and round sides (a sphere, a cylinder's
+  side, an arch's curves) are smooth.
+- **Bake to Mesh** (the Blockout's Inspector, the Mesh menu, `blockout bake` with a Blockout or one of its pieces
+  selected): the object keeps its mesh, materials and UVs and becomes an ordinary mesh - Edit Mode, sculpting,
+  modifiers and Bake Textures work (Paint too, after an unwrap: the baked UVs repeat a tile on every face); the pieces
+  wait under a switched-off child, "Blockout Pieces", and a mesh the Blockout used as a piece stays out of the views,
+  the colliders, the lightmaps and the exports while they do. **Unbake** (`blockout unbake`, the object selected)
+  brings the Blockout back and asks first if the baked mesh was edited - its shape, shading, seams, groups, shape keys
+  or sculpt mask (`blockout unbake force` does not ask; several edited objects are unbaked one at a time). One undo
+  step each. A new component, `BlockoutBaked`, is what a baked object carries.
+- **Blockouts take part in lighting** (Contribute GI on for a new one, however it is made).
+- Console: `blockout set material floor|walls|ceiling|outside|cut|solid <material|none>`, `blockout set texscale
+  <metres>`, `blockout bake`, `blockout unbake [force]`. The Learn section "Materials, baking and export of a Blockout".
+
+**Lighting, said plainly:** Generate Lighting bakes a **live** Blockout as it stands - it could since round 477, once
+Contribute GI was ticked; now it is ticked. No Bake to Mesh is needed for lightmaps, and the lightmap's UVs are the
+bake's own, not the mesh's. Moving a piece, or changing a material or the Texture Scale, **drops** the Blockout's
+lightmap - the old one is not put on the new mesh - and the scene's lighting reads out of date (bake again); undoing
+the change brings it back; a saved scene keeps it through Save and Open. Both are pinned by tests with real bakes of
+a live two-room Blockout. Bake Textures, Mesh Maps and Paint are refused on a live Blockout - Bake to Mesh first.
+
+**Changed:** a Blockout's mesh now has UVs, material slots and shading, so **a lightmap baked on a Blockout before
+this round is out of date when its scene is opened** (bake again). Paint is refused on every live Blockout (it was
+refused only on one without UVs; its UVs now repeat a tile on every face). The refusal of Edit Mode on a Blockout
+offers the bake. Once a Blockout has class materials its renderer's material list is written at every build - a
+material set by hand on the renderer is replaced; an older scene's hand-set material stays until a class material is
+set. **For every mesh:** with Generate Lightmap UVs off, a mesh whose own UVs lie outside 0 to 1 (tiling) now gets
+generated lightmap UVs; they used to be clamped into one texel's edge (`src/render/lightmapper.cpp`). **For every
+menu:** a tooltip written after a submenu went to the row before it (the Mesh menu's Boolean, Separate and Draw);
+it is the submenu's now (`ui.cpp`).
+
+**Export:** OBJ, FBX and GLB write a Blockout - live or baked - as one mesh with its material slots and UVs; no
+object is written for a piece or for "Blockout Pieces". No export code changed: the tests pin it. (The Unity package
+export repacks an imported package and does not write scene objects: not part of this.)
+
+**Numbers** (`blendity_stress --only blockout`, timed, alone on the machine, 2026-11-12; with Blender's libraries /
+without):
+- **Slots, UVs and shading are 0.2 % / 0.1 % of a build:** interior rooms 100 - 0.03 ms of 11.8 ms / 0.03 ms of
+  47.8 ms (392 faces, 6 slots); interior rooms 400 - 0.09 ms of 37.3 ms / 0.11 ms of 187.3 ms (1,424 faces).
+- **A door dragged for 120 frames, nothing lit** (Contribute GI off, Realtime GI off, no sun): frame median 3.0 ms /
+  1.1 ms, worst 5.2 ms / 9.9 ms (round 481: 2.9 / 1.1 and 4.0 / 5.3) - the landing with slots is no slower.
+- **The same drag with Realtime GI on Automatic, a sun and Contribute GI on:** frame median 20.0 ms / 3.1 ms, worst
+  22.4 ms / 32.6 ms - **over the 16.7 ms frame** (the row's verdict is OVER; a known limit below).
+- **The sweeps are unchanged from round 481, row for row** (12 crisp and field sweeps of 2,000 arrangements, 2 sweeps
+  of 500 with Blend radii): 0 refused, 0 problems, the same counts of small faces on top of others (crisp 0, 0, 1, 51,
+  165, 183; field 2, 43, 185, 12, 26, 123; blends 63 / 62).
+
+**Known limits:** a face made of two pieces' faces in one plane takes the first piece's material; blended faces are
+projected a face at a time, so a pattern has seams across a rounded join; UVs are in the Blockout's own units (scaling
+the Blockout object scales the texture); two pieces' faces in one TURNED plane agree at shared corners only to
+rounding (exactly on planes square to the axes); a face within about 2.6 degrees of level takes the floor's direction
+for its pattern (a seam on a nearly flat ramp); a mesh piece's faces are shaded flat and its own materials are not
+carried into the result; Unbake asks about edits to the mesh, not about materials changed on the baked object's
+renderer; a folder that holds both pieces and another Blockout refuses the bake until that Blockout is moved out;
+Unbake of an object whose pieces were deleted is refused (`force` makes it an empty Blockout); with Realtime GI set
+to Automatic and a sun, each landing of a Blockout that contributes GI costs a frame of 20 to 35 ms (the realtime
+lightmap's layout is redone on the main thread; both settings are off by default - a follow-up); the Inspector
+hashes a baked mesh again while it is being sculpted with the object shown.
+
+**Checked:** the round's groups and `editor`, 0 failed on each: Windows without the libraries, Windows with them and
+Linux (the counts are in the PR); `tools/test_coverage_map.py --check` 378 entries, 0 empty; the timed Blockout stress
+section on both Windows builds. Two code reviews and the test-engineer's 19 tests; the changes made after the second
+review were not reviewed again. The full suite, macOS and the sanitizers are CI's.
+
+## 2026-11-12 (round 481): the Blend radius - a rounded join in a box of its own, stitched to the crisp rest (task 0457)
+
+**Asked** (the user's first request for the Blockout: "meta-ball like modeling but with primitives"; the pass's plan,
+approved 2026-11-10): joins crisp by default, a **Blend radius** per piece that rounds the join like a metaball - and
+one rounded column must not cost or change a whole building.
+
+**What was there:** the kernel's grid path could melt a blended piece into what it touches, but a cluster with one
+blended piece went to the grid **whole**, at the Blockout's cell: a connected interior is one cluster, so a rounded
+column rebuilt the building on a 0.1 m grid, several times too coarse for a blend of a few centimetres.
+
+**Added:**
+- **A blend is meshed in a box of its own** (ADR 0130): round each piece with a Blend radius, its bounds grown by the
+  radius and two cells; the box's inside on a finer grid, the rest of the cluster built as if nothing were blended -
+  on the exact path where the build has it - and the two **stitched along the box's faces**, by which corner is which.
+  Outside the box the building is the same mesh, to the bit.
+- **Blend Detail** on the Blockout (Low, Medium, High): the blend's grid is a third, a sixth or a twelfth of the radius.
+- An Add piece with a Blend radius gets a rounded fillet all along its join; a Subtract piece a rounded rim round its
+  cut. Two blended pieces that meet blend with the larger of their radii, whatever order they are in. A radius
+  below a thirty-second of Field Cell (the finest the blend's grid goes) is built unblended and the status says so.
+- `blockout set blend <metres>`, `blockout set detail low|medium|high`; a handle for the radius on the active piece;
+  the Learn section "Rounding joins: the Blend radius".
+- When a seam does not close the boxes are grown and built again (four times at most), then the whole cluster is built
+  on the blend's grid; if that grid will not close, at the Blockout's own cell; if that will not either, **without its
+  blends** - and the status says which: never an open mesh, and a blend never costs the result.
+
+**Fixed, older than this round:** a blended piece's fillet ended in a crease - 96 degrees between a ball sunk into
+a box and the box, at any detail - wherever it ran past the bounds of the unblended piece it melts into: that piece was
+left out of the blend there (`Grid::candidates` grew a solid's bounds by its own radius, not by the radius that
+reaches it). Found by this round's roundness test. **Every blended join of that kind is wider and rounder than it
+was.**
+
+**Changed:** a cluster with a Blend radius is no longer the grid path's whole, unless the boxes take more than half
+of it (the metaball case) - and then, as when a seam will not close, it is built on the **blend's** grid, finer than
+the Blockout's cell it was built at before (a cost: the blobs row). With the method set to Field the rest is the
+grid's and the blend still has its box; with Exact the radii are ignored, as before. Blended pieces that meet used to
+blend with the later one's radius. The Inspector shows Blend Radius for boxes, cylinders and spheres that add or
+subtract (round 477 hid it). A cluster's cache key holds the Blend Detail where a piece is blended.
+
+**Timed** (2026-11-12 17:08 to 17:29, the machine reserved by the hub; `blendity_stress --only blockout`, median of
+five builds on a worker thread; `interior 100` as 36 rooms with 28 doors, a column 0.25 m thick from floor to ceiling
+in the first room):
+
+| a blended column in `interior 100`, radius 0.15 m | with Blender's libraries (the rest on the exact path) | without (the rest on the grid, cell 0.1 m) | boxes | tries again | blend cell | faces (of them blended) | verdict (100 ms) |
+|---|---|---|---|---|---|---|---|
+| the column unblended | 12.7 ms | 49.5 ms | 0 | 0 | - | 460 / 479 (0) | - |
+| Low | **22.6 ms** | **61.1 ms** | 1 | 0 | 0.050 m | 3,158 (2,690) | ok |
+| Medium (the default) | **42.7 ms** | **83.2 ms** | 1 | 0 | 0.025 m | 10,686 (10,202) | ok |
+| High | 128.2 ms | 174.4 ms | 1 | 0 | 0.013 m | 39,059 (38,508) / 36,980 (36,428) | **over** |
+
+So a rounded column adds 10 to 34 ms to a building at Low and Medium, in both builds, and the walls stay the exact
+path's where the build has it; before this round the building went to the 0.1 m grid whole (42 ms with the libraries,
+49 without: the row `interior 100, field cell 0.1`), with a cell and a half across a 0.15 m blend. High misses
+the 100 ms: the editor does not yet build Medium while a piece is dragged and High when it is let go (a follow-up).
+
+| blobs: 40 spheres and boxes, every one with a Blend radius of 0.2 m (7 clusters, each built whole) | with the libraries | without | blend cell | faces |
+|---|---|---|---|---|
+| Low | 24.7 ms | 66.0 ms | 0.067 m | 34,784 |
+| Medium | 94.4 ms | 298.7 ms | 0.033 m | 136,475 |
+| High | 530.2 ms | 1,618.7 ms | 0.017 m | 536,408 |
+
+(The blobs are the grid path in both builds; the build with the libraries has their threads.)
+
+| sweep with Blend radii: 500 hostile arrangements a path (radii: none, 1 mm, 5 to 30 cm, 5 m, not a number) | built | refused | problems | with small faces on top of others | with faces of no area | boxes stitched | clusters built whole | clusters whose seam would not close (then built whole, or without their blends) | tries again | pieces below a thirty-second of the cell | clusters built without their blends |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| the rest on the exact path | 500 | 0 | **0** | 8 | 63 | 28 | 447 | 5 | 23 | 291 | 7 |
+| the rest on the grid (cell 0.08 m), with the libraries | 500 | 0 | **0** | 8 | 62 | 24 | 450 | 8 | 38 | 291 | 7 |
+| the rest on the grid (cell 0.08 m), without | 500 | 0 | **0** | 8 | 62 | 24 | 450 | 8 | 38 | 291 | 7 |
+
+Hostile arrangements are heaps: nine tenths of their clusters are built whole (their boxes take more than half), so
+this sweep is mostly the grid path's; 24 to 28 boxes were stitched. Before the last two rungs of the fallback 11 of the
+500 were refused (the blend's grid would not close), then 7 (nor the Blockout's): those 7 are built without their
+blends. The twelve rows of the older sweep (2,000 arrangements a kind) read what round 480's did, to the number: 0
+problems, 0 refused.
+
+**Unit tests' numbers** (untimed): the rounded cut removes 0.0371 m3 more than the square one (two rims of that
+radius: 0.0364); its rim lies within 0.0293 m of the arc of its radius (a fifth: 0.03); 9 of 9 faces of a building
+away from the column are bit for bit the unblended build's, on both paths; flat faces that run through a box lie on
+their planes to 3e-9 m; two blended balls with radii 0.3 and 0.1 give the same volume in either order; roundness on a
+ball sunk into a box: 26.3 degrees at Medium, 15.1 at High between neighbouring blended faces (96 at any detail before
+the fix above; the spec had guessed 25 and 13 - a deviation, in the spec); the same bytes on one thread or many; a
+cancelled build returns "cancelled" and the next is sound; a changed radius or detail rebuilds the blended cluster
+only.
+
+**Found and fixed before publishing:** the first code review (changes needed): a failed build of the rest was a
+refusal, not a failed try; a box had the first piece's number and could be taken for a part of a room that keeps its
+walls; blended pieces that meet blended with the later one's radius, not the larger; "below the detail" did not
+depend on the detail (the texts said it did); the box's clearance, the weld's reach, a face with one corner twice.
+The test-engineer: the crease above. The stress sweep: the refusals above. The second review (approve with changes):
+the last rung was skipped when the blend's cell is the Blockout's; the report's fields after a fallback; more than
+sixteen blended pieces at one point were melted in out of order; the handle's snap had no test. The third review
+(of those changes; in a follow-up commit): the last rung's test was a random arrangement ported from the stress
+section, whose pieces depend on the order a compiler evaluates arguments in - a different heap under Clang - so it is
+now a test's setting that makes every build with blends fail (`Settings::fail_blends_for_test`); the status said one
+cluster's fallback only when no other had lost its blends; the blended pieces' sort took memory at every grid point.
+
+**Known limits:** the box holds the whole blended piece, so the cost follows the piece, not only the join - a small
+radius on a large piece is expensive (the box's budget of 600,000 grid cells bounds it; the status shows the cell used);
+a blended ball or column is round all over inside its box, on the blend's grid, and its faces there do not merge; a
+flat face that runs through a box is two faces, cut along the box; where round pieces melt into each other in a
+cluster built whole, small faces can lie on top of each other (the sweep's row counts them; whether the coarser
+build before this round left them too was not measured); a cluster no grid closes over with its blends is built
+without them; a failed seam is paid for by building the cluster again, up to eight times at the very worst; High misses
+100 ms on the column in a building (the editor does not yet build Medium while a piece is dragged); Intersect pieces,
+rooms and mesh pieces are not blended.
+
+**Checked:** on main `037ec4fd` (the round's groups and `editor`, ADR 0134; the full suite is CI's). Windows with Blender's libraries: `blockout` 5,848 checks, `editor` 2,346, 0 failed; Windows dependency-free: 4,346 and 2,331, 0 failed; Linux (GCC, dependency-free): 4,348 and 2,331, 0 failed. Stress `--only blockout` in both Windows builds, timed in the hub's window (above); the other geometry sections were not run (the kernel's change is the blended path; the unblended sweep's twelve rows are unchanged to the number). Not run here: the ASan + UBSan group (CI's sanitizer shards run it). Audits: the coverage map (378 entries, 0 empty), `changelog.py check`, `docs_check.sh`. Implementer (the object and editor part), test-engineer (7 tests, one real fault), code review three times. After the third review's follow-up commit: Windows dependency-free `blockout` 4,357 and `editor` 2,331, Linux 4,359 and 2,331, 0 failed; the build with Blender's libraries was not run again for it (the same code on both).
+
+## 2026-11-11 (round 480): More shapes - wedge, stairs, arch, an outline pulled up, any mesh as a piece
+
+**Asked (Pass 23, task 0456, ADR 0128 amended):** the owner's list of shapes - "box, cylinder, sphere; wedge, stairs,
+arch; a drawn outline pulled up; any mesh as a piece." The first three were there.
+
+**Added**
+- **Wedge, Stairs, Arch and Outline pieces** (GameObject > Blockout, the Hierarchy's + and the Modeling Tools window;
+  `blockout add wedge|stairs|arch|outline ...`). A wedge is a ramp; stairs have **Steps** and **Fill Under**; an arch
+  has an **Inner Radius** and an **Angle**; an outline is any closed figure of 3 to 256 corners in the floor plan,
+  pulled up by a **Height**. Each can add or cut; a wedge and an outline can be a **room** (a room under a sloped
+  ceiling; an L-shaped room, a corridor with a bend) whose wall is as thick at a corner turned inward as anywhere
+  else. Faces of a piece's parts that lie in one plane are one face: the top of an L is one face.
+- **An outline's corners** are a list in the Inspector, `blockout outline <x z> <x z> ...` and **handles in the Scene
+  view**: one on each corner, a **+** between two to add one; a corner snaps to the grid or to another piece's
+  corner (Ctrl: off).
+- **The Room tool's Polyline option** (`blockout roomopt polyline on`, `blockout room outline <height> <x z> ...`):
+  click the corners on the ground or a face, close on the first corner or with Enter (Backspace takes one back), then
+  pull the height.
+- **Any mesh as a piece** (`blockout add [subtract] mesh [name]`, the piece's **Mesh Object** field): the object's
+  evaluated mesh, placed by the piece's own transform, joins the Blockout as an Add or a Subtract piece. While a
+  Blockout uses it the object is not drawn, picked, collided with, baked or exported; it is again when the piece is
+  switched off or deleted. Editing the mesh rebuilds the Blockout. A closed mesh is exact on the exact path - one
+  made of several closed shells pushed into each other is united first; an open mesh is skipped there by name; the
+  grid path gives a closed result for any mesh, by the winding vote DynaMesh uses.
+- **F9** for each new piece; **Learn:** "Ramps, stairs, arches and odd-shaped rooms".
+
+**Different from the spec** (listed in the task, "Done: deviations"): an outline room's shell is columns, one slab a
+wall segment and a kite at each outward corner (not the air's parts grown); a mesh of crossing shells is united
+before Manifold sees it; a piece's parts are united before they meet the other pieces; the predicate that hides a
+mesh piece's object is asked in every place a mesh object is read, not four; the polyline tool's tests live in
+`tests/test_blockout.cpp`.
+
+**Found by the test-engineer, running the exact path, and the review - fixed:** an arch (or stairs, or a concave
+outline) that another piece cut kept the seam between two of its blocks as a sheet of no thickness inside it - a
+piece's parts are united first now; a mesh of two cubes pushed into each other gave a volume of 17 for a union of 13
+with faces on top of each other on the exact path; a torus cut from a box whose top passes through the torus's
+middle ring left 28 triangles of no area (edges of no length in Manifold's result are closed up); with two corners
+placed, a click on the first corner added a third on top of it; Enter and Backspace typed into a text field closed
+the outline or took a corner back; a pinched mesh could cost a Blockout set to Exact its whole build (skipped by
+name now); a prism's size was filled through `operator[]` and copied (the pattern Apple's clang lost y and z of in
+round 479).
+
+**Known limits:** stairs, an arch and a concave outline cannot be Intersect pieces (named in the Inspector); the
+Blend radius of the new shapes is not read (round 481); a single shell that crosses itself is handed to the exact
+path as it is; on the grid path small faces of an unresolved place lie on top of others in some hostile arrangements
+(the sweep's column - 0 problems), and a wedge turned about three axes beside a room keeps two; on the exact path a
+flat side that touches or all but touches a many-sided round wall along a ridge leaves a strip a few millimetres wide
+at most back to back with the wall's facets (two of 2,000 hostile arrangements; the mesh is closed; the sweep counts
+them in a column of their own, see the numbers); a very large open
+mesh marks its whole bounds on the grid and coarsens its cluster's cell; the Inspector's Outline list is driven in
+tests through the console and the handles.
+
+**The numbers** (the fragment's `docs/PERFORMANCE.md` section): this machine, 2026-11-11 23:50-23:55, nothing else
+building or running (the hub's window). Stairs and an arch added to `interior 100` cost the exact path 4 ms (**15.6 ms**
+until the mesh can be drawn, 11.6 without them) and the grid nothing that shows (13.6 / 41.7 / 184 ms at 0.2 / 0.1 /
+0.05 m; dependency-free 14.9 / 48.0 / 195). A 10,000-face mesh as a piece among 100 rooms: **72.7 ms** exact, 35.8 /
+60.4 / 207 ms on the grid (dependency-free 44.1 / 68.0 / 218). The live rows are round 479's: a frame 2.9 ms at the
+median while a door moves and 3.0 ms while a face handle is dragged with the libraries, 1.0 and 1.2 ms without. Sweep,
+2,000 hostile arrangements a kind on each path: 0 problems on all twelve rows, none refused.
+
+**The sweep's count was changed, the kernel was not** - said here because the exact path's row of the new shapes
+would otherwise read 2 problems, and the task asked for 0. The two arrangements (seeds 475 and 1337 of 2,000) have a
+flat side against a round room's wall of 256 facets, along the ridge between two facets. In the first a stairs' side
+touches the ridge, which is a float's rounding (a millionth of a metre) past it at one end: a needle of the side
+0.18 mm wide is left, back to back with the facets. In the second a cutter ends 0.04 mm short of the ridge (the
+room's inner outline is mitred that far past its circle - the pieces' own numbers): a skin of wall 0.04 mm thick and
+3 mm wide is left. Both meshes are closed and are what was asked for. The check for faces on top of each other names
+such a pair because the strip is narrower than its distance for "one plane"; the faces are in two planes 0.7 degrees
+apart that cross in a line. The judge now sets apart flat faces that are back to back, flat, at least 0.1 mm wide and
+0.3 degrees or more apart (`meet_at_a_ridge` in `stress/stress_blockout.inc`, with the reasons and what keeps it
+narrow), and counts them in a column of their own: 2 in that row, 0 in the other eleven. Two faces of one plane, and
+any such pair that looks the same way, are a problem as before. The code review looked at this change alone
+(verdict: keep with changes - back to back only, a flatness and width test, an own column, the second seed's cause
+named rightly; all made). Not done: a kernel pass that would close the first seed's micron crack (snapping a round
+piece's corners onto another piece's flat side within the tolerance) - a follow-up, it would move every row.
+
+**Checked:** on main `e978001a` (the round's groups and `editor`, ADR 0134; the full suite is CI's). Windows with Blender's libraries: `blockout` 5,170 checks, `editor` 2,262, 0 failed; Windows dependency-free: 3,669 and 2,247, 0 failed; Linux (GCC, dependency-free): 3,671 and 2,248, 0 failed; ASan + UBSan on Linux: `blockout` 3,672 checks, 0 failed, no report. Stress on Linux (untimed): the Blockout's six grid sweeps 0 problems; `modifiers_ngon` 11,514 operations, 0 problems, 450 shapes; `pushpull` 26,608, 0 problems, 394 results with faces newly on top of each other; `curved` 5,036, 3 problems, 68 (all three as on main); `editor` finished. The exact path's sweep on Windows with the libraries: the table above. Audits: `sweep_commands` 221 verbs, the coverage map (378 entries, 0 empty), the HCI audit 0 findings, `changelog.py check`, `docs_check.sh`. Code review: the round's diff, and the sweep's judge by itself (above).
 
 ## 2026-11-11 (round 479): Dragging rooms out - handles on pieces, snapping, the Room tool
 
@@ -570,397 +2446,6 @@ verbs); the coverage map has no command, action or window without a test. Review
 findings (a build finishing inside the gizmo's frame dropped; eight more writers of the mesh; saving not asking for
 the newest state) are fixed and tested.
 
-## 2026-11-11 (round 471): The world stays kept while a character moves - the card's instances and see-through lists by object
-
-**Asked:** Pass 22's fourth round (task 0447, ADR 0125): posing an avatar that stands in a world should cost what
-posing it alone costs, plus drawing the world. The spec read the cause as the scene hash, the draw items and the
-instance array made again for every object.
-
-**Measured first:** the card's own parts were added to the posing rows (`card shadow maps`, `card g-buffer`, `card
-lighting`, `card copies and wait`, `card render call`, `baked corners`, `see-through triangles`, `presenting`). In
-the owner's world most of the world's share of a posed frame is the card drawing the world (6 to 10 ms of a 10 to
-15 ms card path); the instance array made again is 2 to 3 ms and the see-through triangles about 2 ms; draw items
-and scene hashes are under 1.5 ms together. So the round is narrower than the spec (its deviations and ADR 0125 say
-what was left out and why).
-
-**Changed (task 0447, ADR 0125)**
-- **The card's instance array is kept by object** (`Editor::InstanceRows`): an object whose placement, mesh,
-  materials and lightmap pages are what they were takes last frame's instances; only what changed is made again -
-  in baked and see-through scenes too, where nothing was kept before.
-- **See-through triangles are kept by object**, and while no list changed and the camera rests the sorted corners
-  are last frame's. A camera move sorts them again, as before.
-- A change still gathers once and then settles into the whole-array keep of round 458.
-- Verify mode gathers such a frame whole as well and compares the two.
-- The Profiler's posing parts name the card's passes; counts "instance rows kept / built" and "see-through lists
-  kept".
-
-**Not in this round:** the list of what moved, the scene hash and the draw items by object, the lighting key for a
-move outside the bake, clips not "volatile" (measured small or belonging to round 472); the card's own passes for
-the world.
-
-**Checked:** 27,003 unit checks without the libraries and 27,011 on Linux, 0 failed; 29,080 with the libraries, where the 4 `gpu` picture checks that fail on `main` fail the same way (`test_gpu.cpp:887` twice, `:2226`, `:4886`); the audits pass. The round's own tests (`tests_round471_gpu`, 8 on the card): the picture drawn by rows equals a whole gather after 15 kinds of change and after a lightmap bake; verify mode finds 0 stale rows over 60 frames; see-through lists are copied while the camera rests; ids ageing off the card drop the rows; a whole gather at least every 64 calls; 5,000 objects with one moving make at most 2 rows a frame. The test-engineer found one fault (a mesh sent again dropped every kept row, so a posed avatar gathered whole on most frames) - fixed; the code review approved, its findings fixed. Not covered by a test: a texture or corner block freed under a row still being copied; the reuse of the last frame's sorted corners is checked by picture comparison only. An earlier run of the suites beside other passes' builds showed Live Link, `hci` and one `gpu` check failing; none repeated on the quiet machine.
-
-**Measured:** on a quiet machine, round 470's build against this round's, one after the other. The owner's avatar in the owner's world (measured locally, a window on the card, ms a frame): the Scene view still 8.7 -> 5.7; the whole avatar moved 15.9 -> 11.1; the chest turned 47.2 -> 38.3; an upper leg 25.3 -> 23.3; a hand's IK target 26.6 -> 23.4; a foot's 26.1 -> 22.2; a prop of the world moved 10.0 -> 8.6; scrubbing 53.3 -> 50.0; the clip playing 52.2 -> 49.8; Play with the springs 46.4 -> 44.3; the Puppet handles within 1 ms. The stand-in in its world (`blendity_stress --only perf`, the baseline taken again by both builds): the Move gizmo on a hand's IK target 21.0 -> 14.1, on the elbow's pole 23.5 -> 16.8, G on the target 30.3 -> 21.8, R on the chest 61.5 -> 49.9, a prop moved 10.7 -> 7.7; alone, where there is no world to keep, every row within 1 ms except the clip playing in both views (17.7 -> 27.5, a row whose longest frame is 88 ms in both). **Not reached:** the spec's "what posing alone costs plus drawing the world" - the chest turned is 28.5 ms alone and 38.3 in the world; what is left is the card drawing the world and presenting, which this round only names. **How far to trust a row:** the same build checked against its own baseline minutes later flagged 5 rows 20 to 35 % slower, and the check against round 470's baseline flagged 2 (leaving Play 5.2 -> 7.5 ms, the clip playing with a Live Link client 23.0 -> 29.9, a row the self-check flagged too); the bench's headless rows moved 6 to 8 ms either way between the two runs' settings (orbiting 8.6 -> 15.1 as imported, 16.6 -> 8.4 with IK handles), so the tables use the windowed rows, as round 470's did. `stress/results/baseline.md` is this round's.
-
-## 2026-11-11 (round 470): A posed mesh follows in place - corners split there, ranges for a small move, settled at rest
-
-**Asked:** Pass 22's third round (task 0446, ADR 0124 decisions 5 to 7), from round 468's table: while an avatar is
-posed, most of its meshes were built again from nothing on every frame, with MikkTSpace, because a few corners on
-sliver faces changed which neighbours they are smoothed with; every moved mesh with a normal map or several materials
-went to the card whole; and a posed mesh kept approximate tangents for good.
-
-**Changed (task 0446, ADR 0124)**
-- **A new split is made in place.** A corner whose normal no longer matches the render vertex it shared gets one of
-  its own (`Mesh::update_in_place`: `split_corner`, `split_slots`); the move is no longer refused and the mesh no
-  longer built whole. At most one render vertex a corner; a settle or a build shares them again.
-- **Tangents around what moved.** The quick tangents are worked out for the vertices of the moved faces only, each
-  summed in the whole pass's order (the same bits); a small move no longer rewrites, or sends, every tangent.
-- **Ranges for meshes with a normal map and for meshes with several materials.** The card takes the moved vertex
-  ranges; a mesh of triangles sends no indices at all.
-- **Posed meshes are made exact at rest.** Once nothing has changed for two frames, two posed meshes a frame are
-  built again (vertices shared anew, MikkTSpace), as ADR 0034 settles an edited mesh - also meshes that only had
-  corners split.
-- **The smooth-by-angle normals pass runs on every thread** and reads the vertex-face table kept per topology (it
-  built one on every call); the sums and their order are unchanged.
-- The Profiler's Posing block: "corners split in place" (was "refused for a new split") and "meshes settled".
-
-**Not in this round:** outline shells moved in place; the settle on a worker (two meshes a frame on the main thread
-instead - written in the spec's deviations).
-
-**Checked:** 25,777 unit checks without the libraries and 25,783 on Linux, 0 failed; 27,483 with the libraries, where the 4 `gpu` picture checks that fail on `main` fail the same way (`test_gpu.cpp:887` twice, `:2226`, round 455's Lanczos picture). The round's own tests: 648 random-move steps on smooth-by-angle, sharp, seamed, n-gon, concave, custom-normal, zero-area and fan-flipping meshes draw what a fresh build draws to the bit (913 corners split in place, 0 refused, 0 built whole); partial quick tangents equal the whole quick pass to the bit over 192 steps; 1,000 swings add no render vertex after the first; on the card a finger turned on a three-material mesh of triangles sends under 1 KB of 892 KB a frame (quads: 142 KB of 573 KB, their indices grouped again). `perf_suite.py --check` against the round's own baseline: 2 findings, both rows whose card time swings between runs of one build with the same counts (written in PERFORMANCE); against `main`'s: 3 of the same kind. The coverage map, `changelog.py check` and `docs_check.sh` pass. The code-reviewer approved (its findings - the settle bump made a move, a held button is not a rest - are in the commit).
-
-**Measured:** the owner's avatar (measured locally, on the card, against round 469's run): the chest turned 38.5 -> 28.5 ms a frame alone and 61.9 -> 47.2 ms in the owner's world; a scrub 65.0 -> 32.9 and 87.1 -> 53.3; the clip playing in both views 73.2 -> 35.6 and 104.2 -> 51.0; a foot's IK target 25.7 -> 12.0 and 44.4 -> 26.1; Play with the springs 43.5 -> 26.9 and 72.0 -> 46.4. Its meshes built whole a frame: 3 to 17 -> 0 on every posed row. **Not reached:** the uploads did not halve (the chest turned 6.6 -> 6.7 ms, a scrub 13.7 -> 10.8 ms): these rows move most of every mesh they touch, and a mesh that moved by more than a quarter still goes to the card whole; only the IK rows send ranges (the hand's target: 2,923 -> 1,604 KB a frame). **The stand-in did not get faster** (every row within the run-to-run spread of `main`'s build): its posed frames are its nine outline shells, built whole and sent whole (7.8 ms and most of 7.4 MB on the chest row) - not done in this round. No posed row in the world reaches 16.7 ms. Tables: `docs/PERFORMANCE.md`, "Pass 22: a posed mesh follows in place".
-
-## 2026-11-11 (round 490): Parallel passes stop conflicting - shared-docs fragments and the integration PR
-
-**Asked:** three passes (22, 23, 24) run side by side, each a stack of pull requests on `main`, and every merge made
-the others conflict again - in `docs/USABILITY.md`, `tools/README.md`, `docs/PERFORMANCE.md` and
-`docs/ARCHITECTURE.md` - and wait for a rebuild. The owner approved a plan (2026-11-10) with two parts: the four files
-join the changelog fragments, and one script builds a single pull request that carries every green stack. **Tooling
-and docs only: no product code, no build, nothing in the editor changes.**
-
-**Changed (task 0465, ADR 0123 amended)**
-- **A round's lines for the four shared docs go in its fragment.** `changelog.d/<round>-<slug>.md` may end with
-  sections `<!-- docs/USABILITY.md -->`, `<!-- tools/README.md -->`, `<!-- docs/ARCHITECTURE.md -->` and
-  `<!-- docs/PERFORMANCE.md -->` beside `<!-- README -->`, each taking `after:` + lines, `replace:` / `with:` and the
-  new **`append:`** (a whole block at the file's end, one blank line above it; refused when its first line is already
-  there). `tools/dev/changelog.py check` verifies every operation applies exactly once and names the fragment and
-  the file when one does not; `fold` applies them in ascending round order, keeps each file's line endings, writes
-  every file or none, and deletes the fragments.
-- **`tools/dev/docs_check.sh` holds the four files to the `Docs-fold: yes` rule, for commits newer than the rule.**
-  The rule's start is the day it reached `main`: the committer date of the commit on the base's first-parent line
-  in which the script gained its `SHARED_DOCS=` list (found with `git log -S`). A commit dated earlier is exempt for
-  these four files and printed as `exempt:`; a later one is checked whether or not its branch ever merged `main`
-  (review: an exemption by ancestry would have lasted for as long as a branch stayed unmerged). Until the rule is on
-  the base, a commit is checked only when it descends from the commit of its own history that brought the list. The
-  open passes' rounds that already edited the files directly stay green; a round written after the rule reached
-  `main` is checked. The block sits apart from PR #369's exemption for commits older than the fragment rule itself:
-  `git merge-file` of this version, `main`'s and #369's merges without a conflict, and the result holds both.
-
-**Added (task 0465, ADR 0132)**
-- **`tools/dev/integrate.sh`: the integration PR.** From `origin/main` it merges the top branch of every open stack
-  whose `windows`, `linux`, `macos` and `linux-sanitizers` jobs all passed (a job gh lists twice must have passed
-  twice) - merge commits only - pushes `integration/<n>` and opens one PR on `main` whose body has "Merging this
-  also merges #..." for every PR carried, and what was left out and why. The merges are made with `git merge-tree`
-  in the object store, so no working tree is touched and a conflict leaves nothing half merged: it stops the run
-  before anything is pushed, names the two pull requests and the files, and says where it is settled (two PRs': by
-  hand on the integration branch, which the next run continues; one with `main`: on that PR's branch; or `SKIP`).
-  `git merge-tree` failing for another reason is an error, not a conflict. `CHECK=1` only reports (with `ANY=1`: as
-  if every stack were green, to see today's conflicts); `SKIP="n"` leaves a stack out; while an integration PR is
-  open a later run continues its branch with a fast-forward push and rewrites the PR's body even when there is
-  nothing to push (what is left out may have changed); `SKIP` of a stack already carried says it does nothing;
-  `NEW=1` starts the next number. It never merges a
-  PR, and every PR still targets `main` and can be merged on its own.
-- **`tools/dev/stack_check.sh` and the `stack` job accept an integration PR** (head `integration/*`) as the one
-  allowed top over several stacks. Each stack still needs exactly one top of its own, and a stack the integration PR
-  holds only part of is noted while that stack's top is not green yet and fails once it is, naming
-  `integrate.sh`; a stack wholly outside it is noted. gh failing is now an error
-  instead of "no open pull requests". The grouping and the "required jobs passed" test moved to `tools/dev/stack_lib.sh`, which both scripts source.
-- **`tools/dev/stack_selftest.sh`**: both scripts on a throwaway repository with a local bare origin and a stand-in
-  gh (never GitHub); the `stack` job runs it before the check.
-- CLAUDE.md (Documentation duties, workflow step 6), `changelog.d/README.md`, `tools/dev/README.md`, the PR and
-  task templates say the two rules. The agents' prompts (`.claude/agents/*.md`) are unchanged.
-
-**Checked:** `changelog.py --self-test` 91 passed, 0 failed on Windows and on Linux (49 before); `stack_selftest.sh`
-95 passed, 0 failed on Linux (WSL); on Windows (Git Bash) 77 of 77 before the review's fixes, not rerun after them. A fold on a copy of the tree with a sample fragment
-for all four files: `--dry-run` wrote nothing, the fold changed exactly the lines the fragments named, CRLF kept.
-`integrate.sh` was not run for real. `CHECK=1 bash tools/dev/integrate.sh` against the open PRs (2026-11-11, read-only):
-
-```
-integration/1: new, from origin/main 04f45fd1
-stack: #366 #367 #369 #371 -> left out: #371 is not green (windows: pending, linux: pass pending, macos: pending, linux-sanitizers: pending)
-stack: #372 -> left out: #372 is not green (windows: pending, linux: pending, macos: pending, linux-sanitizers: pending)
-stack: #373 -> left out: #373 is not green (windows: pending, linux: pass pending, linux-sanitizers: pending)
-nothing to integrate: no stack is green
-```
-
-and with `ANY=1` (the jobs not read): #371 and #373 merge, and #372 conflicts with #371 in `docs/USABILITY.md` -
-the kind of conflict part 1 ends for rounds written from here on.
-
-## 2026-11-10 (round 489): the docs check exempts commits older than its rule
-
-**Asked:** the `docs-fragments` job was red on Pass 24's PRs for three round commits written before the changelog
-fragments rule (ADR 0123, #365) was on `main`; of the two options put to the owner - (a) the check skips commits older
-than the rule, (b) the red is accepted - the owner chose "Option a".
-
-**Changed (ADR 0123 amended)**
-- `tools/dev/docs_check.sh` no longer fails a commit that edits `CHANGELOG.md` or `README.md` when that commit was
-  written before the rule reached its own history (it does not descend from the commit that added the script to the
-  base). It prints an `exempt:` line for each. A commit made after its branch merged `main` is checked as before.
-- What it does not check, said in the ADR: that an exempt commit's entry was moved to a fragment. Pass 24's were
-  (`changelog.d/484-`, `485-`, `486-*.md`).
-
-**Checked**
-- `tools/dev/changelog.py --self-test`: two new cases (an older commit is exempt and named; a commit after the merge
-  still fails), all passing. `docs_check.sh` on Pass 24's two open branches: three `exempt:` lines, no error.
-- No source, test or stress file changes.
-
-## 2026-11-10 (round 488): Pass 24's write-up
-
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
-Pass 24's last round: what the pass did about both, in one table. The owner, through the hub: "Thank you, continue and
-finish all tasks."
-
-**Added (task 0464)**
-- `docs/PERFORMANCE.md`, "Pass 24 in one table": the mirror finish (the owner's two views against Unity's own
-  pictures: 13.71 / 0.702 and 12.50 / 0.697 in the owner's session, where the maps were lost, 3.71 / 0.905 and 3.57 /
-  0.912 now, mean difference / SSIM; a fresh import that kept its maps was already 3.75 / 0.898 and 3.67 / 0.902) and
-  the splotches (147 and 133 specks before, 11 and 39 now, the bake no longer by a like-for-like pair), what each round built, the
-  marks missed, the open items ranked and each round's wall time.
-- Before / after pictures of the two views, in the sessions' notes folder and not in the repository (the world is its
-  author's).
-
-**Not done**
-- Round 487 (light cookies, the Light Volume mist, OIDN's lightmap weights) was not run: each waits for the owner to
-  ask for it.
-- The lights a texel keeps by chance spread evenly - what the 11 and 39 specks left are - is a round of its own.
-
-**Checked**
-- No source, test or stress file changes; the suites are round 486's. `tools/dev/changelog.py check` passes.
-
-## 2026-11-10 (round 486): the bake's specks
-
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
-Pass 24's third round: the splotches. Round 484 measured them as specks (small round spots one bake has and the next
-has not) and named a lead; the owner approved the pass's specs ("Continue and finish all tasks, I approve all specs
-from all passes.").
-
-**Fixed (task 0462, ADR 0122 amended)**
-- **A bake leaves far fewer specks.** A texel lit by two or three of its thousand gather rays - the ones that met a
-  small bright patch - is luck, and the bake's filter should spread it into its neighbours. It did not: since round 465
-  the filter took a Sobol-sampled texel's measured noise for an eighth of itself (at 1024 samples), which is right for
-  light that fills the hemisphere and wrong for light a few rays carry, so the lucky texel passed for steady light.
-  The filter (and the firefly clamp) now read each texel's noise by how many of its samples carry its light - its
-  light squared over its samples' variance: the samples' own noise up to 16 such samples, round 465's scale from the
-  sample count on, a smooth curve between. On SideRail (lights linear, round 485's materials, two seeds) the specks at
-  the owner's two views fall from **90 and 71 to 11 and 39**, the grain from 0.190 to 0.181, the blotch from 0.055 to
-  0.053; the bake takes what it took (38.8 s against 38.9 s, like for like in one queue).
-- What is left - 11 and 39 - is about what round 484 measured for the direct light alone: the lights a texel keeps
-  by chance. That is the next round's (the picking spread evenly), not this filter's.
-
-**Bake again.** A saved bake is not marked out of date by this change: Generate Lighting once more to get it.
-
-**Changed**
-- Preview Lighting's filter reads the noise the same way.
-- The change is in Blendity's own filter. Where OIDN's lightmap filter runs instead (not today: it has no lightmap
-  weights), the specks must be measured again before it becomes a bake's own.
-
-**Added**
-- `lighting variancescale auto|on|off` (console; as `lighting pick`: the next Generate Lighting, not saved, not in the
-  scene's key): `on` is rounds 465 to 485's reading - round 485's SideRail bake byte for byte, both seeds - `off` the
-  samples' own noise everywhere (it blurs detail in dim places: the tunnel's error 7 % up); `clamp`, `snr` and `step`
-  are the round's measured candidates.
-- `gather_variance_read` (`render/lightmapper.h`): the rule, on its own for tests.
-- Stress `lightmap_quality`: a table of the old and the new reading on every scene.
-- Learn, "A bake's noise, measured": what a speck is, why the filter let it through, two questions, two Try-it steps.
-
-**Not built, and said in the task:** the largest-sample sums and batch means (the texel's own signal to noise does
-it, with nothing new from the card); a lower gate for the firefly clamp (the clamp changes no texel under any
-reading); the lights kept by chance spread evenly (a round of its own, `lamp_hall` its mark).
-
-**Marks missed, and said in the task:** at 2048 samples the tunnel view counts 47 specks against 39 at 1024 - one
-past "within a fifth" (grain and blotch fall: 0.146 / 0.047); against Unity with Blendity's own bake the dark station
-`spawn_back` reads SSIM 0.798 against 0.804, 0.001 past the mark, its grid correlation up from 0.953 to 0.959 - the
-other five stations are within it and the owner's two views a hair better (6.80 / 0.879 and 6.15 / 0.899 against 6.81
-/ 0.877 and 6.15 / 0.898). On the CPU path, where the sky lights a texel, the rule leans towards the old reading (the
-review's finding; a follow-up).
-
-**Checked**
-- Unit: 11 tests for the round (`tests_round486`, `tests_round486_independent`: two seeds' bakes of a small lamp only
-  the gather finds differ by less than 0.6 of what they did, more samples make fewer specks, a steady glow keeps its
-  peak, the rule on hostile numbers, few-sample and plain-random bakes bit for bit as before, the verb's words). Full
-  suite: Windows dependency-free 24,430 checks, 0 failed; Windows with Blender's libraries 25,344 checks in 1,918
-  tests, 4 failed - the four GPU picture comparisons that fail on this machine's card on `main` too; Linux 24,436, 0
-  failed. `tools/test_coverage_map.py --check`: nothing untested.
-- Stress `lightmap_quality` (relative RMSE against the reference, old reading -> new): room 0.0133 -> 0.0133 (1024
-  samples: 0.0119 -> 0.0119), corridor 0.0039 -> 0.0039, tunnel 0.1033 -> 0.1061 (1024: 0.0581 -> 0.0569), courtyard
-  0.0071 -> 0.0071, hall 0.0433 -> 0.0433; bias unchanged to 0.0001; the tunnel's grain 0.062 -> 0.052. No problem
-  counts in this section.
-- test-engineer: five tests, one finding (a few-sample bake one float step off the old one) - fixed, the test made
-  bit for bit. code-reviewer: approved; its five minor findings and three nits fixed or written into the task and
-  the ADR.
-
-## 2026-11-10 (round 485): Unity materials keep their maps and their gloss
-
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
-Pass 24's second round, cut from round 484's tables: the mirror finish. The owner approved the pass's specs ("Continue
-and finish all tasks, I approve all specs from all passes.").
-
-**Fixed (task 0461, ADR 0131)**
-- **A world no longer comes in as mirrors after importing its package.** A Unity material read while its package was
-  still unpacking found none of its textures (the package's GUID table is written last) and kept Metallic 1, Roughness
-  0 and no maps until Blendity restarted - the Materials window, open, read every `.mat` it saw. Now the list of the
-  project's materials leaves out a folder that is still unpacking, and where the import ends every Unity material
-  already read under it is read again, in place: the objects wearing it, the Inspector and the Materials window follow
-  with nothing to redo. In the real window, with the Materials window open as the owner has it, five imports of
-  SideRail's package: no material read early, all 38 linked with their maps (round 484: maps lost in 6 of 7 runs).
-- **Deleting an imported folder and importing the package again** in one session brings its materials back (the
-  folder's "deleted this session" marks are cleared where the import ends). Before, none loaded until a restart.
-- **The shader's keyword decides, as in Unity** (Standard, Filamented, URP Lit): a texture left in the Metallic slot
-  without `_METALLICGLOSSMAP` (URP: `_METALLICSPECGLOSSMAP`) is ignored and the sliders count; a slot a keyword names
-  and nothing fills is Unity's white texture.
-- **A smoothness kept in a map comes in**, as one number a material: Roughness = 1 - the mean of the alpha Unity's
-  shader samples (the metallic map's, or the albedo's under `_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A`) x its scale. A worn
-  wall is as rough as Unity shades it on average; it is not yet glossier in its polished patches than in its dust
-  (ADR 0131: a channel on the texture slot is the later step). On SideRail, of the 38 Unity materials the scene wears,
-  "smoothness dropped" goes from 10 to 0, and the two views the owner looks from read 3.71 / 0.905 and 3.57 / 0.912
-  against Unity with Unity's bake (3.75 / 0.898 and 3.67 / 0.902 before) - round 484's by-hand mark.
-- **16-bit PNGs read as stored in the build with Blender's libraries** (libpng is asked for the file's own samples):
-  one half reads 128 / 255 in both builds, not 186.
-- **A Unity `.mat` is never written over** (found by the round's review, older than the round): a scene opened while
-  its package's folder was missing kept its own copies of the materials, and once the folder was back the next edit
-  wrote Blendity's text over each Unity file. Such a copy is now read from the Unity file where an import ends (or on
-  Reimport Unity Materials), and is not written while a Unity file is at its path.
-
-**Bake again.** Lightmaps baked while the materials had no maps, or with the brighter 16-bit textures, were lit by
-those materials, and a bake is not marked out of date by a material's maps: Generate Lighting once more after this
-round.
-
-**Added**
-- **`.unity-stats`** beside a package folder's `.unity-guids`: a line for each texture a material reads its gloss
-  from - GUID, the file's bytes, width, height, mean R G B A. The unpack's worker writes it; for a package unpacked by
-  an older Blendity the maps are measured by one background job when its scene opens (the job tray: "Reading Unity
-  materials' gloss"; at once in a headless run) and the materials that asked follow - no others. No image is decoded
-  on the main thread for a material's values. On SideRail the unpack's worker took 2.3 to 3.4 s for its 14 maps and
-  the job 2.3 to 2.6 s for 13 (both with two other passes building beside them; the decode alone is 1.6 s), and the
-  frame that takes the job's result cost 30 to 40 ms, once. Opening the scene takes what it took: 2.23 s against
-  2.23 s for round 484's build over the undisturbed turns of eight.
-- **Assets > Reimport Unity Materials** (`unity rematerials`): every Unity material read again from its file, at once;
-  it says how many changed. Reading again is not an edit - no undo step, the scene not marked changed, and the copies
-  the undo history and Play's Stop keep take the new reading too, so neither brings the early one back. A value typed
-  on a Unity material in the session is replaced by the file's, as at a restart; the Materials window's tooltip on a
-  Unity material says so.
-- **Learn:** "A Unity material's gloss, and reading materials again" (a Try-it, two questions).
-
-**Changed**
-- Round 484's tests that pinned the faults now pin Unity's numbers, each saying what it pinned before; the committed
-  set gains its `.unity-stats`, and `blendity_today.txt` / `expected.json` hold round 485's reading.
-  `tools/unity_materials.py` counts a texture left in the slot as a fault only when Blendity went by it, checks the
-  committed table against its own reading of the PNGs, and keeps round 484's reading as a case of its self-test.
-- `unity materials all` in a headless run measures the gloss maps of the materials it has just loaded before it lists
-  them.
-- A scene that wears a material whose Metallic slot held a texture without its keyword asks for a new bake once: its
-  lighting was baked with that surface as metal.
-
-**Not done (by design):** smoothness per texel; reflections off, highlights off and occlusion maps (Blendity's material
-has no property for them); the lamps', glass's and mirrors' own shaders; URP Lit's and Standard's specular setups; a
-scene saved while its materials were the models' own (opening the `.unity` again is the repair); the lights' intensity
-in a project made from a package (the owner's decision, as round 484 put it). Not reached by a test: Cancel in the job
-tray itself (the landing of a cancelled job is tested).
-
-**Checked:** both Windows suites - dependency-free 23,541 checks, 0 failed; with Blender's libraries 24,455 with the
-four worktree `gpu` picture comparisons failing as in rounds 463 to 484 (the same four, not this round's); Linux (WSL,
-GCC) 23,547 checks, 0 failed; the audits; both tools' self-tests; the test-engineer's ten independent tests (two
-packages sharing a GUID, a package imported over itself, hostile tables, unreadable maps, 16-bit PNGs of every colour
-type, the import settings' Alpha Source; no product fault found); the code review (changes needed, all applied: a
-landing read every Unity material again, Stop undid a landing made in Play, a stand-in copy could be written over a
-Unity `.mat`, a landing could write the table beside an unpack; and one fault the round's own tests found after it -
-a mean held more digits in the session that measured it than in the table). SideRail in scratch copies: the five
-windowed imports, delete-and-import-again (38 linked), a project unpacked by round 484's build (the job, 38 linked),
-the materials table (smoothness dropped 12 -> 0, slot without keyword 1 -> 0, decoders differ 4 -> 0 of 57), the six
-stations with Unity's bake (the owner's two at round 484's by-hand mark, the other four unchanged). The owner's four
-folders have no file changed; the tests' own import cache left four small folders in `~/.blendity/cache/import`, as
-earlier rounds' did (a follow-up). Not done on a quiet machine: every timing above.
-
-## 2026-11-10 (round 484): SideRail's mirror finish and splotches, reproduced and measured
-
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." (the
-owner's imported VRChat world SideRail, against its reference). Pass 24's first round: name each cause with evidence
-before anything is fixed. **This round changes no behaviour** - one log line apart (below).
-
-**Found (task 0460; the tables are in `docs/tasks/0460-siderail-look-measured.md`, "Results")**
-- **The mirror finish in the owner's screenshots is materials read without their textures.** A Unity `.mat` read before
-  its package's GUID table exists gets Metallic 1, Roughness 0 and no map; the table is written last while a package
-  unpacks, the Materials window loads every `.mat` it sees meanwhile, and the asset library keeps what it read until
-  Blendity restarts. Reproduced on main in the real window: `ConcretePanel` without its maps in 6 of 7 runs, 17 to 37 of
-  the scene's 38 Unity materials without any (10 is right). At the owner's two stations the picture goes from 3.75 /
-  0.898 and 3.67 / 0.902 (MAE / SSIM against Unity) to 13.71 / 0.702 and 12.50 / 0.697. **Until round 485: restart
-  Blendity after importing a package** (or keep the Materials window closed while it unpacks).
-- **Deleting a package's folder and importing it again in one session** leaves a Unity scene with none of its Unity
-  materials (the models' own instead), until a restart.
-- **Smoothness is dropped** where Unity keeps it in the metallic map's alpha: 10 of the 38 Unity materials the scene
-  wears (181 renderer slots) come in at roughness 0 where Unity shades roughness 0.24 to 0.76. Set right by hand, F12's
-  picture moves little (3.74 / 0.905 and 3.58 / 0.912).
-- **16-bit PNGs are read brighter by the build with Blender's libraries** (libpng's simplified interface takes them as
-  linear light: one half reads 186 / 255, not 128): 14 of SideRail's textures, 7 of them on materials - the plank
-  floor's colour, mask and normal map among them. The dependency-free build reads them as Unity does.
-- **The lights' intensity:** a project made from a package has no Unity `ProjectSettings`, so its lights are taken in
-  gamma, silently; SideRail's own project is linear. With Blendity's own bake the owner's two stations then read 17.76
-  / 0.734 and 16.40 / 0.761 against Unity where the linear bake reads 6.64 / 0.863 and 5.97 / 0.885, and are 2.9 and
-  2.6 times as bright - the largest single fault there. Whether such a project should take its lights linear is the
-  owner's decision.
-- **The splotches are mostly not the lights kept by chance** (the plan's cause, and Pass 21's note): with every light
-  kept at every texel SideRail's bake has the same grain and blotch (0.384 / 0.251 against 0.382 / 0.251). They are
-  **specks** - small round spots in one seed's bake and not the other's, about 140 a view at the owner's stations (800
-  unfiltered, 330 in the owner's own session with no maps and the lights in gamma). About 100 are in the gathered
-  bounce and about 20 are lights kept by chance; the emitters and the texels filled from their neighbours are not it.
-  **More samples make them worse** (271 and 210 at 2048 samples, 59 and 78 at 256): the lead for round 486 is that the
-  bake scales the noise it measures for Sobol samples (to an eighth at 1024), so its firefly clamp and its filter take
-  a texel's few rare bright samples for steady light.
-
-**Added (measuring only)**
-- **`unity materials [all] [to "<file>"]`**: what Blendity made of every material the scene wears, as text;
-  **`unity mapstats [decoders] "<image>"...`**: an image's channel means as it is decoded, and with `decoders` as
-  Blendity's own decoder reads it (a script's verb: refused in a window).
-- **`lighting pick on|off|<rays>`**: how many Baked point and spot lights a texel keeps by chance in the next Generate
-  Lighting (8: the bake as before; `off`: every light); a bake that picks says how many lights a texel kept and
-  dropped - the one line a default bake's log gains.
-- **`tools/unity_materials.py`**: every Unity `.mat` of a project beside what Blendity made of it - Unity's metallic
-  and roughness by the shader's own rule, Blendity's, a fault class per material, the images two decoders read
-  differently; `state` puts a scratch project into a test state (no maps; Unity's values by hand; 16-bit PNGs as
-  8-bit).
-- **`tests/fixtures/unity_gloss/`**: twelve small Unity materials of our own, one per fault, with Unity's values worked
-  out by hand; the folder is checked out byte for byte (`.gitattributes`).
-- **`tools/unity_compare.py`**: `--bake-cmd`, `--lights-as-imported`, `--reuse-unity-lightmaps`; `noise`, a bake's
-  noise at seeds 0 and 1 without Unity; and at each station the two bakes' own grain, blotch and **specks** (spots
-  where the two pictures differ by over half the picture's mean light).
-- **Stress `lightmap_quality`: `lamp_hall`** - a hall lit by 72 Baked lights whose reference keeps every light, with the
-  bake at `pick` off / 8 / 16 / 32: there the picking is the noise (4.8 times the blotch of keeping every light), which
-  on SideRail it is not. The four older scenes' rows are unchanged to the last digit.
-- **`decode_image_own`** (`image.h`): Blendity's own decoders whatever the process's codec switch says.
-- **Learn:** "A Unity material beside Unity's own values" (a Try-it, two questions); "Many lamps" in "A bake's noise,
-  measured" (two questions, two Try-its).
-
-**Kept exactly:** a bake at the defaults saves the same pages, byte for byte, from main's build and from this round's
-(a room with twelve Baked lights; four files). It did not at first: with the rays a run-time number MSVC ordered one
-expression another way and two bytes of one page differed, so the default path keeps the constant and the measuring
-path is a function of its own, never inlined.
-
-**Not done (by design):** nothing is fixed; rounds 485 and 486 are specified from these tables, and 486 is cut again
-(the plan's stratified light picking would not touch most of SideRail's specks). Not taken as timings: the bake at
-`pick off` and 16 (another worker's build ran beside them) and the stress section's times. Not run: the reproduction
-with the Project window in place of the Materials window. The lights' intensity in a project made from a package is put
-to the owner, not changed.
-
-**Checked:** both Windows suites - dependency-free 23,199 checks, 0 failed; with Blender's libraries 24,114 (the four worktree `gpu` picture comparisons, as rounds 463-466, and in one of two runs
-the slow-open test while another worker used the card);
-Linux (WSL) 23,205 checks with one failure while the machine was baking - "Live Link never pauses the editor", round
-382's tick-time bound - which passes alone; the audits; both tools' self-tests; the code review (changes needed, all
-applied: the committed materials checked out byte for byte, a decoder entry that leaves the process's switch alone, the
-tools refusing a project that is not a scratch copy); stress `lightmap_quality` - `lamp_hall` 0.043 / 0.0327 / 0.0096
-(relative RMSE / grain / blotch), 4.8 times the blotch of every light kept, the four older scenes as Pass 21 left them;
-SideRail in scratch copies - the tables of the task's results; the owner's folders untouched.
-
 ## 2026-11-10 (round 476): Blockout's kernel - pieces built into one mesh, measured
 
 **Asked (Pass 23, task 0452, ADR 0128):** "meta-ball like modeling but with primitives", and "rooms such as rectangles,
@@ -1040,6 +2525,226 @@ and the sweep were run again in every build and the other groups' counts carried
 limit, nor had the grid it asked for; a speck 6 km from the origin came out with its faces on top of each other;
 growing every solid by a hair to make touching faces meet left faces of no area; a cutter's side was judged by all its
 plane holds instead of by the faces it lies on, and then by those faces' bounds instead of their figures.
+
+## 2026-11-12 (round 475): Pass 22's write-up - what posing costs now, and what is left to decide
+
+**Asked:** Pass 22's last round (task 0451): the pass in one place - every row of round 468's baseline beside its
+number after rounds 469 to 474, whether posing holds 16.7 ms a frame, and for every row that does not, what is left
+in the frame and what the options are.
+
+**The short answer**
+- **Met (16.7 ms, a window on the card, the stand-in alone):** dragging an IK target, its pole, or G on it (48 to 56
+  ms before, 10 to 13 ms now), orbiting, a prop moved in the world.
+- **Not met:** every pose that moves the whole body - turning the chest (50 -> 35 ms), a Puppet handle (63 -> 53),
+  a scrub (55 -> 46), Play with the springs (87 -> 44.5) - and, in a world, the IK drags too (67 -> 18 ms: close).
+- **The owner's avatar in the owner's world (measured locally):** an IK target dragged 61.7 -> 23.9 ms, the chest
+  turned 81.1 -> 40.9 ms, a scrub 103.9 -> 50.0 ms, the clip playing with the Game view beside the Scene view 191.8
+  -> 51.8 ms, Play with the springs 108.4 -> 45.0 ms, the whole avatar moved 82.8 -> 11.5 ms. Between a seventh and
+  a half of the frame time of the pass's start, and not 60 frames a second for a whole-body pose.
+- **Why it stops there:** in a whole-body frame the solve is under 2 ms. What is left is the body itself: the moved
+  meshes sent to the card (11 to 18 ms on the stand-in), their positions, normals and tangents moved on the CPU (8
+  to 11 ms) and the outline shells built whole (7 to 10 ms).
+
+**For the owner to decide** (numbers and estimates in `docs/PERFORMANCE.md`, "Pass 22 in one table")
+1. **Skinning on the card** - the largest part: the uploads and the CPU's normals and tangents leave the frame (19
+   to 29 of the stand-in's 35 to 53 ms; what the card then spends deforming is not estimated). Alone it leaves a
+   Puppet drag near 24 ms; with the outline shells in place (option 2) the estimate is 8 to 15 ms - the one
+   combination that brings a whole-body pose under 16.7 ms. A pass of its own, with an ADR: picking, bounds,
+   snapping, the path tracer and exports still need the posed shape on the CPU, on demand.
+2. **Outline shells following in place** (or on the card): 7 to 10 ms of every whole-body frame; a round or two.
+3. **A cheaper view while posing** (outlines, shadows or probes off during a drag): it changes the picture while
+   the mouse is down - the owner's call.
+4. **One window's redraw at a time** (Pass 19's open item): the Game view beside the Scene view costs a scrub 24 ms.
+
+**Changed (task 0451)**
+- The Learn lesson "Where a Posing Frame Goes" in full: what the editor keeps between frames, what a frame still
+  costs, three more questions and a fifth Try-it step.
+- `tools/dev/changelog.py fold`: the fragments of rounds 472 to 475 are in `CHANGELOG.md`, `README.md` and the
+  shared docs.
+
+**Left open by the pass** (from the rounds' entries, their task files and their reviews)
+- Round 468: zero-area faces' normals (found there, not taken up in this pass).
+- Round 472: the rig registry is not built. It was under its line when measured then; in round 474's baseline the
+  constraints cost 0.29 to 0.43 ms a frame in the world, at or just over the 0.3 ms line - a candidate again. An
+  Inspector drag is still drawn a frame late. Three caches compare a raw pointer and a counter (a pointer reused by
+  a new object with the same counter would be taken for the old one).
+- Round 473: no early exit for the full-body solver (ending 32 iterations at 24 moves bones by up to 122 mm); the
+  body model is not built on a job (the first Puppet drag's longest frame is 103 ms against 100); the solver does not
+  converge under a rotated, non-uniformly scaled parent (the old one neither); a goal at 1e20 is not refused; the
+  body model is dropped when the buffer is built again mid-drag and its bones differ; the stand-in is not compared
+  against the reference solver; with the pose prior in use the start pose is still written.
+- Round 474: an enabled Rigidbody in the scene's own physics loses Play's saving; trails still pose the live scene;
+  the springs' own step (3.8 ms); the release frame and the analyses on a timer were not looked at; AutoPhysics 58
+  ms against 50; `rig_ends()` is keyed on the scene's serial only; with Record on a keyed frame samples about 13
+  trail frames again and compares every key of the clip (it grows with the clip); the trail keeps a copy of the
+  clip's tracks; sampling part of a trail again is untried on long IK chains.
+- The bench: on the owner's avatar "FK: an upper arm turned" did not drag in round 468's window run, and "Puppet:
+  the left hand's handle" drags in neither window run (a still frame's time); headless it is 50.3 ms a frame. The stand-in's
+  "the clip playing, Scene view only" rows read one of two values from run to run (18.9 or 28.1 ms alone).
+- Housekeeping: the dependency-free `editor` group's check count varies by a few from run to run (0 failed);
+  `tools/dev/chain.sh`'s `TEST_GROUPS` with two differently configured trees; the `stack` job that failed once on
+  PR 385; the merged branch `task/0448-record-scrub-play` is still on GitHub.
+
+**Checked:** the `editor` and `animation` groups, 0 failed: Windows without the libraries 2,331 and 2,229 checks, with them 2,352 and 2,230, Linux 2,331 and 2,229 (the lessons' audit is in `editor`). The whole suite is CI's (round 493's rule). No timed run was made for the stand-in in this round: its numbers are round 474's session; the owner's avatar alone and the owner's world alone were measured again in this round's own window. Code review: changes needed, all text - the options table overstated what skinning on the card saves alone and gave the card's picture a number from the wrong setup; both corrected, with the ranges, the lesson's wording and the list of what is left open.
+
+## 2026-11-12 (round 474): Play with the springs stops building meshes whole; pins and trails do less each frame
+
+**Asked:** Pass 22's seventh round (task 0450): what sits around a posed frame - trails, the assistants' views,
+AutoPosing's pins, Play with an avatar's springs - should stop costing more than the pose.
+
+**Measured first** (the stand-in, round 473's baseline; a part is built only when it is over 0.3 ms a frame or over
+its budget): Play with the springs 82 ms a frame with 20 render meshes built whole every frame (a playing clip
+builds none); trails, onion skins and the zoetrope add about 6 ms to a drag frame (the trail 2.6 ms, the constraints
+1.7 ms instead of 0.4); the Puppet controls 2.9 ms a frame. Under the line and left alone: Centre of Mass (0.24
+ms), the Avatar window (0.17 ms), the Rigging window (0.27 ms); the first Preview, the first Record and entering
+Play (92, 71 and 96 ms: under their 100).
+
+**Changed (task 0450)**
+- **Play with the springs**: the scene's own physics step looked up every mesh's bounds at the start of each Play
+  frame, even with no rigid body in the scene. That deformed every skinned mesh before the springs had moved the
+  pose, and the Game view then built its meshes whole. With no body the step now does nothing; with one it is as it
+  was.
+- **AutoPosing's pins** are kept until what they are read from changes (the objects, the clip's contacts at the
+  playhead, the locks), where every frame walked the scene up to three times.
+- **Motion trails**: a key edit samples again only the frames around the edited keys (two keys either side), where
+  it sampled the whole trail again - Record keys on every frame of a drag. Turning trails off releases what they kept.
+
+**Not in this round**
+- **Trails still pose the live scene** when they sample (the spec's private copy of the rig would have to repeat
+  the constraint solves exactly: too large here). What changed is how many frames an edit samples again.
+- **With a rigid body in the scene's own physics** (every build without the libraries; with them only a body added
+  during Play) the bounds are looked up as before, and the meshes are built whole again.
+- **The springs' own step** (4.9 ms a frame on the stand-in: three scans of the scene and a body fit hashed every
+  frame) is read and listed, not changed. The release frame, the analyses on a timer, the first Puppet drag's
+  longest frame (110 ms) and AutoPhysics (58 ms against 50) are not touched.
+
+**Checked:** the `animation`, `editor` and `physics` groups, 0 failed: Windows without the libraries 2,229, 2,331 and 190 checks, with them 2,230, 2,349 and 208, Linux 2,229, 2,331 and 190; `round 474` alone 342 checks (338 with the libraries, where one test steps aside: under Jolt a mesh without a collider is no floor); the `gpu` group with the libraries 886 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: no blocking finding. Its notes, kept here: the pins come from a cache, so a frame that commits an undo step walks once; an enabled Rigidbody in the scene's own physics loses the Play saving (follow-up: leave skinned objects out of the statics, or use last frame's bounds); with Record on, a keyed frame samples about 13 trail frames again on the test rig and compares every key of the clip (work that grows with the clip's keys); the trail keeps one copy of the clip's tracks; sampling part of a trail again could differ from sampling all of it where a constraint starts from its last answer (not seen in 37 kinds of edit on the test rig, not tried on long IK chains).
+
+**Measured:** the stand-in, round 473's build against this one on a quiet machine (a window on the card). **Play with the springs: 82.3 -> 44.5 ms a frame alone, 101.5 -> 69.8 ms in its world** (longest frame 93 -> 61 and 108 -> 81); evaluations a frame 27 -> 10.9, tangents built whole 5.3 -> 0 ms, mesh uploads 28.1 -> 17.0 ms, the interface's part (where the physics step sat) 18.9 -> 5.0 ms; entering Play 83.5 -> 70.6 ms. The row is still over its budget: what is left is the springs' own step (3.8 ms), the outline shells built whole and the uploads. **Pins and trails: nothing a row shows.** The drag with trails, onion skins and the zoetrope reads 31.8 -> 28.7 ms (within what a row is good for), its trail part 2.16 -> 2.10 ms: the bench's drag keys on every frame, where the trail was already sampled a few frames at a time. The Puppet handle's row is unchanged (52.4 -> 52.6 ms alone, 61.5 -> 62.0 in its world; controls 1.36 -> 1.39 ms). One check finding, leaving Play 5.3 -> 8.2 ms, did not repeat (5.1 ms in the round's own baseline). The owner's avatar in the owner's world, measured locally, round 472's run against this round's (Unity signed in for both; rounds 473 and 474 together): Play with the springs reads the same in a window (45.5 -> 45.0 ms) and 67.7 -> 55.0 ms headless (normals 11.5 -> 6.6 ms, meshes moved in place 10.3 -> 5.7 ms); the Puppet handles 56.2 -> 52.5 ms (hips) and 55.5 -> 52.2 ms (head); the other rows within a tenth. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+
+## 2026-11-12 (round 473): Puppet Posing's solver works on a pose buffer, not on the scene
+
+**Asked:** Pass 22's sixth round (task 0449, ADR 0127): dragging a Puppet handle should cost about what turning one
+bone costs.
+
+**Read first:** every frame of a Puppet or AutoPosing drag put the whole start pose back into the scene, built the
+joint list again, and wrote two transforms per bone into the scene on each of 32 to 92 iterations - thousands of
+scene writes that nothing draws, each one marking a subtree dirty.
+
+**Changed (task 0449, ADR 0127)**
+- **A pose buffer** (`autopose::Rig`): everything under the armature as plain numbers, parents first, built once per
+  drag. The solver reads and writes only the buffer; an iteration allocates nothing and touches no scene object.
+- **The scene is written once a frame**: after the solve each joint whose turn changed gets one write (the hips'
+  place and a joint's scale too, when they differ). The start pose
+  is no longer written back first (it is, as before, when the pose prior is used: the prior reads the scene).
+- **The pose is the same**: the buffer solver leaves every bone within 0.002 mm of the old solver's on 25 recorded
+  drags (each handle, pins on and off, a limit hit, a target out of reach, the hips with both feet pinned). The old
+  solver stays in the code as the tests' reference (`autopose::solve_reference`).
+- **Arms with support bones**: an avatar whose arms carry `_sup` bones placed further out than the next limb bone
+  now maps its arms, so Puppet Posing shows its hand handles there.
+
+**Not in this round**
+- **The early exit** of ADR 0127 (decision 3). Measured: the pose a drag reaches depends on the whole schedule of
+  iterations - ending the 32 main iterations at 24 moves bones by up to 122 mm and 15 degrees, at 16 by 323 mm - so
+  no exit can keep the pose within the task's 1 mm. The solve still runs 32 iterations, or up to 92 with pins.
+- **The body model on a job** when it takes over 50 ms (scope 6).
+
+**Checked:** the `animation` and `editor` groups, 0 failed: Windows without the libraries 1,887 and 2,326 checks, with them 1,892 and 2,340, Linux 1,887 and 2,330; `round 473` alone 380 checks; the `gpu` group with the libraries 886 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: the buffer solver read against the old one line by line, no difference found; one major finding fixed (a bone destroyed mid-drag left the body model and the prior's rig pointing at freed objects when the buffer was built again), with the armature's parent read every frame, a joint's scale put back, and tests that fail if a frame writes the start pose again.
+
+**Measured:** the stand-in, round 472's build against this one on a quiet machine (a Puppet handle dragged, a window on the card): the solver's own part 1.95 -> 1.11 ms a frame, the controls around it 3.56 -> 2.87 ms, 44.5 scene writes a frame by the solver where it made two a bone on each of 31 iterations; the frame itself reads the same (alone 50.3 -> 55.5 ms, in its world 63.4 -> 57.9: within what a row is good for). The solve was 2 ms of a 50 ms frame: a Puppet drag costs what moving the whole body costs (skinning, normals, uploads), not what the solver costs. The owner's avatar, measured locally: its left hand's handle exists now (a drag frame 49.7 ms headless; the solver 2.6 ms, 219 scene writes a frame); the solver's part for the hips' handle is unchanged there (4.65 -> 4.91 ms: on 200 joints it is the arithmetic per joint, not the scene writes). The avatar-in-the-world rows could not be compared with round 472's: Unity had no licence that morning, so the world came in without Unity's lightmaps and the avatar without its part numbers. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+
+## 2026-11-12 (round 472): Record, scrubbing and the Animation window cost what the pose costs; the limb is drawn where the solver puts it
+
+**Asked:** Pass 22's fifth round (task 0448, ADR 0126): posing with Record on, scrubbing and playing a clip should
+cost what the pose costs, and a dragged IK target's limb should be drawn where the solver puts it for that frame.
+
+**Measured first** (round 471's runs, the owner's avatar, 275 bones keyed): Record cost 10.5 ms a frame and
+serialised the clip once a frame; on a scrub the clip's apply was 1.4 ms and the Animation window 1.5 to 1.9 ms;
+the constraints 0.2 ms. On the stand-in the hand was drawn up to 16.5 mm behind its IK target on 30 of 35 frames
+of a drag.
+
+**Changed (task 0448, ADR 0126)**
+- **Record** takes the clip's text once per undo step instead of on every frame, and reads only the objects that
+  moved since it last looked (`transform_version`), where it read nine numbers of every object under the root
+  through a map keyed by text. The keys written are the same.
+- **A clip's tracks stay bound to their objects** (`apply_clip`): found once per clip and root, kept while the
+  clip's tracks and the objects under the root (which, hung from what, called what) are the same - no map of paths
+  built per call. Blend-shape tracks are bound by index. `AnimationClip::track` / `find` use an index from 24 tracks.
+- **The Animation window** keeps its rows and each row's keys while only the playhead moves.
+- **G / R / S** apply and redraw only when an input changed (the mouse, a typed number, an axis, a modifier, the
+  camera): a held modal with a still mouse costs nothing.
+- **The limb is drawn where the solver puts it**: the constraints are solved once more right after the Scene
+  view's tools moved something, before the view gathers (not in Play).
+
+**Not in this round:** the rig registry (the constraints cost 0.2 ms a frame, under the spec's 0.3 ms line - with
+the second solve a drag now pays 0.5 ms for them, so the registry is worth a look again in the write-up); the
+second solve after an Inspector drag (the Scene view's tools only); what a scrub mostly costs - the meshes moved
+in place, their normals and uploads, and the card.
+
+**Checked:** the `animation` and `editor` groups on main e978001a with the round on it, 0 failed: Windows without the libraries 1,507 and 2,327 checks, with them 1,512 and 2,342, Linux 1,507 and 2,331; `round 472` alone 255 checks; the `gpu` group with the libraries 795 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: one major finding fixed (two animated roots rebuilt each other's bindings on every frame); one nit left for the write-up (three caches compare a raw pointer and a counter).
+
+**Measured:** measured locally, the owner's avatar in the owner's world (275 bones keyed; a window on the card): an IK target dragged with Record on 41.3 -> 25.3 ms a frame (the same drag with Record off: 23.7), Record's own part 10.5 -> 0.85 ms, clip serialisations 1 -> 0 a frame. On a scrub the clip's sampling 0.64 -> 0.05 ms, its apply 0.77 -> 0.17 ms, the Animation window 1.5 -> 0.4 ms (1.9 -> 0.7 with the Game view): about 2.3 ms of a 50 ms frame, so the scrub and play rows read the same (50.0 -> 49.4, 49.8 -> 50.0). The stand-in: the hand was drawn up to 16.5 mm behind its IK target on 30 of 35 frames of a drag, now 0.000 mm on all 35; `AnimationClip::find` on a 201-track clip 0.74 -> 0.009 ms (the `animation` section's row, over its budget before). The second solve doubles the constraints on a drag: 0.24 -> 0.48 ms, 46 -> 92 name walks. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+
+## 2026-11-11 (round 471): The world stays kept while a character moves - the card's instances and see-through lists by object
+
+**Asked:** Pass 22's fourth round (task 0447, ADR 0125): posing an avatar that stands in a world should cost what
+posing it alone costs, plus drawing the world. The spec read the cause as the scene hash, the draw items and the
+instance array made again for every object.
+
+**Measured first:** the card's own parts were added to the posing rows (`card shadow maps`, `card g-buffer`, `card
+lighting`, `card copies and wait`, `card render call`, `baked corners`, `see-through triangles`, `presenting`). In
+the owner's world most of the world's share of a posed frame is the card drawing the world (6 to 10 ms of a 10 to
+15 ms card path); the instance array made again is 2 to 3 ms and the see-through triangles about 2 ms; draw items
+and scene hashes are under 1.5 ms together. So the round is narrower than the spec (its deviations and ADR 0125 say
+what was left out and why).
+
+**Changed (task 0447, ADR 0125)**
+- **The card's instance array is kept by object** (`Editor::InstanceRows`): an object whose placement, mesh,
+  materials and lightmap pages are what they were takes last frame's instances; only what changed is made again -
+  in baked and see-through scenes too, where nothing was kept before.
+- **See-through triangles are kept by object**, and while no list changed and the camera rests the sorted corners
+  are last frame's. A camera move sorts them again, as before.
+- A change still gathers once and then settles into the whole-array keep of round 458.
+- Verify mode gathers such a frame whole as well and compares the two.
+- The Profiler's posing parts name the card's passes; counts "instance rows kept / built" and "see-through lists
+  kept".
+
+**Not in this round:** the list of what moved, the scene hash and the draw items by object, the lighting key for a
+move outside the bake, clips not "volatile" (measured small or belonging to round 472); the card's own passes for
+the world.
+
+**Checked:** 27,003 unit checks without the libraries and 27,011 on Linux, 0 failed; 29,080 with the libraries, where the 4 `gpu` picture checks that fail on `main` fail the same way (`test_gpu.cpp:887` twice, `:2226`, `:4886`); the audits pass. The round's own tests (`tests_round471_gpu`, 8 on the card): the picture drawn by rows equals a whole gather after 15 kinds of change and after a lightmap bake; verify mode finds 0 stale rows over 60 frames; see-through lists are copied while the camera rests; ids ageing off the card drop the rows; a whole gather at least every 64 calls; 5,000 objects with one moving make at most 2 rows a frame. The test-engineer found one fault (a mesh sent again dropped every kept row, so a posed avatar gathered whole on most frames) - fixed; the code review approved, its findings fixed. Not covered by a test: a texture or corner block freed under a row still being copied; the reuse of the last frame's sorted corners is checked by picture comparison only. An earlier run of the suites beside other passes' builds showed Live Link, `hci` and one `gpu` check failing; none repeated on the quiet machine.
+
+**Measured:** on a quiet machine, round 470's build against this round's, one after the other. The owner's avatar in the owner's world (measured locally, a window on the card, ms a frame): the Scene view still 8.7 -> 5.7; the whole avatar moved 15.9 -> 11.1; the chest turned 47.2 -> 38.3; an upper leg 25.3 -> 23.3; a hand's IK target 26.6 -> 23.4; a foot's 26.1 -> 22.2; a prop of the world moved 10.0 -> 8.6; scrubbing 53.3 -> 50.0; the clip playing 52.2 -> 49.8; Play with the springs 46.4 -> 44.3; the Puppet handles within 1 ms. The stand-in in its world (`blendity_stress --only perf`, the baseline taken again by both builds): the Move gizmo on a hand's IK target 21.0 -> 14.1, on the elbow's pole 23.5 -> 16.8, G on the target 30.3 -> 21.8, R on the chest 61.5 -> 49.9, a prop moved 10.7 -> 7.7; alone, where there is no world to keep, every row within 1 ms except the clip playing in both views (17.7 -> 27.5, a row whose longest frame is 88 ms in both). **Not reached:** the spec's "what posing alone costs plus drawing the world" - the chest turned is 28.5 ms alone and 38.3 in the world; what is left is the card drawing the world and presenting, which this round only names. **How far to trust a row:** the same build checked against its own baseline minutes later flagged 5 rows 20 to 35 % slower, and the check against round 470's baseline flagged 2 (leaving Play 5.2 -> 7.5 ms, the clip playing with a Live Link client 23.0 -> 29.9, a row the self-check flagged too); the bench's headless rows moved 6 to 8 ms either way between the two runs' settings (orbiting 8.6 -> 15.1 as imported, 16.6 -> 8.4 with IK handles), so the tables use the windowed rows, as round 470's did. `stress/results/baseline.md` is this round's.
+
+## 2026-11-11 (round 470): A posed mesh follows in place - corners split there, ranges for a small move, settled at rest
+
+**Asked:** Pass 22's third round (task 0446, ADR 0124 decisions 5 to 7), from round 468's table: while an avatar is
+posed, most of its meshes were built again from nothing on every frame, with MikkTSpace, because a few corners on
+sliver faces changed which neighbours they are smoothed with; every moved mesh with a normal map or several materials
+went to the card whole; and a posed mesh kept approximate tangents for good.
+
+**Changed (task 0446, ADR 0124)**
+- **A new split is made in place.** A corner whose normal no longer matches the render vertex it shared gets one of
+  its own (`Mesh::update_in_place`: `split_corner`, `split_slots`); the move is no longer refused and the mesh no
+  longer built whole. At most one render vertex a corner; a settle or a build shares them again.
+- **Tangents around what moved.** The quick tangents are worked out for the vertices of the moved faces only, each
+  summed in the whole pass's order (the same bits); a small move no longer rewrites, or sends, every tangent.
+- **Ranges for meshes with a normal map and for meshes with several materials.** The card takes the moved vertex
+  ranges; a mesh of triangles sends no indices at all.
+- **Posed meshes are made exact at rest.** Once nothing has changed for two frames, two posed meshes a frame are
+  built again (vertices shared anew, MikkTSpace), as ADR 0034 settles an edited mesh - also meshes that only had
+  corners split.
+- **The smooth-by-angle normals pass runs on every thread** and reads the vertex-face table kept per topology (it
+  built one on every call); the sums and their order are unchanged.
+- The Profiler's Posing block: "corners split in place" (was "refused for a new split") and "meshes settled".
+
+**Not in this round:** outline shells moved in place; the settle on a worker (two meshes a frame on the main thread
+instead - written in the spec's deviations).
+
+**Checked:** 25,777 unit checks without the libraries and 25,783 on Linux, 0 failed; 27,483 with the libraries, where the 4 `gpu` picture checks that fail on `main` fail the same way (`test_gpu.cpp:887` twice, `:2226`, round 455's Lanczos picture). The round's own tests: 648 random-move steps on smooth-by-angle, sharp, seamed, n-gon, concave, custom-normal, zero-area and fan-flipping meshes draw what a fresh build draws to the bit (913 corners split in place, 0 refused, 0 built whole); partial quick tangents equal the whole quick pass to the bit over 192 steps; 1,000 swings add no render vertex after the first; on the card a finger turned on a three-material mesh of triangles sends under 1 KB of 892 KB a frame (quads: 142 KB of 573 KB, their indices grouped again). `perf_suite.py --check` against the round's own baseline: 2 findings, both rows whose card time swings between runs of one build with the same counts (written in PERFORMANCE); against `main`'s: 3 of the same kind. The coverage map, `changelog.py check` and `docs_check.sh` pass. The code-reviewer approved (its findings - the settle bump made a move, a held button is not a rest - are in the commit).
+
+**Measured:** the owner's avatar (measured locally, on the card, against round 469's run): the chest turned 38.5 -> 28.5 ms a frame alone and 61.9 -> 47.2 ms in the owner's world; a scrub 65.0 -> 32.9 and 87.1 -> 53.3; the clip playing in both views 73.2 -> 35.6 and 104.2 -> 51.0; a foot's IK target 25.7 -> 12.0 and 44.4 -> 26.1; Play with the springs 43.5 -> 26.9 and 72.0 -> 46.4. Its meshes built whole a frame: 3 to 17 -> 0 on every posed row. **Not reached:** the uploads did not halve (the chest turned 6.6 -> 6.7 ms, a scrub 13.7 -> 10.8 ms): these rows move most of every mesh they touch, and a mesh that moved by more than a quarter still goes to the card whole; only the IK rows send ranges (the hand's target: 2,923 -> 1,604 KB a frame). **The stand-in did not get faster** (every row within the run-to-run spread of `main`'s build): its posed frames are its nine outline shells, built whole and sent whole (7.8 ms and most of 7.4 MB on the chest row) - not done in this round. No posed row in the world reaches 16.7 ms. Tables: `docs/PERFORMANCE.md`, "Pass 22: a posed mesh follows in place".
 
 ## 2026-11-10 (round 469): A skinned mesh is deformed once, and only when its own bones moved
 
@@ -1214,42 +2919,6 @@ refuses now); the fold writes both files to temporaries before swapping them in,
 **Checked:** `changelog.py --self-test` 49 passed on Windows and Linux (WSL); README `same-render` before and after the
 split; the C++ suites are untouched (no `src/` or `tests/` change), CI's four jobs run them. No README section in this
 fragment (nothing user-facing in the editor).
-
-## 2026-11-08 (round 462): Cleanup after drawing, and Solve Mesh
-
-**Asked:** Pass 20's round C (the drawing solver) - drawing leaves proper topology (no doubled vertices or edges, no
-T-junctions, no faces on top of each other, flat regions merged only where the texture is continuous), and a Solve Mesh
-command does the same to a mesh that exists.
-
-**Changed (task 0438, ADR 0120 decisions 5-6)**
-- **After every Draw commit** (flat and projected path, `Editor::draw_tidy`): the new vertices weld onto existing ones at
-  Push/Pull's tolerance (never more than a tenth of the shape's shortest side; a local weld whose cost follows the draw, wires
-  and marks following), faces the shape flattened onto an old edge go (`dissolve_line_faces`, their corners threaded into the
-  face across) and a corner on another face's edge joins it (`meshops::fix_t_junctions`, among the faces around the new
-  vertices; an old vertex never joins a piece of an old edge, so a separate shell stays apart). Nothing is merged: the
-  lines you drew before stay. A draw that would leave more area lying on top of other faces is rolled back - the mesh in
-  place and the selection as before - with a warning (a toast) saying why; the guard measures only beside what the draw
-  changed (`meshops::draw_overlap_gain`), so it costs the same on a 19,600-face wall as on a quad.
-- **`meshops::fix_t_junctions(m, verts, eps)`** (`mesh_cleanup.cpp`): a vertex strictly inside an edge of faces it isn't
-  in, within eps, is inserted into every face on that edge (one batched rebuild, UVs interpolated per face, seams and
-  marks following); candidates from a cell grid, not all pairs; NaN positions skipped.
-- **Solve Mesh** (Mesh > Merge & Clean Up, `editop solve_mesh`, a redoable operator): on the selection's vertices or
-  the whole mesh - weld, T-junctions, doubled faces, faces flattened onto a line, the UV-safe coplanar merge, and a toast
-  counting what was fixed and what still lies on top of each other (faces, vertices, edges). F9 holds the Weld Distance
-  (1e-4 of the mesh's size) and the Merge Angle (1); `redo amount2 <degrees>` from the console.
-- **Drawing tolerances relative to the mesh** (`meshops::relative_eps`): the `1e-4 x max(1, size)` of the imprint, Push
-  Through, Push/Pull and Draw code were absolute below size 1 (a rectangle bigger than a 1e-4-sized face was imprinted);
-  now rel x the mesh size (half the bounding diagonal) with a floor of 8 float steps at the farthest coordinate.
-- **`imprint_loop_across`** refuses a NaN or infinite outline (it added a face); Push Through's Boolean fallback gives
-  its walls UVs read off the faces they cut (Manifold builds only).
-- **Learn:** a "Solve Mesh" section (Try-it, two questions) and a line and a question in "Drawing onto faces".
-
-**Not done:** the stress runs and the cause of the one projected cut that leaves faces on top of each other were held back (a bake was being timed); the Boolean fallback's UV code runs in no build here (no Manifold in the dependency-free build): the test skips
-there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interface).
-
-**Also (testing):** the after-draw overlap guard compares the area lying on another face, not the number of such pairs (a draw that only split a face already in a pair was refused); Solve Mesh on a selection no longer welds an unselected shell touching it (its scope is the selection's faces, not their places).
-
-**Checked:** both suites - with Blender's libraries 20,551; dependency-free 19,636 (Windows) and 19,642 (Linux, WSL), 0 failed; the audits; stress on Linux - `curved` 5,036 / 3 / 68, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 (the same as main); the projected-draw block 236 draws, 82 refused, 0 problems, 0 doubled vertices or edges after drawing; the 51k-face teapot cut 480 ms, cleanup 8 ms, guard 28 ms.
 
 ## 2026-11-09 (round 466): a denoiser driven by measured noise
 
@@ -1431,6 +3100,42 @@ dark; `lighting seed 3` leaves the lighting current and seed 0 returns the pages
 `tunnel_lamps` 0.154 / 0.0002, grain and blotch above; the audits (coverage, HCI, KLM, Unity meta, citations, the command sweep
 regenerated for the two new commands, perf suite).
 
+## 2026-11-08 (round 462): Cleanup after drawing, and Solve Mesh
+
+**Asked:** Pass 20's round C (the drawing solver) - drawing leaves proper topology (no doubled vertices or edges, no
+T-junctions, no faces on top of each other, flat regions merged only where the texture is continuous), and a Solve Mesh
+command does the same to a mesh that exists.
+
+**Changed (task 0438, ADR 0120 decisions 5-6)**
+- **After every Draw commit** (flat and projected path, `Editor::draw_tidy`): the new vertices weld onto existing ones at
+  Push/Pull's tolerance (never more than a tenth of the shape's shortest side; a local weld whose cost follows the draw, wires
+  and marks following), faces the shape flattened onto an old edge go (`dissolve_line_faces`, their corners threaded into the
+  face across) and a corner on another face's edge joins it (`meshops::fix_t_junctions`, among the faces around the new
+  vertices; an old vertex never joins a piece of an old edge, so a separate shell stays apart). Nothing is merged: the
+  lines you drew before stay. A draw that would leave more area lying on top of other faces is rolled back - the mesh in
+  place and the selection as before - with a warning (a toast) saying why; the guard measures only beside what the draw
+  changed (`meshops::draw_overlap_gain`), so it costs the same on a 19,600-face wall as on a quad.
+- **`meshops::fix_t_junctions(m, verts, eps)`** (`mesh_cleanup.cpp`): a vertex strictly inside an edge of faces it isn't
+  in, within eps, is inserted into every face on that edge (one batched rebuild, UVs interpolated per face, seams and
+  marks following); candidates from a cell grid, not all pairs; NaN positions skipped.
+- **Solve Mesh** (Mesh > Merge & Clean Up, `editop solve_mesh`, a redoable operator): on the selection's vertices or
+  the whole mesh - weld, T-junctions, doubled faces, faces flattened onto a line, the UV-safe coplanar merge, and a toast
+  counting what was fixed and what still lies on top of each other (faces, vertices, edges). F9 holds the Weld Distance
+  (1e-4 of the mesh's size) and the Merge Angle (1); `redo amount2 <degrees>` from the console.
+- **Drawing tolerances relative to the mesh** (`meshops::relative_eps`): the `1e-4 x max(1, size)` of the imprint, Push
+  Through, Push/Pull and Draw code were absolute below size 1 (a rectangle bigger than a 1e-4-sized face was imprinted);
+  now rel x the mesh size (half the bounding diagonal) with a floor of 8 float steps at the farthest coordinate.
+- **`imprint_loop_across`** refuses a NaN or infinite outline (it added a face); Push Through's Boolean fallback gives
+  its walls UVs read off the faces they cut (Manifold builds only).
+- **Learn:** a "Solve Mesh" section (Try-it, two questions) and a line and a question in "Drawing onto faces".
+
+**Not done:** the stress runs and the cause of the one projected cut that leaves faces on top of each other were held back (a bake was being timed); the Boolean fallback's UV code runs in no build here (no Manifold in the dependency-free build): the test skips
+there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interface).
+
+**Also (testing):** the after-draw overlap guard compares the area lying on another face, not the number of such pairs (a draw that only split a face already in a pair was refused); Solve Mesh on a selection no longer welds an unselected shell touching it (its scope is the selection's faces, not their places).
+
+**Checked:** both suites - with Blender's libraries 20,551; dependency-free 19,636 (Windows) and 19,642 (Linux, WSL), 0 failed; the audits; stress on Linux - `curved` 5,036 / 3 / 68, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 (the same as main); the projected-draw block 236 draws, 82 refused, 0 problems, 0 doubled vertices or edges after drawing; the 51k-face teapot cut 480 ms, cleanup 8 ms, guard 28 ms.
+
 ## 2026-11-08 (round 461): Draw projects onto curved surfaces
 
 **Asked:** Pass 20's round B (the drawing solver) - a shape drawn over a curved mesh (the Utah teapot) lands on the
@@ -1492,6 +3197,40 @@ you drew.
 
 **Checked:** both suites - with Blender's libraries 17,806; dependency-free 16,908 (Windows) and 16,914 (Linux, WSL), 0 failed (the libraries build's gpu group passes once its scratch copy has the colour-management data); the audits; stress `curved` 5,036 operations / 3 problems / 68 overlaps, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 - the same as main's on Linux.
 
+## 2026-11-08 (round 459): lights at the project's linear intensity
+
+**Asked:** why round 452 made SideRail's lightmap pages brighter and further from Unity's (side tunnel 4.07x -> 4.87x Unity's light, main tunnel 2.20x -> 3.28x, MAE 18.27 -> 20.47, SSIM 0.592 -> 0.545); fix what is wrong.
+
+**Fixed (task 0435)**
+- **Found by bisect:** the bake is deterministic (two runs, bit-identical pages); with round 452's multipliers forced to 1 the pages are round 451's exactly - the change is Unity's own data (SideRail's 20 FootLights bounce at 3). Round 453's light picking changed nothing. Lights split by group showed the side tunnel's excess mostly direct light, and the cause: **SideRail's project lights at linear intensity** (GraphicsSettings `m_LightsUseLinearIntensity: 1`) while Blendity took every Unity scene's colour x intensity in gamma - a lamp of intensity 2 shone 4.6, of 5 shone 34.5.
+- **A bake after a streamed frame:** since round 447 a material a view resolved while its image was still streaming kept that resolve until the batch landed, and Generate Lighting's frozen copy (or a render) reused it - baking the bare colour without the map. Such a resolve now holds only inside the views' stream scope (an axis material's too, when one of its parts was left mid-stream); a caller outside it - the bake's freeze, a render - resolves once again, synchronously on its own thread. (SideRail's headless bake was not affected: bit-identical with and without.)
+
+**Changed**
+- Opening a Unity scene reads `m_LightsUseLinearIntensity` from its project's `ProjectSettings/GraphicsSettings.asset` (`unity_project_settings_file`: the walk up from the scene stops at the project root, the first folder holding an Assets folder) and sets Lights Gamma from it; with none found the lights stay in gamma (Unity's default), and a binary GraphicsSettings is said in the log. **ADR 0099 amended** - to be confirmed at review.
+- **Scenes saved before this round keep Lights Gamma on:** opening a saved scene whose Unity project says otherwise logs one line naming `unity lightsgamma off` (or `on`); the saved value is not changed. Live Link and `unity lightmaps` don't read the setting again.
+- `tools/unity_compare.py` passes the Unity project copy's setting to Blendity's bake and renders (Blendity's copy holds only Assets).
+
+**Added**
+- Console: `unity lightsgamma [on|off]` - shows or sets it for a copy without ProjectSettings.
+- **Learn:** "Light intensity: linear or gamma", a question and a Try-it.
+
+**Checked:** SideRail's pages (`unity_compare.py pages`, Unity's pages unchanged): side tunnel 4.85x -> 2.34x, main tunnel 3.20x -> 2.24x, MAE 20.47 -> 10.12, SSIM 0.545 -> 0.677; the service tunnel's floors and low tables now 1.0x Unity's light. Still open: the bounce is too strong with Unity's multipliers (10.12 / 0.677 against 8.77 / 0.724 with them forced to 1). The chain's own page compare (`--pages`, this build) gives the same pages: MAE 10.12, SSIM 0.677. SideRail's stations in that chain: spawn 3.57 / 0.843 / 0.869, spawn_back (dark) 1.30 / 0.791 / 0.669, floor 3.35 / 0.818 / 0.961, ahead 2.32 / 0.933 / 0.948 (MAE / SSIM / grid; round 458's chain: 3.21 / 0.903 / 0.922, 1.05 / 0.895 / 0.768, 4.99 / 0.879 / 0.956, 3.17 / 0.939 / 0.876). Every station's MAE is now under 4 (the floor 4.99 -> 3.35) and ahead's grid correlation rose (0.876 -> 0.948), but **SSIM fell** at spawn (0.903 -> 0.843), spawn_back and the floor (0.879 -> 0.818), and spawn's grid correlation fell: ADR 0113's target is still missed at three stations, now on SSIM. Of the two rounds in that chain only this one changes SideRail's bake (round 455's groups and window don't apply: SideRail uses Unity's probes). Why the stations' SSIM fell while their MAE and the pages improved is open. The bake-quality section as before (room 0.016, corridor 0.008, courtyard 0.060). Both suites - with Blender's libraries 17,695; dependency-free 16,781 (Windows) and 16,787 (Linux, WSL), 0 failed; the audits (one chain over rounds 455 and 459 together).
+
+## 2026-11-08 (round 458): kept instances, meshes streamed
+
+**Asked:** Pass 19's round 458 - the halves rounds 447-449 left: the CPU built the card's instance array on every frame (50,000 cubes 47-60 ms), a big import's meshes all went up in the first frame (SideRail 366 ms), and the UI's cost on idle frames.
+
+**Changed (task 0434)**
+- **Kept instances:** a view slot keeps its `RasterInstance` array while what `raster_instance`, `raster_axis` and `solid_instance` read holds still - the key is a hash of the items' fields (placement, flags, colours, the pointers to mesh, materials and lightmaps), the meshes' serials (and whether they have tangents / UVs), each material's version (an axis material's parts too), the textures' generation and the shade mode - and the card ids it holds (a kept frame looks each mesh up and asks for each material texture again, which also keeps them on the card: a texture that lands, or a mesh the card let go or sent under another id, rebuilds). On a hit the gather is skipped and the card is not sent the array again. **Not kept (gathered every frame as before): frames with a baked item (lightmap, probe, Light Volume), a see-through or volume material, Edit Mode's face highlight, vertex colours, a live procedural texture, or a mesh without a serial - so Shinano and SideRail (lightmapped / probe-lit) gain nothing here; the gain is in plain scenes like 50,000 cubes.** Verify mode (`BLENDITY_RENDER_CACHE_VERIFY`) gathers anyway and compares byte for byte; a difference counts as a stale picture.
+- **Meshes streamed:** while the views stream (a window, or a headless editor with `jobs async on`) a frame sends at most 16 MB of meshes new to the card, judged by each mesh's size first (only a frame's first mesh may go past the budget); the rest wait - their items are left out of that frame, not drawn on the CPU - and the view asks for another frame until the queue is empty. The selected and the edited object's mesh is never held back; a headless screenshot, render, bake or export has no deferral. `perf wait` waits for the queue; the time from the first mesh left waiting to the frame none was is logged.
+- **The budget counts time too (4 ms of first-use work a frame; the corner buffer starts at 64 MB):** SideRail's 108 meshes are 9.5 MB - under the byte budget - but their first uses cost 56 ms of `add_mesh` and 240 ms of baked corners and lightmap pages in one frame, much of it waiting for the card (`settle`) and the corner buffer growing (each growth waited for the card to go idle and copied the lot; it now starts at 64 MB, retrying at 16 MB if that doesn't fit). Only a mesh, a corner block or a lightmap page actually built counts. SideRail (headless, workers on): first frame 351 -> 101 ms, the longest drain frame 175 -> 73 ms, every mesh on the card after ~0.7 s. The < 50 ms first-frame target is **not met** (the cold gather's 40 ms and the first item's page and corner upload remain); double-buffered uploads (no wait for the card) and a cheaper cold gather are carried to the write-up's open list.
+- **Counters:** the Profiler's "instance arrays kept / gathered; meshes left waiting / queue" row and the windowed check's line; `instances_kept_for_test()`, `mesh_queue_for_test()`, `mesh_drain_ms_for_test()`.
+- **Not done: the UI's reuse.** A UI replay was built and dropped: the UI is immediate-mode painting into the window's canvas (no draw list), and in a real window an idle frame does not run at all, so a frame that leaves the UI out only happens under Always redraw or a forced-frame harness - where it freezes live readouts (the Profiler, the frame time). The 2.8 ms UI cost shows on frames that redraw for a reason (an orbit). The real gain needs per-window redraw (only the Scene view's rect re-run when only the camera moved); carried to the write-up's open list.
+- **Learn:** "Rendering on the GPU" gains "Keeping what did not change (round 458)", with two questions and a Try-it.
+- Timings (windowed on the card, nothing else building, two runs each against round 447's build): 50,000 cubes' Scene view 47.5 / 62.3 -> 33.1 / 33.5 ms (`scene` 39.7 / 54.1 -> 26.1 / 26.0, of it the views' `gpu` part 24.2 / 33.0 -> 11.1 / 11.1) - the < 25 ms target **not met**; Shinano's Scene view 3.6 / 4.4 -> 3.8 / 3.9 ms (baked: nothing kept, as expected); SideRail's first frame 351 -> 101 ms. See docs/PERFORMANCE.md.
+
+**Checked:** both suites - with Blender's libraries 17,422; dependency-free 16,555 (Windows) and 16,561 (Linux, WSL), 0 failed; the audits (one chain over rounds 458, 452 and 453 together).
+
 ## 2026-11-08 (round 457): Pass 19's write-up
 
 **Asked:** Pass 19's round 457 - the pass in one table, the comparison with Unity, the lesson, the baseline, the per-round
@@ -1515,24 +3254,25 @@ wall time against Passes 17 and 18, and the parallel-agents data for the owner's
 
 **Checked:** both suites - with Blender's libraries 17,695 (1 failed: OpenPGL's stochastic "path guiding learns and stays unbiased", test_render.cpp:286; run again alone it passes - guided 0.0286 against 0.0284, 2 checks, 0 failed); dependency-free 16,781 (Windows), 0 failed; 16,787 (Linux, WSL; 1 failed: the load-sensitive Live Link timing check, test_livelink.cpp:2204, under another session's builds; run again alone 366 checks, 0 failed); the audits.
 
-## 2026-11-08 (round 459): lights at the project's linear intensity
+## 2026-11-08 (round 456): A running surface's planes
 
-**Asked:** why round 452 made SideRail's lightmap pages brighter and further from Unity's (side tunnel 4.07x -> 4.87x Unity's light, main tunnel 2.20x -> 3.28x, MAE 18.27 -> 20.47, SSIM 0.592 -> 0.545); fix what is wrong.
+**Asked:** Pass 19's round 456 - the soak's one open memory item: a running 4096 x 4096 surface held 738 MB of planes, and
+its finished images were built even for the maps switched off.
 
-**Fixed (task 0435)**
-- **Found by bisect:** the bake is deterministic (two runs, bit-identical pages); with round 452's multipliers forced to 1 the pages are round 451's exactly - the change is Unity's own data (SideRail's 20 FootLights bounce at 3). Round 453's light picking changed nothing. Lights split by group showed the side tunnel's excess mostly direct light, and the cause: **SideRail's project lights at linear intensity** (GraphicsSettings `m_LightsUseLinearIntensity: 1`) while Blendity took every Unity scene's colour x intensity in gamma - a lamp of intensity 2 shone 4.6, of 5 shone 34.5.
-- **A bake after a streamed frame:** since round 447 a material a view resolved while its image was still streaming kept that resolve until the batch landed, and Generate Lighting's frozen copy (or a render) reused it - baking the bare colour without the map. Such a resolve now holds only inside the views' stream scope (an axis material's too, when one of its parts was left mid-stream); a caller outside it - the bake's freeze, a render - resolves once again, synchronously on its own thread. (SideRail's headless bake was not affected: bit-identical with and without.)
+**Changed (task 0432)**
+- **The planes a stack doesn't use aren't allocated:** the cover, metallic and emission planes (4, 4 and 12 bytes a texel)
+  are made when a layer writes or reads them - by its targets, or by `planes_read` (Warp / Tile move the cover with the
+  colour, Math / Map Range / Clamp read Metallic, a Paint layer blends Metallic and Emission). A missing plane reads as
+  its default. A 4096 x 4096 stack without them holds 24 bytes a texel: **738 MB -> 402 MB** (28 bytes, 470 MB, with a
+  metallic layer).
+- **A flat output is made when asked for:** Normal / Roughness / Height switched off, and Emission with no layer writing
+  it, are one flat colour - the cache notes the colour and size and makes the image (the same bytes, size and mips) when
+  the Textures window or an export asks. Metallic, which every surface material reads, is still built on the surface's
+  worker, so a material never makes a 4096 x 4096 image on the main thread (307 ms measured for Emission's). A texture used only for its albedo now holds one image
+  instead of six. `procedural_texture_planes_bytes` follows both.
+- Nothing a consumer sees changed: the planes, the six images and their mips are byte for byte what the full path makes.
 
-**Changed**
-- Opening a Unity scene reads `m_LightsUseLinearIntensity` from its project's `ProjectSettings/GraphicsSettings.asset` (`unity_project_settings_file`: the walk up from the scene stops at the project root, the first folder holding an Assets folder) and sets Lights Gamma from it; with none found the lights stay in gamma (Unity's default), and a binary GraphicsSettings is said in the log. **ADR 0099 amended** - to be confirmed at review.
-- **Scenes saved before this round keep Lights Gamma on:** opening a saved scene whose Unity project says otherwise logs one line naming `unity lightsgamma off` (or `on`); the saved value is not changed. Live Link and `unity lightmaps` don't read the setting again.
-- `tools/unity_compare.py` passes the Unity project copy's setting to Blendity's bake and renders (Blendity's copy holds only Assets).
-
-**Added**
-- Console: `unity lightsgamma [on|off]` - shows or sets it for a copy without ProjectSettings.
-- **Learn:** "Light intensity: linear or gamma", a question and a Try-it.
-
-**Checked:** SideRail's pages (`unity_compare.py pages`, Unity's pages unchanged): side tunnel 4.85x -> 2.34x, main tunnel 3.20x -> 2.24x, MAE 20.47 -> 10.12, SSIM 0.545 -> 0.677; the service tunnel's floors and low tables now 1.0x Unity's light. Still open: the bounce is too strong with Unity's multipliers (10.12 / 0.677 against 8.77 / 0.724 with them forced to 1). The chain's own page compare (`--pages`, this build) gives the same pages: MAE 10.12, SSIM 0.677. SideRail's stations in that chain: spawn 3.57 / 0.843 / 0.869, spawn_back (dark) 1.30 / 0.791 / 0.669, floor 3.35 / 0.818 / 0.961, ahead 2.32 / 0.933 / 0.948 (MAE / SSIM / grid; round 458's chain: 3.21 / 0.903 / 0.922, 1.05 / 0.895 / 0.768, 4.99 / 0.879 / 0.956, 3.17 / 0.939 / 0.876). Every station's MAE is now under 4 (the floor 4.99 -> 3.35) and ahead's grid correlation rose (0.876 -> 0.948), but **SSIM fell** at spawn (0.903 -> 0.843), spawn_back and the floor (0.879 -> 0.818), and spawn's grid correlation fell: ADR 0113's target is still missed at three stations, now on SSIM. Of the two rounds in that chain only this one changes SideRail's bake (round 455's groups and window don't apply: SideRail uses Unity's probes). Why the stations' SSIM fell while their MAE and the pages improved is open. The bake-quality section as before (room 0.016, corridor 0.008, courtyard 0.060). Both suites - with Blender's libraries 17,695; dependency-free 16,781 (Windows) and 16,787 (Linux, WSL), 0 failed; the audits (one chain over rounds 455 and 459 together).
+**Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits.
 
 ## 2026-11-08 (round 455): SH deringing, Light Probe Groups as objects
 
@@ -1593,59 +3333,6 @@ wall time against Passes 17 and 18, and the parallel-agents data for the owner's
 
 **Checked:** both suites - with Blender's libraries 17,422; dependency-free 16,555 (Windows) and 16,561 (Linux, WSL), 0 failed; the audits (one chain over rounds 458, 452 and 453 together).
 
-## 2026-11-08 (round 458): kept instances, meshes streamed
-
-**Asked:** Pass 19's round 458 - the halves rounds 447-449 left: the CPU built the card's instance array on every frame (50,000 cubes 47-60 ms), a big import's meshes all went up in the first frame (SideRail 366 ms), and the UI's cost on idle frames.
-
-**Changed (task 0434)**
-- **Kept instances:** a view slot keeps its `RasterInstance` array while what `raster_instance`, `raster_axis` and `solid_instance` read holds still - the key is a hash of the items' fields (placement, flags, colours, the pointers to mesh, materials and lightmaps), the meshes' serials (and whether they have tangents / UVs), each material's version (an axis material's parts too), the textures' generation and the shade mode - and the card ids it holds (a kept frame looks each mesh up and asks for each material texture again, which also keeps them on the card: a texture that lands, or a mesh the card let go or sent under another id, rebuilds). On a hit the gather is skipped and the card is not sent the array again. **Not kept (gathered every frame as before): frames with a baked item (lightmap, probe, Light Volume), a see-through or volume material, Edit Mode's face highlight, vertex colours, a live procedural texture, or a mesh without a serial - so Shinano and SideRail (lightmapped / probe-lit) gain nothing here; the gain is in plain scenes like 50,000 cubes.** Verify mode (`BLENDITY_RENDER_CACHE_VERIFY`) gathers anyway and compares byte for byte; a difference counts as a stale picture.
-- **Meshes streamed:** while the views stream (a window, or a headless editor with `jobs async on`) a frame sends at most 16 MB of meshes new to the card, judged by each mesh's size first (only a frame's first mesh may go past the budget); the rest wait - their items are left out of that frame, not drawn on the CPU - and the view asks for another frame until the queue is empty. The selected and the edited object's mesh is never held back; a headless screenshot, render, bake or export has no deferral. `perf wait` waits for the queue; the time from the first mesh left waiting to the frame none was is logged.
-- **The budget counts time too (4 ms of first-use work a frame; the corner buffer starts at 64 MB):** SideRail's 108 meshes are 9.5 MB - under the byte budget - but their first uses cost 56 ms of `add_mesh` and 240 ms of baked corners and lightmap pages in one frame, much of it waiting for the card (`settle`) and the corner buffer growing (each growth waited for the card to go idle and copied the lot; it now starts at 64 MB, retrying at 16 MB if that doesn't fit). Only a mesh, a corner block or a lightmap page actually built counts. SideRail (headless, workers on): first frame 351 -> 101 ms, the longest drain frame 175 -> 73 ms, every mesh on the card after ~0.7 s. The < 50 ms first-frame target is **not met** (the cold gather's 40 ms and the first item's page and corner upload remain); double-buffered uploads (no wait for the card) and a cheaper cold gather are carried to the write-up's open list.
-- **Counters:** the Profiler's "instance arrays kept / gathered; meshes left waiting / queue" row and the windowed check's line; `instances_kept_for_test()`, `mesh_queue_for_test()`, `mesh_drain_ms_for_test()`.
-- **Not done: the UI's reuse.** A UI replay was built and dropped: the UI is immediate-mode painting into the window's canvas (no draw list), and in a real window an idle frame does not run at all, so a frame that leaves the UI out only happens under Always redraw or a forced-frame harness - where it freezes live readouts (the Profiler, the frame time). The 2.8 ms UI cost shows on frames that redraw for a reason (an orbit). The real gain needs per-window redraw (only the Scene view's rect re-run when only the camera moved); carried to the write-up's open list.
-- **Learn:** "Rendering on the GPU" gains "Keeping what did not change (round 458)", with two questions and a Try-it.
-- Timings (windowed on the card, nothing else building, two runs each against round 447's build): 50,000 cubes' Scene view 47.5 / 62.3 -> 33.1 / 33.5 ms (`scene` 39.7 / 54.1 -> 26.1 / 26.0, of it the views' `gpu` part 24.2 / 33.0 -> 11.1 / 11.1) - the < 25 ms target **not met**; Shinano's Scene view 3.6 / 4.4 -> 3.8 / 3.9 ms (baked: nothing kept, as expected); SideRail's first frame 351 -> 101 ms. See docs/PERFORMANCE.md.
-
-**Checked:** both suites - with Blender's libraries 17,422; dependency-free 16,555 (Windows) and 16,561 (Linux, WSL), 0 failed; the audits (one chain over rounds 458, 452 and 453 together).
-
-## 2026-11-08 (round 447): textures stream in
-
-**Asked:** Pass 19's round 447 - opening a big imported scene (SideRail) stalls the first Scene view frame for as long as every texture takes to decode: no frame should wait for a file.
-
-**Changed (task 0423)**
-- **Textures stream in:** in the Scene, Game and Camera Preview views (not renders, bakes or exports) a material's image file that is not in the texture cache shows the material's colours and is loaded on a worker, one batch at a time; when a batch lands the materials resolve again and the maps appear. Only where jobs run on workers (a window; a headless editor with `jobs async on`). A scene switch cancels the batch.
-- **A file that won't decode** is tried once and its material shows it missing (the warning once per material and file) until the file changes - a paint stroke's every-frame invalidation does not retry it.
-- **The card's budget:** while streaming, a frame sends at most 48 MB of material maps to the card; the rest go up in the next frames.
-- **`perf frames N`** (headless): steps N frames; `perf wait` also waits for the stream (and the windowed check's settle).
-- **Learn:** "Importing models: their materials made for you" gains "Textures stream in (round 447)", with two questions and a Try-it.
-- On SideRail the `open` command's own stall is unchanged (0.8 s); no frame then waits for the textures: the first frame is 366 ms (the meshes going up), the next five 34-35 ms in all, the longest frame while the textures land 69-77 ms, all in after 1.35 s.
-
-**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
-
-## 2026-11-08 (round 449): the Scene view's static overlays kept
-
-**Asked:** Pass 19's round 449 - the Scene view recorded every overlay every frame; 50,000 cubes spent 15-20 ms on them.
-
-**Changed (task 0425)**
-- **Kept overlays:** the overlays that only edits change (colliders, Light Volumes, reflection probes, wireframes, the probes' dots, the selection outline) are recorded once and kept while the selection, the view's switches, the bake generations and the scene's change counter hold still (checked every 8th frame; every frame in verify mode, which records fresh and counts a difference as a stale picture); what moves by itself (trails, handles, footprints, the centre of mass) is recorded every frame.
-- 50,000 cubes' overlays 19.8 / 14.8 -> 2.6 / 1.8 ms; Shinano's 1.15 -> 0.19 ms.
-- **Not done, moved to round 458:** the UI's reuse - Shinano's Scene view is 5.3-5.5 ms against the target of 3.3 (its UI is 2.8 ms).
-- **Learn:** "Rendering on the GPU" gains "The overlays that wait for an edit (round 449)", with two questions and a Try-it.
-
-**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
-
-## 2026-11-08 (round 448): instanced draws on the card
-
-**Asked:** Pass 19's round 448 - 50,000 cubes sharing one mesh were 50,000 draw calls a pass on the card; target under 25 ms a frame.
-
-**Changed (task 0424)**
-- **Instanced draws:** neighbouring instances of one mesh (same triangles and pipeline) draw as one instanced call in the shadow, G-buffer, toon and baked passes, each still reading its own colour and place; the mesh's buffers are bound once per mesh. 100 cubes of one mesh: 100 calls -> 1.
-- 50,000 cubes' Scene view 80.3 / 62.8 -> 59.5 / 47.5 ms (together with round 449's overlays).
-- **Not done, moved to round 458:** kept instances - the CPU still builds the 50,000 instances every frame, so the view is 47-60 ms against the target of under 25.
-- **Learn:** "Rendering on the GPU" gains "One call for many (round 448)", with two questions and a Try-it.
-
-**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
-
 ## 2026-11-08 (round 451): where the stations' error lives
 
 **Asked:** Pass 19's round 451 - Blendity's bake of SideRail misses ADR 0113's target (SSIM 0.77-0.88) and nobody knows
@@ -1675,26 +3362,6 @@ which part carries the error: diagnostics that say where, and one known differen
 **Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits; `py tools/image_compare.py --self-test` and `py tools/unity_compare.py --self-test` pass. Not
 measured here: the SideRail stations with the new probes and the diagnostics (the owner's session runs Unity).
 
-## 2026-11-08 (round 456): A running surface's planes
-
-**Asked:** Pass 19's round 456 - the soak's one open memory item: a running 4096 x 4096 surface held 738 MB of planes, and
-its finished images were built even for the maps switched off.
-
-**Changed (task 0432)**
-- **The planes a stack doesn't use aren't allocated:** the cover, metallic and emission planes (4, 4 and 12 bytes a texel)
-  are made when a layer writes or reads them - by its targets, or by `planes_read` (Warp / Tile move the cover with the
-  colour, Math / Map Range / Clamp read Metallic, a Paint layer blends Metallic and Emission). A missing plane reads as
-  its default. A 4096 x 4096 stack without them holds 24 bytes a texel: **738 MB -> 402 MB** (28 bytes, 470 MB, with a
-  metallic layer).
-- **A flat output is made when asked for:** Normal / Roughness / Height switched off, and Emission with no layer writing
-  it, are one flat colour - the cache notes the colour and size and makes the image (the same bytes, size and mips) when
-  the Textures window or an export asks. Metallic, which every surface material reads, is still built on the surface's
-  worker, so a material never makes a 4096 x 4096 image on the main thread (307 ms measured for Emission's). A texture used only for its albedo now holds one image
-  instead of six. `procedural_texture_planes_bytes` follows both.
-- Nothing a consumer sees changed: the planes, the six images and their mips are byte for byte what the full path makes.
-
-**Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits.
-
 ## 2026-11-08 (round 450): The GPU editor frames' drift, attributed
 
 **Asked:** Pass 19's round 450 - Pass 18's baseline read the GPU editor frames 8-18 % slower than Pass 17's end; find the
@@ -1711,6 +3378,44 @@ round or the feature, and gate what costs.
 
 **Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits.
 
+## 2026-11-08 (round 449): the Scene view's static overlays kept
+
+**Asked:** Pass 19's round 449 - the Scene view recorded every overlay every frame; 50,000 cubes spent 15-20 ms on them.
+
+**Changed (task 0425)**
+- **Kept overlays:** the overlays that only edits change (colliders, Light Volumes, reflection probes, wireframes, the probes' dots, the selection outline) are recorded once and kept while the selection, the view's switches, the bake generations and the scene's change counter hold still (checked every 8th frame; every frame in verify mode, which records fresh and counts a difference as a stale picture); what moves by itself (trails, handles, footprints, the centre of mass) is recorded every frame.
+- 50,000 cubes' overlays 19.8 / 14.8 -> 2.6 / 1.8 ms; Shinano's 1.15 -> 0.19 ms.
+- **Not done, moved to round 458:** the UI's reuse - Shinano's Scene view is 5.3-5.5 ms against the target of 3.3 (its UI is 2.8 ms).
+- **Learn:** "Rendering on the GPU" gains "The overlays that wait for an edit (round 449)", with two questions and a Try-it.
+
+**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-08 (round 448): instanced draws on the card
+
+**Asked:** Pass 19's round 448 - 50,000 cubes sharing one mesh were 50,000 draw calls a pass on the card; target under 25 ms a frame.
+
+**Changed (task 0424)**
+- **Instanced draws:** neighbouring instances of one mesh (same triangles and pipeline) draw as one instanced call in the shadow, G-buffer, toon and baked passes, each still reading its own colour and place; the mesh's buffers are bound once per mesh. 100 cubes of one mesh: 100 calls -> 1.
+- 50,000 cubes' Scene view 80.3 / 62.8 -> 59.5 / 47.5 ms (together with round 449's overlays).
+- **Not done, moved to round 458:** kept instances - the CPU still builds the 50,000 instances every frame, so the view is 47-60 ms against the target of under 25.
+- **Learn:** "Rendering on the GPU" gains "One call for many (round 448)", with two questions and a Try-it.
+
+**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-08 (round 447): textures stream in
+
+**Asked:** Pass 19's round 447 - opening a big imported scene (SideRail) stalls the first Scene view frame for as long as every texture takes to decode: no frame should wait for a file.
+
+**Changed (task 0423)**
+- **Textures stream in:** in the Scene, Game and Camera Preview views (not renders, bakes or exports) a material's image file that is not in the texture cache shows the material's colours and is loaded on a worker, one batch at a time; when a batch lands the materials resolve again and the maps appear. Only where jobs run on workers (a window; a headless editor with `jobs async on`). A scene switch cancels the batch.
+- **A file that won't decode** is tried once and its material shows it missing (the warning once per material and file) until the file changes - a paint stroke's every-frame invalidation does not retry it.
+- **The card's budget:** while streaming, a frame sends at most 48 MB of material maps to the card; the rest go up in the next frames.
+- **`perf frames N`** (headless): steps N frames; `perf wait` also waits for the stream (and the windowed check's settle).
+- **Learn:** "Importing models: their materials made for you" gains "Textures stream in (round 447)", with two questions and a Try-it.
+- On SideRail the `open` command's own stall is unchanged (0.8 s); no frame then waits for the textures: the first frame is 366 ms (the meshes going up), the next five 34-35 ms in all, the longest frame while the textures land 69-77 ms, all in after 1.35 s.
+
+**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 446): Pass 18's write-up
 
 **Asked:** Pass 18's round 446 - the pass in one table, the comparison with Unity, the lessons, the baseline; and the
@@ -1726,36 +3431,6 @@ workflow's scripts kept in the repository.
 - **Learn:** "How good is the bake?" gains Pass 18's result and a question.
 
 **Checked:** both suites - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits.
-
-## 2026-11-08 (round 444): Shadowmask and Subtractive
-
-**Asked:** Pass 18's round 444 - Unity's other two Lighting Modes, read from Unity scenes instead of noted.
-
-**Changed (task 0420, ADR 0117)**
-- **Shadowmask:** Mixed lights keep their realtime light, their shadows from the static scene baked into a mask (three
-  lights), on the CPU and the card - a Mixed lamp's shadow, which no view drew before.
-- **Subtractive, as Unity splits it:** the main directional Mixed light baked into the lightmaps and realtime on moving
-  objects (their shadow darkening the lightmap toward Unity's shadow colour); the other Mixed lights baked fully. Unity's
-  own Subtractive lightmaps (SideRail's) no longer get their Mixed lights again in realtime.
-- **Unity's `m_MixedBakeMode`** sets the scene's Lighting Mode.
-- **Learn:** "Mixed lights: Baked Indirect, Shadowmask, Subtractive".
-
-**Checked:** one chain with round 442 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits; the bake-quality section unchanged (room 0.016, corridor 0.008, courtyard 0.060). SideRail has no Mixed lights (10 Baked, 1 Realtime), so its stations are round 441's: spawn 3.69 / 0.809, floor 4.25 / 0.771, ahead 3.06 / 0.884 (MAE / SSIM); the bake 74 s.
-
-## 2026-11-08 (round 442): L2 SH probes and Light Probe Groups
-
-**Asked:** Pass 18's round 442 - probes as L2 spherical harmonics, and Unity's Light Probe Groups interpolated over
-their tetrahedra.
-
-**Changed (task 0418, ADR 0116)**
-- **Probes keep L2 SH** (nine coefficients a colour) beside the ambient cube, baked from the same rays and lamps; baked
-  probe light shades from them on the CPU and the card. A sun-lit probe's light against N.L: mean error 0.132 -> 0.023.
-- **Unity's probes** come along 26 directions (the lighting file's version 3), fitted to L2, and are interpolated over
-  the tetrahedra of their positions (Light Probe Groups), as Unity does - an older lighting file's probes too (their
-  cubes), so a Unity scene's probe light can change a little where it was taken from the nearest four.
-- **Learn:** "Light probes: nine numbers a colour, and tetrahedra".
-
-**Checked:** one chain with round 444 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed (round 444's card test first read its view's device after a CPU view - fixed); the audits.
 
 ## 2026-11-07 (round 445): the soak's memory
 
@@ -1779,6 +3454,21 @@ their tetrahedra.
 
 **Checked:** one chain with round 443 - with Blender's libraries 16,542; dependency-free 15,767 (Windows) and 15,773 (Linux, WSL), 0 failed; the audits. The soak (seed 4242): the working set 699 -> 521 MB at minute 1, flat to the end.
 
+## 2026-11-08 (round 444): Shadowmask and Subtractive
+
+**Asked:** Pass 18's round 444 - Unity's other two Lighting Modes, read from Unity scenes instead of noted.
+
+**Changed (task 0420, ADR 0117)**
+- **Shadowmask:** Mixed lights keep their realtime light, their shadows from the static scene baked into a mask (three
+  lights), on the CPU and the card - a Mixed lamp's shadow, which no view drew before.
+- **Subtractive, as Unity splits it:** the main directional Mixed light baked into the lightmaps and realtime on moving
+  objects (their shadow darkening the lightmap toward Unity's shadow colour); the other Mixed lights baked fully. Unity's
+  own Subtractive lightmaps (SideRail's) no longer get their Mixed lights again in realtime.
+- **Unity's `m_MixedBakeMode`** sets the scene's Lighting Mode.
+- **Learn:** "Mixed lights: Baked Indirect, Shadowmask, Subtractive".
+
+**Checked:** one chain with round 442 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits; the bake-quality section unchanged (room 0.016, corridor 0.008, courtyard 0.060). SideRail has no Mixed lights (10 Baked, 1 Realtime), so its stations are round 441's: spawn 3.69 / 0.809, floor 4.25 / 0.771, ahead 3.06 / 0.884 (MAE / SSIM); the bake 74 s.
+
 ## 2026-11-07 (round 443): Light Volumes in the views
 
 **Asked:** Pass 18's round 443 - both renderers sample the baked VRC Light Volumes on dynamic objects as VRChat does, so
@@ -1799,6 +3489,21 @@ the view matches the headset; a toggle for it.
 
 **Checked:** both suites - with Blender's libraries 16,542 (one chain with round 445); dependency-free 15,767 (Windows) and 15,773
 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-08 (round 442): L2 SH probes and Light Probe Groups
+
+**Asked:** Pass 18's round 442 - probes as L2 spherical harmonics, and Unity's Light Probe Groups interpolated over
+their tetrahedra.
+
+**Changed (task 0418, ADR 0116)**
+- **Probes keep L2 SH** (nine coefficients a colour) beside the ambient cube, baked from the same rays and lamps; baked
+  probe light shades from them on the CPU and the card. A sun-lit probe's light against N.L: mean error 0.132 -> 0.023.
+- **Unity's probes** come along 26 directions (the lighting file's version 3), fitted to L2, and are interpolated over
+  the tetrahedra of their positions (Light Probe Groups), as Unity does - an older lighting file's probes too (their
+  cubes), so a Unity scene's probe light can change a little where it was taken from the nearest four.
+- **Learn:** "Light probes: nine numbers a colour, and tetrahedra".
+
+**Checked:** one chain with round 444 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed (round 444's card test first read its view's device after a CPU view - fixed); the audits.
 
 ## 2026-11-07 (round 441): sampling
 
@@ -4402,28 +6107,6 @@ the Inspector says why (tested: a shin as the thigh, the left foot as the right)
 analysis' own bone; the Inspector's line looks again when bones change, and says nothing on an armature never posed;
 names cleaned of the list's separators; one parser.
 
-## 2026-10-31 (round 341): Anime Face Normals from an ellipsoid
-
-**Asked:** the 2D-look methods ("Add those components onto the plan."): face normals from a head-shaped proxy - task
-0149 already made them from a sphere.
-
-**Added (task 0323)**
-- **Rigging > Anime Face Normals (Ellipsoid)** and `facenormals ellipsoid`: the proxy fitted to the head's width,
-  height and depth, so a tall, narrow anime head keeps its shadow line where it is drawn; `facenormals [sphere]` keeps
-  the ball.
-- Without a Head group, the head's slice keeps its height (a cap alone had made the proxy flat).
-- The other two methods of that list were already here: the toon materials' **Shadow Bias** map (task 0148: painted
-  shadow control, Guilty Gear's vertex colour as a texture) and the **Line Map** (task 0149: inner lines in the
-  texture) - not built again.
-
-**Checked:** `tests_round341` - a head three times as tall as wide getting a 0.5 x 1.5 x 0.5 proxy, a top corner's
-normal leaning out where a ball's leans up, `facenormals sphere` keeping the ball, a refused word; the no-group slice;
-a face card's proxy; the lesson's Try-it; the Normal Transfer tests.
-
-**The review's fixes (Opus code-reviewer, changes needed):** the test now checks the normals' direction against a
-ball's (it had checked only their length); a flat head's proxy is never thinner than a quarter of its width (a sheet's
-two faces would flip the normals); the lesson's Try-it and the MANUAL's paragraph.
-
 ## 2026-10-31 (round 346): Puppet Posing's controls you can click
 
 **Asked:** "I'm also having trouble just clicking the control points without clicking or transforming the bones. What
@@ -4490,6 +6173,28 @@ The box now faces the camera only while a camera view's own kind is evaluated (a
 meshes and the scene's hash unchanged by a camera's collect). A modifier shown in renders only goes the camera way; a
 lattice at rest keeps the camera out of the key; a rolled camera's right is the screen's (tested); an orthographic
 camera tested; the help, the lesson (a Try-it) and the MANUAL say the box's rotation doesn't count.
+
+## 2026-10-31 (round 341): Anime Face Normals from an ellipsoid
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): face normals from a head-shaped proxy - task
+0149 already made them from a sphere.
+
+**Added (task 0323)**
+- **Rigging > Anime Face Normals (Ellipsoid)** and `facenormals ellipsoid`: the proxy fitted to the head's width,
+  height and depth, so a tall, narrow anime head keeps its shadow line where it is drawn; `facenormals [sphere]` keeps
+  the ball.
+- Without a Head group, the head's slice keeps its height (a cap alone had made the proxy flat).
+- The other two methods of that list were already here: the toon materials' **Shadow Bias** map (task 0148: painted
+  shadow control, Guilty Gear's vertex colour as a texture) and the **Line Map** (task 0149: inner lines in the
+  texture) - not built again.
+
+**Checked:** `tests_round341` - a head three times as tall as wide getting a 0.5 x 1.5 x 0.5 proxy, a top corner's
+normal leaning out where a ball's leans up, `facenormals sphere` keeping the ball, a refused word; the no-group slice;
+a face card's proxy; the lesson's Try-it; the Normal Transfer tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the test now checks the normals' direction against a
+ball's (it had checked only their length); a flat head's proxy is never thinner than a quarter of its width (a sheet's
+two faces would flip the normals); the lesson's Try-it and the MANUAL's paragraph.
 
 ## 2026-10-31 (round 340): animating on 2s and 3s - held in the preview, the camera smooth
 
@@ -5027,6 +6732,34 @@ view rect); the guide and the camera now stay finite.
 
 **Checked:** `tests_round324`, `tests_round324_papers` (real events and clicks).
 
+## 2026-10-29 (round 323): a pen display's dial and express keys - XPPen's Artist 13.3 Pro V2
+
+**Asked:** the user (2026-10-29): "I have the artist 13.3 Pro V2 drawing tablet, make it so that the scroll wheel can be
+used; buttons are compatible."
+
+**Added (task 0303)**
+- **Photoshop's view keys over the Draw tab's pad.** The tablet's express keys send Photoshop's shortcuts, and its dial
+  sends Ctrl- / Ctrl+ by default:
+  - Ctrl+= or Ctrl+Shift+= and Ctrl+- zoom about the pen;
+  - Ctrl+1 is 100% and Ctrl+0 fits;
+  - 4 and 6 turn the canvas, and 5 sets it upright.
+
+  The zoom keys and Ctrl+0 work over the reference board too.
+- **More > Wheel / Dial** chooses what the wheel (or the dial set to scroll) does over the pad: zoom, brush size, turn
+  the canvas, or brush opacity.
+  - Ctrl with it always zooms, and a sideways wheel turns the canvas.
+  - The choice is kept with the preferences; `draw wheel zoom|size|turn|opacity`.
+- **Driver settings:** the MANUAL has a table of what to set in XPPen's driver for each dial and key.
+
+**Checked**
+- `tests_round323`:
+  - the keys by real key events, the zoom about the pen within 1 px;
+  - the four wheel modes, chosen by clicks, and Ctrl with the wheel;
+  - a sideways wheel;
+  - the preferences.
+- The board's zoom keys.
+- The keymap presets have no clash.
+
 ## 2026-10-29 (round 322): the reference board - PureRef's endless canvas as a tab
 
 **Asked:** the user (2026-10-29): "Have an additional tab for making mood/reference boards. Utilize good HCI and other
@@ -5107,34 +6840,6 @@ images in are task 0299; the tools, the links and the HCI pass follow (tasks 030
   - Windows with libraries: 13,710 checks (1210 tests), 0 failed;
   - Linux: 13,262, 0 failed. That run found a crash: X11's clipboard calls had no guard for a headless editor's missing
     window, and they now do.
-
-## 2026-10-29 (round 323): a pen display's dial and express keys - XPPen's Artist 13.3 Pro V2
-
-**Asked:** the user (2026-10-29): "I have the artist 13.3 Pro V2 drawing tablet, make it so that the scroll wheel can be
-used; buttons are compatible."
-
-**Added (task 0303)**
-- **Photoshop's view keys over the Draw tab's pad.** The tablet's express keys send Photoshop's shortcuts, and its dial
-  sends Ctrl- / Ctrl+ by default:
-  - Ctrl+= or Ctrl+Shift+= and Ctrl+- zoom about the pen;
-  - Ctrl+1 is 100% and Ctrl+0 fits;
-  - 4 and 6 turn the canvas, and 5 sets it upright.
-
-  The zoom keys and Ctrl+0 work over the reference board too.
-- **More > Wheel / Dial** chooses what the wheel (or the dial set to scroll) does over the pad: zoom, brush size, turn
-  the canvas, or brush opacity.
-  - Ctrl with it always zooms, and a sideways wheel turns the canvas.
-  - The choice is kept with the preferences; `draw wheel zoom|size|turn|opacity`.
-- **Driver settings:** the MANUAL has a table of what to set in XPPen's driver for each dial and key.
-
-**Checked**
-- `tests_round323`:
-  - the keys by real key events, the zoom about the pen within 1 px;
-  - the four wheel modes, chosen by clicks, and Ctrl with the wheel;
-  - a sideways wheel;
-  - the preferences.
-- The board's zoom keys.
-- The keymap presets have no clash.
 
 ## 2026-10-29 (round 321): the Wheel on the Draw tab, the pen held still opening it, the lesson "Drawing like SketchBook"
 
