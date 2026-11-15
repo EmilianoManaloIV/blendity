@@ -14,6 +14,8 @@
 
 using namespace bl;
 
+void run_blockout_openings_tests();  // (tests/test_blockout_openings.cpp: run at the end of run_hci_tests)
+
 namespace {
 
 struct Finding {
@@ -111,7 +113,7 @@ void check_controls(const ui::Context &u, Sweep &sw, const std::string &config, 
   std::vector<Named> drawn;  // (every control but the menu rows: the ones that lie on each other, whatever their kind)
   for (const auto &c : u.controls) {
     if (!on_screen(c, screen_r) || !seen.insert(std::string(c.kind) + rect_str(c.r)).second) continue;
-    const bool row = std::string(c.kind) == "menu" || std::string(c.kind) == "submenu";
+    const bool row = std::string(c.kind) == "menu" || std::string(c.kind) == "submenu" || std::string(c.kind) == "heading";  // (round 513: a dropdown's heading is a list row, not a control)
     ks.controls++;
     ks.by_kind[c.kind]++;
     if (c.tab_stop) ks.stops++, stops[c.layer].push_back(clipped(c.r, c.clip));
@@ -3051,4 +3053,175 @@ void run_hci_tests() {
     std::printf("    %d Game pane(s), %d with the dropdown under 60 px\n", panes, narrow);
     CHECK(panes > 0);
   });
+
+  /* Round 513, task 0495: a dropdown with headings and separators, on a bare toolkit context driven by real mouse and key input
+   * (nothing in the product draws one yet). Rows: 0 heading Solids, 1 Cube, 2 Room, 3 separator, 4 heading Openings, 5 Door, 6 Window. */
+  struct Grouped {
+    ui::Context u;
+    Image img;
+    int v = 1;
+    double t = 0.0;
+    const Recti r{10, 10, 160, 22};
+    std::vector<const char *> opts;
+    Grouped() {
+      u.record_buttons = true;
+      img.resize(300, 300);
+      opts = {"\001Solids", "Cube", "Room", "\002", "\001Openings", "Door", "Window"};
+    }
+    explicit Grouped(std::vector<const char *> plain, int start) : Grouped() { opts = std::move(plain), v = start; }
+    bool frame() {
+      u.begin_frame(&img, t += 1.0);
+      const bool changed = u.combo(u.id("c"), r, v, opts.data(), (int)opts.size());
+      u.end_frame();
+      return changed;
+    }
+    void settle() { frame(), frame(); }
+    void click(const Recti &at) {
+      u.in.mx = at.x + at.w / 2, u.in.my = at.y + at.h / 2;
+      frame();
+      u.in.pressed[0] = u.in.down[0] = true;
+      frame();
+      u.in.pressed[0] = false;
+      u.in.down[0] = false, u.in.released[0] = true;
+      frame();
+      u.in.released[0] = false;
+      settle();
+    }
+    void key(int k) {
+      u.in.key_pressed[k] = u.in.key_down[k] = true;
+      frame();
+      u.in.key_pressed[k] = u.in.key_down[k] = false;
+      frame();
+    }
+    void open_by_key() {
+      u.in.mx = u.in.my = 290;  // (the pointer is away: nothing under it)
+      u.focus_request(u.id("c"));
+      settle();
+      key(platform::KEY_SPACE);
+    }
+    size_t open_lists() const { return u.popup_rects().size(); }
+    std::string combo_label() const {
+      for (const auto &c : u.controls)
+        if (std::string(c.kind) == "combo") return c.label;
+      return "<none>";
+    }
+    Recti row(const char *text) const {
+      const auto it = u.button_rects.find(std::string("menu:") + text);
+      return it == u.button_rects.end() ? Recti{} : it->second;
+    }
+    Recti heading(const char *text) const {
+      for (const auto &c : u.controls)
+        if (std::string(c.kind) == "heading" && c.label == text) return c.r;
+      return Recti{};
+    }
+  };
+
+  test("hci: a dropdown with headings - a click on a choice after a heading picks it, a click on a heading or the separator does nothing and keeps the list open, and the closed dropdown shows the choice, never a heading (round 513, task 0495)", [] {
+    Grouped g;
+    g.settle();
+    CHECK(g.combo_label() == "Cube");
+    g.click(g.r);
+    std::printf("    list open: %zu popup(s), %zu heading(s) recorded\n", g.open_lists(), (size_t)std::count_if(g.u.controls.begin(), g.u.controls.end(), [](const auto &c) { return std::string(c.kind) == "heading"; }));
+    CHECK(g.open_lists() == 1);
+    const Recti solids = g.heading("Solids"), openings = g.heading("Openings"), door = g.row("Door");
+    CHECK(!solids.empty() && !openings.empty() && !door.empty());
+    g.click(openings);
+    CHECK(g.open_lists() == 1);  // (a click on a heading: still open)
+    CHECK(g.v == 1);
+    g.click(solids);
+    CHECK(g.open_lists() == 1 && g.v == 1);
+    Recti sep = openings;  // (the separator row is the thin one just above the heading's own line: its middle is between Room and Openings)
+    sep.y = g.row("Room").bottom() + 1, sep.h = 1;
+    g.click(sep);
+    CHECK(g.open_lists() == 1 && g.v == 1);
+    g.click(g.row("Door"));
+    std::printf("    after a click on Door: v = %d, %zu popup(s), combo shows '%s'\n", g.v, g.open_lists(), g.combo_label().c_str());
+    CHECK(g.v == 5);
+    CHECK(g.open_lists() == 0);
+    CHECK(g.combo_label() == "Door");
+    g.v = 4;  // (a value on a heading: the closed combo shows nothing of it)
+    g.settle();
+    CHECK(g.combo_label().empty());
+    g.v = 0;
+    g.settle();
+    CHECK(g.combo_label().empty());
+  });
+
+  test("hci: in a dropdown with headings Up and Down by key skip the heading and the separator both ways, stop at the ends, and Enter picks the highlighted choice (round 513, task 0495)", [] {
+    Grouped g;
+    g.open_by_key();
+    CHECK(g.open_lists() == 1);
+    g.key(platform::KEY_UP);  // (Cube is the first choice: the heading above is not one)
+    g.key(platform::KEY_ENTER);
+    CHECK(g.open_lists() == 0 && g.v == 1);
+    g.open_by_key();
+    g.key(platform::KEY_DOWN);  // Room
+    g.key(platform::KEY_DOWN);  // past the separator and the heading: Door
+    g.key(platform::KEY_ENTER);
+    std::printf("    Down Down Enter from Cube: v = %d\n", g.v);
+    CHECK(g.v == 5);
+    g.open_by_key();  // (starts on the chosen row)
+    g.key(platform::KEY_ENTER);
+    CHECK(g.v == 5);
+    g.open_by_key();
+    g.key(platform::KEY_UP);  // back over the heading and the separator: Room
+    g.key(platform::KEY_ENTER);
+    CHECK(g.v == 2);
+    g.v = 6;
+    g.open_by_key();
+    g.key(platform::KEY_DOWN);  // (no wrap past the end)
+    g.key(platform::KEY_ENTER);
+    CHECK(g.v == 6);
+    g.v = 4;  // (opened with the value on a heading: the highlight goes to the next choice)
+    g.open_by_key();
+    g.key(platform::KEY_ENTER);
+    CHECK(g.v == 5);
+    g.open_by_key();
+    g.key(platform::KEY_ESCAPE);
+    CHECK(g.open_lists() == 0 && g.v == 5);
+  });
+
+  test("hci: a dropdown's headings are recorded as 'heading' with no Tab stop, its choices stay 'menu' rows, and the sweep's checks flag none of them (round 513, task 0495)", [] {
+    Grouped g;
+    g.click(g.r);
+    size_t headings = 0, menus = 0, stops = 0;
+    for (const auto &c : g.u.controls) {
+      const std::string k = c.kind;
+      headings += k == "heading";
+      menus += k == "menu";
+      if (k == "heading" && c.tab_stop) stops++;
+      if (k == "heading") CHECK(c.label == "Solids" || c.label == "Openings");
+      if (k == "menu") CHECK(c.label != "Solids" && c.label != "Openings" && c.label.find('\001') == std::string::npos);
+    }
+    std::printf("    %zu heading(s), %zu menu row(s), %zu heading stop(s)\n", headings, menus, stops);
+    CHECK(headings == 2 && menus == 4 && stops == 0);
+    Sweep sw;
+    int flagged = 0;
+    check_controls(g.u, sw, "cfg", Recti{0, 0, 300, 300}, [&](const char *kind, const std::string &key, const std::string &) {
+      flagged += std::string(kind) == "no-key" || std::string(kind) == "small";
+      std::printf("    finding %s '%s'\n", kind, key.c_str());
+    });
+    CHECK(flagged == 0);
+  });
+
+  test("hci: a dropdown without headings or separators behaves as before - Down Down Enter picks the third, a click picks the clicked row, Down stops at the last (round 513, task 0495)", [] {
+    Grouped g({"One", "Two", "Three"}, 0);
+    g.open_by_key();
+    g.key(platform::KEY_DOWN);
+    g.key(platform::KEY_DOWN);
+    g.key(platform::KEY_DOWN);  // (the end)
+    g.key(platform::KEY_UP);
+    g.key(platform::KEY_ENTER);
+    CHECK(g.v == 1 && g.open_lists() == 0);
+    g.u.in.mx = g.u.in.my = 290;
+    g.click(g.r);
+    CHECK(g.open_lists() == 1);
+    CHECK(g.u.controls.size() >= 4);
+    g.click(g.row("Three"));
+    CHECK(g.v == 2 && g.open_lists() == 0 && g.combo_label() == "Three");
+  });
+
+  /* Round 513 (task 0495): Draw Piece draws a door or a window. Run from here, in the hci group, because a new group needs the shard table: the tests are
+   * this round's HCI conditions (the grouped Shape list, the keyboard, the preview, the refusals' words) and its behaviour. */
+  run_blockout_openings_tests();
 }

@@ -60,6 +60,11 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
          if (e.room_.stage == 3) return "Room: click the next corner  |  click the first corner or Enter: close it  |  Backspace: take the last corner back" + leave;
          const bool faces = e.room_.solid && !e.room_.circle && !e.room_.polyline && e.room_.piece >= 3;  // (a wedge, stairs or arch face a way: R turns it a quarter)
          const std::string turn = faces ? "  |  R: turn it" : "";
+         if (e.room_.solid && e.room_.piece < 0) {  // a drawn door or window: it is cut into the wall it is drawn on
+           const std::string what = e.room_.piece == -1 ? "Door" : "Window";
+           if (e.room_.stage == 1) return what + ": release to cut the opening  |  R does nothing: it turns with its wall" + leave;
+           return what + ": drag a rectangle on a wall of a Blockout" + leave;
+         }
          if (e.room_.stage == 1) {
           static const char *const kShapes[] = {"Room", "Round Room", "Outline Room", "Box", "Cylinder", "Outline", "Wedge", "Stairs", "Arch"};
           const std::string shape = kShapes[blockout_draw_shape(e.room_.solid, e.room_.circle, e.room_.polyline, e.room_.piece)];

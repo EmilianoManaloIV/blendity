@@ -123,6 +123,10 @@ struct Input {
   int dy() const { return my - pmy; }
 };
 
+/* Round 513: markers in a combo's options (octal, so a heading is written "\001Openings" with no hex digit swallowed). */
+inline constexpr const char *kComboHeading = "\001";
+inline constexpr const char *kComboSeparator = "\002";
+
 enum class Align { Left, Center, Right };
 
 /* Simple vertical layout used by Inspector-like panels. */
@@ -267,7 +271,13 @@ class Context {
    * evaluate "+=1" or L(0,10) against each object's own value. */
   bool number_committed(Id i, std::string *expr = nullptr, int *component = nullptr) const;
   bool slider(Id i, const Recti &r, float &v, float mn, float mx);
+  /* A dropdown. `v` indexes `options`. Round 513: an option can be a row of the list that is not a choice - one starting
+   * with kComboHeading is a heading (dim text, a thin line above it unless it is the first row), exactly kComboSeparator
+   * a line alone. Neither is hovered, clicked or reached by Up / Down, and `v` never lands on one. */
   bool combo(Id i, const Recti &r, int &v, const char *const *options, int count);
+  static bool combo_is_heading(const char *o) { return o && o[0] == kComboHeading[0]; }
+  static bool combo_is_separator(const char *o) { return o && o[0] == kComboSeparator[0] && o[1] == 0; }
+  static bool combo_choosable(const char *o) { return !combo_is_heading(o) && !combo_is_separator(o); }
   bool color_field(Id i, const Recti &r, Vec3 &c, float *alpha = nullptr);  // Unity's colour field + Color window
   /* Round 329: Blender's ColorRamp - the gradient bar with a handle a stop below it: click the bar to add a stop, drag a
    * handle to move it, drag it well below to remove it (two always stay). `sel` the stop picked. Linear colours. */
@@ -438,7 +448,7 @@ class Context {
   Id stop_id(Id base);
   void menu_escape();
   void menu_arrows(bool submenu_row);
-  void combo_keys(Id i, int count);
+  void combo_keys(Id i, const char *const *options, int count);
   void combo_open(Id i, const Recti &r);
   bool checkbox_impl(const Recti &r, const Recti *row, const std::string *text, bool &v);
   Recti edit_rect_;  // (where edit_text last drew the field being edited)
