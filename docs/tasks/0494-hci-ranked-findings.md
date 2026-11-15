@@ -114,7 +114,9 @@ margin. The Profiler's "Scene view on the CPU" rows show whenever a slot has a r
 
 **Item 4, hand-drawn widgets.** The toolkit records `mark_widget`, `text_area`, `drag_label`, `curve_field` and
 `color_ramp` as controls of kinds mark, textarea, draglabel, curve and ramp, with no Tab stop; the sweep counts and judges
-them. The plain buttons drawn by hand were not moved onto the toolkit's calls: each is a clickable region with its own
+them. A drag label under the target size is its own kind, `small-handle`, not asserted (widening it takes a field's
+room): in the full sweep that is the X, Y and Z handles of a vector field (10x20 px), 3 names on 4,666 screens each,
+and `tools/hci_sweep_baseline.json` holds `"small-handle": 3` so `hci_sweep.py --check` fails on a fourth. The plain buttons drawn by hand were not moved onto the toolkit's calls: each is a clickable region with its own
 drag or double-click behaviour, and a keyboard stop needs an action to run on Enter (and the focus ring) that the widget
 does not have today. The clickable ones, each with what it would need:
 - **Brush tiles** (`sketch_brushes.cpp` ~405): a click picks the brush, a double-click opens its properties. It would
