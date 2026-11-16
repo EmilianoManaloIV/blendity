@@ -2476,6 +2476,9 @@ class Editor {
    * rt for overlays. */
   void render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                      const Camera *cam, float aspect, bool game = true, bool scene_lights = true, bool animate = false);
+  /* Round 538 (src/editor/panoramic_view.cpp): a panoramic camera's picture, from the cube faces it needs. */
+  void render_panoramic(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, Vec3 eye, const GameObject *owner, const Camera *cam, bool game, bool scene_lights);
+  std::map<const void *, PanoramicState> pano_;  // (one face target a view - its Renderer3D names it: the Game view and the Camera Preview no longer share and reallocate one)
   /* The enabled filter components on a camera's GameObject, in order. */
   const FilterStack &camera_filters(const GameObject *owner);
   struct FilterCacheEntry {
@@ -3818,6 +3821,7 @@ class Editor {
   void transform_command(const std::string &what, const std::vector<std::string> &v);
   void log_all_commands();
   bool round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line);
+  void camera_panoramic_command(const std::vector<std::string> &t);  // (round 538: `camera panoramic <type|off>`, panoramic_view.cpp)
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
@@ -6685,6 +6689,8 @@ class Editor {
     int w = 0, h = 0, aa = 1;
     bool preview = false, transparent = false, traced = false, denoise = false;
     float far_distance = 1000.0f, play_time = 0.0f;
+    PanoramicParams pano;  // (round 538: a panoramic camera's rasterized render - type 0 otherwise; drawn from cube faces at w x h)
+    float near_clip = 0.3f;
     /* The rasterizer's. */
     RasterOptions opt;
     int clear_mode = 0;  // 0 the world, 1 a solid colour

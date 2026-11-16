@@ -344,6 +344,15 @@ struct Camera : ComponentBase<Camera> {
   float far_clip = 1000.0f;
   bool orthographic = false;
   float ortho_size = 5.0f;
+  /* Panoramic projection (round 538, task 0518; Blender: Camera > Lens > Panorama Type). 0 off, 1 Equirectangular,
+   * 2 Fisheye Equidistant, 3 Fisheye Equisolid, 4 Central Cylindrical, 5 Mirror Ball. While on, the camera is
+   * panoramic and `orthographic` is ignored. Angles in degrees, as Blender shows them. */
+  int panoramic_type = 0;
+  float latitude_min = -90.0f, latitude_max = 90.0f;     // Equirectangular
+  float longitude_min = -180.0f, longitude_max = 180.0f;  // Equirectangular and Central Cylindrical
+  float fisheye_fov = 180.0f;                             // Fisheye Equidistant and Equisolid
+  float fisheye_lens = 10.5f;                             // Fisheye Equisolid, mm (with the sensor width below)
+  float cylinder_min = -1.0f, cylinder_max = 1.0f;        // Central Cylindrical: the height range
   int clear_flags = 0;  // 0 skybox, 1 solid color
   Vec3 background{0.19f, 0.30f, 0.47f};
   bool hdr = true;      // Unity's HDR rendering (round 401: kept for Unity; Blendity always lights in linear HDR)
@@ -376,6 +385,7 @@ struct Camera : ComponentBase<Camera> {
    * pick which. Margins are fractions of half the frame per side (Blender's safe areas). */
   bool show_guides = false;
   void reflect_guides(Reflector &r);
+  void reflect_projection(Reflector &r);  // (round 538: Projection, Panorama Type and its fields)
   bool guide_thirds = true, guide_center = false, guide_center_diagonal = false, guide_golden = false;
   bool guide_golden_tri_a = false, guide_golden_tri_b = false, guide_harmony_a = false, guide_harmony_b = false;
   bool guide_title_safe = false, guide_action_safe = false;

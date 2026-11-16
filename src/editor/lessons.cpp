@@ -2607,6 +2607,21 @@ Moving one hand's IK target deforms the two or three meshes the arm carries: abo
 ! cmd:tool rotate | 3. Choose the Rotate tool
 ! cmd:perf drag gizmo rz 60 frames 20 | 4. Turn the chest 60 pixels as a real drag; when it ends, the Console's "perf drag counts" line says how many meshes a drag frame moved in place and how many it built whole
 )"},
+    {"Panoramic Cameras", "A camera that sees all around, as Blender's Panorama Type", R"(
+A normal camera maps a flat window onto the scene, so it can never see more than about 170 degrees. A panoramic camera lays every direction around it onto the picture instead: an Equirectangular camera draws the whole sphere like a world map, a Fisheye a circle, a Central Cylindrical the wall of a cylinder, a Mirror Ball the reflection in a chrome ball. Blender's Cycles has always had them; EEVEE got them in 5.3, and Blendity's rasterizer, Game view, Camera Preview and path tracer show them too.
+# Try it
+Select a Camera and set Camera > Projection to Panoramic in the Inspector. Panorama Type and only that type's numbers appear: Equirectangular has a latitude and a longitude range (-90 to 90 and -180 to 180 degrees show everything), the fisheyes a field of view, Equisolid also the lens in millimetres, the cylinder a height range. The Camera Preview shows the picture.
+# How it is drawn
+A rasterizer only draws flat pictures, so Blendity (like EEVEE) draws the sides of a cube around the camera - only those the projection needs: a fisheye of 120 degrees needs the front and four sides, an equirectangular one all six - and then, for every pixel of the panorama, works out which way it looks and copies the colour from that cube face. The faces are drawn a little wider than 90 degrees (a 5 percent overscan) so the smooth lookup at their edges stays inside them. Depth of field and the camera's filters are not applied to a panorama.
+@ blender/source/blender/draw/engines/eevee/eevee_camera.cc (panoramic_view_mask_get), shaders/eevee_camera_lib.bsl.hh
+> [FoCG] 7.1 Texture mapping (looking a colour up by direction), 8.1 Viewing transformations
+? Why can a perspective camera not show 180 degrees or more? | Its picture is a plane, and a plane at distance 1 would have to be infinitely wide to reach the horizon; every direction is mapped to where its ray crosses that plane.
+? A fisheye of 90 degrees draws one cube face, one of 120 degrees five. Why? | A face covers 90 degrees plus its overscan, a little over 45 degrees each side of its axis; a 120 degree fisheye looks 60 degrees off axis, past the front face, into the four side faces.
+? What does a pixel in the corner of a fisheye picture show? | Nothing: it is outside the circle, so it stays black.
+! cmd:create Camera; camera panoramic equirectangular | 1. Add a camera and make it Equirectangular (the Inspector's Projection says Panoramic now); look at the Camera Preview
+! cmd:camera panoramic fisheye equidistant | 2. Make it a Fisheye Equidistant: the picture becomes a circle
+! cmd:camera panoramic off | 3. Back to a normal camera
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

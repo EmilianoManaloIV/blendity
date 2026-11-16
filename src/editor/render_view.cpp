@@ -6,6 +6,7 @@
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
 #include "view_keeps.h"
+#include "panoramic_view.h"
 #include "../core/view_perf.h"
 #include "../core/profiling.h"
 #include "../render/dof.h"
@@ -1584,6 +1585,7 @@ void Editor::set_cpu_threads(int n) {
 
 void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                            const Camera *cam, float aspect, bool game, bool scene_lights, bool animate) {
+  if (cam && cam->panoramic_type > 0) return render_panoramic(r3d, rt, v, eye, owner, cam, game, scene_lights);  // (round 538)
   const FilterStack &fs = camera_filters(owner);
   /* The Scene view fills whatever the stack says: its overlays and picking use the full view's projection. */
   const int fit = cam ? fs.fit : (int)FilterStack::Fill;
@@ -1800,6 +1802,10 @@ bool Editor::start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Cam
     Log::warn("MoonRay: an orthographic camera isn't sent yet: rendering with the path tracer instead");
     return false;
   }
+  if (cam && cam->panoramic_type > 0) {  // (round 538: the export has no panoramic lens)
+    Log::warn("MoonRay: a panoramic camera isn't sent yet: rendering with the path tracer instead");
+    return false;
+  }
   const RenderSettings &rs = scene_->render;
   render_filtered_ = false;  // (camera filters are Blendity's: noted, not drawn)
   if (!render_filters_.empty()) Log::info("MoonRay: the camera's filters aren't applied to its render");
@@ -1837,6 +1843,7 @@ static PTLens camera_lens(const Camera *cam, float aspect) {
   l.focus_distance = cam->focus_distance;
   l.blades = cam->blades >= 3 ? cam->blades : 0;
   l.rotation = cam->blade_rotation * kDeg2Rad;
+  if (cam->panoramic_type > 0 && finite_bits(aspect) && aspect > 1e-3f && aspect < 1e3f) l.pano = panoramic_params_for(*cam, (int)(aspect * 1000.0f), 1000);  // (round 538)
   return l;
 }
 
@@ -1942,14 +1949,17 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   j->far_distance = cam ? cam->far_clip : 1000.0f;
   j->play_time = play_time_;
   j->filters = render_filters_;
-  j->filtered = render_filtered_ && (traced || owner);
+  const bool pano_cam = cam && cam->panoramic_type > 0;  // (round 538: no filters or supersampling; its faces are drawn at the picture's size)
+  if (pano_cam) j->filters = FilterStack();  // (a panorama takes none, traced or not: the retro stages would warp it)
+  j->filtered = render_filtered_ && (traced || owner) && !pano_cam;
+  if (pano_cam && !traced) j->pano = panoramic_params_for(*cam, w, h), j->near_clip = cam->near_clip;
   struct FinalRender {  // the quality tier's caps are for the editor's views, not for renders
     bool &flag;
     explicit FinalRender(bool &f) : flag(f) { flag = true; }
     ~FinalRender() { flag = false; }
   } final_render(final_render_);
   /* The target the items are gathered for: the outlines' width goes by its height. */
-  j->aa = traced || preview ? 1 : std::max(1, std::min(4, rs.raster_aa));
+  j->aa = traced || preview || pano_cam ? 1 : std::max(1, std::min(4, rs.raster_aa));
   int target_h = h * j->aa;
   if (j->filtered && !traced) {
     filter_layout(j->filters, cam ? j->filters.fit : (int)FilterStack::Fill, w, h, j->iw, j->ih, j->dst);
@@ -2117,7 +2127,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     if (j->filtered) j->filters.apply_raster(j->opt);
     const Camera *look = cam ? cam : owner ? owner->camera() : nullptr;
     if (look && look->clear_flags == 1) j->clear_mode = 1, j->clear_color = to_display_pixel(look->background, ViewTransform::Standard, 0.0f);
-    if (cam && cam->dof && !cam->orthographic) {
+    if (cam && cam->dof && !cam->orthographic && !pano_cam) {
       const int th = j->filtered ? j->ih : h * j->aa, tw = j->filtered ? j->iw : w * j->aa;
       const float aspect = j->filtered && j->boxed ? j->dst.w / (float)std::max(1, j->dst.h) : w / (float)h;
       DofParams &d = j->dof_params;
@@ -2183,9 +2193,10 @@ void Editor::raster_picture(RenderJob &j) {
     if (!j.shadow.valid()) j.env.shadow = nullptr, j.env.shadow_light = -1;
   }
   Renderer3D r3d;
+  Mat4 view = j.view;  // (a panoramic render's cube faces look their own ways)
   auto draw = [&](RenderTarget &rt, const Mat4 &p, bool override_on, uint32_t override_color) {
-    r3d.begin(&rt, j.view, p, j.env, j.opt);
-    const Mat4 inv = (p * j.view).inverse();
+    r3d.begin(&rt, view, p, j.env, j.opt);
+    const Mat4 inv = (p * view).inverse();
     if (override_on) {  // a transparent render's black / white pass (task 0035)
       r3d.clear(override_color);
       if (!rt.hdr.empty()) std::fill(rt.hdr.begin(), rt.hdr.end(), Vec3(0.0f));  // no light there for bloom in either pass
@@ -2195,7 +2206,18 @@ void Editor::raster_picture(RenderJob &j) {
     for (const DrawItem &it : j.items) r3d.add(it);
     r3d.flush();
   };
+  PanoramicState pano_state;
   auto once = [&](bool override_on, uint32_t override_color) {
+    if (j.pano.type > 0) {  // (round 538: the cube faces a panoramic camera needs, each resampled into the picture)
+      PanoramicCameraFrame fr;
+      fr.eye = j.eye, fr.right = {j.view.m[0], j.view.m[4], j.view.m[8]}, fr.up = {j.view.m[1], j.view.m[5], j.view.m[9]};
+      fr.forward = {j.view.m[2], j.view.m[6], j.view.m[10]}, fr.near_clip = j.near_clip, fr.far_clip = j.far_distance;
+      panoramic_render(j.pano, j.w, j.h, fr, pano_state, j.img.pixels.data(), j.w, [&](int, const Mat4 &fv, const Mat4 &fp, RenderTarget &frt) {
+        view = fv;
+        draw(frt, fp, override_on, override_color);
+      });
+      return;
+    }
     if (!j.filtered) {
       /* Rasterized: supersample then box-filter down (SSAA). */
       Image big;
@@ -3089,7 +3111,8 @@ void Editor::draw_camera_preview(const Recti &view) {
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
     uint64_t hash = camera_render_hash(g, cam) ^ trace_settings_hash() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
-    const FilterStack &filters = camera_filters(g);
+    static const FilterStack kNoFilters;  // (round 538: a panorama takes no camera filters)
+    const FilterStack &filters = cam->panoramic_type > 0 ? kNoFilters : camera_filters(g);
     int tw = w, th = h;
     Recti tdst{0, 0, w, h};
     if (!filters.empty()) filter_layout(filters, w, h, tw, th, tdst);
