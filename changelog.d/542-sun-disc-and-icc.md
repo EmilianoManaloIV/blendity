@@ -25,7 +25,7 @@ world and the light); the sky's sun in lightmap bakes (they gather lights on the
 the world). Non-colour 8-bit maps (normal, roughness) carry the same tag as every PNG: untagged 8-bit images are read
 as sRGB everywhere already, so no reader changes its reading.
 
-**Checked:** the full Windows suite with Blender's libraries, 54,365 checks: 2 tests fail, neither this round's - the
+**Checked:** the full Windows suite (dependency-free build), 54,365 checks: 2 tests fail, neither this round's - the
 Live Link paint-dab timing (60 ms worst tick under 13 sessions' load; 3.7 ms run alone, passes) and "assets: Ctrl and
 Shift click select several materials", which fails the same 21 of 25 checks on `main` (068207d9) and on rounds 536,
 537 and 540's builds. Linux (dependency-free build) render, lighting and editor groups: 15,713 checks, 0 failed. The
