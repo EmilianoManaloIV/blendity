@@ -17,7 +17,7 @@ rasterizer (the CPU path tracer and the card's are rounds 533 and 534).
   picking and the outline (lighting-layout bindings 40 and 41).
 - F12's rasterized render draws them too (sorted inside the frame), and their colour is the path tracers' (round 533's
   `gsplat_math.h`: the SH colour taken as sRGB, then linear light).
-- A frame's splats are kept under a budget of pixels to blend (2e8): a camera inside a cloud of huge splats leaves the
+- A frame's splats are kept under a budget of pixels to blend (6e7, about 40 ms): a camera inside a cloud of huge splats leaves the
   biggest out, keeping the nearest, instead of stalling the editor; `splat stats` counts what was left out.
 - `splat stats` prints the last frame's splats submitted, culled and drawn, with the project, sort and draw times.
 

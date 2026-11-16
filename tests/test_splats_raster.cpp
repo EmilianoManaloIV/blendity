@@ -587,15 +587,18 @@ static void splat_raster_round532_review() {
     CHECK(g != nullptr);
     if (!g) return;
     const uint64_t misses0 = ed.scene_hash_misses_for_test();
+    const uint64_t before = ed.render_hash_for_test(), gen0 = gsplat_sort_generation();
     ed.command("camera 60 20 7 0 0 0");  // a new camera: the big cloud's order goes to a worker
     ed.step_frame_headless();
-    const uint64_t moved = ed.render_hash_for_test();
+    /* (The worker may land inside that frame already - a 220,000-splat sort is a few ms - so the hash is compared with
+     * the one before the camera moved, which no camera move changes.) */
     /* The worker lands (a few hundred ms at most); the editor keeps drawing frames while one runs. */
     ScopedTimer t;
     while (gsplat_sorts_running() > 0 && t.ms() < 20000.0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     CHECK(gsplat_sorts_running() == 0);
     r34_steps(ed, 2);
-    CHECK(ed.render_hash_for_test() != moved);  // (the landed order is a new picture)
+    CHECK(gsplat_sort_generation() > gen0);         // (a worker's order landed)
+    CHECK(ed.render_hash_for_test() != before);  // (and the scene hash has it: the view draws it)
     CHECK(ed.scene_hash_misses_for_test() == misses0);  // (and not one the edit counter missed: ADR 0115)
     std::printf("    hash misses %llu -> %llu\n", (unsigned long long)misses0, (unsigned long long)ed.scene_hash_misses_for_test());
   });

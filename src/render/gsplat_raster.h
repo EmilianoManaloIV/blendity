@@ -72,11 +72,11 @@ constexpr float kSplatMinOpacity = 1.0f / 255.0f;
 constexpr float kSplatMaxAxisPx = 1024.0f;
 constexpr float kSplatMinEigen = 0.001f;
 constexpr float kSplatPickAlpha = 0.1f;
-/* The most pixel evaluations one frame's splats may cost (the sum of their on-screen boxes; review 532, ADR 0105): about
- * 25 ms on 16 threads. A camera inside a dense cloud makes most splats hit the 1024 px cap (a million boxes of 4096 px
+/* The most pixel evaluations one frame's splats may cost (the sum of their on-screen boxes; review 532, ADR 0105): 2e8
+ * measured 130 ms on the 16-thread machine under load, 6e7 keeps the splats' part of a frame near 40 ms. A camera inside a dense cloud makes most splats hit the 1024 px cap (a million boxes of 4096 px
  * across); past the budget the biggest boxes are left out - the nearest splats, which hide the rest anyway - and
  * SplatStats::dropped counts them. */
-constexpr double kSplatPixelBudget = 2.0e8;
+constexpr double kSplatPixelBudget = 6.0e7;
 /* The smallest dot a Points cloud's point draws as, in pixels (radius): a far cloud stays visible. */
 constexpr float kPointDotMinRadiusPx = 1.0f;
 
