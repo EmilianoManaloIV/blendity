@@ -1982,6 +1982,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   }
   collect_hold_ = &j->meshes;  // (the outline shells the items point at are held with the meshes)
   j->items = collect_items(true, true);
+  j->splats = scene_splat_draws(*scene_);  // (round 532)
   collect_hold_ = nullptr;
   outline_view_.on = false;
   flatten_view_.on = false;
@@ -2207,6 +2208,11 @@ void Editor::raster_picture(RenderJob &j) {
     else if (j.clear_mode == 1) r3d.clear(j.clear_color);
     else r3d.clear_environment(inv, j.environment, j.env.view_transform, j.env.exposure);
     for (const DrawItem &it : j.items) r3d.add(it);
+    SplatPass splats;  // (round 532: sorted in the frame - a final picture waits for its order)
+    if (!j.splats.empty()) {
+      splats.prepare(j.splats, SplatView{j.view, p, rt.width, rt.height, j.env.view_transform, j.env.exposure}, false);
+      r3d.set_splats(&splats);
+    }
     r3d.flush();
   };
   auto once = [&](bool override_on, uint32_t override_color) {
