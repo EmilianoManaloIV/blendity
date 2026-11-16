@@ -95,7 +95,7 @@ KeptGuidIndex &kept_guid_index() {
  * .unity-meta ones too, by name, size and write time (a sum of per-entry hashes: the walk's order doesn't matter). Listing the folders
  * costs a few ms where reading each .meta costs seconds in a project of tens of thousands of files; any difference rebuilds the index.
  * On Windows a file replaced by one of the same size with the same write time (a copy or an unpack that keeps archive times) is not
- * seen; POSIX's change time catches that.
+ * seen; POSIX's change time catches that when the replacement lands in a later second.
  *
  * Round 511, git's "racy" rule: a write time can't tell two edits apart inside one tick of the file clock - CI's quick Windows runner
  * wrote a .meta, read the index, rewrote it with another GUID of the same size and read again inside one tick, and the stale index
@@ -137,7 +137,8 @@ uint64_t assets_signature(const std::string &assets_dir, std::vector<std::pair<s
     uint64_t h = 1469598103934665603ull;
     for (char c : name) h = (h ^ (unsigned char)c) * 1099511628211ull;
     if (!it->is_directory(e2)) {  // (a folder by its name only: NTFS updates a folder's time in its parent's listing late, so it differs from one walk to the next)
-      const uint64_t size = (uint64_t)it->file_size(e2);
+      std::error_code size_err;
+      const uint64_t size = (uint64_t)it->file_size(size_err);
       const sfs::file_time_type written = it->last_write_time(e2);
       const uint64_t when = (uint64_t)written.time_since_epoch().count();
       uint64_t changed = 0;  // (POSIX: the change time too - an unpack that keeps write times still moves it; Windows' is not cheap)
@@ -146,7 +147,8 @@ uint64_t assets_signature(const std::string &assets_dir, std::vector<std::pair<s
       if (::stat(it->path().c_str(), &st) == 0) changed = (uint64_t)st.st_ctime;
 #endif
       for (uint64_t v : {size, when, changed}) h = (h ^ v) * 1099511628211ull, h ^= h >> 29;
-      if (racy && written >= racy_after && index_reads(it->path().filename().u8string())) {
+      /* (Regular files only, with a size: a FIFO named x.meta would block the read, and a failed size would wrap the total.) */
+      if (racy && !size_err && written >= racy_after && it->is_regular_file(e2) && index_reads(it->path().filename().u8string())) {
         racy_bytes += size;
         bool ok = racy_bytes <= kRacyBytes;
         if (ok) racy->push_back({it->path().u8string(), content_hash(it->path().u8string(), ok)});
