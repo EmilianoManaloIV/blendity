@@ -564,6 +564,9 @@ void run_r533_scene() {
     GameObject *hidden = create_point_cloud_object(scene, PointCloudType::GaussianSplats);
     hidden->get<PointCloudObject>()->data = pointcloud_random(PointCloudType::GaussianSplats, 30, 0, 5u);
     hidden->active = false;
+    GameObject *off = create_point_cloud_object(scene, PointCloudType::GaussianSplats);  // its component unticked
+    off->get<PointCloudObject>()->data = pointcloud_random(PointCloudType::GaussianSplats, 20, 0, 6u);
+    off->get<PointCloudObject>()->enabled = false;
     std::vector<SplatCloudView> views = scene_splat_views(scene);
     CHECK(views.size() == 1);
     if (views.size() != 1) return;
@@ -582,6 +585,24 @@ void run_r533_scene() {
     size_t kept = 0;
     trace_splats(views, {}, 1, false, &kept);
     CHECK(kept > 150);
+  });
+
+  test("Splats in the editor: a Gaussian Splats object reaches F12's settings, and moving or editing it re-renders", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("pointcloud random splats 300 1 7");
+    CHECK(ed.pt_settings_for_test().splats.size() == 1);
+    if (ed.pt_settings_for_test().splats.size() != 1) return;
+    CHECK(ed.pt_settings_for_test().splats[0].count == 300);
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr && (uint32_t)g->id == ed.pt_settings_for_test().splats[0].id);
+    if (!g) return;
+    const uint64_t h0 = ed.render_hash_for_test();
+    g->set_world_position(g->world_position() + Vec3(1, 0, 0));
+    const uint64_t h1 = ed.render_hash_for_test();
+    CHECK(h1 != h0);  // moved: the previews and the lighting's out-of-date check see it
+    ed.command("pointcloud random splats 300 1 8");  // (it is selected: refills the same object)
+    CHECK(ed.render_hash_for_test() != h1);  // a new cloud on the same object
   });
 }
 

@@ -569,7 +569,7 @@ std::vector<SplatCloudView> scene_splat_views(Scene &scene) {
   scene.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     const PointCloudObject *po = g.get<PointCloudObject>();
-    if (!po || !po->data) return;
+    if (!po || !po->enabled || !po->data) return;  // (an unticked component draws nothing)
     SplatCloudView v = splat_view_of(po->data, g.world_matrix(), g.id);
     if (v.count) out.push_back(std::move(v));
   });
