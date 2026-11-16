@@ -939,9 +939,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   Component *outline = nullptr, *flatten = nullptr, *vshapes = nullptr;
   bool bone = false;
   const LightProbeGroupComponent *pgroup = nullptr;
-  const PointCloudObject *cloud = nullptr;
+  const PointCloudObject *cloud = nullptr;  // (round 532: the views draw its splats)
+  Component *pcloud = nullptr;  // (round 533: the path tracers trace splat clouds)
   for (auto &c : g.components) switch (c->render_role()) {
-      case Component::RenderRole::PointCloud: if (!cloud) cloud = static_cast<const PointCloudObject *>(c.get()); break;
+      case Component::RenderRole::PointCloud:
+        if (!cloud) cloud = static_cast<const PointCloudObject *>(c.get()), pcloud = c.get();
+        break;
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
       case Component::RenderRole::ViewShapes: if (!vshapes) vshapes = c.get(); break;
@@ -984,6 +987,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
                                (uint64_t)std::hash<float>()(cloud->point_size)};
       mix(w.m, sizeof(w.m));
       mix(key, sizeof(key));
+    }
+    if (pcloud) {  // (round 533: a splat cloud moved or edited is a new traced picture and a new bake - its cloud's pointer and version)
+      const Mat4 w = g.world_matrix();
+      const uint64_t key = hash_component(*pcloud) ^ (uint64_t)pcloud->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+      mix(w.m, sizeof(w.m));
+      mix(&key, 8);
     }
     if (pgroup) {  // (round 455: a probe moved - or the group - is a new bake: the lighting's out-of-date check re-runs; the Scene view draws them)
       const Mat4 w = g.world_matrix();
@@ -1701,6 +1710,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   s.use_guiding = rs.path_guiding;
   s.view_transform = view_transform_from_setting(rs.view_transform);
   s.exposure = rs.exposure;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the Gaussian splat objects, traced after the meshes)
   return s;
 }
 

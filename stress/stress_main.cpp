@@ -7416,6 +7416,7 @@ static void test_blender_parity(Report &rep, const Options &o) {
 #include "stress_survey.inc"    // (round 504: the performance survey's seven sections)
 #include "stress_blockout_piece_modifiers.inc"  // (round 514: test_blockout_piece_modifiers)
 #include "stress_splat_raster.inc"  // (round 532: test_splat_raster)
+#include "stress_splats.inc"  // (round 531: test_splats - the splat / point cloud readers on damaged files)
 
 int main(int argc, char **argv) {
   install_crash_handler();
@@ -7496,7 +7497,7 @@ int main(int argc, char **argv) {
                {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
                {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}, {"posing", test_posing},
                {"lightmap_quality", test_lightmap_quality}, {"blockout", test_blockout}, {"blockout_modifiers", test_blockout_modifiers},
-               {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers},
+               {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers}, {"splats", test_splats},
                {"image_edit", test_image_edit}, {"sculpt_paint", test_sculpt_paint}, {"sequencer", test_sequencer}, {"importers", test_importers},
                {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views},
                {"splat_raster", test_splat_raster}};

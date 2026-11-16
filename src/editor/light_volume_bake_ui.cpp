@@ -102,6 +102,7 @@ void Editor::bake_volumes_on_worker(BakeJob &j) {
   PTSettings ps;
   ps.max_bounces = std::max(0, j.bounces - 1);
   ps.denoise = false, ps.use_guiding = false;
+  ps.splats = j.settings.splats;  // (round 533)
   pt.set_settings(ps);
   pt.build(objs, lights, j.env);
   const int psamples = std::max(24, std::min(4096, j.indirect_samples / 4));
@@ -169,6 +170,7 @@ void Editor::bake_reflection_probes_on_worker(BakeJob &j) {
   ps.max_bounces = std::max(1, j.bounces);
   ps.denoise = false;
   ps.use_guiding = false;
+  ps.splats = j.settings.splats;  // (round 533: splats seen in the reflections)
   pt.set_settings(ps);
   pt.build(objs, lights, j.env);
   const bool from_lightmaps = !j.lighting.empty();

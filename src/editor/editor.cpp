@@ -2733,7 +2733,7 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae", ".spz"}}, {"Motions", {".vmd"}},
                                                  {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Unity animation clips", {".anim"}}, {"Godot scenes", {".tscn"}}, {"Blender files (through Blender)", {".blend"}}};  // (rounds 370, 373, 374)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
@@ -5114,7 +5114,7 @@ void Editor::draw_dialogs() {
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
-      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}) scan_files(assets_dir_, ext, dialog_files_);
+      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".spz"}) scan_files(assets_dir_, ext, dialog_files_);
     }
   }
   u.popup(id, w, [this, id] {
