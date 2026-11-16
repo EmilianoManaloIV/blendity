@@ -14,8 +14,8 @@
 **Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux); the round's tests are the `dimensions:` rows at the end of `tests/test_editor.cpp`. Stress `editor`: fuzz 6000 frames, no crash, 0 stale pictures, 0 missed changes. Windows (libraries): the `editor` group 3340 checks and `modeling` 4622, 0 failed; `dimensions:` 121 checks. Linux (dependency-free): `editor` 3326, `modeling` 4564, 0 failed.
 
 <!-- README -->
-replace: bridge, knife, n-gons, F9;
-with: bridge, knife, n-gons, F9, a typed size for the selection (Dimensions, round 536);
+replace: 50k-face mesh enters it in about a frame,
+with: 50k-face mesh enters it in about a frame, the selection's size typed in (Dimensions, round 536),
 
 <!-- docs/USABILITY.md -->
 after: | With AutoPosing on: a Puppet handle dragged, Ctrl+Z, any other edit
