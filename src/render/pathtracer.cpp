@@ -195,11 +195,6 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   /* Round 331: the GPU kernel has no volumes yet - a scene with fog is traced on the CPU, and says so. */
   if (has_volume_ && !settings_.gpus.empty()) gpu_note_ = "a Volume (fog) material: traced on the CPU (the GPU kernel has no volumes yet)";
   else gpu_note_.clear();
-  /* Round 533: nor splats, until round 534 puts them on the card (that round deletes this branch). */
-  if (!splats_->empty()) {
-    cpu_only = true;
-    if (!settings_.gpus.empty() && gpu_note_.empty()) gpu_note_ = "Gaussian splats: traced on the CPU (the GPU kernel has no splats yet)";
-  }
   if (!settings_.gpus.empty() && gpu::available() && !cpu_only) sync_gpus();
   else if (cpu_only && !settings_.gpus.empty()) {  // (set aside, open, for the scene without fog: not torn down on every toggle)
     stop_all_workers();
@@ -2560,7 +2555,8 @@ static uint64_t gpu_scene_bytes(const gpu::Scene &s) {
          s.verts.size() * sizeof(gpu::GVertex) + s.idx.size() * 4 + s.materials.size() * sizeof(gpu::GMaterial) +
          s.lights.size() * sizeof(gpu::GLight) + s.mesh_lights.size() * sizeof(gpu::GMeshLight) + s.mesh_cdf.size() * 4 +
          s.tex8.size() * 4 + s.texf.size() * 4 + s.textures.size() * sizeof(gpu::GTexInfo) + s.tlas_order.size() * 4 +
-         s.blas.size() * sizeof(gpu::GBlas) + s.object_blas.size() * 4;
+         s.blas.size() * sizeof(gpu::GBlas) + s.object_blas.size() * 4 + s.splats.size() * sizeof(gpu::GSplat) + s.splat_sh.size() * 4 +
+         s.splat_aabbs.size() * 4;  // (round 534: the splats)
 }
 
 /* The level a texture is sent at, tex_skip levels below `lv`, never under 256 texels a side. */
@@ -2826,6 +2822,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
       }
     }
   }
+  gpu::gsplat_gpu_append_all(s, settings_.splats);  // round 534: the splat clouds, instances after the meshes'
   for (const Instance &in : instances_) s.tlas_order.push_back(in.object);
   for (const RenderLight &l : lights_) {
     gpu::GLight g{};
@@ -3033,6 +3030,8 @@ PathTracer::GpuSections PathTracer::gpu_scene_sections(const gpu::Scene &s) {
   g = s.nodes.size() > tlas ? mix_bytes(g, s.nodes.data() + tlas, (s.nodes.size() - tlas) * sizeof(gpu::GNode)) : g;
   g = hash_mix(g, (uint64_t)tlas);  // (the software TLAS's node count: the BLAS nodes sit after it, so a split that changes it moves them)
   g = hash_mix(g, (uint64_t)s.nodes.size());
+  g = bytes(g, s.splats);  // (round 534: the splats are geometry - a changed cloud is a whole upload)
+  g = bytes(g, s.splat_sh);
   h.geometry = g;
   uint64_t i = bytes(kFnvBasis, s.instances);
   i = bytes(i, s.tlas_order);
@@ -3386,12 +3385,6 @@ bool PathTracer::gpu_gather_on(const std::vector<int> &devices, int mode, const 
   if (hit) hit->clear();
   gpu_gather_waiting_ = false;
   if (origins.size() != dirs.size() || (mode != 1 && mode != 2)) return false;
-  /* Round 533: the card has no splats until round 534 - a bake with splats gathers on the CPU (that round deletes
-   * this branch). */
-  if (splats_ && !splats_->empty()) {
-    if (error) *error = "Gaussian splats: gathered on the CPU (the GPU kernel has no splats yet)";
-    return false;
-  }
   if (!gpu::available() || devices.empty()) {
     if (error) *error = "no such GPU";
     return false;
