@@ -510,7 +510,7 @@ bool Editor::wheel_keys() {
   }
   for (int k = 0; k < kMaxSlices; k++) {
     if (!in.key_pressed[KEY_1 + k]) continue;
-    wheel_run(k, in.shift());
+    wheel_run(k, (in.chord_mods(KEY_1 + k) & MOD_SHIFT) != 0);  // (round 548: Shift as the number went down - keep it open)
     return true;
   }
   if (in.key_pressed[KEY_BACKSPACE] && !qm_.typed.empty()) {
@@ -527,7 +527,10 @@ bool Editor::wheel_keys() {
   int only = -1, matches = 0;
   for (int i = 0; i < n; i++)
     if (to_lower(ring[(size_t)i].label).compare(0, qm_.typed.size(), qm_.typed) == 0) only = i, matches++;
-  if (matches == 1) wheel_run(only, in.shift());
+  bool shift = in.shift();  // (round 548: Shift as the letter's key went down, when one was pressed)
+  for (int k = KEY_A; k <= KEY_Z; k++)
+    if (in.key_pressed[k]) shift = (in.chord_mods(k) & MOD_SHIFT) != 0;
+  if (matches == 1) wheel_run(only, shift);
   else if (matches == 0) qm_.typed.clear();
   return true;
 }

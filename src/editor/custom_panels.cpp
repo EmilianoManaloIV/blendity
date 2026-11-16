@@ -391,10 +391,7 @@ void Editor::keymap_capture_frame() {
     if (!in.key_pressed[key] || key == KEY_SHIFT || key == KEY_CTRL || key == KEY_ALT || key == KEY_SUPER) continue;
     in.key_pressed[key] = false;  // (the key is the binding's: its old action doesn't run)
     in.text.clear();
-    int mods = 0;
-    if (in.ctrl()) mods |= MOD_CTRL;
-    if (in.shift()) mods |= MOD_SHIFT;
-    if (in.alt()) mods |= MOD_ALT;
+    const int mods = in.chord_mods(key);  // (round 548: as the key went down - a quick Shift+R would otherwise bind a bare R)
     std::vector<KeyChord> chords = keymap_[capturing_binding_];
     if ((key == KEY_BACKSPACE || key == KEY_DELETE) && !mods) {
       if (capturing_slot_ < (int)chords.size()) chords.erase(chords.begin() + capturing_slot_);

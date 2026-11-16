@@ -607,7 +607,8 @@ struct InspectorReflector : Reflector {
     const std::string prop = anim_prefix + n;
     const int state = keyable ? ed.anim_property_state(anim_obj, prop) : 0;
     if (state) draw_key_marker(label, state == 2);
-    if (keyable && u.hovered(label) && u.in.key_pressed[platform::KEY_I] && u.in.mods == 0 && !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
+    if (keyable && u.hovered(label) && u.in.chord(platform::KEY_I, 0) &&  // (round 548: I's own chord)
+         !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
       u.in.key_pressed[platform::KEY_I] = false;
       ed.anim_key_property(anim_obj, prop, axes);
     }
