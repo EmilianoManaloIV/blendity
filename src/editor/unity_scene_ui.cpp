@@ -13,9 +13,9 @@
 #include "../core/core.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
-#include <chrono>
 #include <filesystem>
 #include <set>
 #ifndef _WIN32
@@ -82,6 +82,9 @@ struct KeptGuidIndex {
   double at = -1e9;
   uint64_t signature = 0;
   bool signed_ = false;  // (the signature is of the state this index was walked from)
+  /* Round 511: the files the index reads that were written just before it was signed, by path and a hash of their contents
+   * (see assets_signature). */
+  std::vector<std::pair<std::string, uint64_t>> racy;
 };
 KeptGuidIndex &kept_guid_index() {
   static KeptGuidIndex kept;
@@ -91,15 +94,38 @@ KeptGuidIndex &kept_guid_index() {
 /* Round 507: a fingerprint of everything unity_guid_index reads - every entry under Assets, the hidden .unity-guids / .unity-stats /
  * .unity-meta ones too, by name, size and write time (a sum of per-entry hashes: the walk's order doesn't matter). Listing the folders
  * costs a few ms where reading each .meta costs seconds in a project of tens of thousands of files; any difference rebuilds the index.
- * (Round 511: a file written in the last two seconds is fingerprinted by its contents too - git's "racy" rule. Its write time can't
- * tell two edits apart within one tick of the file clock, and the same size with another GUID in it kept a stale index: CI's quick
- * Windows runner wrote a .meta, read the index, rewrote it and read it again inside one tick. Such files are only the ones just
- * written, so reading them costs nothing.) */
-uint64_t assets_signature(const std::string &assets_dir) {
+ * On Windows a file replaced by one of the same size with the same write time (a copy or an unpack that keeps archive times) is not
+ * seen; POSIX's change time catches that.
+ *
+ * Round 511, git's "racy" rule: a write time can't tell two edits apart inside one tick of the file clock - CI's quick Windows runner
+ * wrote a .meta, read the index, rewrote it with another GUID of the same size and read again inside one tick, and the stale index
+ * answered. So when `racy` is given, the files the index reads (.meta, .unity-guids, .unity-stats) written within kRacySeconds of now
+ * are listed with a hash of their contents; unity_guid_index_checked keeps them with the index and reuses it only while each still
+ * hashes the same. The signature itself stays free of contents and of the clock, so an untouched Assets matches itself however
+ * long ago it was written. A racy file that can't be read, or more than kRacyBytes of them (a package unpacked a moment ago, write
+ * times in the future), makes the state unkeepable (`keepable` false: the next import walks again). A clock skewed by more than
+ * the window between the editor and a network drive is not covered. */
+constexpr int kRacySeconds = 3;
+constexpr uint64_t kRacyBytes = 32ull << 20;
+
+bool index_reads(const std::string &name) {
+  return fs::extension(name) == ".meta" || name == ".unity-guids" || name == ".unity-stats";
+}
+
+uint64_t content_hash(const std::string &path, bool &ok) {
+  std::string bytes;
+  ok = fs::read_file(path, bytes);
+  uint64_t h = 1469598103934665603ull;
+  for (char c : bytes) h = (h ^ (unsigned char)c) * 1099511628211ull;
+  return h;
+}
+
+uint64_t assets_signature(const std::string &assets_dir, std::vector<std::pair<std::string, uint64_t>> *racy = nullptr, bool *keepable = nullptr) {
   namespace sfs = std::filesystem;
-  uint64_t sum = 0;
+  uint64_t sum = 0, racy_bytes = 0;
   std::error_code ec;
-  const sfs::file_time_type racy_after = sfs::file_time_type::clock::now() - std::chrono::seconds(2);
+  const sfs::file_time_type racy_after = sfs::file_time_type::clock::now() - std::chrono::seconds(kRacySeconds);
+  if (keepable) *keepable = true;
   sfs::recursive_directory_iterator it(sfs::u8path(assets_dir), sfs::directory_options::skip_permission_denied, ec), end;
   for (; !ec && it != end; it.increment(ec)) {
     if (it.depth() > 16) {
@@ -112,16 +138,20 @@ uint64_t assets_signature(const std::string &assets_dir) {
     for (char c : name) h = (h ^ (unsigned char)c) * 1099511628211ull;
     if (!it->is_directory(e2)) {  // (a folder by its name only: NTFS updates a folder's time in its parent's listing late, so it differs from one walk to the next)
       const uint64_t size = (uint64_t)it->file_size(e2);
-      const uint64_t when = (uint64_t)it->last_write_time(e2).time_since_epoch().count();
+      const sfs::file_time_type written = it->last_write_time(e2);
+      const uint64_t when = (uint64_t)written.time_since_epoch().count();
       uint64_t changed = 0;  // (POSIX: the change time too - an unpack that keeps write times still moves it; Windows' is not cheap)
 #ifndef _WIN32
       struct stat st;
       if (::stat(it->path().c_str(), &st) == 0) changed = (uint64_t)st.st_ctime;
 #endif
       for (uint64_t v : {size, when, changed}) h = (h ^ v) * 1099511628211ull, h ^= h >> 29;
-      std::string bytes;
-      if (it->last_write_time(e2) >= racy_after && size <= (1u << 20) && fs::read_file(it->path().u8string(), bytes))
-        for (char c : bytes) h = (h ^ (unsigned char)c) * 1099511628211ull;
+      if (racy && written >= racy_after && index_reads(it->path().filename().u8string())) {
+        racy_bytes += size;
+        bool ok = racy_bytes <= kRacyBytes;
+        if (ok) racy->push_back({it->path().u8string(), content_hash(it->path().u8string(), ok)});
+        if (!ok && keepable) *keepable = false;
+      }
     }
     sum += h;
   }
@@ -134,18 +164,25 @@ std::shared_ptr<const UnityGuidIndex> unity_guid_index_cached(const std::string 
   KeptGuidIndex &k = kept_guid_index();
   if (!fresh && k.index && k.root == assets_dir && now_seconds() - k.at < 5.0) return k.index;
   k.index = std::make_shared<const UnityGuidIndex>(unity_guid_index(assets_dir, project_root));
-  k.root = assets_dir, k.at = now_seconds(), k.signed_ = false;
+  k.root = assets_dir, k.at = now_seconds(), k.signed_ = false, k.racy.clear();
   return k.index;
 }
 
 std::shared_ptr<const UnityGuidIndex> unity_guid_index_checked(const std::string &assets_dir, const std::string &project_root, bool *reused) {
   KeptGuidIndex &k = kept_guid_index();
-  const uint64_t sig = assets_signature(assets_dir);  // (before the walk: a change during it makes the next check differ)
-  const bool same = k.index && k.signed_ && k.root == assets_dir && k.signature == sig;
+  std::vector<std::pair<std::string, uint64_t>> racy;
+  bool keepable = true;
+  const uint64_t sig = assets_signature(assets_dir, &racy, &keepable);  // (before the walk: a change during it makes the next check differ)
+  bool same = k.index && k.signed_ && k.root == assets_dir && k.signature == sig;
+  for (const auto &r : k.racy) {  // (round 511: the files written just before the index was signed must still hold what it read)
+    if (!same) break;
+    bool ok = false;
+    same = content_hash(r.first, ok) == r.second && ok;
+  }
   if (reused) *reused = same;
   if (same) return k.at = now_seconds(), k.index;
   k.index = std::make_shared<const UnityGuidIndex>(unity_guid_index(assets_dir, project_root));
-  k.root = assets_dir, k.at = now_seconds(), k.signature = sig, k.signed_ = true;
+  k.root = assets_dir, k.at = now_seconds(), k.signature = sig, k.signed_ = keepable, k.racy = std::move(racy);
   return k.index;
 }
 

@@ -15937,7 +15937,8 @@ static void tests_round507_te() {
   });
   test("round 511: a .meta rewritten with another GUID of the same size inside one tick of the file clock is still found - the kept GUID index is walked again", [] {
     /* (CI's Windows runner wrote, read, rewrote and read within one tick: the size and the write time were the same and the
-     * stale index answered. The write time is put back here, so the case happens on every machine.) */
+     * stale index answered. The write time is put back here, so the case happens on every Windows machine; on POSIX the
+     * rewrite also moves the change time when it crosses a second, so there the test passes without the fix part of the time.) */
     const std::string A = fs::join(test_dir(), "r511_racy");
     r507te::clean(A), fs::make_dirs(fs::join(A, "Assets"));
     const std::string meta = fs::join(fs::join(A, "Assets"), "A.mat.meta");
