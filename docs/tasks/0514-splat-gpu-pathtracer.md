@@ -1,10 +1,9 @@
 # 0514: Gaussian splats in the card path tracer (Vulkan and OptiX) - round 534
 
-- **Status:** in progress (approved with Pass 27's plan, 2026-11-15)
+- **Status:** done (2026-11-16; approved with Pass 27's plan, 2026-11-15)
 - **Requirements:** Pass 27 plan, wave 2, worker S4
-- **Decisions:** ADR 0147 (the splat layout, round 530); this round's card layout choices are recorded below and
-  in the round's ADR section of `changelog.d` (no new subsystem: two buffers and a primitive kind in the existing
-  card path tracer)
+- **Decisions:** ADR 0147 (the splat layout, round 530); none new - the card's layout choices are recorded in this
+  spec (two buffers, an instance flag and a primitive kind in the existing card path tracer, no new subsystem)
 - **Model:** main session (Opus) for the kernel; implementer / test-engineer / code-reviewer agents
 - **Builds on:** round 530 (`src/scene/pointcloud.h`, S1) and round 533's maths header (`src/render/gsplat_math.h`, S3)
 - **PR:** (link when opened)
@@ -55,9 +54,14 @@ one from its rng per segment - the match is statistical either way); rays meet s
   - The integrator: a splat hit's emission, path end, denoiser passes; `transmittance` treats it as opaque.
   - `src/render/gsplat_gpu.{h,cpp}`: the flattening (`gsplat_gpu_append`), the BVH build over splat boxes,
     the GLSL piece (`kGlslSplats`) the kernel includes, and the device helpers for both devices.
-  - A clean refusal: a cloud over the card's memory budget, or a device whose kernel can't take the splat
-    buffers, leaves the splats out with one log line (`gpu: splats left out: <why>`); the dependency-free
-    build has no card and compiles none of it.
+  - A clean refusal: a cloud whose arrays are missing or whose transform can't be inverted is left out with
+    one log line (`gpu: splats left out: <why>`, once a cloud and version). A scene whose splats don't fit the
+    card's memory (after its textures shrink), or a buffer over the card's `maxStorageBufferRange`, renders on
+    the CPU, said once: the splats are never left off the card alone, because its samples are averaged with the
+    CPU's and both must see the same scene (decided in review; the first draft of this spec said otherwise).
+    The dependency-free build has no card and compiles none of it.
+  - The flattened clouds are cached by their uid and version (up to 1 GB), so a scene rebuilt for a moved object
+    or a bake copies them; the upload's sections compare which clouds are on the card, not their bytes.
 - Out: motion blur of splats, splats as light sources (NEE), splats in the Scene view (round 532), the CPU path
   (round 533), import (round 531), the realtime lightmapper and voxel GI (they don't trace splats yet).
 
@@ -113,8 +117,10 @@ one from its rng per segment - the match is statistical either way); rays meet s
 - The stochastic test's hash of the hit point makes CPU and card agree except where float rounding moves a
   hit across the threshold: the tolerance in criterion 3 covers that; criterion 3's opaque case pins exactness.
 - A cloud inside a mesh's bounds; a camera inside a splat (the bounding sphere test without back-face cull).
-- Memory: a 1M degree-3 cloud is ~250 MB on the card; `build_gpu_scene_fit` counts it, so a card short of
-  memory drops texture levels first, then the splats, with the log line.
+- Memory: a 1M degree-3 cloud is ~290 MB on the card; `build_gpu_scene_fit` counts it, so a card short of
+  memory drops texture levels first, then renders the scene on the CPU, with the log line.
+- A driver that reports a splat's box twice to one ray would darken its shadow twice: the AABB geometry asks for
+  no duplicate any-hit (Vulkan), and OptiX's shadow pass runs in an any-hit program the geometry calls once.
 
 ## Documentation to update
 - `changelog.d/534-splat-gpu-pathtracer.md` (README line: splats on the card; ARCHITECTURE row for

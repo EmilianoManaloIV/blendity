@@ -715,17 +715,6 @@ vec3 bsdf_any(bool toon, Sample s, vec3 n, vec3 V, vec3 L) { return toon ? s.alb
 
 /* PathTracer::transmittance: through cutout holes and transparent surfaces. */
 
-vec3 transmittance_meshes(vec3 o, vec3 d, float tmax);
-/* Round 534: the splats let by the product of (1 - alpha) of those the ray crosses (as the CPU's, round 533), the
- * meshes what transmittance_meshes says. */
-vec3 transmittance(vec3 o, vec3 d, float tmax) {
-  float ts = scene_has_splats() ? splat_transmittance(o, d, tmax) : 1.0;
-  if (!(ts > 0.0)) return vec3(0.0);
-  g_meshes_only = true;
-  vec3 T = transmittance_meshes(o, d, tmax);
-  g_meshes_only = false;
-  return T * ts;
-}
 vec3 transmittance_meshes(vec3 o, vec3 d, float tmax) {
   if (P.counts.z == 0) return occluded(o, d, tmax) ? vec3(0.0) : vec3(1.0);
   vec3 T = vec3(1.0);
@@ -754,6 +743,16 @@ vec3 transmittance_meshes(vec3 o, vec3 d, float tmax) {
     left -= step;
   }
   return T;
+}
+/* Round 534: the splats let by the product of (1 - alpha) of those the ray crosses (as the CPU's, round 533), the
+ * meshes what transmittance_meshes (above) says. */
+vec3 transmittance(vec3 o, vec3 d, float tmax) {
+  float ts = scene_has_splats() ? splat_transmittance(o, d, tmax) : 1.0;
+  if (!(ts > 0.0)) return vec3(0.0);
+  g_meshes_only = true;
+  vec3 T = transmittance_meshes(o, d, tmax);
+  g_meshes_only = false;
+  return T * ts;
 }
 float mesh_light_pdf(uint li, float dist, float cos_light) {
   MeshLight l = mlights[li];

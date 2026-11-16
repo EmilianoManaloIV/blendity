@@ -116,6 +116,7 @@ struct Scene {
   std::vector<GSplat> splats;
   std::vector<float> splat_sh;       // RGB triples
   std::vector<float> splat_aabbs;    // 6 per splat: min, max (the cloud's space)
+  uint64_t splat_hash = 0;           // which clouds, at which versions (the upload's sections compare it, not 300 MB of bytes)
 };
 
 /* One GPU rendering samples of the full frame into its own accumulation

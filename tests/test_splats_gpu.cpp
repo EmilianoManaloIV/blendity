@@ -59,17 +59,25 @@ bool walk_cloud(const gpu::Scene &s, const gpu::GInstance &gi, std::vector<uint3
 
 
 /* A splat scene on one device - 0 the CPU, 1 GPU Compute with ray queries, 2 GPU Compute walking Blendity's BVH,
- * 3 OptiX: the cloud over a grey plane under a low sun (its shadow on the plane), a blue-grey sky. Linear RGB, 3
- * floats a pixel; `device_out` what traced it. */
-std::vector<float> splat_scene_render(int device, const PointCloudPtr &pc, int spp, const Mat4 &cloud_model, std::string *device_out) {
+ * 3 OptiX: the cloud over a plane under a low sun (its shadow on the plane), a blue-grey sky. The plane is grey, or a
+ * mirror (`mirror`: the splats seen by a bounce). */
+struct SplatRender {
+  std::vector<float> rgb;  // linear RGB, 3 floats a pixel
+  std::string device, error;
+};
+SplatRender splat_scene_render(int device, const PointCloudPtr &pc, int spp, const Mat4 &cloud_model, bool mirror = false) {
   auto plane = primitives::plane(10.0f, 1);
-  std::vector<MaterialPtr> mats = {make_material("Grey", Vec3(0.6f))};
+  MaterialPtr m = make_material("Floor", Vec3(0.6f));
+  if (mirror) m->metallic = 1.0f, m->roughness = 0.02f, m->base_color = Vec3(0.9f);
+  std::vector<MaterialPtr> mats = {m};
   std::vector<PTObject> objs = {{&plane->render_mesh_tangents(), Mat4::translate({0, -0.9f, 0}), &mats}};
   Environment env;
   env.mode = Environment::Color;
   env.color = {0.2f, 0.25f, 0.3f};
   RenderLight sun;
   sun.direction = normalize(Vec3(-0.5f, -1.0f, 0.3f));
+  const char *before = std::getenv("BLENDITY_GPU_BACKEND");
+  const std::string restore = before ? before : "";
   set_env("BLENDITY_GPU_BACKEND", device == 3 ? "optix" : "vulkan");
   PathTracer pt;
   PTSettings st;
@@ -84,12 +92,16 @@ std::vector<float> splat_scene_render(int device, const PointCloudPtr &pc, int s
   pt.build(objs, {sun}, env);
   pt.set_camera(Mat4::look_at({0, 0.7f, -3.4f}, {0, -0.2f, 0}, {0, 1, 0}), Mat4::perspective(45 * kDeg2Rad, 1.0f, 0.1f, 50.0f), 64, 64);
   pt.render(1e9, spp);
-  set_env("BLENDITY_GPU_BACKEND", "vulkan");
-  if (device_out) *device_out = pt.gpu_error().empty() ? pt.device_summary() : pt.gpu_error();
-  return pt.linear_rgb(false);
+  set_env("BLENDITY_GPU_BACKEND", restore);
+  SplatRender r;
+  r.device = pt.device_summary();
+  r.error = pt.gpu_error();
+  r.rgb = pt.linear_rgb(false);
+  return r;
 }
 
-/* Two pictures apart: their means, and the worst 4 x 4 block's mean difference (single pixels are noise here). */
+/* Two pictures apart: their means, and the worst 4 x 4 block's mean difference in any channel (single pixels are
+ * noise here). */
 struct ImageDiff { double mean_a = 0, mean_b = 0, worst = 0; };
 ImageDiff image_diff(const std::vector<float> &a, const std::vector<float> &b) {
   ImageDiff d;
@@ -97,17 +109,25 @@ ImageDiff image_diff(const std::vector<float> &a, const std::vector<float> &b) {
   for (size_t i = 0; i < n; i++) d.mean_a += a[i], d.mean_b += b[i];
   if (n) d.mean_a /= (double)n, d.mean_b /= (double)n;
   for (int by = 0; by < 64; by += 4)
-    for (int bx = 0; bx < 64; bx += 4) {
-      double sum = 0;
-      for (int y = by; y < by + 4; y++)
-        for (int x = bx; x < bx + 4; x++)
-          for (int c = 0; c < 3; c++) {
+    for (int bx = 0; bx < 64; bx += 4)
+      for (int c = 0; c < 3; c++) {
+        double sum = 0;
+        for (int y = by; y < by + 4; y++)
+          for (int x = bx; x < bx + 4; x++) {
             const size_t i = ((size_t)y * 64 + x) * 3 + c;
             if (i < n) sum += (double)a[i] - b[i];
           }
-      d.worst = std::max(d.worst, std::fabs(sum) / 48.0);
-    }
+        d.worst = std::max(d.worst, std::fabs(sum) / 16.0);
+      }
   return d;
+}
+/* The mean of `img` over the pixels `mask` marks (all channels). */
+double masked_mean(const std::vector<float> &img, const std::vector<uint8_t> &mask) {
+  double s = 0;
+  size_t n = 0;
+  for (size_t p = 0; p < mask.size() && p * 3 + 2 < img.size(); p++)
+    if (mask[p]) s += img[p * 3] + img[p * 3 + 1] + img[p * 3 + 2], n += 3;
+  return n ? s / (double)n : 0.0;
 }
 
 /* The card devices this machine has for the match tests (none: skipped). */
@@ -120,28 +140,43 @@ std::vector<int> card_devices() {
   return out;
 }
 
-/* The card's picture of `pc` placed by `model` against the CPU's. */
-void check_card_matches_cpu(const PointCloudPtr &pc, const Mat4 &model) {
+/* The card's picture of `pc` placed by `model` against the CPU's: each card device must have traced it itself (no
+ * quiet fall back to the CPU, the variant it was asked for), the means within 2 %, no block far apart, and the pixels
+ * the splats darken - their shadow on the plane, dark splats in front of it - within 3 %. */
+void check_card_matches_cpu(const PointCloudPtr &pc, const Mat4 &model, bool mirror = false) {
   const char *names[] = {"the CPU", "GPU Compute, ray queries", "GPU Compute, BVH walk", "OptiX"};
-  std::string dev;
-  const std::vector<float> cpu = splat_scene_render(0, pc, 256, model, &dev);
-  CHECK(cpu.size() == 64 * 64 * 3);
-  /* (Two empty pictures would match too: the splats must be in it - a spread of brightness.) */
-  float lo = 1e30f, hi = -1e30f;
-  for (size_t i = 0; i + 2 < cpu.size(); i += 3) {
-    const float l = 0.2126f * cpu[i] + 0.7152f * cpu[i + 1] + 0.0722f * cpu[i + 2];
-    lo = std::min(lo, l), hi = std::max(hi, l);
+  const SplatRender cpu = splat_scene_render(0, pc, 256, model, mirror);
+  CHECK(cpu.rgb.size() == 64 * 64 * 3);
+  /* The splats are in the picture: without them some block is far from it. */
+  PointCloudPtr none = pointcloud_random(PointCloudType::GaussianSplats, 1, 0, 1, 0.6f);
+  none->opacity[0] = 0.0f;  // (under 1%: nothing to see)
+  const SplatRender bare = splat_scene_render(0, none, 64, model, mirror);
+  CHECK(image_diff(cpu.rgb, bare.rgb).worst > 0.1);
+  std::vector<uint8_t> darker(64 * 64, 0);
+  size_t shadowed = 0;
+  for (size_t p = 0; p < darker.size(); p++) {
+    const float with = cpu.rgb[p * 3] + cpu.rgb[p * 3 + 1] + cpu.rgb[p * 3 + 2], without = bare.rgb[p * 3] + bare.rgb[p * 3 + 1] + bare.rgb[p * 3 + 2];
+    darker[p] = with < 0.8f * without;
+    shadowed += darker[p];
   }
-  CHECK(hi - lo > 0.2f);
+  CHECK(shadowed > 40);
+  const double cpu_dark = masked_mean(cpu.rgb, darker);
   for (int d : card_devices()) {
-    const std::vector<float> card = splat_scene_render(d, pc, 256, model, &dev);
-    const ImageDiff diff = image_diff(cpu, card);
-    std::printf("    %s (%s): mean %.4f against the CPU's %.4f, worst 4x4 block apart by %.4f\n", names[d], dev.c_str(), diff.mean_b, diff.mean_a,
-                diff.worst);
-    CHECK(card.size() == cpu.size());
+    const SplatRender card = splat_scene_render(d, pc, 256, model, mirror);
+    const ImageDiff diff = image_diff(cpu.rgb, card.rgb);
+    const double card_dark = masked_mean(card.rgb, darker);
+    std::printf("    %s (%s%s%s): mean %.4f against the CPU's %.4f, worst 4x4 block %.4f; the %zu darkened pixels %.4f against %.4f\n", names[d],
+                card.device.c_str(), card.error.empty() ? "" : " - ", card.error.c_str(), diff.mean_b, diff.mean_a, diff.worst, shadowed, card_dark,
+                cpu_dark);
+    CHECK(card.error.empty());
+    CHECK(card.device.find(gpu::devices()[0].name) != std::string::npos);
+    if (d == 1) CHECK(card.device.find("RT hardware") != std::string::npos);
+    if (d == 2) CHECK(card.device.find("GPU compute") != std::string::npos);
+    if (d == 3) CHECK(card.device.find("OptiX") != std::string::npos);
+    CHECK(card.rgb.size() == cpu.rgb.size());
     CHECK(std::fabs(diff.mean_b - diff.mean_a) < 0.02 * diff.mean_a);
     CHECK(diff.worst < 0.12);
-    if (d == 3) CHECK(dev.find("OptiX") != std::string::npos);
+    CHECK(std::fabs(card_dark - cpu_dark) < 0.03 * cpu_dark);
   }
 }
 }  // namespace
@@ -299,9 +334,30 @@ static void round534_tests() {
     check_card_matches_cpu(pointcloud_random(PointCloudType::GaussianSplats, 2000, 3, 33, 0.6f), model);
   });
 
-  test("card splats: the path tracer's kernel with the splats compiles for cards with and without ray queries (skipped without Vulkan's shader compiler)", [] {
-    if (!gpu::compiled_in()) {
-      std::printf("    (no Vulkan in this build: skipped)\n");
+  test("card splats: a mirror floor shows the splats on the card as on the CPU - a bounce that meets a splat adds its colour (skipped without a card)", [] {
+    if (card_devices().empty()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    check_card_matches_cpu(pointcloud_random(PointCloudType::GaussianSplats, 2000, 3, 47, 0.6f), Mat4(), true);
+  });
+
+  test("card splats: with OptiX turned off (BLENDITY_NO_OPTIX=1) the splat tests leave OptiX out and say why; the card's other devices stay (skipped without a card)", [] {
+    const char *before = std::getenv("BLENDITY_NO_OPTIX");
+    const std::string restore = before ? before : "";
+    set_env("BLENDITY_NO_OPTIX", "1");
+    const std::vector<int> devs = card_devices();
+    std::printf("    %s; devices: %zu\n", gpu::optix_status().c_str(), devs.size());
+    CHECK(!gpu::optix_compiled_in());
+    CHECK(std::find(devs.begin(), devs.end(), 3) == devs.end());
+    CHECK(gpu::optix_status().find("OptiX") != std::string::npos);
+    if (gpu::available()) CHECK(!devs.empty());
+    set_env("BLENDITY_NO_OPTIX", restore);
+  });
+
+  test("card splats: the path tracer's kernel with the splats compiles for cards with and without ray queries (skipped without a Vulkan card)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no Vulkan card here: skipped)\n");
       return;
     }
     std::string err;

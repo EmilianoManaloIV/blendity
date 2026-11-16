@@ -2601,6 +2601,12 @@ bool PathTracer::build_gpu_scene_fit(gpu::Scene &s, uint64_t memory_mb, int *ski
     if (tb == prev) break;  // nothing smaller left to send
     prev = tb;
   }
+  /* Round 534: the splats are never left off the card alone - its samples are averaged with the CPU's, so it must see
+   * the whole scene; a scene they don't fit renders on the CPU (the caller says so), and the reason is said once. */
+  const uint64_t splat_bytes = s.splats.size() * sizeof(gpu::GSplat) + s.splat_sh.size() * 4 + s.splat_aabbs.size() * 4;
+  if (splat_bytes && !splats_too_big_noted_.exchange(true))
+    Log::warn("gpu: %.0f MB of Gaussian splats with the scene don't fit the card's %llu MB: traced on the CPU", splat_bytes / 1048576.0,
+              (unsigned long long)memory_mb);
   return false;
 }
 
@@ -3030,8 +3036,7 @@ PathTracer::GpuSections PathTracer::gpu_scene_sections(const gpu::Scene &s) {
   g = s.nodes.size() > tlas ? mix_bytes(g, s.nodes.data() + tlas, (s.nodes.size() - tlas) * sizeof(gpu::GNode)) : g;
   g = hash_mix(g, (uint64_t)tlas);  // (the software TLAS's node count: the BLAS nodes sit after it, so a split that changes it moves them)
   g = hash_mix(g, (uint64_t)s.nodes.size());
-  g = bytes(g, s.splats);  // (round 534: the splats are geometry - a changed cloud is a whole upload)
-  g = bytes(g, s.splat_sh);
+  g = hash_mix(g, s.splat_hash);  // (round 534: the splats are geometry - a changed cloud is a whole upload)
   h.geometry = g;
   uint64_t i = bytes(kFnvBasis, s.instances);
   i = bytes(i, s.tlas_order);

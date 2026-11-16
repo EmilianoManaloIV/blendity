@@ -332,7 +332,7 @@ class OptixRenderer final : public Renderer {
         for (int c = 0; c < 4; c++) in.transform[r * 4 + c] = m[c * 4 + r];
       in.instanceId = (unsigned)o;
       in.visibilityMask = s.blas[b].kind == kBlasSplats ? 2 : 1;  // (round 534: shadow rays ask the meshes and the splats apart)
-      in.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING | OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
+      in.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING | (s.blas[b].kind == kBlasSplats ? 0u : OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT);  // (round 534: the splats' shadow pass uses any-hit)
       in.traversableHandle = gas[b];
       inst.push_back(in);
     }
@@ -353,7 +353,7 @@ class OptixRenderer final : public Renderer {
     if (gb.kind == kBlasSplats) {
       /* Round 534: a splat cloud - custom primitives over its splats' boxes; __intersection__splat tests each. */
       CUdeviceptr ab = scene_[13].ptr + (CUdeviceptr)gb.idx_off * 24;
-      const unsigned flags[1] = {OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT};
+      const unsigned flags[1] = {OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL};  // (a shadow ray's any-hit multiplies each splat's share once)
       OptixBuildInput bi{};
       bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
       bi.customPrimitiveArray.aabbBuffers = &ab;
@@ -428,6 +428,8 @@ class OptixRenderer final : public Renderer {
     d[2].hitgroup.entryFunctionNameCH = "__closesthit__hit";
     d[2].hitgroup.moduleIS = module_;  // (round 534: the splats' test; the triangles' built-in one ignores it)
     d[2].hitgroup.entryFunctionNameIS = "__intersection__splat";
+    d[2].hitgroup.moduleAH = module_;  // (the splats' shadow pass; every other ray turns any-hit off)
+    d[2].hitgroup.entryFunctionNameAH = "__anyhit__splat";
     OptixProgramGroupOptions pgo{};
     ls = sizeof(log);
     if (optixProgramGroupCreate(octx_, d, 3, &pgo, log, &ls, groups_) != OPTIX_SUCCESS) return fail(err, std::string("the program groups: ") + log);

@@ -96,10 +96,13 @@ bool splat_hit(uint gi, vec3 ro, vec3 rd, float tmin, float tmax, inout float t_
 bool splat_hit_in(uint obj, uint prim, vec3 ro, vec3 rd, float tmin, float tmax, inout float t_out) {
   return splat_hit(insts[obj].off.y + prim, ro, rd, tmin, tmax, t_out);
 }
-/* (A shadow ray's share through that splat: 1 - its alpha.) */
+/* (A shadow ray's: that splat's alpha on [kSplatTmin, tmax] and t there, then its share through it, 1 - alpha.) */
+float splat_alpha_in(uint obj, uint prim, vec3 ro, vec3 rd, float tmax, inout float t_out) {
+  return splat_alpha(insts[obj].off.y + prim, ro, rd, kSplatTmin, tmax, t_out);
+}
 float splat_pass_in(uint obj, uint prim, vec3 ro, vec3 rd, float tmax) {
   float t = tmax;
-  return 1.0 - splat_alpha(insts[obj].off.y + prim, ro, rd, kSplatTmin, tmax, t);
+  return 1.0 - splat_alpha_in(obj, prim, ro, rd, tmax, t);
 }
 /* gsplat::srgb_to_linear */
 float gs_srgb_to_linear(float c) {

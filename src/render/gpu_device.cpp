@@ -465,6 +465,7 @@ class VulkanRenderer final : public Renderer {
     VkPhysicalDeviceProperties props;
     g.f.vkGetPhysicalDeviceProperties(pd_, &props);
     ts_period_ns_ = props.limits.timestampPeriod;
+    max_storage_range_ = props.limits.maxStorageBufferRange;
     uint32_t qn = 0;
     g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
     std::vector<VkQueueFamilyProperties> qs(qn);
@@ -571,6 +572,11 @@ class VulkanRenderer final : public Renderer {
   /* A new device buffer for the binding, its data queued in the batch (an empty section gets a 16-byte buffer, zeroed). */
   bool batch_put(Batch &b, int binding, const void *data, size_t bytes, VkBufferUsageFlags extra, std::string *err) {
     free_buffer(bufs_[binding]);
+    if (bytes > max_storage_range_) {  // (round 534: a 1M-splat cloud's SH is 180 MB; some drivers bind no more than 128 MB)
+      if (err) *err = strprintf("%s: a %.1f MB buffer is over the card's storage-buffer limit (%.1f MB)", info_.name.c_str(), bytes / 1048576.0,
+                                max_storage_range_ / 1048576.0);
+      return false;
+    }
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | extra;
     if (!make_buffer(bufs_[binding], bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
       if (err) *err = strprintf("%s: out of GPU memory (%.1f MB buffer)", info_.name.c_str(), bytes / 1048576.0);
@@ -832,6 +838,7 @@ class VulkanRenderer final : public Renderer {
   VkDescriptorSet set_ = VK_NULL_HANDLE;
   /* By binding: 0-15 and the splats' 17-18 (round 534); 16 is the TLAS, a descriptor of its own. */
   static constexpr int kBufs = 19;
+  uint64_t max_storage_range_ = ~0ull;  // the card's maxStorageBufferRange (create_timestamps reads it)
   Buffer bufs_[kBufs];
   Buffer readback_;
   bool readback_coherent_ = true;
@@ -1087,6 +1094,7 @@ class VulkanRenderer final : public Renderer {
       if (gb.kind == kBlasSplats) {
         /* Round 534: a splat cloud - one box a splat; the kernel's ray query tests the splat itself (gsplat_gpu_glsl.h). */
         geo.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+        geo.flags = VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;  // (a shadow ray multiplies each splat's share once)
         geo.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
         geo.geometry.aabbs.data.deviceAddress = ab.address + (VkDeviceAddress)gb.idx_off * 24;
         geo.geometry.aabbs.stride = 24;

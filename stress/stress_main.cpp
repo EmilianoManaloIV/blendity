@@ -5760,10 +5760,10 @@ static void test_gpu_optix(Report &rep, const Options &o) {
  * each card device, against the CPU path tracer at the same samples. A measurement, never a check (ADR 0056). */
 static void test_splats_gpu(Report &rep, const Options &o) {
   rep.title("Gaussian splats on the card (round 534)",
-            "512x512, a cloud of N splats of SH degree 3 over a floor, a sun, 4 bounces, 16 samples (8 quick). Flatten: the "
+            "256x256, a cloud of N splats of SH degree 3 over a floor, a sun, 4 bounces, 16 samples (8 quick). Flatten: the "
             "splats onto the card's buffers alone; build: PathTracer::build with the card opening and uploading (BVH / BLAS / "
             "GAS); samples a second: the best of two runs. The CPU path tracer at the same scene for scale.");
-  const int W = 512, H = 512, spp = o.quick ? 8 : 16;
+  const int W = 256, H = 256, spp = o.quick ? 8 : 16;
   auto floor = primitives::plane(40.0f, 1);
   MaterialPtr mfl = make_material("floor", {0.7f, 0.7f, 0.7f});
   std::vector<MaterialPtr> mfloor = {mfl};
