@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Round 549's diagnosis only (task 0529): on the diag/549-gcc15 branch, never merged. The Linux build of main went red when
+# ubuntu-latest became ubuntu-26.04 (GCC 15); this runs that build with debug symbols and the failing runs under gdb.
+name: diag549
+on:
+  push:
+    branches: ['diag/549-*']
+jobs:
+  gdb:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y g++ gdb libx11-dev libxi-dev fonts-dejavu-core
+      - name: The runner
+        run: |
+          g++ --version | head -1
+          lscpu | grep -E 'Model name|^CPU\(s\)|Flags' | cut -c 1-400
+      - name: Build (release, with debug symbols)
+        env:
+          EXTRA_FLAGS: "-g"
+        run: ./build.sh release all
+      - name: The two tests under gdb
+        env:
+          BLENDITY_PROJECT: /tmp/p
+          BLENDITY_TRASH: /tmp/t
+        run: |
+          mkdir -p /tmp/p /tmp/t
+          for f in "turning Realtime GI or its settings on" "draw piece window: a 1 x 1.5 m drag"; do
+            echo "=== $f"
+            BLENDITY_TEST_FILTER="$f" gdb -q -batch -ex run -ex bt ./dist/linux/blendity_tests 2>&1 | grep -E 'FAIL|checks,|^#|signal|nothing|hit_far' | head -60
+          done
+          echo "=== the whole suite"
+          ./dist/linux/blendity_tests > tests.log 2>&1; echo "exit $?"
+          grep -E '^\[FAIL\]|^  FAIL |checks,' tests.log | head -40
+      - name: Stress, curved alone and the quick run, under gdb
+        env:
+          BLENDITY_PROJECT: /tmp/p
+          BLENDITY_TRASH: /tmp/t
+        run: |
+          echo "=== curved alone"
+          gdb -q -batch -ex run -ex bt --args ./dist/linux/blendity_stress --quick --only curved --out /tmp/o1 2>&1 | grep -E '^#|signal|torus|cylinder|Total' | head -60
+          echo "=== the quick run"
+          gdb -q -batch -ex run -ex bt -ex 'info registers rip' -ex 'x/6i $pc' --args ./dist/linux/blendity_stress --quick --out /tmp/o2 > stress.log 2>&1; echo "exit $?"
+          grep -E '^#|signal|^\[stress\]|=> ' stress.log | tail -60
