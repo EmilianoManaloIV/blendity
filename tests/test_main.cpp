@@ -114,11 +114,8 @@ static const TestGroup kTestGroups[] = {
     {"blockout_modifiers", run_blockout_modifiers_tests},
     {"blockout_join", run_blockout_join_tests},
     {"blockout_piece_modifiers", run_blockout_piece_modifiers_tests},
-<<<<<<< HEAD
-    {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
-=======
     {"splats", run_splats_tests},  // (Pass 27: point clouds and Gaussian splats)
->>>>>>> 8344e4c67f49a8e8e837acbdfcbec398dfbb2161
+    {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 
