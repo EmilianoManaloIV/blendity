@@ -91,6 +91,9 @@ copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
 | File | From | License of the origin | How it is distributed |
 |---|---|---|---|
 | `src/render/sky.cpp` (`sky_radiance_internal`, the sky texture's evaluation) | Cycles' `intern/cycles/kernel/svm/sky.h` | Apache-2.0 (`Apache-2.0.txt`; "2011-2022 Blender Foundation", kept word for word in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+| `src/scene/pointcloud.h`, `pointcloud.cpp` (the point cloud's types, the splat attributes' meaning and decoding, round 530) | Blender 5.3's `blenkernel/BKE_pointcloud.hh`, `intern/pointcloud.cc`, `makesdna/DNA_pointcloud_types.h`, `io/common/IO_gsplat.hh` | GPL-2.0-or-later ("2023-2026 Blender Authors", kept in the headers) | GPL-3.0-or-later, like the executables |
+| `src/scene/import_splat.cpp` (PLY splat detection and decoding, the SPZ v2-v4 readers, round 531) | Blender 5.3's `io/ply/importer/ply_import.cc`, `ply_import_gsplat.cc`, `io/spz/intern/` | GPL-2.0-or-later ("2026 Blender Authors", kept in the header) | GPL-3.0-or-later, like the executables |
+| `src/render/gsplat_math.h` (Gaussian splat intersection, stochastic alpha, SH colour, normal; round 533) | Cycles 5.3's `intern/cycles/kernel/geom/gsplat_intersect.h`, `kernel/geom/gsplat.h`, `scene/pointcloud.cpp` (`update_gsplat_radii`), `util/math_spherical_harmonics.h`, `util/hash.h` (`hash_uint3`, Bob Jenkins' lookup3, public domain) | Apache-2.0 (`Apache-2.0.txt`; "2026 Blender Foundation", kept in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
 
 ## Read, not copied
 
@@ -104,6 +107,7 @@ Nothing of their code is in the tree, so no licence text ships; the original's l
 | [Poiyomi Toon](https://github.com/poiyomi/PoiyomiToonShader), [UniVRM / MToon](https://github.com/vrm-c/UniVRM), UTS2 | material property names read by the Unity material converter and the texture presets | Poiyomi's own licence; MIT; Unity Companion License |
 | [CATS Blender Plugin](https://github.com/absolute-quantum/cats-blender-plugin) | the Avatar window's tools (Fix Model, visemes, decimation, eye tracking, merging), re-implemented | MIT |
 | [Cascadeur](https://cascadeur.com/) (Nekki) | the ideas behind physics for animation (ADRs 0042-0045, 0087) | proprietary; ideas only |
+| [glTF-Blender-IO](https://github.com/KhronosGroup/glTF-Blender-IO), [SPZ](https://github.com/nianticlabs/spz) (Niantic) | `KHR_gaussian_splatting`'s attribute names, and SPZ version 1's float16 positions, read by `src/scene/import_splat.cpp` (round 531) | Apache-2.0; MIT |
 | [OpenMoonRay](https://github.com/dreamworksanimation/openmoonray) (DreamWorks) | an optional external renderer run as a program of its own (ADR 0041, `moonray.yml`); never linked, never shipped | Apache-2.0 |
 | [Blender](https://www.blender.org/) (Blender Authors) | what a brush keeps and how pressure drives it, read in `blenkernel/intern/brush.cc`, `editors/sculpt_paint/paint_image_ops_paint.cc` and `paint_stroke.cc` (own size, strength and colour per brush, Unified switches, `hardness * curve(pressure)`, `spacing * (1.5 - curve(pressure))`), written again in `src/editor/brush_slots.cpp` | GPL-2.0-or-later |
 | The Live Link bridges (`bridges/`) | Blendity's own code under GPL-2.0-or-later, run inside Blender, Unity, Godot and Unreal as their plug-in terms allow; nothing of Blendity's links into them | - |

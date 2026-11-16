@@ -8,6 +8,7 @@
 #include "../texture/surface.h"
 #include "../scene/stroke_object.h"
 #include "../scene/blockout_piece_stack.h"  // (round 514: a Blockout piece's modifiers)
+#include "../scene/pointcloud_object.h"     // (round 530: a point cloud's icon)
 
 #include "../core/core.h"
 #include <cstring>
@@ -30,6 +31,7 @@ static Icon object_icon(const GameObject &g) {
   if (g.get<Blockout>()) return Icon::Cube;  // (round 477: the result's mesh - its pieces below show the Subtract below)
   if (const BlockoutPiece *bp = g.get<BlockoutPiece>()) return bp->operation == 1 ? Icon::Close : Icon::Plus;
   if (g.get<MeshFilter>()) return Icon::Cube;
+  if (g.get<PointCloudObject>()) return Icon::Vertex;  // (round 530)
   return Icon::Empty;
 }
 
@@ -78,6 +80,11 @@ void Editor::draw_hierarchy(const Recti &r) {
         if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k, child);
     });
     if (u.menu_item("Lattice")) create_object("Lattice", child);
+    u.submenu("Point Cloud", u.px(170), [this, child] {  // (round 530)
+      if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud", child);
+      if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats", child);
+      if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats", child);
+    });
     if (u.menu_item("Armature")) create_object("Armature", child);
   };
   u.popup(create_menu, u.px(200), [create_body] { create_body(false); });

@@ -90,7 +90,9 @@ void run_blockout_tests();
 void run_blockout_modifiers_tests();
 void run_blockout_join_tests();
 void run_blockout_piece_modifiers_tests();
+void run_splats_tests();
 void run_runner_tests();
+void run_splats_trace_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -112,6 +114,8 @@ static const TestGroup kTestGroups[] = {
     {"blockout_modifiers", run_blockout_modifiers_tests},
     {"blockout_join", run_blockout_join_tests},
     {"blockout_piece_modifiers", run_blockout_piece_modifiers_tests},
+    {"splats", run_splats_tests},  // (Pass 27: point clouds and Gaussian splats)
+    {"splats_trace", run_splats_trace_tests},
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 
