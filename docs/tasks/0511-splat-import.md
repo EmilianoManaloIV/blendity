@@ -1,6 +1,6 @@
 # 0511: Importing Gaussian splats - PLY, SPZ and glTF (round 531)
 
-- **Status:** in progress (round 531)
+- **Status:** done (round 531)
 - **Requirements:** R-10 (import), Q-01 (robust data), C-02 (dependency-free)
 - **Decisions:** ADR 0147 (the layout); none new
 - **Model:** main session (Opus) for the formats; test-engineer and code-reviewer agents

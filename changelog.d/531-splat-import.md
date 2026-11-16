@@ -14,7 +14,18 @@
   keeps bands 1-3 with a note.
 - Cut-short files, huge or zero counts, bad magic, bad versions and NaN values refuse cleanly or drop the bad points.
 
-**Checked:** CHECKS_531
+**Checked:** the `splats` group passes 378 of 378 checks on Windows with Blender's libraries, on the tree joined with
+round 530's fixes. The comparison with Blender 5.3 is made against its decoding formulas and its own SH tables, not
+against files it imported: no Blender 5.3 executable is on this machine. Linux and the dependency-free build (SPZ v4
+refused there) are left to CI. The `splats` stress section fuzzes the three readers.
+
+**Review:** fixed three things before publishing:
+- an unnormalised PLY rotation turned wrongly when the axes changed;
+- an SPZ v4 header could ask for a huge allocation before decompressing;
+- a glTF accessor was read past its buffer view.
+
+Some glTF cases are now refused with a note: accessors with no buffer view (Draco, sparse), a point primitive's
+indices, and a second point primitive.
 
 <!-- README -->
 after: Remove Ringing (Hanning or Lanczos, a view setting)
