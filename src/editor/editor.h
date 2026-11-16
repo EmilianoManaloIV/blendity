@@ -3606,9 +3606,12 @@ class Editor {
     int axis = 0;           // array: 0 X, 1 Y, 2 Z (the selection's own axes)
     float amount2 = 0.0f;   // taper: end scale; recess: border
     Vec3 size{1, 1, 1};     // sketch_box: the lengths; sketch_cylinder: base radius, height, top radius (task 0225)
+    int lock = 0;           // LoopTools: the locked local axes, bit 0 X, 1 Y, 2 Z (round 537)
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
+  int run_looptools(Mesh &m, const LastOp &L);  // LoopTools (round 537): the vertices it moved
+  Vec3 looptools_view_dir(const LastOp &L);       // Flatten's View plane in the edited object's space
   /* A redoable operator's start (task 0165): the selection flushed, LastOp filled from the mesh as it is, run_last_op. */
   void begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp);
   /* The faces an operator reads, from the vertices or the edges in those modes; how many are selected. */

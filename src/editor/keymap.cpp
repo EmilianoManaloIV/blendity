@@ -189,6 +189,11 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mesh.recalc_normals", "Recalculate Normals", "Mesh", CTX_SCENE_EDIT},
       {"mesh.shrink_fatten", "Shrink / Fatten", "Mesh", CTX_SCENE_EDIT},
       {"mesh.to_sphere", "To Sphere", "Mesh", CTX_SCENE_EDIT},
+      {"mesh.relax_loops", "Relax Edge Loops", "Mesh", CTX_SCENE_EDIT},  // LoopTools (round 537)
+      {"mesh.space_loops", "Space Edge Loops Evenly", "Mesh", CTX_SCENE_EDIT},
+      {"mesh.circularize", "To Circle", "Mesh", CTX_SCENE_EDIT},
+      {"mesh.flatten_loops", "Flatten", "Mesh", CTX_SCENE_EDIT},
+      {"mesh.curve_loops", "Curve Edge Loops Between Selected", "Mesh", CTX_SCENE_EDIT},
       {"mesh.duplicate", "Duplicate Elements", "Mesh", CTX_SCENE_EDIT},
       {"mesh.proportional", "Proportional Editing", "Mesh", CTX_SCENE_EDIT},
       /* Selection */
@@ -943,6 +948,11 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "mesh.recalc_normals") edit_tool("recalc_normals");
   else if (id == "mesh.shrink_fatten") edit_tool("shrink_fatten");
   else if (id == "mesh.to_sphere") edit_tool("to_sphere");
+  else if (id == "mesh.relax_loops") edit_tool("relax_loops");  // LoopTools (round 537)
+  else if (id == "mesh.space_loops") edit_tool("space_loops");
+  else if (id == "mesh.circularize") edit_tool("circularize");
+  else if (id == "mesh.flatten_loops") edit_tool("flatten_loops");
+  else if (id == "mesh.curve_loops") edit_tool("curve_loops");
   else if (id == "mesh.duplicate") edit_tool("duplicate");
   else if (id == "mesh.proportional") proportional_ = !proportional_;
   else if (id == "select.linked") edit_tool("select_linked");

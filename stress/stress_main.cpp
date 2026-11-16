@@ -7408,6 +7408,98 @@ static void test_blender_parity(Report &rep, const Options &o) {
   parity_render(out, o);
 }
 
+/* ---- Round 537 (task 0517): LoopTools on long loops ---- */
+#include "../src/scene/mesh_tools_loop.h"
+
+namespace lt537 {
+/* What is wrong with a mesh after an operator: non-finite positions, arrays that disagree, or a topology that changed. */
+static size_t problems(const Mesh &m, const Mesh &base) {
+  size_t bad = 0;
+  for (const Vec3 &p : m.positions)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) bad++;
+  if (m.positions.size() != base.positions.size() || m.face_offsets != base.face_offsets || m.corner_verts != base.corner_verts ||
+      m.loose_edges != base.loose_edges)
+    bad++;
+  for (uint32_t c : m.corner_verts)
+    if (c >= m.vert_count()) bad++;
+  if (m.face_offsets.empty() || m.face_offsets.back() != m.corner_verts.size()) bad++;
+  return bad;
+}
+
+static size_t moved(const Mesh &a, const Mesh &b) {
+  size_t n = 0;
+  for (size_t i = 0; i < a.positions.size() && i < b.positions.size(); i++)
+    if (std::memcmp(&a.positions[i], &b.positions[i], sizeof(Vec3)) != 0) n++;
+  return n;
+}
+
+/* A loop of n wire vertices: a wobbly circle with uneven spacing (closed) or a wavy line (open). */
+static Mesh loop(int n, bool closed) {
+  Mesh m;
+  for (int i = 0; i < n; i++) {
+    const float t = (float)i / (float)n;
+    const float a = 6.2831853f * (t + 0.15f * t * t);  // (uneven steps)
+    const float r = 100.0f * (1.0f + 0.05f * std::sin(37.0f * a));
+    if (closed) m.add_vert({r * std::cos(a), 3.0f * std::sin(5.0f * a), r * std::sin(a)});
+    else m.add_vert({1000.0f * t * (1.0f + 0.3f * t), 5.0f * std::sin(60.0f * t), 2.0f * std::cos(23.0f * t)});
+  }
+  for (int i = 0; i + 1 < n; i++) m.add_loose_edge((uint32_t)i, (uint32_t)i + 1);
+  if (closed) m.add_loose_edge((uint32_t)n - 1, 0);
+  return m;
+}
+
+static Mesh grid(int n) {
+  Mesh m;
+  for (int j = 0; j < n; j++)
+    for (int i = 0; i < n; i++) m.add_vert({(float)i, 2.0f * std::sin(0.3f * (float)i) * std::cos(0.2f * (float)j) + 0.05f * (float)i, (float)j});
+  for (int j = 0; j + 1 < n; j++)
+    for (int i = 0; i + 1 < n; i++) {
+      const uint32_t a = (uint32_t)(j * n + i);
+      m.add_face({a, a + (uint32_t)n, a + (uint32_t)n + 1, a + 1});
+    }
+  return m;
+}
+}  // namespace lt537
+
+static void test_looptools_stress(Report &rep, const Options &o) {
+  rep.title("LoopTools on long loops",
+            "Relax, Space, To Circle, Flatten and Curve (meshops, round 537) on a closed ring and an open chain of 10,000 wire vertices, "
+            "and Flatten on a 100 x 100 grid patch. A time per operator (a row, never asserted) and the problems found: a NaN or "
+            "infinite position, arrays that disagree, a changed topology.");
+  rep.table({"operator", "mesh", "vertices", "moved", "ms", "problems"});
+  const int n = o.quick ? 2000 : 10000;
+  struct Op {
+    const char *name;
+    std::function<int(Mesh &, const std::vector<uint8_t> &)> run;
+  };
+  const Op ops[] = {
+      {"relax_loops", [](Mesh &m, const std::vector<uint8_t> &s) { return meshops::relax_loops(m, s, 3, 0, true); }},
+      {"space_loops", [](Mesh &m, const std::vector<uint8_t> &s) { return meshops::space_loops(m, s, 1.0f, 0, nullptr); }},
+      {"circularize", [](Mesh &m, const std::vector<uint8_t> &s) { return meshops::circularize(m, s, 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr); }},
+      {"flatten_loops", [](Mesh &m, const std::vector<uint8_t> &s) { return meshops::flatten_loops(m, s, 1.0f, 0, Vec3(0, 0, 1), nullptr); }},
+      {"curve_loops", [](Mesh &m, const std::vector<uint8_t> &s) { return meshops::curve_loops(m, s, 1.0f, 0, 0, false, true, nullptr); }},
+  };
+  size_t total_problems = 0;
+  auto run_one = [&](const Op &op, const char *what, const Mesh &base) {
+    Mesh m = base;
+    const std::vector<uint8_t> sel(m.vert_count(), 1);
+    int ret = 0;
+    const double ms = time_ms([&] { ret = op.run(m, sel); });
+    size_t bad = lt537::problems(m, base);
+    /* -1 is a refusal (Curve with every vertex selected has no unselected ones to move) and 0 a run that moved nothing:
+     * neither touches the mesh; a positive count must be the number of vertices that really moved. */
+    if (ret < 0 && lt537::moved(m, base) != 0) bad++;
+    if ((ret > 0) != (lt537::moved(m, base) > 0)) bad++;
+    total_problems += bad;
+    rep.row({op.name, what, num((double)m.vert_count()), num((double)std::max(ret, 0)), f2(ms), std::to_string(bad)});
+  };
+  const Mesh ring = lt537::loop(n, true), chain = lt537::loop(n, false);
+  for (const Op &op : ops) run_one(op, "closed ring", ring);
+  for (const Op &op : ops) run_one(op, "open chain", chain);
+  run_one(ops[3], "100 x 100 grid", lt537::grid(100));
+  rep.note(strprintf("LoopTools problems in all rows: %zu (must stay 0).", total_problems));
+}
+
 #include "stress_blockout.inc"  // (round 476: test_blockout)
 #include "stress_blockout_modifiers.inc"  // (round 502: test_blockout_modifiers)
 #include "stress_blockout_join.inc"  // (round 501: test_blockout_join)
@@ -7495,7 +7587,8 @@ int main(int argc, char **argv) {
                {"lightmap_quality", test_lightmap_quality}, {"blockout", test_blockout}, {"blockout_modifiers", test_blockout_modifiers},
                {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers},
                {"image_edit", test_image_edit}, {"sculpt_paint", test_sculpt_paint}, {"sequencer", test_sequencer}, {"importers", test_importers},
-               {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views}};
+               {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views},
+               {"looptools", test_looptools_stress}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

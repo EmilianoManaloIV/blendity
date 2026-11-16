@@ -7,6 +7,7 @@
 //                 and blender/source/blender/editors/transform
 //   Edit Mode   : Blender's mesh editing (blender/source/blender/editors/mesh)
 #include "../scene/curve.h"
+#include "../scene/mesh_tools_loop.h"
 #include "editor.h"
 #include "../core/profiling.h"
 
@@ -24,6 +25,9 @@ namespace bl {
 
 using namespace platform;
 using ui::Icon;
+
+bool is_looptools_op(const std::string &op);  // LoopTools (round 537), below edit_op_redoable
+int looptools_f9_rows(const std::string &op);
 
 
 /* ===================================================================== */
@@ -1884,6 +1888,20 @@ void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
   else if (op == "extrude_individual") L.amount = extrude_dist_;
   else if (op == "shrink_fatten") L.amount = 0.1f;
   else if (op == "to_sphere") L.amount = 1.0f;
+  else if (is_looptools_op(op)) {
+    /* LoopTools (round 537), Blender 5.3's defaults. LastOp's fields: amount the factor, segments the iterations, axis
+     * the interpolation / fit / plane, individual Space Evenly, clamp Custom Radius / Extend Loop, path the elevation
+     * clamp, amount2 the rotation (degrees), size.x the radius, size.y Flatten, lock the locked axes. */
+    L.amount = 1.0f;
+    L.segments = 1;
+    L.axis = 0;
+    L.individual = true;
+    L.clamp = false;
+    L.path = 0;
+    L.amount2 = 0.0f;
+    L.size = {1.0f, 1.0f, 0.0f};
+    L.lock = 0;
+  }
   else if (op == "randomize") { L.amount = 0.05f; L.segments = 1; }
   else if (op == "push_pull") {
     L.amount = pp_last_distance_ != 0 ? pp_last_distance_ : extrude_dist_;
@@ -2413,7 +2431,8 @@ int edit_op_group(const std::string &op) {
   static const char *cut[] = {"loopcut", "knife", "subdivide_edges", "connect", "slice", "bevel", "edge_split"};
   static const char *clean[] = {"merge_center", "merge_distance", "merge_overlaps", "select_overlaps", "collapse", "dissolve", "dissolve_vertices", "dissolve_faces", "dissolve_limited", "delete",
                                 "delete_loose", "solve_mesh", "tris_to_quads", "triangulate_faces", "recalc_normals", "flip_faces"};
-  static const char *deform[] = {"smooth", "shrink_fatten", "to_sphere", "randomize"};
+  static const char *deform[] = {"smooth", "shrink_fatten", "to_sphere", "randomize",
+                                  "relax_loops", "space_loops", "circularize", "flatten_loops", "curve_loops"};  // LoopTools (round 537)
   static const char *shading[] = {"shade_smooth", "shade_flat", "mark_sharp", "clear_sharp", "mark_seam", "clear_seam", "seams_from_sharp"};
   for (const char *o : create)
     if (op == o) return 1;
@@ -2529,6 +2548,17 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"recalc_normals", "Recalculate Normals", "mesh.recalc_normals", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
       {"shrink_fatten", "Shrink/Fatten", "mesh.shrink_fatten", "Move the selected vertices along their normals (Adjust Last Operation sets the distance). Blender: Alt+S.", ALL},
       {"to_sphere", "To Sphere", "mesh.to_sphere", "Pull the selected vertices onto a sphere around their centre (Adjust Last Operation sets how far). Blender: Shift+Alt+S.", ALL},
+      /* LoopTools, native in Blender 5.3 (round 537): a loop is the edges whose two ends are selected. */
+      {"relax_loops", "Relax Edge Loops", "mesh.relax_loops", "Smooth the selected edge loops without shrinking them; open loops keep their ends.\n"
+       "Adjust Last Operation: iterations, Cubic or Linear, Space Evenly. Blender: Transform > Relax Edge Loops (LoopTools).", ALL},
+      {"space_loops", "Space Edge Loops Evenly", "mesh.space_loops", "Spread the vertices of the selected loops at equal distances along their own curve.\n"
+       "Blender: Transform > Space Edge Loops Evenly (LoopTools: Space).", ALL},
+      {"circularize", "To Circle", "mesh.circularize", "Make each selected loop (or a selected face region's border) a circle.\n"
+       "Adjust Last Operation: Best or Interior Fit, a radius, rotation, Space Evenly, Flatten. Blender: Transform > To Circle (LoopTools: Circle).", ALL},
+      {"flatten_loops", "Flatten", "mesh.flatten_loops", "Put the selected vertices on one plane: the best-fitting one, the faces' average normal, or facing\n"
+       "the view. Blender: Transform > Flatten (LoopTools).", ALL},
+      {"curve_loops", "Curve Edge Loops Between Selected", "mesh.curve_loops", "Bend the unselected loops between selected vertices onto a smooth curve\n"
+       "through them (lift a middle vertex, select the rows that set the shape). Blender: Transform > Curve Edge Loops Between Selected (LoopTools: Curve).", ALL},
       {"randomize", "Randomize", "", "Jitter the selected vertices (Adjust Last Operation: amount and seed). Blender: Transform > Randomize.", ALL},
       {"knife", "Knife / Line", "mesh.knife", "Draw a line across a face to split it: click a corner or an edge, then another on the same face.\n"
        "Snaps to endpoints (green), midpoints (cyan) and edges (red). SketchUp: Line tool. Blender: K.", ALL},
@@ -2925,7 +2955,53 @@ bool Editor::edit_op_redoable(const std::string &op) const {
   return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
          op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
          op == "shrink_fatten" || op == "to_sphere" || op == "randomize" || op == "grid" || op == "pipe" || op == "array" || op == "taper" ||
-         op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder" || op == "solve_mesh";
+         op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder" || op == "solve_mesh" ||
+         is_looptools_op(op);
+}
+
+/* LoopTools (round 537): the five loop operators Blender 5.3 made native. */
+bool is_looptools_op(const std::string &op) {
+  return op == "relax_loops" || op == "space_loops" || op == "circularize" || op == "flatten_loops" || op == "curve_loops";
+}
+
+/* Their rows in Adjust Last Operation, the fields above Move. */
+int looptools_f9_rows(const std::string &op) {
+  if (op == "relax_loops") return 3;
+  if (op == "circularize") return 8;
+  if (op == "curve_loops") return 6;
+  return 3;  // space_loops, flatten_loops: factor, interpolation / plane, lock
+}
+
+/* Runs one on the edited mesh with LastOp's numbers (the mapping in fill_last_op_settings): the vertices it moved, -1 when
+ * it refused. Face mode hands over the real face selection (a face region is not "every vertex selected"); the other modes
+ * leave faces to the edges, which Edge mode's EdgeSelectionScope (set by run_last_op) already speaks for. */
+int Editor::run_looptools(Mesh &m, const LastOp &L) {
+  const bool lock[3] = {(L.lock & 1) != 0, (L.lock & 2) != 0, (L.lock & 4) != 0};
+  face_sel_.resize(m.face_count(), 0);
+  const std::vector<uint8_t> *fs = L.elem == EditElement::Face ? &face_sel_ : nullptr;
+  if (L.op == "relax_loops") return meshops::relax_loops(m, vert_sel_, L.segments, L.axis, L.individual, fs);
+  if (L.op == "space_loops") return meshops::space_loops(m, vert_sel_, L.amount, L.axis, lock, fs);
+  if (L.op == "circularize")
+    return meshops::circularize(m, vert_sel_, L.amount, L.axis, L.amount2 * kDeg2Rad, L.clamp, L.size.x, L.individual, L.size.y, lock, fs);
+  if (L.op == "curve_loops") return meshops::curve_loops(m, vert_sel_, L.amount, L.axis, L.path, L.clamp, L.individual, lock);
+  return meshops::flatten_loops(m, vert_sel_, L.amount, L.axis, looptools_view_dir(L), lock, fs);
+}
+
+/* What each LoopTools operator says when it refuses. */
+static const char *looptools_error(const std::string &op) {
+  if (op == "relax_loops" || op == "space_loops") return "Select edge loops (edges, not faces)";
+  if (op == "circularize") return "Select an edge loop or a face region";
+  if (op == "flatten_loops") return "Flatten: select at least three vertices that span a plane";
+  return "Curve: select vertices on two or more loops, with unselected loops between them";
+}
+
+/* Flatten's View plane: the Scene view's looking direction in the edited object's own space. */
+Vec3 Editor::looptools_view_dir(const LastOp &L) {
+  GameObject *g = scene_->find(L.obj);
+  const Vec3 look = cam_.pivot - cam_.position();
+  if (!g || !(length(look) > 0.0f)) return {0, 0, 1};
+  const Vec3 d = g->world_matrix().inverse().dir(look);
+  return length(d) > 0.0f ? normalize(d) : Vec3{0, 0, 1};
 }
 
 bool Editor::last_op_valid() {
@@ -3125,6 +3201,10 @@ void Editor::run_last_op(bool first) {
     else if (op == "to_sphere") meshops::to_sphere(m, vert_sel_, L.amount);
     else meshops::randomize(m, vert_sel_, L.amount, (uint32_t)std::max(1, L.segments));
   }
+  else if (is_looptools_op(op)) {
+    ok = run_looptools(m, L) >= 0;  // (0 moved is a run: a flat face, Factor 0; -1 is a refusal)
+    if (!ok) err = looptools_error(op);
+  }
   if (ok) m.adopt_caches(*L.before);  // (an operator that only moved vertices: the render meshes follow in place)
   if (!ok) {
     /* Back to the untouched mesh, as a copy (task 0165): the very pointer would bring back an earlier render-cache key
@@ -3192,12 +3272,15 @@ void Editor::draw_last_op_panel(const Recti &view) {
       {"sketch_box", "Box from Sketch"}, {"sketch_cylinder", "Cylinder / Cone from Sketch"},
       {"recess", "Recess / Plate"},   {"shell", "Shell"},
       {"thicken", "Thicken"},          {"draft", "Draft"},
-      {"solve_mesh", "Solve Mesh"}};
+      {"solve_mesh", "Solve Mesh"},
+      {"relax_loops", "Relax Edge Loops"}, {"space_loops", "Space Edge Loops Evenly"},
+      {"circularize", "To Circle"},     {"flatten_loops", "Flatten"},
+      {"curve_loops", "Curve Edge Loops Between Selected"}};
   auto it = titles.find(L.op);
   std::string title = it == titles.end() ? L.op : it->second;
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
-  int fields = L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
+  int fields = is_looptools_op(L.op) ? looptools_f9_rows(L.op) : L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
                L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" || L.op == "solve_mesh" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
@@ -3352,6 +3435,44 @@ void Editor::draw_last_op_panel(const Recti &view) {
   else if (L.op == "smooth") {
     fl("Factor", L.amount, 0.01f, 0.0f, 1.0f);
     ifield("Repeat", L.segments, 1, 100);
+  }
+  else if (is_looptools_op(L.op)) {
+    static const char *kInterp[] = {"Cubic", "Linear"};
+    static const char *kFit[] = {"Best Fit", "Interior Fit"};
+    static const char *kPlane[] = {"Best Fit", "Normal", "View"};
+    static const char *kClamp[] = {"None", "Only Raise", "Only Lower"};
+    auto check = [&](const char *label, bool &v) {
+      Recti cr = row(label);
+      changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, v);
+    };
+    if (L.op == "relax_loops") ifield("Iterations", L.segments, 1, 25);
+    else fl("Factor", L.amount, 0.01f, 0.0f, 1.0f);
+    if (L.op == "circularize") changed |= u.combo(u.id("lt_fit"), row("Method"), L.axis, kFit, 2);
+    else if (L.op == "flatten_loops") changed |= u.combo(u.id("lt_plane"), row("Plane"), L.axis, kPlane, 3);
+    else changed |= u.combo(u.id("lt_interp"), row("Interpolation"), L.axis, kInterp, 2);
+    if (L.op == "relax_loops" || L.op == "circularize" || L.op == "curve_loops") check("Space Evenly", L.individual);
+    if (L.op == "circularize") {
+      fl("Rotation", L.amount2, 0.5f, -360.0f, 360.0f);
+      check("Custom Radius", L.clamp);
+      fl("Radius", L.size.x, 0.01f, 0.0f, 1e6f);
+      fl("Flatten", L.size.y, 0.01f, 0.0f, 1.0f);
+      u.tooltip("1: a flat circle. Below 1 the circle follows the surface around it.");
+    }
+    if (L.op == "curve_loops") {
+      changed |= u.combo(u.id("lt_clamp"), row("Clamp Elevation"), L.path, kClamp, 3);
+      check("Extend Loop", L.clamp);
+    }
+    if (L.op != "relax_loops") {
+      Recti lr = row("Lock X Y Z");
+      for (int a = 0; a < 3; a++) {
+        bool on = (L.lock >> a) & 1;
+        if (u.checkbox({lr.x + a * (lr.h + u.px(6)), lr.y, lr.h, lr.h}, on)) {
+          changed = true;
+          L.lock = on ? (L.lock | (1 << a)) : (L.lock & ~(1 << a));
+        }
+      }
+      u.tooltip("A locked axis: no vertex moves along the object's own X / Y / Z.");
+    }
   }
   changed |= u.vec3_field(u.id("move"), row("Move X Y Z"), L.move, 0.01f);
   u.tooltip("Moves the result afterwards (Blender's Move in the operator panel).");
