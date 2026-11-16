@@ -80,7 +80,8 @@ On the joined tree's exe, a scratch project:
 
 | Kind | Baseline | Joined tree | Pass 27 panels |
 |---|---|---|---|
-| clipped / elided / no-tooltip / overlap / popup-outside / disabled-no-reason / small / no-key / tab-order / covered | from `tools/hci_sweep_baseline.json` | TBD | TBD |
+| all kinds (#420, #421, #422 joined, 2026-11-16) | elided 7, small-handle 3 | elided 7, small-handle 3 (at the baseline) | none new |
+| the same, every Pass 27 round joined | elided 7, small-handle 3 | TBD | TBD |
 
 ## The Learn check list
 
@@ -112,6 +113,12 @@ Through the fold of every `changelog.d/5xx-*.md` (ADR 0123) and this round's own
 - **requirements:** splats (import, draw budget at 1M, trace), the Edit Mode tools (LoopTools, dimensions), paint
   (automasking, Vertex Paint), animation (world-space copy, rotation modes), each made checkable.
 - **USABILITY / PERFORMANCE:** the rows from the fragments, then this page's numbers.
+
+## Checks on the joined tree
+
+| Date | Tree | Checks |
+|---|---|---|
+| 2026-11-16 | main 068207d9 + #420 + #421 + #422 (`cbde25a2`) | Windows with Blender's libraries: `splats` 112, `modeling` 6,046, `editor` 3,420, `hci` 1,849 checks, 0 failed (a fresh scratch project); `test_coverage_map --check` 382 entries, 0 empty; `changelog.py check` 3 fragments applicable; the live sweep at its baseline. `hci_console_audit --check` 8 above the baseline's 6: two point cloud texts of #420 (`editor.cpp` 1218, `pointcloud_object.cpp` 29) - S1's. `sweep_commands --check`: stale on #420 alone; #422's fixed (`d8ce88e5`). |
 
 ## Results
 
