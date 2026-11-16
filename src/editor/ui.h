@@ -112,22 +112,10 @@ struct Input {
   float pressure = 1.0f;  // a pen's, else 1
   bool key_down[platform::KEY_COUNT] = {};
   bool key_pressed[platform::KEY_COUNT] = {};  // includes auto-repeat
-  /* Round 548: the modifiers held when each key last went down. `mods` is the frame's last event's: when Shift and R are
-   * let go within one frame, the last event is Shift's release and `mods` has no Shift - a chord is read from these. */
-  int key_mods[platform::KEY_COUNT] = {};
   int mods = 0;
-  int chord_mods(int key) const {  // (Ctrl, Shift and Alt as the key went down)
-    const int m = key > 0 && key < platform::KEY_COUNT ? key_mods[key] : mods;
-    return m & (platform::MOD_CTRL | platform::MOD_SHIFT | platform::MOD_ALT);
-  }
   std::string text;
   std::vector<std::string> dropped;
   int drop_x = 0, drop_y = 0;
-  /* Round 548: `key` went down this frame with exactly `mods` (a MOD_ mask) held. */
-  bool chord(int key, int mods_) const {
-    /* (Super counts here too: a check for a bare key - `chord(K, 0)` - must not take Super+K, as `mods == 0` didn't.) */
-    return key > 0 && key < platform::KEY_COUNT && key_pressed[key] && (key_mods[key] & (platform::MOD_CTRL | platform::MOD_SHIFT | platform::MOD_ALT | platform::MOD_SUPER)) == mods_;
-  }
   bool shift() const { return mods & platform::MOD_SHIFT; }
   bool ctrl() const { return mods & platform::MOD_CTRL; }
   bool alt() const { return mods & platform::MOD_ALT; }

@@ -216,9 +216,9 @@ void Context::focus_capture_keys() {
   pending_at_start_ = focus_request_ != 0 || focus_area_pending_;
   /* In a dialog or a popup nothing else wants Tab: it puts the focus on the first control (Shift+Tab: the last). */
   const bool waiting = focus_id_ || focus_request_ || focus_next_ || focus_wrap_back_ || focus_area_pending_;
-  if (!waiting && !mouse && !popups_.empty() && edit_id_ == 0 && (in.chord(KEY_TAB, 0) || in.chord(KEY_TAB, MOD_SHIFT))) {  // (round 548: Tab's own chord - Shift let go in the same frame was a bare Tab)
+  if (!waiting && !mouse && !popups_.empty() && edit_id_ == 0 && in.key_pressed[KEY_TAB] && !in.ctrl() && !in.alt()) {
     in.key_pressed[KEY_TAB] = false;
-    ((in.chord_mods(KEY_TAB) & MOD_SHIFT) ? focus_wrap_back_ : focus_next_) = true;
+    (in.shift() ? focus_wrap_back_ : focus_next_) = true;
     pending_layer_ = (int)popups_.size();
     redraw = true;
   }
@@ -227,23 +227,19 @@ void Context::focus_capture_keys() {
   else if (focus_id_ || edit_id_) walk_layer_ = focus_layer_;
   else walk_layer_ = (int)popups_.size();
   const bool holds = focus_id_ || focus_request_ || focus_next_ || focus_wrap_back_ || focus_area_pending_;
-  if (!holds || mouse) return;
+  if (!holds || mouse || in.ctrl() || in.alt()) return;
   auto take = [&](int key, bool &out) {
     if (!in.key_pressed[key]) return;
-    if (in.chord_mods(key) & (MOD_CTRL | MOD_ALT)) return;  // (round 548: the key's own chord, not the frame's last event's)
     out = true;
     in.key_pressed[key] = false;
     in.key_down[key] = false;
   };
-  fk_.shift = in.key_pressed[KEY_TAB] ? (in.chord_mods(KEY_TAB) & MOD_SHIFT) != 0 : in.shift();  // (round 548: Shift+Tab as the Tab went down)
+  fk_.shift = in.shift();
   take(KEY_TAB, fk_.tab);
   take(KEY_UP, fk_.up), take(KEY_DOWN, fk_.down), take(KEY_LEFT, fk_.left), take(KEY_RIGHT, fk_.right);
   if (fk_.shift) return;  // (Shift+Space, Shift+Enter, Shift+Esc stay the keymap's)
-  auto take_plain = [&](int key, bool &out) {  // (round 548: Shift as that key went down)
-    if (!(in.chord_mods(key) & MOD_SHIFT)) take(key, out);
-  };
-  take_plain(KEY_SPACE, fk_.activate), take_plain(KEY_ENTER, fk_.activate);
-  take_plain(KEY_ESCAPE, fk_.esc);
+  take(KEY_SPACE, fk_.activate), take(KEY_ENTER, fk_.activate);
+  take(KEY_ESCAPE, fk_.esc);
   if (fk_.esc && !focus_id_) focus_request_ = 0, focus_next_ = focus_wrap_back_ = focus_area_pending_ = false;  // (Esc while the focus was on its way: it stays where it is)
 }
 
@@ -738,7 +734,7 @@ int Context::edit_text(Id i, const Recti &r, std::string &buf) {
     edit_cursor_ += in.text.size();
     result = 1;
   }
-  const auto ctrl_key = [&](int key) { return in.key_pressed[key] && (in.chord_mods(key) & MOD_CTRL); };  // (round 548: Ctrl as that key went down)
+  bool ctrl = in.ctrl();
   if (in.key_pressed[KEY_BACKSPACE]) {
     if (!erase_selection() && edit_cursor_ > 0) {
       size_t p = utf8_prev(buf, edit_cursor_);
@@ -755,15 +751,15 @@ int Context::edit_text(Id i, const Recti &r, std::string &buf) {
   if (in.key_pressed[KEY_RIGHT]) { edit_select_all_ = false; edit_cursor_ = utf8_after(buf, edit_cursor_); }
   if (in.key_pressed[KEY_HOME]) { edit_select_all_ = false; edit_cursor_ = 0; }
   if (in.key_pressed[KEY_END]) { edit_select_all_ = false; edit_cursor_ = buf.size(); }
-  if (ctrl_key(KEY_A)) edit_select_all_ = true;
-  if (ctrl_key(KEY_C) && clipboard_set) clipboard_set(buf);
-  if (ctrl_key(KEY_X) && clipboard_set) {
+  if (ctrl && in.key_pressed[KEY_A]) edit_select_all_ = true;
+  if (ctrl && in.key_pressed[KEY_C] && clipboard_set) clipboard_set(buf);
+  if (ctrl && in.key_pressed[KEY_X] && clipboard_set) {
     clipboard_set(buf);
     buf.clear();
     edit_cursor_ = 0;
     result = 1;
   }
-  if (ctrl_key(KEY_V) && clipboard_get) {
+  if (ctrl && in.key_pressed[KEY_V] && clipboard_get) {
     std::string clip = clipboard_get();
     for (char &c : clip)
       if (c == '\n' || c == '\r') c = ' ';
@@ -908,7 +904,7 @@ bool Context::text_area(Id i, const Recti &r, std::string &s, uint32_t paper, ui
     in.key_pressed[KEY_ESCAPE] = false;
     return false;
   }
-  if (in.key_pressed[KEY_ENTER] && (in.chord_mods(KEY_ENTER) & MOD_CTRL)) {  // (round 548: Ctrl as Enter went down)
+  if (in.key_pressed[KEY_ENTER] && in.ctrl()) {
     s = buf;
     edit_id_ = 0;
     return true;
@@ -927,7 +923,7 @@ bool Context::text_area(Id i, const Recti &r, std::string &s, uint32_t paper, ui
   if (in.key_pressed[KEY_DOWN] && line + 1 < lines.size()) edit_cursor_ = at_x(line + 1, caret_x(line, edit_cursor_));
   if (in.key_pressed[KEY_HOME]) edit_cursor_ = lines[line].first;
   if (in.key_pressed[KEY_END]) edit_cursor_ = lines[line].second;
-  if (in.key_pressed[KEY_V] && (in.chord_mods(KEY_V) & MOD_CTRL) && clipboard_get) {  // (round 548: Ctrl as V went down)
+  if (in.ctrl() && in.key_pressed[KEY_V] && clipboard_get) {
     const std::string clip = clipboard_get();
     buf.insert(edit_cursor_, clip), edit_cursor_ += clip.size();
   }
@@ -958,7 +954,7 @@ void Context::tab_to(Id previous, Id self) {
   focus_from_ = self;
   focus_from_field_ = true;
   pending_layer_ = current_layer_;
-  if (!(in.chord_mods(KEY_TAB) & MOD_SHIFT)) focus_next_ = true;  // (round 548: Shift as the Tab went down)
+  if (!in.shift()) focus_next_ = true;
   else if (previous) focus_request_ = previous;
   else focus_wrap_back_ = true;
   redraw = true;

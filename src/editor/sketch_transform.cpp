@@ -279,7 +279,7 @@ bool Editor::sketch_xf_update(const Recti &view, Vec2 px) {
   auto &in = u.in;
   const bool keys = !u.wants_keyboard() && sketch_view_.hovered;
   if (sketch_xf_.on && sketch_xf_.drag >= 0 && sketch_xf_.view_kind != sketch_view_.kind) return false;  // (review 389: the drag is the view's it began in)
-  if (keys && (in.chord_mods(platform::KEY_T) & (platform::MOD_CTRL | platform::MOD_SHIFT)) == platform::MOD_CTRL && in.key_pressed[platform::KEY_T]) {  // (round 548: the chord as T went down)
+  if (keys && in.ctrl() && !in.shift() && in.key_pressed[platform::KEY_T]) {
     in.key_pressed[platform::KEY_T] = false;  // (Unity's preset has Ctrl+T for Triangulate: not in the sketch)
     sketch_xf_begin();
     return true;

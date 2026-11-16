@@ -515,11 +515,6 @@ void Editor::process_events(std::vector<Event> &events) {
         if (e.key > 0 && e.key < KEY_COUNT) {
           in.key_down[e.key] = true;
           in.key_pressed[e.key] = true;
-          int km = e.mods;  // (round 548: the chord is this press's, whatever the frame's later events)
-          if (in.key_down[KEY_SHIFT]) km |= MOD_SHIFT;  // (some platforms omit the modifiers on key events)
-          if (in.key_down[KEY_CTRL]) km |= MOD_CTRL;
-          if (in.key_down[KEY_ALT]) km |= MOD_ALT;
-          in.key_mods[e.key] = km;
         }
         in.mods = e.mods;
         break;

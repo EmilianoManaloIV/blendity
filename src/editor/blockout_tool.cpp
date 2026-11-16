@@ -534,7 +534,7 @@ bool Editor::room_update(const Recti &view) {
   }
   /* Round 496: R turns the piece's direction a quarter round the surface's normal while one is in progress (elsewhere R keeps its keymap meaning;
    * Shift+R is the tool's own switch). Only a wedge, stairs and an arch face a way; the choice is kept for the next piece of that shape. */
-  const bool plain_r = in.chord_mods(platform::KEY_R) == 0;  // (round 548: R's own chord - a quick Shift+R, Shift let go in the frame, turned the piece instead of switching the tool off)
+  const bool plain_r = !in.ctrl() && !in.shift() && !in.alt();
   if ((r.stage == 1 || r.stage == 2) && plain_r && in.key_pressed[platform::KEY_R] && !u.wants_keyboard()) {
     in.key_pressed[platform::KEY_R] = false;
     if (r.solid && opening_of(r.piece)) Log::info("R does nothing for a door or window: it turns with its wall (draw it on another wall to face the other way).");

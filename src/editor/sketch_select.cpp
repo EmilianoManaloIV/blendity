@@ -216,10 +216,8 @@ bool Editor::sketch_select_update(const Recti &view, Vec2 px) {
   auto &in = u.in;
   const bool keys = !u.wants_keyboard() && sketch_view_.hovered;
   if (keys && sketch_sel_.size() >= 3 && in.key_pressed[platform::KEY_DELETE]) return in.key_pressed[platform::KEY_DELETE] = false, sketch_delete(), true;
-  // (round 548: Alt as Backspace went down)
-  if (keys && sketch_sel_.size() >= 3 && (in.chord_mods(platform::KEY_BACKSPACE) & platform::MOD_ALT) && in.key_pressed[platform::KEY_BACKSPACE])
-    return in.key_pressed[platform::KEY_BACKSPACE] = false, sketch_fill(), true;
-  if (keys && (in.chord_mods(platform::KEY_D) & platform::MOD_CTRL) && in.key_pressed[platform::KEY_D] && !sketch_sel_.empty()) {
+  if (keys && sketch_sel_.size() >= 3 && in.alt() && in.key_pressed[platform::KEY_BACKSPACE]) return in.key_pressed[platform::KEY_BACKSPACE] = false, sketch_fill(), true;
+  if (keys && in.ctrl() && in.key_pressed[platform::KEY_D] && !sketch_sel_.empty()) {
     in.key_pressed[platform::KEY_D] = false;  // (review 388: else Duplicate ran on the selected object too)
     sketch_sel_.clear();
     return u.redraw = true, true;

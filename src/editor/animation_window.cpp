@@ -1499,14 +1499,13 @@ void Editor::draw_animation_window(const Recti &r) {
     anim_delete_selected();
     in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
   }
-  if (in.key_pressed[platform::KEY_C] && (in.chord_mods(platform::KEY_C) & platform::MOD_CTRL))  // (round 548: the chord as its key went down, not the frame's last event's)
-    anim_copy(), in.key_pressed[platform::KEY_C] = false;
-  if (in.key_pressed[platform::KEY_V] && (in.chord_mods(platform::KEY_V) & platform::MOD_CTRL)) anim_paste(), in.key_pressed[platform::KEY_V] = false;
+  if (in.ctrl() && in.key_pressed[platform::KEY_C]) anim_copy(), in.key_pressed[platform::KEY_C] = false;
+  if (in.ctrl() && in.key_pressed[platform::KEY_V]) anim_paste(), in.key_pressed[platform::KEY_V] = false;
   /* Round 406: Unity's Animation window keys over the sheet - K a key of every track at the playhead, comma / full
    * stop the previous / next key (Space stays the keymap's Wheel; Unity's Space is on the transport button). */
-  if (in.chord(platform::KEY_K, 0)) anim_key_all(), in.key_pressed[platform::KEY_K] = false;
-  if (in.chord(platform::KEY_COMMA, 0)) anim_step_key(-1), in.key_pressed[platform::KEY_COMMA] = false;
-  if (in.chord(platform::KEY_PERIOD, 0)) anim_step_key(1), in.key_pressed[platform::KEY_PERIOD] = false;
+  if (in.mods == 0 && in.key_pressed[platform::KEY_K]) anim_key_all(), in.key_pressed[platform::KEY_K] = false;
+  if (in.mods == 0 && in.key_pressed[platform::KEY_COMMA]) anim_step_key(-1), in.key_pressed[platform::KEY_COMMA] = false;
+  if (in.mods == 0 && in.key_pressed[platform::KEY_PERIOD]) anim_step_key(1), in.key_pressed[platform::KEY_PERIOD] = false;
 }
 
 /* ---------------------------------------------------------------- console */
