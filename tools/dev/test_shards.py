@@ -31,7 +31,7 @@ SHARDS = [
     ["lighting"],                                               # 20.5 min
     ["editor"],                                                 # 12.9
     ["blockout"],                                               # 12.6 (Pass 23 is adding to it)
-    ["render", "sketch", "gpu", "board"],                       # 11.6
+    ["render", "sketch", "gpu", "board", "splats", "splats_trace"],  # 11.6 (splats: round 530; splats_trace: round 533 - seconds each)
     ["modeling", "animation", "physics"],                       # 12.2
     ["assets", "livelink", "input", "sculpt", "hci", "vr", "runner", "blockout_modifiers", "blockout_join", "blockout_piece_modifiers", "splats"],  # 8.9 (runner: new in round 492, seconds; blockout_modifiers: round 502; blockout_join: round 501; blockout_piece_modifiers: round 514; splats: round 530, seconds)
 ]
