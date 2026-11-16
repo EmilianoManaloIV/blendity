@@ -91,7 +91,11 @@ copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
 | File | From | License of the origin | How it is distributed |
 |---|---|---|---|
 | `src/render/sky.cpp` (`sky_radiance_internal`, the sky texture's evaluation) | Cycles' `intern/cycles/kernel/svm/sky.h` | Apache-2.0 (`Apache-2.0.txt`; "2011-2022 Blender Foundation", kept word for word in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+<<<<<<< HEAD
 | `src/render/gsplat_gpu.{h,cpp}`, `src/render/gsplat_gpu_glsl.h` (the card path tracer's Gaussian splats, round 534) | Cycles 5.3's `intern/cycles/kernel/geom/gsplat_intersect.h`, `gsplat.h`, `scene/pointcloud.cpp` (the bounding radius) and `util/hash.h` (`hash_uint3`), through round 533's `gsplat_math.h` | Apache-2.0 (`Apache-2.0.txt`; "2026 Blender Foundation", kept in the headers, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+=======
+| `src/scene/pointcloud.h`, `pointcloud.cpp` (the point cloud's types, the splat attributes' meaning and decoding, round 530) | Blender 5.3's `blenkernel/BKE_pointcloud.hh`, `intern/pointcloud.cc`, `makesdna/DNA_pointcloud_types.h`, `io/common/IO_gsplat.hh` | GPL-2.0-or-later ("2023-2026 Blender Authors", kept in the headers) | GPL-3.0-or-later, like the executables |
+>>>>>>> 8344e4c67f49a8e8e837acbdfcbec398dfbb2161
 
 ## Read, not copied
 
