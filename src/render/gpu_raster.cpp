@@ -810,8 +810,8 @@ void main() {
  * back through the id table, binding 39). Draw order is the array's order (back to front). */
 const char *kSplatCommon = R"(
 struct SplatG { vec4 a; vec2 inv; uint e0; uint rgbc; };  // x, y, z, opacity; 1 / axis lengths (a dot: radius, 0); the first axis (two halves); colour bytes | cloud << 24
-layout(std430, set = 0, binding = 38) readonly buffer Splats { SplatG sp[]; };
-layout(std430, set = 0, binding = 39) readonly buffer SplatIds { uint sid[]; };
+layout(std430, set = 0, binding = 40) readonly buffer Splats { SplatG sp[]; };
+layout(std430, set = 0, binding = 41) readonly buffer SplatIds { uint sid[]; };
 layout(set = 0, binding = 4) uniform sampler2D g_depth;
 vec2 splat_axis(uint bits) {
   vec2 e = unpackHalf2x16(bits);
@@ -878,7 +878,7 @@ const char *kOutlineFrag = R"(
 layout(set = 0, binding = 4) uniform sampler2D g_depth;
 layout(set = 0, binding = 15) uniform usampler2D g_inst;
 layout(std430, set = 0, binding = 19) readonly buffer Outlines { uint ot[]; };  // count; per outline first, n, colour, width; the ids
-layout(std430, set = 0, binding = 39) readonly buffer SplatIdsO { uint splat_id[]; };  // round 532: a splat cloud's pick id
+layout(std430, set = 0, binding = 41) readonly buffer SplatIdsO { uint splat_id[]; };  // round 532: a splat cloud's pick id
 layout(location = 0) out vec4 o_color;
 uint id_at(ivec2 q) {
   if (q.x < 0 || q.y < 0 || q.x >= int(view.x) || q.y >= int(view.y)) return 0u;
@@ -4720,7 +4720,7 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 34; i <= 36; i++)  // round 416: lilToon's planes
       b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({37, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // round 454: the baked pass's shadowmask plane
-    for (uint32_t i = 38; i <= 39; i++)  // round 532: the Gaussian splats and their clouds' pick ids
+    for (uint32_t i = 40; i <= 41; i++)  // round 532: the Gaussian splats and their clouds' pick ids
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 28; i <= 30; i++)  // task 0197: the baked table, the corners, the probe volume
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
@@ -4773,7 +4773,7 @@ class VulkanRaster final : public Raster {
                                            {toon_buf_.buf, 0, VK_WHOLE_SIZE}, {baked_buf_.buf, 0, VK_WHOLE_SIZE}, {corner_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {probe_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo lil2[2] = {{lil_buf_.buf, 0, VK_WHOLE_SIZE}, {lilmap_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 416: bindings 32, 33)
-    const VkDescriptorBufferInfo splat2[2] = {{splat_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_ids_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 532: bindings 38, 39)
+    const VkDescriptorBufferInfo splat2[2] = {{splat_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_ids_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 532: bindings 40, 41)
     VkWriteDescriptorSet w[24];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
@@ -4817,8 +4817,8 @@ class VulkanRaster final : public Raster {
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &lil2[i - 20];
     }
-    for (int i = 22; i < 24; i++) {  // (round 532: bindings 38, 39)
-      w[i].dstBinding = (uint32_t)(38 + i - 22);
+    for (int i = 22; i < 24; i++) {  // (round 532: bindings 40, 41)
+      w[i].dstBinding = (uint32_t)(40 + i - 22);
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &splat2[i - 22];
