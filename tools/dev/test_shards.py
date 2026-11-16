@@ -33,7 +33,7 @@ SHARDS = [
     ["blockout"],                                               # 12.6 (Pass 23 is adding to it)
     ["render", "sketch", "gpu", "board", "splats_trace", "splats_gpu"],  # 11.6 (splats_trace: round 533; splats_gpu: round 534 - seconds each)
     ["modeling", "animation", "physics"],                       # 12.2
-    ["assets", "livelink", "input", "sculpt", "hci", "vr", "runner", "blockout_modifiers", "blockout_join", "blockout_piece_modifiers", "splats"],  # 8.9 (runner: new in round 492, seconds; blockout_modifiers: round 502; blockout_join: round 501; blockout_piece_modifiers: round 514; splats: round 530, seconds)
+    ["assets", "livelink", "input", "sculpt", "hci", "vr", "runner", "blockout_modifiers", "blockout_join", "blockout_piece_modifiers", "splats", "splats_raster"],  # 8.9 (runner: new in round 492, seconds; blockout_modifiers: round 502; blockout_join: round 501; blockout_piece_modifiers: round 514; splats: round 530, seconds; splats_raster: round 532, seconds)
 ]
 
 # A pull request needs no build when every path it changes is one of these: text no program, test or CI check reads.

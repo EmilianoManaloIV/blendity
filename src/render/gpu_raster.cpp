@@ -802,6 +802,75 @@ void main() {
 }
 )";
 
+/* Round 532 (task 0512): Gaussian splats (RasterSplat), the CPU's gsplat_alpha_at per pixel. One instance a splat, a
+ * quad over its pixel box; the vertex shader takes the pixels as they are (the splat's y counts rows from the top, as
+ * gl_FragCoord's do, so no flip). The colour pass blends premultiplied over the lit picture, hidden where the mesh depth
+ * is nearer than the splat's centre (the CPU's s.z > depth), writing no depth; BL_SPLAT_IDS: the ids pass, a splat with
+ * alpha 0.1 or more writes its object's pick id and the instance plane a flagged cloud index (the outline pass reads it
+ * back through the id table, binding 41). Draw order is the array's order (back to front). */
+const char *kSplatCommon = R"(
+struct SplatG { vec4 a; vec2 inv; uint e0; uint rgbc; };  // x, y, z, opacity; 1 / axis lengths (a dot: radius, 0); the first axis (two halves); colour bytes | cloud << 24
+layout(std430, set = 0, binding = 40) readonly buffer Splats { SplatG sp[]; };
+layout(std430, set = 0, binding = 41) readonly buffer SplatIds { uint sid[]; };
+layout(set = 0, binding = 4) uniform sampler2D g_depth;
+vec2 splat_axis(uint bits) {
+  vec2 e = unpackHalf2x16(bits);
+  float l = dot(e, e);
+  return l > 0.0 ? e * inversesqrt(l) : vec2(1.0, 0.0);
+}
+)";
+const char *kSplatVert = R"(
+const vec2 kCorner[6] = vec2[](vec2(0, 0), vec2(1, 0), vec2(1, 1), vec2(0, 0), vec2(1, 1), vec2(0, 1));
+layout(location = 0) flat out uint sidx;
+void main() {
+  SplatG s = sp[gl_InstanceIndex];
+  sidx = uint(gl_InstanceIndex);
+  vec2 half_px;
+  if (s.inv.y == 0.0) half_px = vec2(abs(s.inv.x));  // a dot: its radius
+  else {  // the billboard's +-2 axes: |e0| 2 L0 + |e1| 2 L1 across each axis of the screen
+    vec2 e = abs(splat_axis(s.e0));
+    float l0 = 1.0 / s.inv.x, l1 = 1.0 / s.inv.y;
+    half_px = 2.0 * vec2(e.x * l0 + e.y * l1, e.y * l0 + e.x * l1);
+  }
+  half_px += 1.0;  // (a pixel of margin: the fragment shader decides the coverage)
+  vec2 px = s.a.xy + (kCorner[gl_VertexIndex] * 2.0 - 1.0) * half_px;
+  gl_Position = vec4(px / view.xy * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+const char *kSplatFrag = R"(
+layout(location = 0) flat in uint sidx;
+#ifdef BL_SPLAT_IDS
+layout(location = 0) out uint o_id;
+layout(location = 1) out uint o_inst;
+#else
+layout(location = 0) out vec4 o_color;
+#endif
+void main() {
+  SplatG s = sp[sidx];
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  if (s.a.z > texelFetch(g_depth, p, 0).r) discard;  // a mesh is nearer than the splat's centre
+  vec2 d = gl_FragCoord.xy - s.a.xy;
+  float a;
+  if (s.inv.y == 0.0) a = dot(d, d) <= s.inv.x * s.inv.x ? 1.0 : 0.0;
+  else {
+    vec2 e = splat_axis(s.e0);
+    float u0 = (d.x * e.x + d.y * e.y) * s.inv.x, u1 = (-d.x * e.y + d.y * e.x) * s.inv.y;
+    if (abs(u0) > 2.0 || abs(u1) > 2.0) discard;
+    a = min(1.0, s.a.w * exp(-(u0 * u0 + u1 * u1)));
+  }
+  if (a <= 0.0) discard;
+#ifdef BL_SPLAT_IDS
+  if (a < 0.1) discard;  // kSplatPickAlpha
+  uint cloud = s.rgbc >> 24;
+  o_id = sid[cloud];
+  o_inst = 0x80000000u | cloud;
+#else
+  vec3 c = vec3(float(s.rgbc & 255u), float((s.rgbc >> 8) & 255u), float((s.rgbc >> 16) & 255u)) / 255.0;
+  o_color = vec4(c * a, a);
+#endif
+}
+)";
+
 /* Task 0192: Renderer3D::outline_ids on the card - a pixel not showing one of an outline's objects, with one within
  * `width` pixels left, right, above or below, takes its colour (the later outline's, as the CPU writes them in order).
  * A pixel's object is its instance's id where something was drawn (the depth below 1), as the ids plane holds it. */
@@ -809,11 +878,14 @@ const char *kOutlineFrag = R"(
 layout(set = 0, binding = 4) uniform sampler2D g_depth;
 layout(set = 0, binding = 15) uniform usampler2D g_inst;
 layout(std430, set = 0, binding = 19) readonly buffer Outlines { uint ot[]; };  // count; per outline first, n, colour, width; the ids
+layout(std430, set = 0, binding = 41) readonly buffer SplatIdsO { uint splat_id[]; };  // round 532: a splat cloud's pick id
 layout(location = 0) out vec4 o_color;
 uint id_at(ivec2 q) {
   if (q.x < 0 || q.y < 0 || q.x >= int(view.x) || q.y >= int(view.y)) return 0u;
   uint i = texelFetch(g_inst, q, 0).r;  // (task 0195: nothing drawn is the clear's ~0 - a see-through surface writes no depth)
-  return i == 0xFFFFFFFFu ? 0u : inst[i].id.x;
+  if (i == 0xFFFFFFFFu) return 0u;
+  if ((i & 0x80000000u) != 0u) return splat_id[i & 255u];  // (round 532: the splat pass's flagged cloud index)
+  return inst[i].id.x;
 }
 bool in_set(uint id, uint first, uint n) {
   if (id == 0u) return false;
@@ -2739,7 +2811,7 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
-    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_})  // (tasks 0192, 0195-0197; round 416)
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_buf_, &splat_ids_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532)
       if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
@@ -2844,6 +2916,7 @@ class VulkanRaster final : public Raster {
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
   bool can_draw_overlays() const override { return pl_ov_line_ && pl_ov_point_ && pl_outline_; }
   bool can_draw_see_through() const override { return pl_see_ && pl_see_ids_; }
+  bool can_draw_splats() const override { return pl_splat_ && pl_splat_ids_; }  // round 532
   bool can_draw_toon_maps() const override { return pl_toon_[0] && pl_toon_[1] && pl_toon_[2]; }
   bool can_draw_baked() const override { return pl_baked_[0] && pl_baked_[1] && pl_baked_[2]; }
   bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
@@ -3148,6 +3221,7 @@ class VulkanRaster final : public Raster {
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_light_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+    if (!fr.splats.empty() && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
     if (!fr.see_through.empty() && can_draw_see_through()) draw_see_through(fr, sl);
     if (can_draw_overlays()) draw_overlays(fr);
     if (fr.cage && can_draw_cage()) draw_cage(fr);
@@ -3719,6 +3793,7 @@ class VulkanRaster final : public Raster {
   Buf light_buf_;                            // task 0195: the frame's lights, as many as there are
   Buf vcol_buf_;                             // task 0195: Weight Paint's vertex colours (RasterFrame::vertex_colors)
   Buf see_buf_;                              // task 0195: the see-through triangles' corners (RasterFrame::see_through)
+  Buf splat_buf_, splat_ids_buf_;            // round 532: the Gaussian splats and their clouds' pick ids (RasterFrame::splats, splat_ids)
   /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
    * another; the tables of textures and levels mirrored here and sent when they change. */
   struct TexSlot {
@@ -3761,6 +3836,7 @@ class VulkanRaster final : public Raster {
              pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE,
              pl_ov_line_ = VK_NULL_HANDLE, pl_ov_point_ = VK_NULL_HANDLE, pl_outline_ = VK_NULL_HANDLE,  // (task 0192)
              pl_see_ = VK_NULL_HANDLE, pl_see_ids_ = VK_NULL_HANDLE;  // (task 0195)
+  VkPipeline pl_splat_ = VK_NULL_HANDLE, pl_splat_ids_ = VK_NULL_HANDLE;  // round 532: the Gaussian splats' colour and ids passes
   VkPipeline pl_see_hdr_ = VK_NULL_HANDLE;  // round 414: the see-through triangles' "none" marks in the linear-light plane
   VkPipeline pl_toon_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0196: the toon pass - not culled, back, front
   VkPipeline pl_baked_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0197: the baked pass
@@ -4107,6 +4183,27 @@ class VulkanRaster final : public Raster {
     f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_see_ids_);
     f_.vkCmdDraw(cmd_, corners, 1, 0, 0);
+    f_.vkCmdEndRenderPass(cmd_);
+    barrier();
+    rb.renderPass = rp_light_load_;
+    rb.framebuffer = sl.fb_light;
+    f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
+  }
+  /* Round 532: the Gaussian splats over the lit picture (in the lighting's pass, begun), their ids in a pass of their own,
+   * then the lighting's pass again, keeping the picture - as draw_see_through does. */
+  void draw_splats(const RasterFrame &fr, const Slot &sl) {
+    const uint32_t n = (uint32_t)fr.splats.size();
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_splat_);
+    f_.vkCmdDraw(cmd_, 6, n, 0, 0);
+    f_.vkCmdEndRenderPass(cmd_);
+    barrier();
+    VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rb.renderPass = rp_ids_;
+    rb.framebuffer = sl.fb_ids;
+    rb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
+    f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_splat_ids_);
+    f_.vkCmdDraw(cmd_, 6, n, 0, 0);
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
     rb.renderPass = rp_light_load_;
@@ -4526,6 +4623,8 @@ class VulkanRaster final : public Raster {
     if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
+    if (!write_array(splat_buf_, fr.splats.data(), fr.splats.size() * sizeof(RasterSplat), err)) return false;  // (round 532)
+    if (!write_array(splat_ids_buf_, fr.splat_ids.data(), fr.splat_ids.size() * 4, err)) return false;
     if (!write_toon_table(err) || !write_baked_table(err) || !write_lil_tables(err)) return false;
     /* (Round 415: the corners live in blocks on the card; a frame's own array - a card without blocks - is written over
      * the buffer only while no block is held.) */
@@ -4621,6 +4720,8 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 34; i <= 36; i++)  // round 416: lilToon's planes
       b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({37, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // round 454: the baked pass's shadowmask plane
+    for (uint32_t i = 40; i <= 41; i++)  // round 532: the Gaussian splats and their clouds' pick ids
+      b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 28; i <= 30; i++)  // task 0197: the baked table, the corners, the probe volume
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
@@ -4672,7 +4773,8 @@ class VulkanRaster final : public Raster {
                                            {toon_buf_.buf, 0, VK_WHOLE_SIZE}, {baked_buf_.buf, 0, VK_WHOLE_SIZE}, {corner_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {probe_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo lil2[2] = {{lil_buf_.buf, 0, VK_WHOLE_SIZE}, {lilmap_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 416: bindings 32, 33)
-    VkWriteDescriptorSet w[22];
+    const VkDescriptorBufferInfo splat2[2] = {{splat_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_ids_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 532: bindings 40, 41)
+    VkWriteDescriptorSet w[24];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -4715,7 +4817,13 @@ class VulkanRaster final : public Raster {
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &lil2[i - 20];
     }
-    f_.vkUpdateDescriptorSets(dev_, 22, w, 0, nullptr);
+    for (int i = 22; i < 24; i++) {  // (round 532: bindings 40, 41)
+      w[i].dstBinding = (uint32_t)(40 + i - 22);
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      w[i].pBufferInfo = &splat2[i - 22];
+    }
+    f_.vkUpdateDescriptorSets(dev_, 24, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const bool toon = sl.fb_toon != VK_NULL_HANDLE, baked = sl.fb_baked != VK_NULL_HANDLE;
@@ -4921,6 +5029,21 @@ class VulkanRaster final : public Raster {
     if (!can_draw_see_through()) Log::warn("The GPU view can't draw see-through surfaces (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
     else if (!can_draw_see_through_hdr()) Log::warn("The GPU view can't draw see-through surfaces over a picture kept in linear light (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
     for (VkShaderModule m : {vs, cf, idf, hf})
+      if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
+  }
+  /* Round 532: the Gaussian splats' pipelines - the colour (premultiplied over, no depth) and the ids. Without them such
+   * views stay the CPU's (the editor asks can_draw_splats()). */
+  void make_splat_pipelines() {
+    std::string serr;
+    const std::string cc = kSplatCommon;
+    VkShaderModule vs = module(cc + kSplatVert, shaderc_vertex_shader, &serr), cf = module(cc + kSplatFrag, shaderc_fragment_shader, &serr),
+                   idf = module("#define BL_SPLAT_IDS 1\n" + cc + kSplatFrag, shaderc_fragment_shader, &serr);
+    if (vs && cf && idf) {
+      pl_splat_ = make_pipeline(rp_light_, vs, cf, 1, false, VK_CULL_MODE_NONE, true);
+      pl_splat_ids_ = make_pipeline(rp_ids_, vs, idf, 2, false, VK_CULL_MODE_NONE);
+    }
+    if (!can_draw_splats()) Log::warn("The GPU view can't draw Gaussian splats (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
+    for (VkShaderModule m : {vs, cf, idf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
   }
   /* Task 0196: the toon pass's pipelines, culled as the g-buffer's (the same vertex shader: the same depth). */
@@ -5165,6 +5288,9 @@ class VulkanRaster final : public Raster {
     };
     if (dual_src_) srcs.push_back({see + kSeeFrag, shaderc_fragment_shader}), srcs.push_back({"#define BL_SEE_IDS 1\n" + see + kSeeFrag, shaderc_fragment_shader});
     if (dual_src_) srcs.push_back({"#define BL_SEE_HDR 1\n" + see + kSeeFrag, shaderc_fragment_shader});  // (round 414)
+    srcs.push_back({std::string(kSplatCommon) + kSplatVert, shaderc_vertex_shader});  // (round 532)
+    srcs.push_back({std::string(kSplatCommon) + kSplatFrag, shaderc_fragment_shader});
+    srcs.push_back({"#define BL_SPLAT_IDS 1\n" + std::string(kSplatCommon) + kSplatFrag, shaderc_fragment_shader});
     for (const char *d : {"#define BL_POST_VIGNETTE 1\n", "#define BL_POST_GRADE 1\n", "#define BL_POST_CHROMA 1\n", "#define BL_POST_GRAIN 1\n", "#define BL_POST_BRIGHT 1\n",
                           "#define BL_POST_BASE 1\n", "#define BL_POST_DOWN 1\n", "#define BL_POST_UP 1\n", "#define BL_POST_ADD 1\n"})  // (round 416: the filters' passes)
       srcs.push_back({std::string(d) + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kPostFrag, shaderc_fragment_shader});
@@ -5206,6 +5332,7 @@ class VulkanRaster final : public Raster {
     }
     if (!can_draw_overlays()) Log::warn("The GPU view can't draw the overlays (%s): the CPU draws them", oerr.empty() ? "?" : oerr.c_str());
     make_see_through_pipelines();
+    make_splat_pipelines();
     for (VkShaderModule m : {olv, opv, ofv, off, olf, opf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
     if (sv && gv && gf && fv && lf) {
@@ -5327,7 +5454,7 @@ class VulkanRaster final : public Raster {
       for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_splat_, pl_splat_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkPipeline p : pl_post_)  // (round 416)
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
@@ -5338,7 +5465,7 @@ class VulkanRaster final : public Raster {
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_buf_, &splat_ids_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
