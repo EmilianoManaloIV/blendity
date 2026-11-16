@@ -9,6 +9,9 @@
 #include <chrono>
 #include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
+#include "../src/render/sky_sun.h"
+#include "../src/image/icc_profile.h"
+#include <limits>
 
 static void colormanagement_tests() {
   test("display: exact sRGB table and SIMD encoders", [] {
@@ -12300,6 +12303,196 @@ static void tests_round462() {
   });
 }
 
+/* ---- round 542 (task 0522): the Sky world's sun lights the scene; saved sRGB images carry an ICC profile ---- */
+static uint32_t r542_be32(const std::string &s, size_t o) {
+  return ((uint32_t)(uint8_t)s[o] << 24) | ((uint32_t)(uint8_t)s[o + 1] << 16) | ((uint32_t)(uint8_t)s[o + 2] << 8) | (uint32_t)(uint8_t)s[o + 3];
+}
+static float r542_lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+static std::vector<uint32_t> r542_picture(int w, int h) {
+  std::vector<uint32_t> px((size_t)w * h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      px[(size_t)y * w + x] = 0xFF000000u | ((uint32_t)(x * 255 / (w - 1)) << 16) | ((uint32_t)(y * 255 / (h - 1)) << 8) | (uint32_t)((x + y) * 255 / (w + h - 2));
+  return px;
+}
+
+static void tests_round542() {
+  test("sky sun: the sun's light is full strength at the zenith, weaker and redder toward the horizon, and gone at or below it", [] {
+    const Vec3 zen = sky_sun_transmittance(0.5f * kPi, 3.0f);
+    CHECK(std::fabs(r542_lum(zen) - 1.0f) < 0.02f);
+    float prev_lum = r542_lum(zen), prev_ratio = zen.x / zen.z;
+    for (float deg : {60.0f, 40.0f, 20.0f, 10.0f, 4.0f}) {
+      const Vec3 t = sky_sun_transmittance(deg * kDeg2Rad, 3.0f);
+      std::printf("    %4.0f deg: lum %.3f r/b %.2f\n", deg, r542_lum(t), t.x / std::max(t.z, 1e-6f));
+      CHECK(r542_lum(t) < prev_lum && r542_lum(t) > 0.0f);
+      CHECK(t.x / std::max(t.z, 1e-6f) > prev_ratio);
+      prev_lum = r542_lum(t), prev_ratio = t.x / std::max(t.z, 1e-6f);
+    }
+    for (float e : {0.0f, -0.1f, -1.5f}) {
+      const Vec3 t = sky_sun_transmittance(e, 3.0f);
+      CHECK(t.x == 0.0f && t.y == 0.0f && t.z == 0.0f);
+    }
+    const Vec3 nan = sky_sun_transmittance(std::nanf(""), 3.0f), nan2 = sky_sun_transmittance(0.5f, std::nanf(""));
+    CHECK(nan.x == 0.0f && nan.y == 0.0f && nan2.x == 0.0f && nan2.y == 0.0f);
+  });
+  test("sky sun: a hazier sky dims the low sun more", [] {
+    const float clear = r542_lum(sky_sun_transmittance(10.0f * kDeg2Rad, 2.0f)), hazy = r542_lum(sky_sun_transmittance(10.0f * kDeg2Rad, 9.0f));
+    CHECK(hazy < clear);
+  });
+  test("sky sun: the light points away from the sun and is a directional light", [] {
+    EnvironmentSettings es;
+    es.mode = 1;
+    const Vec3 to_sun = normalize(Vec3(0.3f, 0.8f, -0.4f));
+    auto l = sky_sun_light(es, to_sun * 3.0f);  // (any length)
+    CHECK(l.has_value());
+    if (!l) return;
+    CHECK(l->type == RenderLight::Directional);
+    CHECK(length(l->direction - (-to_sun)) < 1e-4f);
+    CHECK(l->intensity > 0.0f && l->intensity <= 1.0f + 1e-3f && l->color.x > 0.0f && l->color.z > 0.0f);
+    es.sun_intensity = 2.0f;
+    auto l2 = sky_sun_light(es, to_sun);
+    CHECK(l2 && std::fabs(l2->intensity - 2.0f * l->intensity) < 1e-4f);
+  });
+  test("sky sun: no light for a NaN or zero direction, below the horizon, another world, the switch off or Sun Intensity 0", [] {
+    EnvironmentSettings es;
+    es.mode = 1;
+    const Vec3 up(0, 1, 0);
+    CHECK(sky_sun_light(es, up).has_value());
+    CHECK(!sky_sun_light(es, Vec3(0, 0, 0)).has_value());
+    CHECK(!sky_sun_light(es, Vec3(std::nanf(""), 1, 0)).has_value());
+    CHECK(!sky_sun_light(es, Vec3(0, 1, std::numeric_limits<float>::infinity())).has_value());
+    CHECK(!sky_sun_light(es, Vec3(1, -0.2f, 0)).has_value());
+    CHECK(!sky_sun_light(es, Vec3(1, 0, 0)).has_value());
+    for (int m : {0, 2, 3}) {
+      EnvironmentSettings o = es;
+      o.mode = m;
+      CHECK(!sky_sun_light(o, up).has_value());
+    }
+    EnvironmentSettings off = es;
+    off.sun_lights_scene = false;
+    CHECK(!sky_sun_light(off, up).has_value());
+    EnvironmentSettings zero = es;
+    zero.sun_intensity = 0.0f;
+    CHECK(!sky_sun_light(zero, up).has_value());
+    zero.sun_intensity = std::nanf("");
+    CHECK(!sky_sun_light(zero, up).has_value());
+    zero.sun_intensity = -1.0f;
+    CHECK(!sky_sun_light(zero, up).has_value());
+  });
+  test("sky sun: the lighting cache key changes with the switch, Sun Intensity, Turbidity and the world, and is 0 when the sun adds nothing", [] {
+    EnvironmentSettings es;
+    es.mode = 1;
+    const uint64_t base = sky_sun_key(es);
+    CHECK(base != 0);
+    EnvironmentSettings a = es;
+    a.sun_lights_scene = false;
+    CHECK(sky_sun_key(a) == 0 && sky_sun_key(a) != base);
+    a = es, a.sun_intensity = 2.0f;
+    CHECK(sky_sun_key(a) != base);
+    a = es, a.turbidity = 5.0f;
+    CHECK(sky_sun_key(a) != base);
+    a = es, a.mode = 0;
+    CHECK(sky_sun_key(a) == 0);
+  });
+
+  test("ICC: the embedded sRGB profile is a valid ICC v4 display profile (size, acsp, mntr RGB XYZ, D50, every tag inside)", [] {
+    const std::string &p = srgb_icc_profile();
+    CHECK(p.size() > 132);
+    if (p.size() <= 132) return;
+    CHECK(r542_be32(p, 0) == p.size());
+    CHECK(p.compare(36, 4, "acsp") == 0);
+    CHECK(p.compare(12, 4, "mntr") == 0 && p.compare(16, 4, "RGB ") == 0 && p.compare(20, 4, "XYZ ") == 0);
+    CHECK((uint8_t)p[8] == 4);
+    /* The illuminant at 68: D50 as s15Fixed16 (0.9642, 1, 0.8249). */
+    auto fixed = [&](size_t o) { return (float)(int32_t)r542_be32(p, o) / 65536.0f; };
+    CHECK(std::fabs(fixed(68) - 0.9642f) < 0.001f && std::fabs(fixed(72) - 1.0f) < 0.001f && std::fabs(fixed(76) - 0.8249f) < 0.001f);
+    const uint32_t tags = r542_be32(p, 128);
+    CHECK(tags >= 3 && tags < 64 && 132 + (size_t)tags * 12 <= p.size());
+    for (uint32_t i = 0; i < tags && 132 + (size_t)i * 12 + 12 <= p.size(); i++) {
+      const size_t e = 132 + (size_t)i * 12;
+      const uint64_t off = r542_be32(p, e + 4), size = r542_be32(p, e + 8);
+      CHECK(off + size <= p.size() && size > 0);
+      CHECK(off % 4 == 0);
+    }
+    CHECK(&srgb_icc_profile() == &p);  // (built once)
+  });
+  test("ICC: a saved PNG holds an iCCP chunk before its pixels, whose zlib body inflates to exactly the sRGB profile", [] {
+    const std::vector<uint32_t> px = r542_picture(24, 16);
+    const std::string png = encode_png(px.data(), 24, 16, 24);
+    CHECK(png.size() > 8 && png.compare(1, 3, "PNG") == 0);
+    size_t o = 8;
+    int iccp_at = -1, idat_at = -1, n = 0;
+    std::string iccp;
+    while (o + 12 <= png.size()) {
+      const uint32_t len = r542_be32(png, o);
+      const std::string type = png.substr(o + 4, 4);
+      if (o + 12 + len > png.size()) break;
+      if (type == "iCCP") iccp_at = n, iccp = png.substr(o + 8, len);
+      if (type == "IDAT" && idat_at < 0) idat_at = n;
+      o += 12 + len, n++;
+    }
+    CHECK(iccp_at >= 0 && idat_at >= 0 && iccp_at < idat_at);
+    CHECK(o == png.size());  // (the chunks tile the file)
+    const size_t z = iccp.find('\0');
+    CHECK(z != std::string::npos && z >= 1 && z <= 79 && z + 2 < iccp.size());
+    if (z == std::string::npos || z + 2 >= iccp.size()) return;
+    CHECK(iccp[z + 1] == 0);  // (compression method 0)
+    std::vector<uint8_t> out;
+    CHECK(zlib_inflate((const uint8_t *)iccp.data() + z + 2, iccp.size() - z - 2, out));
+    CHECK(std::string(out.begin(), out.end()) == srgb_icc_profile());
+    /* An alpha PNG too. */
+    const std::string rgba = encode_png(px.data(), 24, 16, 24, true);
+    CHECK(rgba.find("iCCP") != std::string::npos && rgba.find("iCCP") < rgba.find("IDAT"));
+  });
+  test("ICC: a saved JPEG holds an APP2 ICC_PROFILE marker with the whole sRGB profile, before the picture's tables", [] {
+    const std::vector<uint32_t> px = r542_picture(24, 16);
+    const std::string jpg = encode_jpeg(px.data(), 24, 16, 24);
+    CHECK((uint8_t)jpg[0] == 0xFF && (uint8_t)jpg[1] == 0xD8);
+    size_t o = 2;
+    bool found = false;
+    while (o + 4 <= jpg.size() && (uint8_t)jpg[o] == 0xFF) {
+      const uint8_t m = (uint8_t)jpg[o + 1];
+      if (m == 0xDA) break;
+      const size_t len = ((uint8_t)jpg[o + 2] << 8) | (uint8_t)jpg[o + 3];
+      if (m == 0xE2 && jpg.compare(o + 4, 12, std::string("ICC_PROFILE\0", 12)) == 0) {
+        found = true;
+        CHECK((uint8_t)jpg[o + 16] == 1 && (uint8_t)jpg[o + 17] == 1);  // (chunk 1 of 1)
+        CHECK(jpg.substr(o + 18, len - 16) == srgb_icc_profile());
+      }
+      if (m == 0xDB || m == 0xC0 || m == 0xC2) CHECK(found);  // (the profile came before the tables)
+      o += 2 + len;
+    }
+    CHECK(found);
+  });
+  test("ICC: Blendity's own decoders and the default decoder read a tagged PNG to exactly the pixels written, a tagged JPEG to within the lossy tolerance", [] {
+    const int w = 32, h = 24;
+    const std::vector<uint32_t> px = r542_picture(w, h);
+    const std::string png = encode_png(px.data(), w, h, w), jpg = encode_jpeg(px.data(), w, h, w, 95);
+    for (int own = 0; own < 2; own++) {
+      Bitmap b;
+      std::string err;
+      CHECK(own ? decode_image_own(png, b, err) : decode_image(png, b, err));
+      CHECK(b.width == w && b.height == h && b.rgba8.size() == (size_t)w * h * 4);
+      int bad = 0;
+      for (size_t i = 0; i < (size_t)w * h && b.rgba8.size() >= (i + 1) * 4; i++)
+        bad += b.rgba8[i * 4] != ((px[i] >> 16) & 255) || b.rgba8[i * 4 + 1] != ((px[i] >> 8) & 255) || b.rgba8[i * 4 + 2] != (px[i] & 255) || b.rgba8[i * 4 + 3] != 255;
+      CHECK(bad == 0);
+      Bitmap j;
+      CHECK(own ? decode_image_own(jpg, j, err) : decode_image(jpg, j, err));
+      CHECK(j.width == w && j.height == h && j.rgba8.size() == (size_t)w * h * 4);
+      double sum = 0;
+      int worst = 0;
+      for (size_t i = 0; i < (size_t)w * h && j.rgba8.size() >= (i + 1) * 4; i++)
+        for (int c = 0; c < 3; c++) {
+          const int d = std::abs((int)j.rgba8[i * 4 + c] - (int)((px[i] >> (16 - 8 * c)) & 255));
+          sum += d, worst = std::max(worst, d);
+        }
+      std::printf("    %s JPEG: mean error %.2f, worst %d\n", own ? "own" : "default", sum / (w * h * 3), worst);
+      CHECK(sum / (w * h * 3) < 3.0 && worst < 24);
+    }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -12354,4 +12547,5 @@ void run_render_tests() {
   tests_round343();
   tests_round341();
   tests_round462();
+  tests_round542();
 }
