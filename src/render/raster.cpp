@@ -983,9 +983,12 @@ Vec3 Lightmap::sample(Vec2 uv) const {
 }
 
 static inline uint32_t pack_rgb(float r, float g, float b) {
+  /* Clamped as a float before the cast (round 539): a NaN or infinite shade - a mesh with NaN positions lit through
+   * its NaN normals - would overflow the int (UBSan: "nan is outside the range of representable values"). NaN is 0. */
   auto c = [](float v) {
-    int i = (int)(v * 255.0f + 0.5f);
-    return (uint32_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
+    if (!(v == v)) v = 0.0f;
+    v = std::max(0.0f, std::min(v, 1.0f));
+    return (uint32_t)(int)(v * 255.0f + 0.5f);
   };
   return 0xFF000000u | (c(r) << 16) | (c(g) << 8) | c(b);
 }
