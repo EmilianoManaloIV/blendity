@@ -4,7 +4,7 @@
 - **Requirements:** U-04 (keyboard reach), the keymap's presets
 - **Decisions:** ADR 0145 (keyboard focus) - none new
 - **Model:** main session (the HCI worker)
-- **PR:** (link when opened) - base `main`, its own
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/426 (base `main`, its own)
 
 ## Goal
 The owner: "Shift R doesn't work" (main 068207d9, the Unity preset, no overrides). Shift+R is Draw Piece's key in every
