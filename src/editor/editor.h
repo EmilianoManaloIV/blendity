@@ -3606,9 +3606,52 @@ class Editor {
     int axis = 0;           // array: 0 X, 1 Y, 2 Z (the selection's own axes)
     float amount2 = 0.0f;   // taper: end scale; recess: border
     Vec3 size{1, 1, 1};     // sketch_box: the lengths; sketch_cylinder: base radius, height, top radius (task 0225)
+    unsigned dims_keep = 7;  // dimensions: the axes (bit k) the user did not type: they follow the selection's size in the frame
+    int dims_frame = 0;      // dimensions: the orientation `size` was measured in (a switch re-measures the untouched axes)
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
+  /* Round 536 (task 0516): Edit Mode's Dimensions. The selected vertices' size, global (world axes, world units) and local
+   * (the object's axes, object units), cached by the mesh's pointer and version, the object's matrix and the selection. */
+  struct EditDims {
+    const Mesh *mesh = nullptr;
+    uint64_t version = 0;
+    float world[16] = {};
+    uint64_t sel_hash = 0;
+    size_t sel_size = 0;
+    size_t count = 0;  // selected vertices
+    Vec3 global_size{0.0f}, local_size{0.0f};
+    bool filled = false;
+  };
+  EditDims edit_dims_;
+  uint64_t edit_dims_computes_ = 0;  // (the tests: how often the bounds were walked)
+  bool dims_local_ = false;          // the Inspector's Global / Local switch
+  bool dims_drag_ = false;           // a field is being dragged: its changes amend one operator instead of starting new ones
+  const EditDims &edit_dimensions(const GameObject &g, const Mesh &m);
+  void edit_dimensions_command(const std::vector<std::string> &t);  // (editor_commands.cpp's editop)
+  Vec3 dims_current_size(const LastOp &L) const;  // L.before's selection's size in L.orientation's frame
+  void dims_follow_orientation(LastOp &L) const;  // an Orientation switch: the untouched axes take the new frame's sizes
+  /* Runs `dimensions` with the wanted size (an axis whose bit is set in keep_mask keeps the size it has). */
+  void edit_dimensions_op(Vec3 wanted, unsigned keep_mask, int orientation);
+  /* `quiet`: refused only because nothing would change (said as info, not a warning). */
+  bool run_dimensions(Mesh &m, const LastOp &L, const Mat4 &world, std::string &err, bool &quiet);  // (scene_view.cpp)
+  void apply_dimensions_edit(Vec3 size, int axis, float v);                             // (panels.cpp)
+  bool dims_refused_ = false;  // this press of a field was refused: stay quiet until it is released
+  void draw_edit_dimensions(ui::Layout &lay);                                        // (panels.cpp)
+  Vec3 dims_request_{0.0f};
+  unsigned dims_request_keep_ = 7;
+  int dims_request_orientation_ = 0;
+ public:
+  /* The tests: the cache's numbers, and the bounds walked so far. */
+  bool edit_dims_for_test(Vec3 &global, Vec3 &local, size_t &count) {
+    GameObject *g = edit_object();
+    if (!g || !edit_mesh_ptr()) return false;
+    const EditDims &d = edit_dimensions(*g, **edit_mesh_ptr());
+    global = d.global_size, local = d.local_size, count = d.count;
+    return true;
+  }
+  uint64_t edit_dims_computes_for_test() const { return edit_dims_computes_; }
+ private:
   /* A redoable operator's start (task 0165): the selection flushed, LastOp filled from the mesh as it is, run_last_op. */
   void begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp);
   /* The faces an operator reads, from the vertices or the edges in those modes; how many are selected. */

@@ -14701,6 +14701,575 @@ static void tests_round508_te_open() {
   });
 }
 
+/* ---- Round 536 (task 0516): Edit Mode's Dimensions ---- */
+
+/* A cube of the given size in Edit Mode, vertex mode, with every vertex selected (none when `select` is false). */
+static GameObject *r536_cube(Editor &ed, const char *name, float size, bool select = true) {
+  GameObject *g = ed.scene().create(name);
+  g->add<MeshFilter>()->mesh = primitives::cube(size);
+  g->add<MeshRenderer>();
+  ed.mark_changed_for_test(name);
+  ed.command("edit off");  // (a test makes several objects: each is edited in turn)
+  ed.command(std::string("select ") + name);
+  ed.command("edit vertex");
+  std::string vs = "vsel";
+  const size_t n = g->get<MeshFilter>()->mesh->vert_count();
+  for (size_t v = 0; select && v < n; v++) vs += " " + std::to_string(v);
+  ed.command(vs);
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  return g;
+}
+
+/* The size of a mesh's vertices (all of them) along each local axis. */
+static Vec3 r536_extent(const Mesh &m) {
+  Vec3 lo(1e30f), hi(-1e30f);
+  for (const Vec3 &p : m.positions)
+    for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], p[k]), hi[k] = std::max(hi[k], p[k]);
+  return hi - lo;
+}
+
+static bool r536_same_positions(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0;
+}
+
+static bool r536_finite(const Mesh &m) {
+  for (const Vec3 &p : m.positions)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+  return true;
+}
+
+static Vec3 r536_median(const Mesh &m) {
+  Vec3 s(0.0f);
+  for (const Vec3 &p : m.positions) s += p;
+  return s / (float)m.positions.size();
+}
+
+static void tests_round536() {
+  test("dimensions: a 2 x 2 x 2 cube selected shows 2 2 2 (global and local); typing 5 into the Inspector's Y field scales the selection to 5 about its median in one undo step, and F9's Y typed 3 re-runs from before (3, not 7.5), still one step, Ctrl+Z gives the cube back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    GameObject *g = r536_cube(ed, "DimCube", 2.0f);
+    auto type_into = [&](const std::string &key, const std::string &text) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = x, e.y = y;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+      for (char c : text) {
+        platform::Event e;
+        e.type = ET::Text, e.codepoint = (uint32_t)c;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(count == g->get<MeshFilter>()->mesh->vert_count());
+    CHECK(std::fabs(gs.x - 2) < 1e-5f && std::fabs(gs.y - 2) < 1e-5f && std::fabs(gs.z - 2) < 1e-5f);
+    CHECK(std::fabs(ls.x - 2) < 1e-5f && std::fabs(ls.y - 2) < 1e-5f && std::fabs(ls.z - 2) < 1e-5f);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const Vec3 med0 = r536_median(*before);
+    const size_t steps0 = ed.undo_steps_for_test();
+    const bool typed = type_into("field:Dimensions Y", "5");
+    const Vec3 e1 = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    typed Y 5 (%d): size %.4f %.4f %.4f, undo steps %zu -> %zu (%s)\n", (int)typed, e1.x, e1.y, e1.z, steps0, ed.undo_steps_for_test(), ed.undo_label_for_test(0).c_str());
+    CHECK(typed);
+    CHECK(std::fabs(e1.y - 5.0f) < 1e-4f && std::fabs(e1.x - 2.0f) < 1e-4f && std::fabs(e1.z - 2.0f) < 1e-4f);
+    CHECK(length(r536_median(*g->get<MeshFilter>()->mesh) - med0) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1 && ed.undo_label_for_test(0) == "Edit: dimensions");
+    CHECK(ed.last_op_name_for_test() == "dimensions");
+    /* F9: Y typed 3 starts again from the 2-high cube. */
+    const bool typed9 = type_into("lastop:Y", "3");
+    const Vec3 e2 = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    F9 Y 3 (%d): size %.4f %.4f %.4f, undo steps %zu\n", (int)typed9, e2.x, e2.y, e2.z, ed.undo_steps_for_test());
+    CHECK(typed9);
+    CHECK(std::fabs(e2.y - 3.0f) < 1e-4f && std::fabs(e2.x - 2.0f) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+    ed.command("undo");
+    CHECK(r536_same_positions(*ed.scene().find_by_name("DimCube")->get<MeshFilter>()->mesh, *before));
+  });
+  test("dimensions: on an object turned 90 degrees about Z and scaled 2 in X, Global and Local read different sizes, and a typed local X changes the size along the object's own X", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimTurned", 2.0f);
+    g->set_local_euler({0, 0, 90});
+    g->set_local_scale({2, 1, 1});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    std::printf("    turned + scaled: global %.3f %.3f %.3f, local %.3f %.3f %.3f\n", gs.x, gs.y, gs.z, ls.x, ls.y, ls.z);
+    CHECK(std::fabs(gs.x - 2) < 1e-4f && std::fabs(gs.y - 4) < 1e-4f && std::fabs(gs.z - 2) < 1e-4f);
+    CHECK(std::fabs(ls.x - 2) < 1e-4f && std::fabs(ls.y - 2) < 1e-4f && std::fabs(ls.z - 2) < 1e-4f);
+    ed.command("editop dimensions 3 - - local");
+    const Vec3 le = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(std::fabs(le.x - 3) < 1e-4f && std::fabs(le.y - 2) < 1e-4f && std::fabs(ls.x - 3) < 1e-4f);
+    CHECK(std::fabs(gs.y - 6) < 1e-4f && std::fabs(gs.x - 2) < 1e-4f);  // (local X is world Y here)
+    /* Global: the world X size (the object's local Y) goes to 4. */
+    ed.command("editop dimensions 4 - -");
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(std::fabs(gs.x - 4) < 1e-4f && std::fabs(gs.y - 6) < 1e-4f && std::fabs(ls.y - 4) < 1e-4f);
+  });
+  test("dimensions: one selected face scales alone (the other vertices keep their positions bit for bit); a size on the flat axis is refused with a message and leaves the mesh and the undo steps alone, the other axes work, 0 flattens a sized axis", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimFace", 2.0f, false);
+    ed.command("fsel facing 0 1 0");
+    ed.step_frame_headless();
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const std::vector<uint8_t> sel = ed.vert_sel_for_test();
+    const size_t picked = (size_t)std::count(sel.begin(), sel.end(), 1);
+    CHECK(picked >= 4 && picked < before->vert_count());
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(count == picked && std::fabs(gs.y) < 1e-6f && std::fabs(gs.x - 2) < 1e-5f);
+    /* The flat axis (Y): refused, nothing changes. */
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop dimensions - 3 -");
+    ed.step_frame_headless();  // (a pending undo step would show here)
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    /* X works: only the selected vertices move. */
+    ed.command("editop dimensions 4 - -");
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    bool others_kept = true, selected_moved = false;
+    for (size_t v = 0; v < before->vert_count(); v++) {
+      const bool same = std::memcmp(&before->positions[v], &after.positions[v], sizeof(Vec3)) == 0;
+      if (!sel[v]) others_kept = others_kept && same;
+      else selected_moved = selected_moved || !same;
+    }
+    std::printf("    one face: %zu of %zu vertices selected, others untouched %d, undo steps %zu -> %zu\n", picked, before->vert_count(), (int)others_kept, steps0, ed.undo_steps_for_test());
+    CHECK(others_kept && selected_moved);
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x - 4) < 1e-4f);
+    /* 0 on a sized axis flattens it (Blender allows it). */
+    ed.command("editop dimensions 0 - -");
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x) < 1e-6f && r536_finite(*g->get<MeshFilter>()->mesh));
+  });
+  test("dimensions: one vertex reads 0 everywhere and typing a size is refused (positions bit for bit, no undo step); nothing selected changes nothing; NaN, inf and negatives never write a non-finite position; a 1e-6 to 1e6 scale stays finite", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimPoint", 2.0f, false);
+    ed.command("vsel 0");
+    ed.step_frame_headless();
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 1 && gs.x == 0 && gs.y == 0 && gs.z == 0 && ls.x == 0);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop dimensions 1 - -");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    /* Nothing selected. */
+    ed.command("vsel");
+    ed.step_frame_headless();
+    ed.command("editop dimensions 3 - -");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    /* NaN / inf / negative on the whole cube. */
+    std::string vs = "vsel";
+    for (size_t v = 0; v < before->vert_count(); v++) vs += " " + std::to_string(v);
+    ed.command(vs);
+    ed.step_frame_headless();
+    for (const char *bad : {"nan", "inf", "-inf"}) {
+      ed.command(std::string("editop dimensions ") + bad + " - -");
+      CHECK(r536_finite(*g->get<MeshFilter>()->mesh));
+      CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    }
+    ed.command("editop dimensions -3 - -");  // a negative size is 0: flat
+    const Vec3 neg = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh) && neg.x == 0 && std::fabs(neg.y - 2) < 1e-5f);
+    /* A huge factor on a tiny cube. */
+    GameObject *t = r536_cube(ed, "DimTiny", 2e-6f);
+    ed.command("editop dimensions 1000000 - -");
+    const Mesh &tm = *t->get<MeshFilter>()->mesh;
+    std::printf("    1e-6 -> 1e6: x size %.6g, finite %d, %zu faces\n", r536_extent(tm).x, (int)r536_finite(tm), tm.face_count());
+    CHECK(r536_finite(tm) && std::fabs(r536_extent(tm).x - 1e6f) < 1e6f * 1e-3f && tm.face_count() == primitives::cube(1.0f)->face_count());
+  });
+  test("dimensions: the Inspector's bounds are cached by the mesh, its version and the selection (not walked every frame); a million vertices' frame cost is printed", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    GameObject *g = r536_cube(ed, "DimCache", 2.0f);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const uint64_t c0 = ed.edit_dims_computes_for_test();
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    CHECK(ed.edit_dims_computes_for_test() == c0);  // (the Inspector drew five frames from the cache)
+    ed.command("vsel 0 1");
+    ed.step_frame_headless();
+    CHECK(ed.edit_dims_computes_for_test() > c0);   // (another selection: walked again)
+    const uint64_t c1 = ed.edit_dims_computes_for_test();
+    ed.command("editop dimensions 3 - -");
+    ed.step_frame_headless();
+    CHECK(ed.edit_dims_computes_for_test() > c1);   // (another mesh version)
+    /* A million vertices: the cached frame's cost against the walk's. */
+    GameObject *big = ed.scene().create("DimBig");
+    auto mesh = std::make_shared<Mesh>();
+    for (int i = 0; i < 1000000; i++) mesh->add_vert({(float)(i % 1000), (float)(i / 1000), 0.0f});
+    const uint32_t tri[3] = {0, 1, 2};
+    mesh->add_face(tri, 3, nullptr, 0);
+    big->add<MeshFilter>()->mesh = mesh;
+    big->add<MeshRenderer>();
+    ed.mark_changed_for_test("DimBig");
+    ed.command("edit off");
+    ed.command("select DimBig");
+    ed.command("edit vertex");
+    ed.vert_sel_for_test().assign(mesh->vert_count(), 1);
+    (void)g;
+    Vec3 gs, ls;
+    size_t count = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    ed.edit_dims_for_test(gs, ls, count);
+    const auto t1 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; i++) ed.edit_dims_for_test(gs, ls, count);
+    const auto t2 = std::chrono::steady_clock::now();
+    std::printf("    1M vertices selected: first walk %.2f ms, a cached look %.3f ms (size %.0f x %.0f)\n", std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                std::chrono::duration<double, std::milli>(t2 - t1).count() / 20.0, gs.x, gs.y);
+    CHECK(count == 1000000 && std::fabs(gs.x - 999) < 1e-3f);
+  });
+}
+
+/* ---- Round 536 (task 0516), the test engineer's additions ---- */
+
+/* Double-clicks the control recorded as `key`, types `text` and presses Enter. `step` runs one frame with events (the main
+ * window's, or a floating window's). False when the control is not on screen. */
+static bool r536_type_with(const std::function<bool(const std::string &, Recti &)> &find, const std::function<void(std::vector<platform::Event>)> &step, const std::string &key, const std::string &text) {
+  using ET = platform::EventType;
+  Recti r;
+  for (int i = 0; i < 4 && !find(key, r); i++) step({});
+  if (!find(key, r)) return false;
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp, ET::MouseDown, ET::MouseUp}) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    step({e});
+  }
+  step({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+  for (char c : text) {
+    platform::Event e;
+    e.type = ET::Text, e.codepoint = (uint32_t)c;
+    step({e});
+  }
+  step({key_ev(platform::KEY_ENTER)});
+  step({});
+  step({});
+  return true;
+}
+
+static bool r536_type(Editor &ed, const std::string &key, const std::string &text) {
+  return r536_type_with([&](const std::string &k, Recti &r) { return ed.button_rect_for_test(k, r); }, [&](std::vector<platform::Event> ev) { ed.step_frame_headless(std::move(ev)); }, key, text);
+}
+
+/* An object with this mesh in Edit Mode, vertex mode, every vertex selected. */
+static GameObject *r536_object(Editor &ed, const char *name, MeshPtr mesh, bool select = true) {
+  GameObject *g = ed.scene().create(name);
+  g->add<MeshFilter>()->mesh = mesh;
+  g->add<MeshRenderer>();
+  ed.mark_changed_for_test(name);
+  ed.command("edit off");
+  ed.command(std::string("select ") + name);
+  ed.command("edit vertex");
+  std::string vs = "vsel";
+  for (size_t v = 0; select && v < mesh->vert_count(); v++) vs += " " + std::to_string(v);
+  ed.command(vs);
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  return g;
+}
+
+static void tests_round536_engineer() {
+  test("dimensions: edge select mode measures and scales the vertices of the selected edge; the rest of the cube stays bit for bit", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimEdge", 2.0f, false);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const uint32_t *f0 = before->face_verts(0);
+    const uint32_t a = f0[0], b = f0[1];
+    ed.command(strprintf("esel %u %u", a, b));
+    ed.step_frame_headless();
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    const Vec3 d = before->positions[a] - before->positions[b];
+    int axis = std::fabs(d.x) > 1e-3f ? 0 : std::fabs(d.y) > 1e-3f ? 1 : 2;
+    std::printf("    edge %u-%u: %zu verts, size %.3f %.3f %.3f, axis %d\n", a, b, count, gs.x, gs.y, gs.z, axis);
+    CHECK(count == 2 && std::fabs(gs[axis] - 2) < 1e-5f);
+    const Vec3 mid0 = (before->positions[a] + before->positions[b]) * 0.5f;
+    std::string cmd = "editop dimensions";
+    for (int k = 0; k < 3; k++) cmd += k == axis ? " 4" : " -";
+    ed.command(cmd);
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    CHECK(std::fabs(length(after.positions[a] - after.positions[b]) - 4.0f) < 1e-4f);
+    CHECK(length((after.positions[a] + after.positions[b]) * 0.5f - mid0) < 1e-4f);
+    for (size_t v = 0; v < before->vert_count(); v++)
+      if (v != a && v != b) CHECK(std::memcmp(&before->positions[v], &after.positions[v], sizeof(Vec3)) == 0);
+  });
+
+  test("dimensions: F9 after the selection changed re-runs on the selection the operator started from, with X / Y / Z typed in F9's own fields", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    GameObject *g = r536_cube(ed, "DimF9Sel", 2.0f);
+    ed.command("editop dimensions - 5 -");
+    CHECK(ed.last_op_name_for_test() == "dimensions");
+    ed.step_frame_headless();  // (the console op's undo step lands on the next frame)
+    const size_t steps1 = ed.undo_steps_for_test();
+    ed.command("vsel 0");  // (the selection moves on: one vertex)
+    ed.step_frame_headless();
+    const bool t1 = r536_type(ed, "lastop:Y", "3");
+    Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    F9 Y 3 after vsel 0 (%d): size %.3f %.3f %.3f, undo %zu -> %zu, last op '%s'\n", (int)t1, e.x, e.y, e.z, steps1, ed.undo_steps_for_test(), ed.last_op_name_for_test().c_str());
+    CHECK(t1);
+    CHECK(std::fabs(e.y - 3) < 1e-4f && std::fabs(e.x - 2) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps1);
+    /* X and Z typed in F9 too (each re-runs from the 2 x 2 x 2 cube). */
+    CHECK(r536_type(ed, "lastop:X", "4"));
+    e = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(std::fabs(e.x - 4) < 1e-4f && std::fabs(e.y - 3) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+    CHECK(r536_type(ed, "lastop:Z", "1"));
+    e = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(std::fabs(e.x - 4) < 1e-4f && std::fabs(e.y - 3) < 1e-4f && std::fabs(e.z - 1) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps1);
+  });
+
+  test("dimensions: a quad strip (open, boundary edges) and two faces that share only a vertex measure and scale without a hole or a crash", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    auto strip = std::make_shared<Mesh>();
+    for (int i = 0; i < 4; i++) strip->add_vert({(float)i, 0, 0}), strip->add_vert({(float)i, 1, 0});
+    for (uint32_t i = 0; i < 3; i++) strip->add_face({2 * i, 2 * i + 2, 2 * i + 3, 2 * i + 1});
+    GameObject *g = r536_object(ed, "DimStrip", strip);
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 8 && std::fabs(gs.x - 3) < 1e-5f && std::fabs(gs.y - 1) < 1e-5f && gs.z == 0);
+    ed.command("editop dimensions 6 2 -");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    const Vec3 e = r536_extent(m);
+    CHECK(r536_finite(m) && m.face_count() == 3 && std::fabs(e.x - 6) < 1e-4f && std::fabs(e.y - 2) < 1e-4f);
+    ed.command("editop dimensions - - 1");  // flat in Z: refused
+    CHECK(r536_extent(*g->get<MeshFilter>()->mesh).z == 0);
+    /* Two quads that touch at one vertex (a bow tie). */
+    auto bow = std::make_shared<Mesh>();
+    const uint32_t c = bow->add_vert({0, 0, 0});
+    const uint32_t p[6] = {bow->add_vert({1, 0, 0}), bow->add_vert({1, 1, 0}), bow->add_vert({0, 1, 0}),
+                           bow->add_vert({-1, 0, 0}), bow->add_vert({-1, -1, 0}), bow->add_vert({0, -1, 0})};
+    bow->add_face({c, p[0], p[1], p[2]});
+    bow->add_face({c, p[3], p[4], p[5]});
+    GameObject *h = r536_object(ed, "DimBow", bow);
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 7 && std::fabs(gs.x - 2) < 1e-5f && std::fabs(gs.y - 2) < 1e-5f);
+    ed.command("editop dimensions 4 - -");
+    const Mesh &bm = *h->get<MeshFilter>()->mesh;
+    CHECK(r536_finite(bm) && bm.face_count() == 2 && std::fabs(r536_extent(bm).x - 4) < 1e-4f);
+    CHECK(length(bm.positions[c]) < 1e-5f);  // (the shared vertex is the median here, so it stays)
+  });
+
+  test("dimensions: a mesh with a zero-area face scales finitely, and the degenerate face alone has size along one axis only", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    auto m = std::make_shared<Mesh>(*primitives::cube(2.0f));
+    const uint32_t s = m->add_vert({-1, 5, 0}), t = m->add_vert({0, 5, 0}), u = m->add_vert({1, 5, 0});
+    m->add_face({s, t, u});  // collinear: no area
+    const size_t faces = m->face_count();
+    GameObject *g = r536_object(ed, "DimDegen", m);
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.y - 6.0f) < 1e-5f);
+    ed.command("editop dimensions 4 3 4");
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh) && g->get<MeshFilter>()->mesh->face_count() == faces);
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x - 4) < 1e-4f && std::fabs(gs.y - 3) < 1e-4f && std::fabs(gs.z - 4) < 1e-4f);
+    /* Only the degenerate triangle: a line along X. */
+    ed.command(strprintf("vsel %u %u %u", s, t, u));
+    ed.step_frame_headless();
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 3 && gs.y == 0 && gs.z == 0 && gs.x > 0);
+    ed.command("editop dimensions - 2 -");
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    ed.command("editop dimensions 1 - -");
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh) && std::fabs(r536_extent(*g->get<MeshFilter>()->mesh).x - 4) < 1e-4f);  // (the cube still spans 4)
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x - 1) < 1e-4f);
+  });
+
+  test("dimensions: an object scaled 1e4 or 1e-4 reads its global size and local size, and typed sizes land in the right frame", [] {
+    for (float sc : {1e4f, 1e-4f}) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      GameObject *g = r536_cube(ed, "DimScale", 2.0f);
+      g->set_local_scale({sc, sc, sc});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      Vec3 gs, ls;
+      size_t count = 0;
+      CHECK(ed.edit_dims_for_test(gs, ls, count));
+      std::printf("    scale %g: global %.6g, local %.6g\n", sc, gs.x, ls.x);
+      CHECK(std::fabs(gs.x - 2 * sc) < 2 * sc * 1e-4f && std::fabs(ls.x - 2) < 1e-4f);
+      ed.command(strprintf("editop dimensions %.9g - -", 4 * sc));  // global X: twice the size
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      CHECK(r536_finite(m) && std::fabs(r536_extent(m).x - 4) < 4e-3f && std::fabs(r536_extent(m).y - 2) < 2e-3f);
+      ed.command("editop dimensions - 3 - local");
+      CHECK(r536_finite(m) && std::fabs(r536_extent(*g->get<MeshFilter>()->mesh).y - 3) < 3e-3f);
+      CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.y - 3 * sc) < 3 * sc * 1e-3f);
+    }
+  });
+
+  test("dimensions: dragging a field is one undo step, not one a frame", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    GameObject *g = r536_cube(ed, "DimDrag", 2.0f);
+    Recti r;
+    for (int i = 0; i < 4 && !ed.button_rect_for_test("field:Dimensions Y", r); i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("field:Dimensions Y", r));
+    const size_t steps0 = ed.undo_steps_for_test();
+    const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+    platform::Event mv;
+    mv.type = ET::MouseMove, mv.x = x, mv.y = y;
+    ed.step_frame_headless({mv});
+    platform::Event down;
+    down.type = ET::MouseDown, down.x = x, down.y = y;
+    ed.step_frame_headless({down});
+    for (int i = 1; i <= 12; i++) {
+      platform::Event m2;
+      m2.type = ET::MouseMove, m2.x = x + i * 10, m2.y = y;
+      ed.step_frame_headless({m2});
+    }
+    platform::Event up;
+    up.type = ET::MouseUp, up.x = x + 120, up.y = y;
+    ed.step_frame_headless({up});
+    ed.step_frame_headless();
+    const Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    dragged +120 px: size %.3f %.3f %.3f, undo %zu -> %zu\n", e.x, e.y, e.z, steps0, ed.undo_steps_for_test());
+    CHECK(e.y > 2.5f && std::fabs(e.x - 2) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+    ed.command("undo");
+    CHECK(std::fabs(r536_extent(*ed.scene().find_by_name("DimDrag")->get<MeshFilter>()->mesh).y - 2) < 1e-5f);
+  });
+
+  test("dimensions: the console refuses bad arguments (abc, nan, outside Edit Mode) and leaves mesh and undo stack alone; '- 2 -' works", [] {
+    for (const char *bad : {"editop dimensions abc", "editop dimensions abc 2 2", "editop dimensions 2 xyz -", "editop dimensions nan nan nan", "editop dimensions - - 1e999"}) {
+      Editor ed;  // (a fresh editor a line: one bad line must not hide behind the one before)
+      ed.init_headless(1000, 700);
+      GameObject *g = r536_cube(ed, "DimConsole", 2.0f);
+      const MeshPtr before = g->get<MeshFilter>()->mesh;
+      ed.step_frame_headless();
+      const size_t steps0 = ed.undo_steps_for_test();
+      ed.command(bad);
+      ed.step_frame_headless();
+      std::printf("    '%s': same mesh %d, finite %d, undo %zu\n", bad, (int)r536_same_positions(*g->get<MeshFilter>()->mesh, *before), (int)r536_finite(*g->get<MeshFilter>()->mesh), ed.undo_steps_for_test());
+      CHECK(r536_finite(*g->get<MeshFilter>()->mesh));
+      CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));  // (a word that is no number must not become a size of 0)
+      CHECK(ed.undo_steps_for_test() == steps0);
+    }
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimConsole", 2.0f);
+    ed.command("editop dimensions - 2 -");  // already 2: nothing to do, nothing broken
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh));
+    ed.command("editop dimensions - 7 -");
+    CHECK(std::fabs(r536_extent(*g->get<MeshFilter>()->mesh).y - 7) < 1e-4f);
+    ed.command("edit off");
+    const MeshPtr obj = g->get<MeshFilter>()->mesh;
+    ed.command("editop dimensions 1 1 1");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *obj));
+  });
+
+  test("dimensions: the Modeling Tools window's Edit Mode section has the same block and typing there scales the selection in one undo step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *g = r536_cube(ed, "DimTools", 2.0f);
+    const int id = ed.open_window_for_test(WindowKind::Tools, 500, 2600)  /* (tall: the Edit Mode section is far down the list) */;
+    CHECK(id != 0);
+    EditorWindow *w = ed.window_for_test(id);
+    CHECK(w != nullptr);
+    if (!w) return;
+    w->ui.record_buttons = true;  // (a floating window has its own UI context, so its own recorded rects)
+    auto step = [&](std::vector<platform::Event> ev) { ed.step_window_headless(id, std::move(ev)); };
+    auto find = [&](const std::string &k, Recti &r) {
+      const auto it = w->ui.button_rects.find(k);
+      if (it == w->ui.button_rects.end()) return false;
+      r = it->second;
+      return true;
+    };
+    for (int i = 0; i < 3; i++) step({});
+    Recti r;
+    const bool found = find("field:Dimensions Y", r);
+    std::printf("    tools window field found: %d\n", (int)found);
+    CHECK(found);
+    const size_t steps0 = ed.undo_steps_for_test();
+    const bool typed = r536_type_with(find, step, "field:Dimensions Y", "5");
+    const Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    typed (%d): size %.3f %.3f %.3f, undo %zu -> %zu\n", (int)typed, e.x, e.y, e.z, steps0, ed.undo_steps_for_test());
+    CHECK(typed && std::fabs(e.y - 5) < 1e-4f && std::fabs(e.x - 2) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+  });
+}
+
+static void tests_round536_review() {
+  test("dimensions: switching F9's Orientation re-measures the axes you did not type (global X typed on a turned, stretched object, then Local: the other axes keep the object's own sizes)", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimSwitch", 2.0f);
+    g->set_local_euler({0, 0, 90});
+    g->set_local_scale({2, 1, 1});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("editop dimensions 3 - -");  // global: the world X size (the object's Y) to 3; Y stays at its 4
+    ed.command("redo orientation 1");        // local: X (typed) 3 along the object's X, Y and Z are the object's own 2 and 2
+    const Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    after the switch: local extent %.3f %.3f %.3f\n", e.x, e.y, e.z);
+    CHECK(std::fabs(e.x - 3) < 1e-4f && std::fabs(e.y - 2) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+  });
+  test("dimensions: a size the selection already has is not an operation (no undo step, no warning-level refusal); a sixth word that is not global or local refuses", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimNoop", 2.0f);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    ed.step_frame_headless();
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop dimensions 2 2 2");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    ed.command("editop dimensions 4 - - sideways");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before) && ed.undo_steps_for_test() == steps0);
+  });
+  test("dimensions: during a G drag the Inspector shows the last sizes and does not walk the mesh again every frame", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *g = r536_cube(ed, "DimDrag", 2.0f);
+    (void)g;
+    using ET = platform::EventType;
+    const Recti sv = ed.window_rect_for_test(WindowKind::Scene);
+    const int cx = sv.x + sv.w / 2, cy = sv.y + sv.h / 2;
+    auto mouse = [&](int x, int y) {
+      platform::Event e;
+      e.type = ET::MouseMove, e.x = x, e.y = y;
+      ed.step_frame_headless({e});
+    };
+    mouse(cx, cy);
+    mouse(cx, cy);
+    ed.step_frame_headless({key_ev(platform::KEY_G)});
+    CHECK(ed.transform_active_for_test());
+    const uint64_t c0 = ed.edit_dims_computes_for_test();
+    for (int i = 1; i <= 8; i++) mouse(cx + 10 * i, cy);
+    std::printf("    G drag: recomputes %llu -> %llu\n", (unsigned long long)c0, (unsigned long long)ed.edit_dims_computes_for_test());
+    CHECK(ed.edit_dims_computes_for_test() == c0);
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -14808,5 +15377,8 @@ void run_editor_tests() {
   tests_round508_te();
   tests_round508_te_open();
   tests_round515_collider_wire();
+  tests_round536();
+  tests_round536_engineer();
+  tests_round536_review();
   coverage_tests();
 }
