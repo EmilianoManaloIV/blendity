@@ -153,9 +153,17 @@ struct WeightBrush {
   float radius = 50.0f, strength = 0.5f, weight = 1.0f;
   int falloff = 0;  // kWeightFalloffs
   bool mirror_x = false, front_only = true;
+  /* Task 0519 (Blender 5.3): automasking, as Blender's mesh automasking settings and their defaults. Limits in
+   * degrees; falloffs as fractions of pi. */
+  bool am_topology = false, am_boundary = false, am_view_normal = false, am_area_normal = false;
+  int am_cavity = 0;  // kWeightCavityModes: Off, Cavity, Inverted
+  int am_boundary_steps = 1, am_cavity_blur = 2;
+  float am_cavity_factor = 0.5f;
+  float am_view_limit = 90.0f, am_view_falloff = 0.25f, am_area_limit = 20.0f, am_area_falloff = 0.25f;
 };
-extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (task 0046)
+extern const char *const kWeightBrushModes[4];  // Add Weight, Subtract, Set Weight, Blur (task 0046; names task 0519)
 extern const char *const kWeightFalloffs[6];
+extern const char *const kWeightCavityModes[3];  // Off, Cavity, Inverted (task 0519)
 /* Sculpt Mode's brush (task 0236). */
 struct SculptBrush {
   int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab, Clay Buildup, Inflate, Flatten, Pinch, Crease, Scrape, Snake Hook, Mask
@@ -3390,6 +3398,12 @@ class Editor {
   void wp_prepare(const Mesh &m);
   void wp_abort_stroke();
   const std::vector<Vec3> *wp_colors(const Mesh &m, const RenderMesh &rm);
+  /* Task 0519: automasking (weight_paint_automask.cpp). */
+  bool wp_automask_any() const;
+  bool wp_automask_start(const Mesh &m, const Mat4 &W, const Mat4 &N, float x, float y, float R);
+  bool wp_automask_pick(const Mesh &m, const Mat4 &W, const Mat4 &N, float x, float y, float R, size_t &start, Vec3 &area);
+  float wp_automask(const Mesh &m, const Mat4 &N, size_t v);
+  void wp_automask_command(const std::vector<std::string> &t);
   void weight_paint_command(const std::vector<std::string> &t);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
@@ -5009,7 +5023,7 @@ class Editor {
   Vec2 sculpt_last_px_;
   bool set_sculpt(bool on);
   Mesh *sculpt_mesh();
-  bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist);
+  bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist, uint64_t obj = 0);  // (obj 0: the sculpted object; task 0519: Weight Paint's)
   float sculpt_world_radius(float px, float dist) const;
   void sculpt_build_grid(const Mesh &m, float cell);
   void sculpt_gather(const Mesh &m, Vec3 centre, float radius, std::vector<uint32_t> &ids, std::vector<float> &d) const;
@@ -5475,6 +5489,15 @@ class Editor {
   const Mesh *wp_cache_mesh_ = nullptr;    // what wp_normals_ / wp_nb_ / wp_mirror_ were made for
   int wp_group_ = 0;
   std::vector<float> wp_start_, wp_alpha_;  // a stroke's starting weights and strongest amount per vertex
+  /* Task 0519: a stroke's automask, started at its first dab that reaches a vertex: the island (topology), the cavity
+   * per vertex (-1: not worked out yet), the area normal and the view direction, the boundary's distances and the
+   * steps they were made for. wp_stroke_flip_: Ctrl at the stroke's start with Set Weight paints 1 - Weight. */
+  bool wp_am_started_ = false, wp_stroke_flip_ = false;
+  std::vector<uint8_t> wp_am_island_;
+  std::vector<float> wp_am_cavity_;
+  Vec3 wp_am_area_normal_, wp_am_view_dir_;
+  std::vector<int> wp_am_edge_dist_;
+  int wp_am_edge_steps_ = 1;
   Shading wp_saved_shading_ = Shading::Shaded;
   Vec2 wp_last_;
   std::vector<Vec3> wp_normals_;
