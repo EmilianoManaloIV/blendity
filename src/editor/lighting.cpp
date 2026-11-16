@@ -1273,6 +1273,7 @@ void Editor::preview_step() {
     if (scene_->lighting.lighting_mode == 1) shadowmask_split(lights, false);  // (round 454: logged once, by the bake)
     update_environment();
     BakeSettings s;
+    s.splats = scene_splat_views(*scene_);  // (round 533: as the final bake)
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)
     s.min_chart = 32;  // a small object still gets a few hundred texels, or it looks blocky at a quarter of the resolution
     s.max_size = std::min(ls.max_size, 1024);

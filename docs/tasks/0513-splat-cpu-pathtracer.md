@@ -1,6 +1,6 @@
 # 0513: Gaussian splats in the CPU path tracer (round 533, Pass 27 S3)
 
-- **Status:** in progress
+- **Status:** done (2026-11-16)
 - **Requirements:** R-render (F12, bakes), Pass 27 plan (approved 2026-11-15; the approval covers this spec)
 - **Decisions:** ADR 0147 (round 530's splat layout) - none new: the splats join the existing path tracer as one more
   primitive kind, the way Cycles 5.3 adds them
@@ -37,7 +37,7 @@ colour (emissive, as Cycles' default splat shader) and light the meshes round th
     `PathTracer::intersect()` stays meshes only (its callers want a surface: probes, texel checks, mesh maps).
   - Bakes: a lightmap gather runs `trace()`, so its texels see splat light; the card gather refuses while splats
     exist (CPU fallback) until 534. The F12 / bake hand-off of round 530's clouds (`render_view.cpp`, `lighting.cpp`,
-    `lightmapper`, `texture_bake`; the hub approved these lines) lands once 530's head is in this branch.
+    `lightmapper`, `texture_bake`; the hub approved these lines) merged with 530's head (#420): `scene_splat_views` fills `PTSettings::splats` (F12, previews) and `BakeSettings::splats` (lightmaps, probes, Light Volumes, Reflection Probes, the lighting preview); `light_volume_bake_ui.cpp` got the same line (review). Texture bakes bake materials, not rays: nothing for splats there.
   - `tests/test_splats_trace.cpp` (group `splats_trace`, in CI's render shard), `changelog.d` fragment,
     `licenses/README.md` row.
 - Out: the card path tracer (534), the rasterizer (532), importers (531), motion blur of splats, splats in the light
