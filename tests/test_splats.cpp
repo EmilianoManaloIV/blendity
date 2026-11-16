@@ -3,6 +3,7 @@
 #include "test_common.h"
 
 #include "../src/scene/pointcloud.h"
+#include "../src/editor/learn.h"
 #include "../src/scene/pointcloud_object.h"
 
 #include <cmath>
@@ -404,6 +405,38 @@ static void tests_round530() {
     CHECK(find_component_info("PointCloud") != nullptr);
     std::unique_ptr<Component> c = create_component("PointCloud");
     CHECK(c && c->render_role() == Component::RenderRole::PointCloud);
+  });
+
+  test("splats (hub): Create > Point Cloud > Test Splats makes 10,000 splats to look at, one undo step, and Undo takes it away", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("create Test Splats");
+    ed.step_frame_headless();
+    GameObject *g = r530_find_cloud(ed);
+    CHECK(g && g->get<PointCloudObject>()->data && g->get<PointCloudObject>()->data->count() == 10000);
+    CHECK(g && g->get<PointCloudObject>()->data->is_splats() && g->get<PointCloudObject>()->data->sh_degree == 3);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(r530_count_clouds(ed) == 0);
+  });
+
+  test("splats (hub): the Learn tab has a Point clouds and Gaussian splats section with a Try-it and questions", [] {
+    bool section = false, tryit = false;
+    int questions = 0;
+    for (int i = 0; i < lesson_count(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("# Point clouds and Gaussian splats");
+      if (at == std::string::npos) continue;
+      section = true;
+      const size_t end = body.find("\n# ", at + 1);
+      const std::string part = body.substr(at, end == std::string::npos ? std::string::npos : end - at);
+      tryit = part.find("! cmd:create Test Splats") != std::string::npos;
+      for (size_t q = part.find("\n? "); q != std::string::npos; q = part.find("\n? ", q + 1)) questions++;
+    }
+    CHECK(section && tryit && questions >= 2);
   });
 }
 
