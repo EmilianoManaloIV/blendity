@@ -26,5 +26,5 @@ after: Remove Ringing (Hanning or Lanczos, a view setting)
 Point Cloud objects - Points or Gaussian Splats with spherical harmonics up to degree 3 (round 530);
 
 <!-- docs/ARCHITECTURE.md -->
-after: | `bake_lightmap()`
+after: | `Editor::button_grid`, `ui::Context::button_cells`
 | `PointCloud`, `splat_color()`, `pointcloud_validate()` | `src/scene/pointcloud.h` | a point cloud's arrays and the splat maths every renderer shares (round 530, ADR 0147) |
