@@ -1164,7 +1164,7 @@ class VulkanRenderer final : public Renderer {
       for (int r = 0; r < 3; r++)
         for (int c = 0; c < 4; c++) in.transform.matrix[r][c] = m[c * 4 + r];
       in.instanceCustomIndex = (uint32_t)o;
-      in.mask = 0xFF;
+      in.mask = s.blas[s.object_blas[o]].kind == kBlasSplats ? 0x02 : 0x01;  // (round 534: shadow rays ask the meshes and the splats apart)
       in.instanceShaderBindingTableRecordOffset = 0;
       in.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
       in.accelerationStructureReference = blas_addr[s.object_blas[o]];

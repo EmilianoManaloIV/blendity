@@ -309,7 +309,7 @@ class OptixRenderer final : public Renderer {
     launch_.insts = scene_[0].ptr, launch_.verts = scene_[1].ptr, launch_.idx = scene_[2].ptr, launch_.mats = scene_[3].ptr;
     launch_.lights = scene_[4].ptr, launch_.mlights = scene_[5].ptr, launch_.mcdf = scene_[6].ptr, launch_.tex8 = scene_[7].ptr;
     launch_.texf = scene_[8].ptr, launch_.texinfo = scene_[9].ptr;
-    launch_.splats = scene_[11].ptr, launch_.splat_sh = scene_[12].ptr;
+    launch_.splats = scene_[11].ptr, launch_.splat_sh = scene_[12].ptr, launch_.splat_count = s.splats.size();
     return true;
   }
 
@@ -331,7 +331,7 @@ class OptixRenderer final : public Renderer {
       for (int r = 0; r < 3; r++)
         for (int c = 0; c < 4; c++) in.transform[r * 4 + c] = m[c * 4 + r];
       in.instanceId = (unsigned)o;
-      in.visibilityMask = 255;
+      in.visibilityMask = s.blas[b].kind == kBlasSplats ? 2 : 1;  // (round 534: shadow rays ask the meshes and the splats apart)
       in.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING | OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
       in.traversableHandle = gas[b];
       inst.push_back(in);

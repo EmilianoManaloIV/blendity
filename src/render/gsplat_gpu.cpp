@@ -120,7 +120,6 @@ static bool finite_splat(const SplatCloudView &v, size_t i) {
 
 bool gsplat_gpu_append(Scene &s, const SplatCloudView &v, SplatAppend *out, std::string *why) {
   SplatAppend st;
-  ScopedTimer T;  // TIMING
   if (out) *out = st;
   if (v.count == 0) return true;
   if (!v.position || !v.color || !v.opacity || !v.scale || !v.rotation || (v.sh_rest_per_point > 0 && !v.sh_rest)) {
@@ -171,9 +170,7 @@ bool gsplat_gpu_append(Scene &s, const SplatCloudView &v, SplatAppend *out, std:
   }
   std::vector<GNode> nodes;
   std::vector<uint32_t> order;
-  std::fprintf(stderr, "TIMING prep %.0f\n", T.ms());
   build_splat_bvh(boxes, nodes, order);
-  std::fprintf(stderr, "TIMING bvh %.0f\n", T.ms());
 
   const uint32_t node_off = (uint32_t)s.nodes.size(), splat_off = (uint32_t)s.splats.size(), sh_off = (uint32_t)s.splat_sh.size();
   s.nodes.insert(s.nodes.end(), nodes.begin(), nodes.end());
@@ -210,7 +207,6 @@ bool gsplat_gpu_append(Scene &s, const SplatCloudView &v, SplatAppend *out, std:
 
   /* The cloud's instance: its transform (the normals' by the inverse transpose, as the meshes'), its bounds, flag,
    * offsets and id. */
-  std::fprintf(stderr, "TIMING copy %.0f\n", T.ms());
   GInstance gi;
   std::memset(&gi, 0, sizeof(gi));
   std::memcpy(gi.to_world, v.model.m, 64);

@@ -50,7 +50,7 @@ assert not leftover, "a layout this translation doesn't know: %s" % leftover[:2]
 # --- the intersection: OptiX's
 src, n = re.subn(r"^#ifdef USE_RAY_QUERY\nbool intersect\(",
                  "#if 1  // (the OptiX device: optixTrace through the scene's acceleration structures)\n"
-                 "bool intersect(vec3 o, vec3 d, inout Hit h) { return optix_intersect(o, d, h.t, h.u, h.v, h.prim, h.obj, g_splat_seed); }\n"
+                 "bool intersect(vec3 o, vec3 d, inout Hit h) { return optix_intersect(o, d, h.t, h.u, h.v, h.prim, h.obj, g_splat_seed, g_meshes_only ? 1u : 255u); }\n"
                  "#elif defined(USE_RAY_QUERY)\nbool intersect(", src, flags=re.M)
 assert n == 1, "the intersect() variants"
 

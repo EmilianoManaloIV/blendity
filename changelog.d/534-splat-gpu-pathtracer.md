@@ -10,7 +10,9 @@ Compute (Vulkan, with and without ray queries) and OptiX, matching the CPU path 
   primitives for OptiX (`src/render/gsplat_gpu.{h,cpp}`).
 - The kernel (`src/render/gsplat_gpu_glsl.h`, one GLSL piece both devices run) tests a splat as Cycles 5.3 does:
   the bounding sphere, the density's peak along the ray, the stochastic opacity test (hashed per sample), and
-  shades a kept splat as emission of its view-dependent SH colour, ending the path; shadow rays stop at it.
+  shades a kept splat as emission of its view-dependent SH colour, ending the path. A shadow ray takes the
+  product of (1 - alpha) of the splats it crosses, as the CPU's (no noise, so bakes converge): ray queries and
+  OptiX visit the splat instances alone for it (instance mask 2; the meshes are mask 1).
 - OptiX: an `__intersection__splat` program in the one hit group; the committed PTX regenerated.
 
 **Checked:** `--group splats_gpu` (Windows, Linux); CHECKS_W / CHECKS_L in the round's PR.
