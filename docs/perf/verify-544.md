@@ -16,16 +16,16 @@ of all of them.
 
 | Round | Worker | What | PR / head | In the tree |
 |---|---|---|---|---|
-| 530 | S1 | the point cloud object: Points or Gaussian Splats (ADR 0147) | #420 `2a120ec7` | yes |
-| 531 | S1 | splat import: PLY auto-detected, SPZ v1-4, glTF's Gaussian-splat extension | - | TBD |
+| 530 | S1 | the point cloud object: Points or Gaussian Splats (ADR 0147) | #420 `5d077641` | yes |
+| 531 | S1 | splat import: PLY auto-detected, SPZ v1-4, glTF's Gaussian-splat extension | #423 `2fea5ef0` (on #420) | yes |
 | 532 | S2 | splats in the Scene view and the rasterizers (CPU, Vulkan) | - | TBD |
 | 533 | S3 | splats in the CPU path tracer (Embree user geometry, `gsplat_math.h`) | - | TBD |
 | 534 | S4 | splats on the card (Vulkan ray queries, OptiX) | - | TBD |
 | 535 | M1 | Quad Sphere, snapping to object origins | - | TBD |
 | 536 | M2 | Edit Mode selection dimensions | - | TBD |
-| 537 | M3 | LoopTools: Relax, Space, To Circle, Flatten, Curve | #422 `133a57fd` | yes |
+| 537 | M3 | LoopTools: Relax, Space, To Circle, Flatten, Curve | #422 `d8ce88e5` | yes |
 | 538 | M1 | panoramic cameras in the rasterizer | - | TBD |
-| 539 | P1 | Weight Paint automasking, Add / Set Weight | #421 `a352777b` | yes |
+| 539 | P1 | Weight Paint automasking, Add / Set Weight | #421 `0686403c` | yes |
 | 540 | P2 | size, strength and colour per brush | - | TBD |
 | 541 | P2 | world-space animation copy / paste, rotation modes (ADR 0148) | - | TBD |
 | 542 | R1 | the sky's sun disc lights the scene; ICC profiles in saved sRGB images | - | TBD |
@@ -33,7 +33,8 @@ of all of them.
 | 545 | P1 | colour attributes and Vertex Paint (ADR 0152) | - | TBD |
 
 Joining so far: #420 and #421 met in `licenses/README.md` (a row each) and the console list (`pointcloud`, `wpautomask`);
-#421 and #422 in `licenses/README.md` and `run_modeling_tests` (a call each). All kept both sides.
+#421 and #422 in `licenses/README.md` and `run_modeling_tests` (a call each); #423 in `licenses/README.md`. All kept
+both sides. `stress/sweep_commands.inc` is generated per round, so the joined tree regenerates its own.
 
 ## The timed plan (one hub window)
 
@@ -89,7 +90,7 @@ Each feature has a lesson (or a section of one) with Try-it lines that run headl
 
 | Round | Feature | Lesson / section | Try-it runs clean | Questions |
 |---|---|---|---|---|
-| 530 / 531 | point clouds, splats, import | none yet in #420 - asked of S1 | TBD | TBD |
+| 530 / 531 | point clouds, splats, import | added in #420's `5d077641` | TBD (the Learn walk) | TBD |
 | 532 - 534 | splats drawn and traced | TBD | TBD | TBD |
 | 535 | Quad Sphere, origin snapping | TBD | TBD | TBD |
 | 536 | Edit Mode dimensions | TBD (M2: "one step") | TBD | TBD |
@@ -119,6 +120,7 @@ Through the fold of every `changelog.d/5xx-*.md` (ADR 0123) and this round's own
 | Date | Tree | Checks |
 |---|---|---|
 | 2026-11-16 | main 068207d9 + #420 + #421 + #422 (`cbde25a2`) | Windows with Blender's libraries: `splats` 112, `modeling` 6,046, `editor` 3,420, `hci` 1,849 checks, 0 failed (a fresh scratch project); `test_coverage_map --check` 382 entries, 0 empty; `changelog.py check` 3 fragments applicable; the live sweep at its baseline. `hci_console_audit --check` 8 above the baseline's 6: two point cloud texts of #420 (`editor.cpp` 1218, `pointcloud_object.cpp` 29) - S1's. `sweep_commands --check`: stale on #420 alone; #422's fixed (`d8ce88e5`). |
+| 2026-11-16 | + #423 (with #420 at `5d077641`) + #421 at `0686403c` (`f38f9c37`) | Windows with Blender's libraries: `splats` 378, `modeling` 6,046, `editor` 3,409, `hci` 1,849 checks, 0 failed; the live sweep at its baseline (elided 7, small-handle 3); `hci_console_audit --check` back at the baseline (6); `sweep_commands --check` current (223 verbs, regenerated for the joined tree); coverage map 382 entries, 0 empty; 4 fragments applicable. |
 
 ## Results
 
