@@ -42,6 +42,8 @@
 #include "../src/scene/import.h"
 #include "../src/scene/autophysics.h"
 #include "../src/scene/ragdoll.h"
+#include "../src/scene/pointcloud.h"
+#include "../src/render/gsplat_raster.h"
 #include "../tests/fixtures/synthetic_mmd.h"
 
 #include <algorithm>
@@ -7505,6 +7507,7 @@ static void test_looptools_stress(Report &rep, const Options &o) {
 #include "stress_blockout_join.inc"  // (round 501: test_blockout_join)
 #include "stress_survey.inc"    // (round 504: the performance survey's seven sections)
 #include "stress_blockout_piece_modifiers.inc"  // (round 514: test_blockout_piece_modifiers)
+#include "stress_splat_raster.inc"  // (round 532: test_splat_raster)
 #include "stress_splats.inc"  // (round 531: test_splats - the splat / point cloud readers on damaged files)
 
 int main(int argc, char **argv) {
@@ -7589,7 +7592,8 @@ int main(int argc, char **argv) {
                {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers}, {"splats", test_splats},
                {"image_edit", test_image_edit}, {"sculpt_paint", test_sculpt_paint}, {"sequencer", test_sequencer}, {"importers", test_importers},
                {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views},
-               {"looptools", test_looptools_stress}};
+               {"looptools", test_looptools_stress},
+               {"splat_raster", test_splat_raster}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
@@ -7599,7 +7603,7 @@ int main(int argc, char **argv) {
     if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
     if (std::string(t.name) == "asset_windows" && o.only == "windows") continue;  // (round 504: `--only windows` is the OS-window section alone)
     if ((std::string(t.name) == "operations" || std::string(t.name) == "responsiveness" || std::string(t.name) == "world_like" ||
-         std::string(t.name) == "posing" || std::string(t.name) == "lightmap_quality" || survey_named_only(t.name)) && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
+         std::string(t.name) == "posing" || std::string(t.name) == "lightmap_quality" || std::string(t.name) == "splat_raster" || survey_named_only(t.name)) && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py; round 532: splat_raster)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);
