@@ -1,59 +1,48 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Round 549's diagnosis only (task 0529): on the diag/549-gcc15 branch, never merged. The Linux build of main went red when
-# ubuntu-latest became ubuntu-26.04 (GCC 15, an Intel Xeon 6 runner); this runs that build with debug symbols and the failing runs
-# under gdb, with what each failure sees printed.
+# ubuntu-latest became ubuntu-26.04 (GCC 15); this runs that build with debug symbols under valgrind, which names reads of memory
+# never written (their values differ from machine to machine).
 name: diag549
 on:
   push:
     branches: ['diag/549-*']
 jobs:
-  gdb:
+  valgrind:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - name: Tools
-        run: sudo apt-get update && sudo apt-get install -y g++ gdb libx11-dev libxi-dev fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y g++ valgrind libx11-dev libxi-dev fonts-dejavu-core
       - name: The runner
         run: |
           g++ --version | head -1
           lscpu | grep -E 'Model name|^CPU\(s\)'
-      - name: Diagnostic prints (not committed)
-        run: |
-          # The GI test: how many pixels differ and where, and whether more frames make them equal.
-          sed -i 's|    CHECK(nothing == off);  // GI on but adding nothing is the plain picture|    std::printf("    DIAG nothing vs off: %zu pixels differ (tol 0), %zu (tol 2), size %zu %zu\\n", r35_diff_count(nothing, off), r35_diff_count(nothing, off, 2), nothing.size(), off.size());\n    { r34_steps(ed, 30); const std::vector<uint32_t> later = r35_game(ed); std::printf("    DIAG after 30 more frames: %zu differ from off\\n", r35_diff_count(later, off)); }\n    CHECK(nothing == off);|' tests/test_lighting.cpp
-          grep -n "DIAG" tests/test_lighting.cpp | head
-          # The window test: the hit's distance.
-          sed -i 's|    CHECK(hit_far);|    std::printf("    DIAG wall %s: hit %d at %.3f\\n", w.name, (int)hit.distance, hit.distance);\n    CHECK(hit_far);|' tests/test_blockout_openings.cpp
-          grep -n "DIAG" tests/test_blockout_openings.cpp | head
       - name: Build (release, with debug symbols)
         env:
           EXTRA_FLAGS: "-g"
         run: ./build.sh release all
-      - name: The two tests
+      - name: The two tests under valgrind
         continue-on-error: true
         env:
           BLENDITY_PROJECT: /tmp/p
           BLENDITY_TRASH: /tmp/t
+          BLENDITY_THREADS: "1"
         run: |
           mkdir -p /tmp/p /tmp/t
           for f in "turning Realtime GI or its settings on" "draw piece window: a 1 x 1.5 m drag"; do
             echo "=== $f"
-            BLENDITY_TEST_FILTER="$f" ./dist/linux/blendity_tests 2>&1 | grep -E 'FAIL|checks,|DIAG' | head -40 || true
+            BLENDITY_TEST_FILTER="$f" valgrind --error-limit=no --track-origins=yes --num-callers=24 ./dist/linux/blendity_tests > v.log 2>&1 || true
+            grep -E 'FAIL|checks,|ERROR SUMMARY' v.log | head -10
+            grep -B2 -A26 -E 'uninitiali[sz]ed|Invalid read|Invalid write' v.log | head -400
           done
-      - name: Stress curved alone, under gdb
+      - name: Stress curved alone under valgrind
         continue-on-error: true
         env:
           BLENDITY_PROJECT: /tmp/p
           BLENDITY_TRASH: /tmp/t
+          BLENDITY_THREADS: "1"
         run: |
           mkdir -p /tmp/p /tmp/t
-          gdb -q -batch -ex run -ex bt -ex 'info registers rip' -ex 'x/4i $pc' --args ./dist/linux/blendity_stress --quick --only curved --out /tmp/o1 > curved.log 2>&1 || true
-          grep -E '^#|signal|SIGSEGV|torus|cylinder|Total|=> ' curved.log | head -60
-      - name: Stress quick run, under gdb
-        continue-on-error: true
-        env:
-          BLENDITY_PROJECT: /tmp/p
-          BLENDITY_TRASH: /tmp/t
-        run: |
-          gdb -q -batch -ex run -ex bt -ex 'info registers rip' -ex 'x/4i $pc' --args ./dist/linux/blendity_stress --quick --out /tmp/o2 > stress.log 2>&1 || true
-          grep -E '^#|signal|SIGSEGV|^\[stress\]|=> ' stress.log | tail -60
+          valgrind --error-limit=no --track-origins=yes --num-callers=24 ./dist/linux/blendity_stress --quick --only curved --out /tmp/o1 > vc.log 2>&1 || true
+          grep -E 'ERROR SUMMARY|torus|cylinder' vc.log | head -10
+          grep -B2 -A26 -E 'uninitiali[sz]ed|Invalid read|Invalid write' vc.log | head -500
