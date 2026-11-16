@@ -2611,6 +2611,31 @@ Moving one hand's IK target deforms the two or three meshes the arm carries: abo
 ! cmd:tool rotate | 3. Choose the Rotate tool
 ! cmd:perf drag gizmo rz 60 frames 20 | 4. Turn the chest 60 pixels as a real drag; when it ends, the Console's "perf drag counts" line says how many meshes a drag frame moved in place and how many it built whole
 )"},
+    {"LoopTools: Loops to Circles, Curves and Planes", "Relax, Space, Circle, Flatten and Curve, built in as in Blender 5.3", R"(
+LoopTools was a Blender add-on for twenty years; Blender 5.3 made its loop tools part of Edit Mode (Mesh > Transform), and Blendity has the same five in the Mesh menu's Deform group. Each works on loops: the edges whose two ends are selected. A vertex where three selected edges meet splits the loops there. In Unity, ProBuilder has none of them; a modeller would write each as an editor script.
+@ source/blender/bmesh/operators/bmo_relax_edge_loops.cc, bmo_space_edge_loops_evenly.cc, bmo_circularize.cc, bmo_flatten.cc, bmo_curve_edge_loops_between_selected.cc
+# The five
+| Operator | What it does | Adjust Last Operation (F9)
+| Relax Edge Loops | smooths a loop without shrinking it; an open loop keeps its ends | Iterations, Cubic / Linear, Space Evenly
+| Space Edge Loops Evenly | the same vertices at equal distances along the loop's own curve | Factor, Cubic / Linear, Lock X Y Z
+| To Circle | each loop, or a selected face region's border, a circle | Factor, Best / Interior Fit, Rotation, Custom Radius, Space Evenly, Flatten, Lock
+| Flatten | the selected vertices on one plane: the best fitting one, the faces' normal, or facing the view | Factor, Plane, Lock
+| Curve Edge Loops Between Selected | the loops between selected vertices bent onto a smooth curve through them | Factor, Interpolation, Clamp Elevation, Extend Loop, Space Evenly, Lock
+# The theory
+Relax, Space and Curve fit a natural cubic spline through the loop: a curve made of cubic pieces that meet with the same slope and bend, the bend zero at an open loop's ends. Finding it is one tridiagonal linear system per axis, solved in linear time; a closed loop's system wraps around, and is solved with the Sherman-Morrison formula. Relax moves every other vertex half way to the spline through its neighbours, then the others - so it smooths without the shrinking that plain Laplacian smoothing (Smooth Vertices) causes. To Circle fits a circle in the loop's best plane by least squares; Flatten's Best Fit plane goes through the vertices' centre, its normal taken from the cloud's extreme points: the vertex farthest from the centre gives one direction, the vertex farthest across it a second, and the vertices most opposite each close the two spans the normal is crossed from - quick, and close to the least-squares plane for a patch that is nearly flat.
+> [FoCG] 15 Curves: cubic splines, continuity and interpolating curves
+> [FoCG] 2.7 and 6 Linear algebra: least squares, planes and normals
+# Try it
+! cmd:create Plane; edit face; fsel 44 45 54 55; editop circularize | 1. To Circle: the border of the Plane's middle four squares becomes a circle (F9: Rotation, Custom Radius)
+! cmd:editop randomize; redo amount 0.3; editop flatten_loops | 2. Jitter those faces up and down, then Flatten them back onto one plane
+! cmd:esel 48 49 49 50 50 61 61 72 72 71 71 70 70 59 59 48; editop randomize; redo amount 0.3; editop relax_loops | 3. The same circle as an edge loop, jittered, then Relax Edge Loops smooths it (F9: more Iterations)
+! cmd:editop space_loops | 4. Space Edge Loops Evenly: the loop's vertices at equal distances
+! cmd:edit vertex; vsel 22 27 32; editop randomize; redo amount 0.8; editop curve_loops | 5. Three vertices of a row moved, then Curve Edge Loops Between Selected bends the row through them
+? You select one open row of five vertices and Relax it. Which ones move? | The three in the middle. An open loop keeps its two ends, so it stays attached where it starts and stops.
+? Why does Smooth Vertices shrink a ring, and Relax not? | Smooth moves each vertex toward its neighbours' average, which is inside a curved ring, so every pass makes it smaller. Relax moves a vertex toward the spline through its neighbours, which runs through them, so the ring keeps its size.
+? You run To Circle with Interior Fit on a star-shaped loop. Do the star's tips or its notches move? | The tips. Interior Fit only moves vertices toward the centre, so the circle passes through the innermost ones and the tips are pulled in to it.
+? Flatten with Lock Z on: what happens to a vertex that needed to move up? | It keeps its Z. A locked axis is the object's own axis no vertex may move along, so the plane is reached only along X and Y - or not at all, for a plane facing up.
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

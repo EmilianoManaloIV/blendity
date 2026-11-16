@@ -91,6 +91,7 @@ copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
 | File | From | License of the origin | How it is distributed |
 |---|---|---|---|
 | `src/render/sky.cpp` (`sky_radiance_internal`, the sky texture's evaluation) | Cycles' `intern/cycles/kernel/svm/sky.h` | Apache-2.0 (`Apache-2.0.txt`; "2011-2022 Blender Foundation", kept word for word in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+| `src/scene/mesh_tools_loop.cpp` (`meshops::relax_loops`, `space_loops`, `circularize`, `flatten_loops`, `curve_loops`; round 537) | Blender 5.3's native LoopTools: `source/blender/bmesh/operators/bmo_relax_edge_loops.cc`, `bmo_space_edge_loops_evenly.cc`, `bmo_circularize.cc`, `bmo_curve_edge_loops_between_selected.cc`, `bmo_flatten.cc`, `editors/mesh/editmesh_flatten.cc` | GPL-2.0-or-later ("2026 Blender Authors", kept in the header) | as Blendity's source, GPL-2.0-or-later; in the binaries GPL-3.0-or-later |
 
 ## Read, not copied
 

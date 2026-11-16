@@ -1736,6 +1736,7 @@ static void coverage_tests() {
     for (const char *id : {"mode.vertex", "mode.edge", "mode.face", "mesh.extrude", "mesh.inset", "mesh.bevel", "mesh.bridge", "mesh.connect", "mesh.dissolve",
                            "mesh.duplicate", "mesh.fill", "mesh.merge_center", "mesh.merge_distance", "mesh.push_pull", "mesh.push_through",
                            "mesh.recalc_normals", "mesh.shrink_fatten", "mesh.to_sphere", "mesh.triangulate", "mesh.tris_to_quads", "mesh.proportional",
+                           "mesh.relax_loops", "mesh.space_loops", "mesh.circularize", "mesh.flatten_loops", "mesh.curve_loops",  // (LoopTools, round 537)
                            "select.invert", "select.linked", "select.more", "select.less", "edit.duplicate", "edit.delete", "mesh.knife", "transform.grab",
                            "transform.rotate", "transform.scale", "mode.edit_toggle"}) {
       ed.command("edit face");
@@ -15270,6 +15271,271 @@ static void tests_round536_review() {
   });
 }
 
+/* ---- Round 537 (task 0517): LoopTools in the editor (Relax, Space, To Circle, Flatten, Curve) ---- */
+namespace lt537e {
+static const char *const kOps[5] = {"relax_loops", "space_loops", "circularize", "flatten_loops", "curve_loops"};
+
+static const Mesh *edited_mesh(Editor &ed) {
+  GameObject *g = ed.active_object_for_test();
+  MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  return mf && mf->mesh ? mf->mesh.get() : nullptr;
+}
+static bool same_positions(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].z != b[i].z) return false;
+  return true;
+}
+/* A Cube's top face with its border cut once (the Learn lesson's first step), the ring's vertices found (by angle) in
+ * the mesh as it is then. */
+static std::vector<size_t> cube_top_ring(Editor &ed) {
+  ed.command("create Cube");
+  ed.command("edit face");
+  ed.command("fsel facing 0 1 0");
+  ed.command("editop subdivide_edges");
+  const Mesh *m = edited_mesh(ed);
+  std::vector<size_t> ring;
+  if (!m) return ring;
+  float top = -1e30f, half = 0;
+  for (Vec3 p : m->positions) top = std::max(top, p.y), half = std::max(half, std::fabs(p.x));
+  for (size_t i = 0; i < m->positions.size(); i++) {
+    const Vec3 p = m->positions[i];
+    if (p.y > top - 1e-3f && std::max(std::fabs(p.x), std::fabs(p.z)) > 0.98f * half) ring.push_back(i);
+  }
+  std::sort(ring.begin(), ring.end(), [&](size_t a, size_t b) {
+    return std::atan2(m->positions[a].z, m->positions[a].x) < std::atan2(m->positions[b].z, m->positions[b].x);
+  });
+  return ring;
+}
+
+/* A selection each operator works on, on the default Plane (10 m, 10 x 10 quads; vertex z * 11 + x, face z * 10 + x):
+ * Relax / Space the edge ring round the middle 2 x 2 faces, jittered (edge mode: Blender refuses faces for them);
+ * To Circle and Flatten the middle 2 x 2 faces (Flatten jittered first); Curve three vertices of row 2, lifted. */
+static void plane_setup(Editor &ed, int which) {
+  ed.command("create Plane");
+  if (which <= 1) {
+    ed.command("esel 48 49 49 50 50 61 61 72 72 71 71 70 70 59 59 48");
+    ed.command("editop randomize");
+    ed.command("redo amount 0.3");
+    return;
+  }
+  if (which == 4) {
+    ed.command("edit vertex");
+    ed.command("vsel 22 27 32");
+    ed.command("editop randomize");
+    ed.command("redo amount 0.8");
+    return;
+  }
+  ed.command("edit face");
+  ed.command("fsel 44 45 54 55");
+  if (which == 3) {
+    ed.command("editop randomize");
+    ed.command("redo amount 0.3");
+  }
+}
+}  // namespace lt537e
+
+static void tests_round537() {
+  using namespace lt537e;
+  test("LoopTools: the five operators are in the Mesh menu's Deform group, in every selection mode, each with its keymap action and no default key", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    std::set<std::string> in_keymap;
+    for (const ShortcutAction &a : shortcut_actions())
+      if (std::string(a.id).rfind("mesh.", 0) == 0) in_keymap.insert(a.id);
+    for (const char *op : kOps) {
+      const EditOpInfo *info = find_edit_op(op);
+      CHECK(info != nullptr);
+      if (!info) continue;
+      CHECK(std::string(kEditGroups[edit_op_group(op)]) == "Deform");
+      CHECK((info->elements & 7) == 7);
+      CHECK(std::string(info->label).size() > 3 && std::string(info->tip).size() > 10);
+      CHECK(in_keymap.count(info->keys) == 1);  // (the op's own action: the menu shows its key)
+      CHECK(ed.shortcut_for_test(info->keys).empty());
+    }
+    CHECK(in_keymap.count("mesh.relax_loops") && in_keymap.count("mesh.space_loops") && in_keymap.count("mesh.circularize") &&
+          in_keymap.count("mesh.flatten_loops") && in_keymap.count("mesh.curve_loops"));
+  });
+  test("LoopTools: Edit Mode on a Plane - each operator runs from `editop` on its selection, changes the mesh and becomes the last operation", [] {
+    for (int which = 0; which < 5; which++) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      plane_setup(ed, which);
+      CHECK(edited_mesh(ed) != nullptr);
+      if (!edited_mesh(ed)) return;
+      const std::vector<Vec3> start = edited_mesh(ed)->positions;
+      ed.command(std::string("editop ") + kOps[which]);
+      const Mesh *m = edited_mesh(ed);
+      CHECK(m != nullptr);
+      if (!m) return;
+      std::printf("    %s: last operation '%s', mesh %s\n", kOps[which], ed.last_op_name_for_test().c_str(), same_positions(start, m->positions) ? "unchanged" : "changed");
+      CHECK(ed.last_op_name_for_test() == kOps[which]);
+      CHECK(!same_positions(start, m->positions));
+      bool finite = true;
+      for (Vec3 p : m->positions) finite = finite && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+      CHECK(finite);
+    }
+  });
+  test("LoopTools: To Circle on a Cube's cut top face makes the border round, and F9 (Custom Radius, a new radius) re-runs it from the mesh as it was in one undo step", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const std::vector<size_t> ring = cube_top_ring(ed);
+    CHECK(ring.size() == 8);
+    if (ring.size() != 8 || !edited_mesh(ed)) return;
+    ed.step_frame_headless();  // (an edit becomes an undo step at the end of its frame: subdivide's first)
+    const std::vector<Vec3> before = edited_mesh(ed)->positions;
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop circularize");
+    ed.step_frame_headless();
+    CHECK(ed.last_op_name_for_test() == "circularize");
+    const size_t steps1 = ed.undo_steps_for_test();
+    std::printf("    undo steps: %zu before To Circle, %zu after\n", steps0, steps1);
+    CHECK(steps1 == steps0 + 1);
+    const std::vector<Vec3> first = edited_mesh(ed)->positions;
+    float mean = 0;
+    for (size_t i : ring) mean += std::hypot(first[i].x, first[i].z) / 8.0f;
+    for (size_t i : ring) CHECK_NEAR(std::hypot(first[i].x, first[i].z), mean, 2e-3f * mean);  // (corners were 1.41x the midpoints; now one radius)
+    for (size_t i : ring) CHECK_NEAR(first[i].y, before[i].y, 1e-3);                            // (flat, at the face's height)
+    CHECK(!same_positions(before, first));
+    /* F9: the radius from the panel's numbers (Custom Radius on, Radius 0.2) replaces the first run, it doesn't add to it. */
+    ed.command("redo clamp 1");
+    ed.set_last_op_size_for_test({0.2f, 1.0f, 0.0f});
+    ed.step_frame_headless();
+    const std::vector<Vec3> second = edited_mesh(ed)->positions;
+    std::printf("    first run radius %.3f; F9 with Custom Radius 0.2 gives %.3f\n", mean, std::hypot(second[ring[0]].x, second[ring[0]].z));
+    for (size_t i : ring) CHECK_NEAR(std::hypot(second[i].x, second[i].z), 0.2f, 2e-3);
+    CHECK(ed.last_op_name_for_test() == "circularize");
+    CHECK(ed.undo_steps_for_test() == steps1);  // (the re-run replaced the step, it did not push another)
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(edited_mesh(ed) && same_positions(before, edited_mesh(ed)->positions));  // (one undo: back to before the operator)
+  });
+  test("LoopTools: F9 on Relax Edge Loops with more Iterations re-runs from the mesh as it was and rounds the ring further", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const std::vector<size_t> ring = cube_top_ring(ed);
+    if (ring.size() != 8 || !edited_mesh(ed)) return;
+    ed.command("edit edge");  // (Relax works on edge loops; with faces selected it refuses, as Blender's)
+    ed.command("editop relax_loops");
+    CHECK(ed.last_op_name_for_test() == "relax_loops" && ed.last_op_segments_for_test() == 1);
+    auto spread = [&] {
+      const std::vector<Vec3> &p = edited_mesh(ed)->positions;
+      float lo = 1e30f, hi = 0;
+      for (size_t i : ring) lo = std::min(lo, std::hypot(p[i].x, p[i].z)), hi = std::max(hi, std::hypot(p[i].x, p[i].z));
+      return hi - lo;
+    };
+    const float one = spread();
+    ed.command("redo segments 6");
+    const float six = spread();
+    std::printf("    radius spread after 1 iteration %.4f, after F9 with 6: %.4f\n", one, six);
+    CHECK(ed.last_op_segments_for_test() == 6 && six < one);
+    ed.command("redo segments 1");
+    CHECK_NEAR(spread(), one, 1e-5);  // (back to one iteration from the same start: the runs don't pile up)
+  });
+  test("LoopTools: every operator refuses a selection it cannot work on with a warning and leaves the mesh and the undo stack alone", [] {
+    for (const char *op : kOps) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      ed.command("edit vertex");
+      ed.command("vsel 0");  // (one vertex: no loop, no plane)
+      const std::vector<Vec3> before = edited_mesh(ed)->positions;
+      const size_t steps = ed.undo_steps_for_test();
+      std::vector<LogEntry> sink;
+      const size_t log_base = Log::fetch(0, sink);
+      ed.command(std::string("editop ") + op);
+      std::vector<LogEntry> got;
+      Log::fetch(log_base, got);
+      bool warned = false;
+      for (const LogEntry &e : got) warned = warned || e.level != LogLevel::Info;
+      CHECK(same_positions(before, edited_mesh(ed)->positions));
+      CHECK(ed.undo_steps_for_test() == steps);
+      CHECK(warned);
+      CHECK(ed.last_op_name_for_test() != op);
+    }
+  });
+  test("LoopTools: each operator's keymap action runs it from a key, in the Unity and the Blender preset", [] {
+    for (const char *preset : {"Unity", "Blender"}) {
+      for (int which = 0; which < 5; which++) {
+        Editor ed;
+        ed.init_headless(1000, 700);
+        ed.step_frame_headless();
+        ed.command(std::string("keymap ") + preset);
+        CHECK(ed.keymap_preset_name() == preset);
+        plane_setup(ed, which);
+        if (!edited_mesh(ed)) return;
+        const std::string action = std::string("mesh.") + kOps[which];
+        CHECK(ed.shortcut_for_test(action).empty());
+        ed.command("keymap bind " + action + " Ctrl+Alt+Shift+F6");
+        const Recti r = ed.scene_view_rect();
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+        const std::vector<Vec3> start = edited_mesh(ed)->positions;
+        ed.step_frame_headless({key_ev(platform::KEY_F6, platform::MOD_CTRL | platform::MOD_ALT | platform::MOD_SHIFT)});
+        platform::Event up;
+        up.type = platform::EventType::KeyUp, up.key = platform::KEY_F6;
+        ed.step_frame_headless({up});
+        std::printf("    %s / %s: last operation '%s'\n", preset, action.c_str(), ed.last_op_name_for_test().c_str());
+        CHECK(ed.last_op_name_for_test() == kOps[which]);
+        CHECK(edited_mesh(ed) && !same_positions(start, edited_mesh(ed)->positions));
+      }
+    }
+  });
+  test("LoopTools: the Learn lesson has a Try-it step for every operator, each step's commands run without a warning, and it has questions", [] {
+    int at = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "LoopTools: Loops to Circles, Curves and Planes") at = i;
+    CHECK(at >= 0);
+    if (at < 0) return;
+    const std::string body = lesson(at).body;
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    std::set<std::string> ops_seen;
+    int questions = 0, steps = 0;
+    std::istringstream lines(body);
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      steps++;
+      const std::string cmds = line.substr(6, line.find(" | ") - 6);
+      size_t a = 0;
+      std::vector<LogEntry> sink;
+      const size_t base = Log::fetch(0, sink);
+      while (a <= cmds.size()) {  // (as the Learn tab runs them: ';'-separated console commands)
+        const size_t e = cmds.find(';', a);
+        std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) {
+          const std::string verb = c.substr(0, c.find(' '));
+          CHECK(ed.command_suggestions_for_test(verb).size() > 0 && ed.command_suggestions_for_test(verb)[0] == verb);
+          if (c.rfind("editop ", 0) == 0) ops_seen.insert(c.substr(7));
+          ed.command(c);
+        }
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+      ed.step_frame_headless();
+      std::vector<LogEntry> got;
+      Log::fetch(base, got);
+      bool warned = false;
+      for (const LogEntry &e : got)
+        if (e.level != LogLevel::Info) warned = true, std::printf("    Try it '%s' warned: %s\n", cmds.c_str(), e.text.c_str());
+      CHECK(!warned);
+    }
+    for (const char *op : kOps) {
+      if (!ops_seen.count(op)) std::printf("    no Try-it step runs `editop %s`\n", op);
+      CHECK(ops_seen.count(op) == 1);
+    }
+    CHECK(steps >= 5 && questions >= 3);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -15380,5 +15646,6 @@ void run_editor_tests() {
   tests_round536();
   tests_round536_engineer();
   tests_round536_review();
+  tests_round537();
   coverage_tests();
 }

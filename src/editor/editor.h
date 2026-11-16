@@ -3608,6 +3608,7 @@ class Editor {
     Vec3 size{1, 1, 1};     // sketch_box: the lengths; sketch_cylinder: base radius, height, top radius (task 0225)
     unsigned dims_keep = 7;  // dimensions: the axes (bit k) the user did not type: they follow the selection's size in the frame
     int dims_frame = 0;      // dimensions: the orientation `size` was measured in (a switch re-measures the untouched axes)
+    int lock = 0;           // LoopTools: the locked local axes, bit 0 X, 1 Y, 2 Z (round 537)
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
@@ -3652,6 +3653,8 @@ class Editor {
   }
   uint64_t edit_dims_computes_for_test() const { return edit_dims_computes_; }
  private:
+  int run_looptools(Mesh &m, const LastOp &L);  // LoopTools (round 537): the vertices it moved
+  Vec3 looptools_view_dir(const LastOp &L);       // Flatten's View plane in the edited object's space
   /* A redoable operator's start (task 0165): the selection flushed, LastOp filled from the mesh as it is, run_last_op. */
   void begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp);
   /* The faces an operator reads, from the vertices or the edges in those modes; how many are selected. */
