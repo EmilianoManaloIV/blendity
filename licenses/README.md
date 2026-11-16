@@ -105,6 +105,7 @@ Nothing of their code is in the tree, so no licence text ships; the original's l
 | [CATS Blender Plugin](https://github.com/absolute-quantum/cats-blender-plugin) | the Avatar window's tools (Fix Model, visemes, decimation, eye tracking, merging), re-implemented | MIT |
 | [Cascadeur](https://cascadeur.com/) (Nekki) | the ideas behind physics for animation (ADRs 0042-0045, 0087) | proprietary; ideas only |
 | [OpenMoonRay](https://github.com/dreamworksanimation/openmoonray) (DreamWorks) | an optional external renderer run as a program of its own (ADR 0041, `moonray.yml`); never linked, never shipped | Apache-2.0 |
+| [Blender](https://www.blender.org/) (Blender Authors) | what a brush keeps and how pressure drives it, read in `blenkernel/intern/brush.cc`, `editors/sculpt_paint/paint_image_ops_paint.cc` and `paint_stroke.cc` (own size, strength and colour per brush, Unified switches, `hardness * curve(pressure)`, `spacing * (1.5 - curve(pressure))`), written again in `src/editor/brush_slots.cpp` | GPL-2.0-or-later |
 | The Live Link bridges (`bridges/`) | Blendity's own code under GPL-2.0-or-later, run inside Blender, Unity, Godot and Unreal as their plug-in terms allow; nothing of Blendity's links into them | - |
 
 ## Authorship and copyright

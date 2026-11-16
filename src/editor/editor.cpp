@@ -184,6 +184,7 @@ bool Editor::init(int argc, char **argv) {
   std::string scene_arg = scene_in_args(argc, argv), layout_arg;  // (a double-clicked .scene: task 0076)
   resolve_project_paths(scene_arg);
   load_prefs();
+  brushes_load();  // (round 540: each brush's size, strength and colour, beside the preferences)
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];
@@ -588,6 +589,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
+  brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
   process_events(events);
   upload_bytes_frame_ = 0;
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
@@ -5644,6 +5646,7 @@ void Editor::save_prefs() {
   s += panels_prefs_text();
   s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
+  brushes_save();  // (round 540: beside prefs.txt)
 }
 
 /* points (or curve) add|move|delete|select <object> [index] [x y z]: a Curve's or Lattice's control points (tasks

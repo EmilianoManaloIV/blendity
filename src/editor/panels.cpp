@@ -3974,9 +3974,13 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (!painting) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
+  brush_banks_sync();  // (round 540: the Radius and Strength below are this brush's)
   br.help("Add raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
   br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", wp_bank_.unified_size);
+  br.field("Unified Strength", wp_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
   br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
@@ -4510,6 +4514,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   if (paint_brush_.tip == 2) br.field("Bristles", paint_brush_.bristles, 1, 64);
   static const char *modes[] = {"Paint", "Smudge", "Blend"};
   br.enumeration("Mode", paint_brush_.mode, modes, 3);
+  brush_banks_sync();  // (round 540: Size, Opacity and the colour are this mode's)
   br.field("Wet", paint_brush_.wet, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Hue", paint_brush_.jitter_h, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Saturation", paint_brush_.jitter_s, 0.01f, 0.0f, 1.0f);
@@ -4559,9 +4564,20 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Size", paint_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Hardness", paint_brush_.hardness, 0.01f, 0.0f, 1.0f);
   br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", paint_bank_.unified_size);
+  br.field("Unified Opacity", paint_bank_.unified_strength);
+  br.field("Unified Colour", paint_bank_.unified_color);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size, Opacity and the colour are kept for each of Paint, Smudge and Blend; Unified shares one value between them.");
   br.field("Flow", paint_brush_.flow, 0.01f, 0.0f, 1.0f);
   br.field("Spacing", paint_brush_.spacing, 0.01f, 0.05f, 2.0f);
   br.help("Dabs this many radii apart along the stroke.");
+  br.field("Hardness Pressure", paint_brush_.hardness_pressure);
+  if (paint_brush_.hardness_pressure) br.curve("Hardness Curve", paint_brush_.hardness_curve);
+  br.field("Spacing Pressure", paint_brush_.spacing_pressure);
+  if (paint_brush_.spacing_pressure) br.curve("Spacing Curve", paint_brush_.spacing_curve);
+  br.help("A pen's pressure (through the Pressure Curve below) scales the hardness by Hardness Curve and the spacing by 1.5 minus Spacing Curve: "
+          "a firm press packs the dabs closer.");
   br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
   static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
   br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
@@ -4656,11 +4672,16 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 11);
+  brush_banks_sync();  // (round 540: the Size and Strength below are this brush's)
   br.help("Draw raises along the normal (Alt carves), Smooth evens the surface, Grab pulls what is under the first dab with the drag; Clay Buildup lays flat layers, Inflate swells along each vertex's normal, "
           "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag; "
           "Mask paints a mask no brush gets through (Ctrl with any brush does the same; Ctrl+Alt takes it away).");
   br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", sculpt_bank_.unified_size);
+  br.field("Unified Strength", sculpt_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size and Strength are kept for each brush; Unified shares one value between all of Sculpt's brushes.");
   br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
   br.field("Carve", sculpt_brush_.carve);
   br.field("Front Faces Only", sculpt_brush_.front_only);

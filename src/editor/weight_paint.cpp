@@ -341,6 +341,7 @@ void Editor::weight_paint_command(const std::vector<std::string> &t) {
     const std::string mode = to_lower(arg(1, ""));
     for (int i = 0; i < 4; i++)
       if (mode == to_lower(kWeightBrushModes[i])) wp_brush_.mode = i;
+    brush_banks_sync();
     if (t.size() > 2) wp_brush_.radius = std::max(1.0f, std::min((float)std::atof(t[2].c_str()), 1000.0f));
     if (t.size() > 3) wp_brush_.strength = std::max(0.0f, std::min((float)std::atof(t[3].c_str()), 1.0f));
     if (t.size() > 4) wp_brush_.weight = std::max(0.0f, std::min((float)std::atof(t[4].c_str()), 1.0f));

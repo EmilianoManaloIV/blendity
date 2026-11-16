@@ -94,6 +94,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "brush_slots.h"
 #include "view_keeps.h"
 
 namespace bl {
@@ -753,6 +754,10 @@ struct PaintBrush {
   float wet = 0.0f;        // how much of the colour picked up under the last dab the brush carries
   float jitter_h = 0.0f, jitter_s = 0.0f, jitter_v = 0.0f;
   float grain_scale = 1.0f;
+  /* Round 540 (Blender 5.3's curve_hardness / curve_spacing): off at first, so nothing changes until they are turned on. On,
+   * a dab's hardness is hardness * curve(pressure) and the step between dabs spacing * (1.5 - curve(pressure)). */
+  bool hardness_pressure = false, spacing_pressure = false;
+  std::vector<Vec2> hardness_curve{Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f)}, spacing_curve{Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f)};
 };
 
 bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p);
@@ -1454,6 +1459,16 @@ class Editor {
     return n;
   }
   int sculpt_brush_kind_for_test() const { return sculpt_brush_.kind; }
+  /* Round 540: the per-brush banks (brush_slots.cpp). */
+  BrushBank &sculpt_bank_for_test() { return sculpt_bank_; }
+  BrushBank &weight_bank_for_test() { return wp_bank_; }
+  BrushBank &paint_bank_for_test() { return paint_bank_; }
+  void brush_banks_sync_for_test() { brush_banks_sync(); }
+  std::string brushes_path_for_test() const { return brushes_path(); }
+  std::string brushes_text_for_test() { return brushes_text(); }
+  void brushes_load_text_for_test(const std::string &s) { brushes_load_text(s); }
+  float paint_last_dab_hardness_for_test() const { return paint_last_dab_hardness_; }
+  float paint_spacing_for_test(float pressure) { return paint_spacing_now(pressure); }
   const std::vector<Vec2> &sculpt_dab_px_for_test() const { return sculpt_dab_px_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
@@ -5261,6 +5276,18 @@ class Editor {
   float paint_grain_at(int x, int y) const;
   void paint_dab_begin(float pressure);
   void paint_dab_finish();
+  float paint_dab_hardness_ = -1.0f;       // (round 540: this dab's hardness through the pressure curve; -1 outside a dab: the field's)
+  float paint_last_dab_hardness_ = 1.0f;   // (the last dab's, for tests)
+  float paint_spacing_now(float pressure);  // (the step between dabs in radii: spacing, through the curve when Spacing Pressure is on)
+  /* Round 540: size, strength and colour per brush (brush_slots.cpp). */
+  BrushBank sculpt_bank_, wp_bank_, paint_bank_;
+  void brush_banks_sync();
+  std::string brushes_text();
+  void brushes_load_text(const std::string &text);
+  std::string brushes_path() const;
+  void brushes_save();
+  void brushes_load();
+  void brush_command(const std::vector<std::string> &t);
   Vec3 paint_dab_colour() const;
   Bitmap paint_stencil_;
   Vec2 paint_stencil_offset_;

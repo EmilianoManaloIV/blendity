@@ -1640,6 +1640,7 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
       return;
     }
     sculpt_brush_.kind = kind;
+    brush_banks_sync();  // (round 540: a size typed next lands on this brush)
   }
   else if (v == "mask") sculpt_mask_op(arg(2, ""), t);  // (task 0238)
   else if (v == "group") sculpt_group_op(arg(2, ""));
@@ -1741,9 +1742,12 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
     const std::string s = arg(2, "50");
     if (s == "+") sculpt_brush_.radius = std::min(500.0f, sculpt_brush_.radius * kSizeStep);
     else if (s == "-") sculpt_brush_.radius = std::max(1.0f, sculpt_brush_.radius / kSizeStep);
-    else sculpt_brush_.radius = std::max(1.0f, std::min(500.0f, (float)std::atof(s.c_str())));
+    else if (const float r = (float)std::atof(s.c_str()); std::isfinite(r)) sculpt_brush_.radius = std::max(1.0f, std::min(500.0f, r));  // (NaN: the size stays)
   }
-  else if (v == "strength") sculpt_brush_.strength = std::max(0.0f, std::min(1.0f, (float)std::atof(arg(2, "0.5").c_str())));
+  else if (v == "strength") {
+    const float st = (float)std::atof(arg(2, "0.5").c_str());
+    if (std::isfinite(st)) sculpt_brush_.strength = std::max(0.0f, std::min(1.0f, st));
+  }
   else if (v == "falloff") {
     const std::string f = arg(2, "smooth");
     for (int i = 0; i < 6; i++)
