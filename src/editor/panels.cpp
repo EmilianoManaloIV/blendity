@@ -3078,6 +3078,64 @@ void Editor::draw_export_options() {
 }
 
 
+/* Edit Mode's Dimensions (Blender's Transform panel, N): the selected vertices' size, X / Y / Z, in the world's axes or
+ * the object's. Typing one scales the selection about its median to that size (the redoable operator `dimensions`, so
+ * F9 re-runs it); dragging a field amends one operator instead of starting one a frame. */
+void Editor::draw_edit_dimensions(ui::Layout &lay) {
+  auto &u = ui_;
+  GameObject *g = edit_object();
+  MeshPtr *mp = edit_mesh_ptr();
+  if (!g || !mp || !*mp) return;
+  if (!u.in.down[0]) dims_drag_ = dims_refused_ = false;
+  const EditDims &d = edit_dimensions(*g, **mp);
+  const bool any = d.count > 0;
+  const Vec3 size = dims_local_ ? d.local_size : d.global_size;  // (a copy: the cache is rebuilt by the edit below)
+  u.push_id("dimensions");
+  Recti hr = lay.row(u.row_h() + u.px(2));
+  u.label({hr.x + u.px(4), hr.y, hr.w / 2 - u.px(8), hr.h}, "Dimensions", u.theme.accent);
+  static const char *kFrames[] = {"Global", "Local"};
+  int frame = dims_local_ ? 1 : 0;
+  if (u.combo(u.id("frame"), {hr.x + hr.w / 2, hr.y, hr.w / 2 - u.px(6), hr.h}, frame, kFrames, 2)) dims_local_ = frame == 1;
+  u.tooltip("The size of the selected vertices. Global: along the world's axes, in world units. Local: along the object's own\n"
+            "axes, in the object's units (Blender: the Transform panel's Global / Local switch). Type a size to scale the\n"
+            "selection to it about its median, as S does; Adjust Last Operation (F9) re-runs it.");
+  static const char *kAxes[] = {"X", "Y", "Z"};
+  for (int k = 0; k < 3; k++) {
+    Recti row = lay.row();
+    const int lw = row.w * 2 / 5;
+    u.label({row.x + u.px(4), row.y, lw - u.px(8), row.h}, kAxes[k]);
+    const Recti f{row.x + lw, row.y, row.w - lw - u.px(6), row.h};
+    if (u.record_buttons) u.button_rects[std::string("field:Dimensions ") + kAxes[k]] = f;
+    if (!any) {  // nothing selected: a greyed field with a dash, and nothing to change
+      u.frame(f, u.theme.field, u.theme.field_border, u.px(2));
+      u.label(f, "-", u.theme.text_dim, ui::Align::Center);
+      continue;
+    }
+    float v = size[k];
+    if (u.float_field(u.id(kAxes[k]), f, v, 0.01f, 0.0f, 1e30f)) apply_dimensions_edit(size, k, v);
+    u.tooltip(strprintf("The selection's size along %s. Typing a number scales it to that size (0 flattens it); a selection with\n"
+                        "no size along this axis (a flat face, one vertex) can't be scaled along it.", kAxes[k]));
+  }
+  u.pop_id();
+}
+
+/* One Dimensions field changed to `v`: the other two axes keep the size they have. */
+void Editor::apply_dimensions_edit(Vec3 size, int axis, float v) {
+  if (dims_refused_ && ui_.in.down[0]) return;  // (a drag of a field that was refused: said once, not every frame)
+  const int orientation = dims_local_ ? 1 : 0;
+  const bool amend = dims_drag_ && ui_.in.down[0] && last_op_valid() && last_op_.op == "dimensions" && last_op_.orientation == orientation;
+  if (amend) {
+    last_op_.size[axis] = v;
+    last_op_.dims_keep &= ~(1u << axis);
+    run_last_op(false);
+    return;
+  }
+  size[axis] = v;
+  edit_dimensions_op(size, 7u & ~(1u << axis), orientation);
+  dims_drag_ = ui_.in.down[0] && last_op_valid() && last_op_.op == "dimensions";
+  dims_refused_ = ui_.in.down[0] && !dims_drag_;
+}
+
 /* Edit Mode's tools: selection mode, n-gon / knife / drawing, the mode's settings and
  * operators. Shared by the Inspector and the Modeling Tools window. */
 void Editor::draw_edit_tools(ui::Layout &lay) {
@@ -3215,6 +3273,7 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
                   "of the Scene view) after a tool runs, and in the drag helper while Bevel, Inset, Array, Grid, Pipe, Taper\n"
                   "or Recess is dragged. Changing them re-runs the tool, and they are kept for its next use.");
       }
+      draw_edit_dimensions(lay);
       {
         /* The tools in groups, Select first (one place for every way of selecting); each
          * group shows what this selection mode can use. Mark / Clear and similar pairs

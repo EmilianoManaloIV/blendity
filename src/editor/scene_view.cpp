@@ -20,7 +20,9 @@
 #include <array>
 #include <unordered_map>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace bl {
 
@@ -1873,7 +1875,15 @@ void Editor::begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp
 
 /* The tool settings the operator starts from (F9 adjusts them afterwards). */
 void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
-  if (op == "extrude") L.amount = extrude_dist_;
+  if (op == "dimensions") {
+    /* The wanted size; an axis to keep (the console's "-", the two fields not typed) takes the size the selection has. */
+    L.orientation = dims_request_orientation_;
+    const Vec3 cur = dims_current_size(L);
+    for (int k = 0; k < 3; k++) L.size[k] = (dims_request_keep_ >> k) & 1u ? cur[k] : dims_request_[k];
+    L.dims_keep = dims_request_keep_;
+    L.dims_frame = L.orientation;
+  }
+  else if (op == "extrude") L.amount = extrude_dist_;
   else if (op == "merge_distance") {
     L.amount = merge_dist_;
     L.individual = false;  // F9: Unselected
@@ -2954,8 +2964,197 @@ void Editor::draw_game_view(const Recti &r) {
 /* Adjust Last Operation (Blender's redo panel, F9)                       */
 /* ===================================================================== */
 
+/* ===================================================================== */
+/* Dimensions (Blender's Transform panel: the selection's size, typed)     */
+/* ===================================================================== */
+
+namespace {
+/* The selected vertices' size along the world axes and along the object's, and their medians (the pivot the modal Scale
+ * uses, in both frames: an affine map keeps a median a median). */
+struct DimsMeasure {
+  size_t count = 0;
+  Vec3 global_size{0.0f}, local_size{0.0f};
+  Vec3 global_pivot{0.0f}, local_pivot{0.0f};
+};
+
+DimsMeasure measure_selection(const Mesh &m, const std::vector<uint8_t> &sel, const Mat4 &w) {
+  DimsMeasure r;
+  const float inf = std::numeric_limits<float>::infinity();
+  Vec3 glo(inf), ghi(-inf), llo(inf), lhi(-inf);
+  double gsum[3] = {0, 0, 0}, lsum[3] = {0, 0, 0};
+  const size_t n = std::min(m.vert_count(), sel.size());
+  for (size_t v = 0; v < n; v++) {
+    if (!sel[v]) continue;
+    const Vec3 l = m.positions[v], g = w.point(l);
+    for (int k = 0; k < 3; k++) {
+      glo[k] = std::min(glo[k], g[k]);
+      ghi[k] = std::max(ghi[k], g[k]);
+      llo[k] = std::min(llo[k], l[k]);
+      lhi[k] = std::max(lhi[k], l[k]);
+      gsum[k] += g[k];
+      lsum[k] += l[k];
+    }
+    r.count++;
+  }
+  if (!r.count) return r;
+  for (int k = 0; k < 3; k++) {
+    r.global_size[k] = ghi[k] - glo[k];
+    r.local_size[k] = lhi[k] - llo[k];
+    r.global_pivot[k] = (float)(gsum[k] / (double)r.count);
+    r.local_pivot[k] = (float)(lsum[k] / (double)r.count);
+  }
+  return r;
+}
+
+/* A fast fingerprint of the selection flags (eight at a time), so the Inspector knows the selection changed without a
+ * walk over the mesh's positions. */
+uint64_t selection_fingerprint(const std::vector<uint8_t> &sel) {
+  uint64_t h = 1469598103934665603ull;
+  const size_t words = sel.size() / 8;
+  for (size_t i = 0; i < words; i++) {
+    uint64_t x;
+    std::memcpy(&x, sel.data() + i * 8, 8);
+    h = (h ^ x) * 1099511628211ull;
+    h ^= h >> 29;
+  }
+  for (size_t i = words * 8; i < sel.size(); i++) h = (h ^ sel[i]) * 1099511628211ull;
+  return h;
+}
+}  // namespace
+
+const Editor::EditDims &Editor::edit_dimensions(const GameObject &g, const Mesh &m) {
+  EditDims &d = edit_dims_;
+  /* A G / R / S or Push/Pull drag changes the mesh every frame: show the last numbers, walk again once it ends. */
+  if (d.filled && (modal_.active || pp_.active || xf_.active)) return d;
+  const Mat4 &w = g.world_matrix();
+  const uint64_t hash = selection_fingerprint(vert_sel_);
+  const bool same = d.filled && d.mesh == &m && d.version == m.version && d.sel_hash == hash && d.sel_size == vert_sel_.size() &&
+                    std::memcmp(d.world, w.m, sizeof d.world) == 0;
+  if (same) return d;
+  const DimsMeasure r = measure_selection(m, vert_sel_, w);
+  d.mesh = &m;
+  d.version = m.version;
+  d.sel_hash = hash;
+  d.sel_size = vert_sel_.size();
+  std::memcpy(d.world, w.m, sizeof d.world);
+  d.count = r.count;
+  d.global_size = r.global_size;
+  d.local_size = r.local_size;
+  d.filled = true;
+  edit_dims_computes_++;
+  return d;
+}
+
+/* The console's `editop dimensions <x> <y> <z> [global|local]`: "-" (or a missing number) keeps that axis's size. */
+void Editor::edit_dimensions_command(const std::vector<std::string> &t) {
+  if (!edit_mode_) {
+    Log::warn("dimensions: enter Edit Mode and select something first");
+    return;
+  }
+  Vec3 want(0.0f);
+  unsigned keep = 0;
+  for (int k = 0; k < 3; k++) {
+    const size_t at = 2 + (size_t)k;
+    if (at >= t.size() || t[at] == "-") {
+      keep |= 1u << k;
+      continue;
+    }
+    /* The whole token must be a number: atof read "abc" as 0 and flattened the axis. (NaN / inf parse, and the
+     * operator refuses them.) */
+    char *end = nullptr;
+    const double v = std::strtod(t[at].c_str(), &end);
+    if (end == t[at].c_str() || *end != '\0') {
+      Log::warn("dimensions: '%s' is not a number (use a size, or - to keep that axis)", t[at].c_str());
+      return;
+    }
+    want[k] = (float)v;
+  }
+  const std::string frame = t.size() > 5 ? to_lower(t[5]) : std::string("global");
+  if (frame != "global" && frame != "local") {
+    Log::warn("dimensions: '%s' is not an orientation (use global or local)", t[5].c_str());
+    return;
+  }
+  edit_dimensions_op(want, keep, frame == "local" ? 1 : 0);
+}
+
+Vec3 Editor::dims_current_size(const LastOp &L) const {
+  const GameObject *g = scene_->find(L.obj);
+  if (!g || !L.before) return Vec3(0.0f);
+  const DimsMeasure ms = measure_selection(*L.before, L.vsel, g->world_matrix());
+  return L.orientation == 0 ? ms.global_size : ms.local_size;
+}
+
+/* The sizes in L.size were measured in L.dims_frame; once the Orientation changed, the axes the user did not type take
+ * the new frame's sizes (reading the old frame's numbers in the new one would reshape the selection). */
+void Editor::dims_follow_orientation(LastOp &L) const {
+  if (L.dims_frame == L.orientation) return;
+  const Vec3 cur = dims_current_size(L);
+  for (int k = 0; k < 3; k++)
+    if ((L.dims_keep >> k) & 1u) L.size[k] = cur[k];
+  L.dims_frame = L.orientation;
+}
+
+void Editor::edit_dimensions_op(Vec3 wanted, unsigned keep_mask, int orientation) {
+  dims_request_ = wanted;
+  dims_request_keep_ = keep_mask;
+  dims_request_orientation_ = orientation;
+  edit_op("dimensions");
+}
+
+/* Scales the selected vertices about their median so the selection has the wanted size (L.size) along each axis, in the
+ * world axes (L.orientation 0) or the object's (1). It reads `m` as it was before: run_last_op hands it a fresh copy of
+ * L.before, so a re-run from F9 is exact, not cumulative. */
+bool Editor::run_dimensions(Mesh &m, const LastOp &L, const Mat4 &world, std::string &err, bool &quiet) {
+  const bool global = L.orientation == 0;
+  const DimsMeasure ms = measure_selection(m, L.vsel, world);
+  if (!ms.count) {
+    err = "Dimensions: select vertices first";
+    return false;
+  }
+  const Vec3 cur = global ? ms.global_size : ms.local_size;
+  const float widest = std::max(cur.x, std::max(cur.y, cur.z));
+  Vec3 factor(1.0f);
+  for (int k = 0; k < 3; k++) {
+    if (!std::isfinite(L.size[k])) {
+      err = strprintf("Dimensions: the size along %c is not a number", "XYZ"[k]);
+      return false;
+    }
+    const float want = std::max(0.0f, L.size[k]);  // (a negative size is 0: flat)
+    if (std::fabs(want - cur[k]) <= 1e-7f * std::max(want, cur[k])) continue;  // already that size (or both 0)
+    if (!(cur[k] > 1e-5f * widest)) {
+      err = strprintf("Dimensions: the selection has no size along %c: nothing to scale", "XYZ"[k]);
+      return false;
+    }
+    factor[k] = want / cur[k];
+  }
+  if (factor.x == 1.0f && factor.y == 1.0f && factor.z == 1.0f) {
+    err = "Dimensions: the selection is already that size";
+    quiet = true;  // (nothing to do is not a problem, and not an undo step)
+    return false;
+  }
+  const Vec3 pivot = global ? ms.global_pivot : ms.local_pivot;
+  if (!std::isfinite(pivot.x) || !std::isfinite(pivot.y) || !std::isfinite(pivot.z)) {
+    err = "Dimensions: the selection's centre is not finite (a vertex is at infinity or NaN)";
+    return false;
+  }
+  const Mat4 inv = world.inverse();
+  const size_t n = std::min(m.vert_count(), L.vsel.size());
+  for (size_t v = 0; v < n; v++) {
+    if (!L.vsel[v]) continue;
+    Vec3 p = global ? world.point(m.positions[v]) : m.positions[v];
+    p = pivot + (p - pivot) * factor;  // (componentwise)
+    p = global ? inv.point(p) : p;
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+      err = "Dimensions: the result is not finite (the size is too far from what the selection has)";
+      return false;
+    }
+    m.positions[v] = p;
+  }
+  return true;
+}
+
 bool Editor::edit_op_redoable(const std::string &op) const {
-  return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
+  return op == "dimensions" || op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
          op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
          op == "shrink_fatten" || op == "to_sphere" || op == "randomize" || op == "grid" || op == "pipe" || op == "array" || op == "taper" ||
          op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder" || op == "solve_mesh" ||
@@ -3076,7 +3275,7 @@ void Editor::run_last_op(bool first) {
   elem_ = L.elem;
   meshops::EdgeSelectionScope scope(L.elem == EditElement::Edge ? &L.esel : nullptr);
   std::string err;
-  bool ok = true;
+  bool ok = true, quiet = false;
   const std::string &op = L.op;
   if (op == "merge_distance") {
     /* The selection (every vertex when nothing is selected), Blender's way. */
@@ -3090,6 +3289,10 @@ void Editor::run_last_op(bool first) {
     Log::info("Merge by Distance: removed %zu vertices", n);
   }
   else if (op == "solve_mesh") run_solve_mesh(m, L);
+  else if (op == "dimensions") {
+    dims_follow_orientation(L);
+    ok = run_dimensions(m, L, g->world_matrix(), err, quiet);
+  }
   else if (op == "extrude" || op == "inset") {
     if (op == "extrude") meshops::extrude_faces(m, face_sel_, L.amount);
     else if (L.individual) meshops::inset_faces(m, face_sel_, L.amount);
@@ -3215,7 +3418,8 @@ void Editor::run_last_op(bool first) {
     mf->mesh = mesh_copy(*L.before);
     vert_sel_ = L.vsel;
     face_sel_ = L.fsel;
-    Log::warn("%s", err.c_str());
+    if (quiet) Log::info("%s", err.c_str());
+    else Log::warn("%s", err.c_str());
     L.message = err;
     if (first) {
       L.op.clear();
@@ -3278,12 +3482,12 @@ void Editor::draw_last_op_panel(const Recti &view) {
       {"solve_mesh", "Solve Mesh"},
       {"relax_loops", "Relax Edge Loops"}, {"space_loops", "Space Edge Loops Evenly"},
       {"circularize", "To Circle"},     {"flatten_loops", "Flatten"},
-      {"curve_loops", "Curve Edge Loops Between Selected"}};
+      {"curve_loops", "Curve Edge Loops Between Selected"}, {"dimensions", "Dimensions"}};
   auto it = titles.find(L.op);
   std::string title = it == titles.end() ? L.op : it->second;
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
-  int fields = is_looptools_op(L.op) ? looptools_f9_rows(L.op) : L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
+  int fields = is_looptools_op(L.op) ? looptools_f9_rows(L.op) : L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" || L.op == "dimensions" ? 3 :
                L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" || L.op == "solve_mesh" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
@@ -3320,7 +3524,9 @@ void Editor::draw_last_op_panel(const Recti &view) {
     return Recti{rr.x + lw, rr.y, rr.w - lw, rr.h};
   };
   auto fl = [&](const char *label, float &v, float speed, float mn, float mx) {
-    changed |= u.float_field(u.id(label), row(label), v, speed, mn, mx);
+    const Recti fr = row(label);
+    if (u.record_buttons) u.button_rects[std::string("lastop:") + label] = fr;  // (the tests type into it)
+    changed |= u.float_field(u.id(label), fr, v, speed, mn, mx);
   };
   auto ifield = [&](const char *label, int &v, int mn, int mx) { changed |= u.int_field(u.id(label), row(label), v, mn, mx); };
   if (L.op == "extrude") {
@@ -3334,6 +3540,22 @@ void Editor::draw_last_op_panel(const Recti &view) {
     u.tooltip("Vertices closer than this weld, vertices this close to an edge join it. Starts at 1e-4 of the mesh's size.");
     fl("Merge Angle", L.amount2, 0.1f, 0.0f, 90.0f);
     u.tooltip("Flat faces meeting at less than this (degrees) merge, where the texture is continuous.");
+  }
+  else if (L.op == "dimensions") {
+    /* A typed axis stops following the selection's size when the Orientation changes. */
+    auto dim = [&](const char *label, int k) {
+      const bool was = changed;
+      changed = false;
+      fl(label, L.size[k], 0.01f, 0.0f, 1e30f);
+      if (changed) L.dims_keep &= ~(1u << k);
+      changed |= was;
+    };
+    dim("X", 0);
+    u.tooltip("The selection's size along X, in the Orientation below (Global: world units; Local: the object's).");
+    dim("Y", 1);
+    u.tooltip("The selection's size along Y. The selection is scaled about its median, as S does.");
+    dim("Z", 2);
+    u.tooltip("The selection's size along Z. 0 flattens it.");
   }
   else if (L.op == "merge_distance") {
     fl("Merge Distance", L.amount, 0.0005f, 0.0f, 1000.0f);

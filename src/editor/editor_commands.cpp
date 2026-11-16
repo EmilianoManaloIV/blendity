@@ -1918,6 +1918,7 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "editop") {
     const std::string op = arg(1, "fill");
     if (op == "knife" || op == "origin_to_selection") edit_tool(op);  /* tools, not mesh operators */
+    else if (op == "dimensions") edit_dimensions_command(t);  // editop dimensions <x> <y> <z> [global|local]; "-" keeps an axis
     else edit_op(op);
   }
   else if (c == "ngon") ngon_mode_ = to_lower(arg(1, ngon_mode_ ? "off" : "on")) == "on";  // ngon [on|off]: SketchUp-style faces
