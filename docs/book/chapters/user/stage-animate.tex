@@ -91,6 +91,29 @@ along a curve on footprints you can move, \ui{Locomotion} walks and runs it live
 optional download) fills the motion between two keys in a style, shown as a ghost. Every assistant is a switch in
 Preferences; hand animation never changes.
 
+\section{Posing at speed: what to expect}
+Posing a character is the heaviest thing the editor does every frame, because a pose moves meshes: the constraints are solved,
+every mesh skinned to a moved bone is deformed again, and the changed meshes are sent to the graphics card. Since Pass~22
+the editor pays for the meshes a pose moves, not for the size of the avatar. A skinned mesh is deformed once, and only when
+one of its own bones moved; a deformed mesh is updated in place on the card; the world around the character is kept while it
+moves; the full-body solver behind Puppet handles writes each joint once; and a character's springs in Play no longer
+rebuild meshes. The pose you get is the same as before.
+\begin{itemize}
+  \item \textbf{Dragging an IK target or pole, \key{G} on it, orbiting and moving a prop} stay within a frame at 60~fps
+    (16.7~ms) on an avatar of a real one's size (about 140{,}000 triangles on 15 skinned meshes). On the test avatar a
+    hand's IK drag measured 10 to 13~ms a frame against 48 to 56 before.
+  \item \textbf{Whole-body poses} (a Puppet handle, turning the chest, scrubbing a clip, Play with springs on a whole
+    avatar) move every mesh and cost more: 35 to 53~ms on the test avatar, which feels like 20 to 30~fps. Nothing is
+    wrong; what is left is the moved meshes sent to the card, their normals, and the outline shells. The Learn lesson below shows how to see which part
+    of a frame it is.
+  \item \textbf{Where a slow frame goes.} The Profiler (\menu{Window > Profiler}) shows a \emph{Posing} block while a rig is
+    posed: the constraint solve, the full-body solver, skinning, the in-place moves, the uploads. A frame that costs much
+    more than the block adds up to is the drawing, not the pose. The Learn lesson \emph{Where a Posing Frame Goes} walks
+    through it with Try-it buttons that drag a test avatar's chest.
+  \item \textbf{Skinning on the graphics card} would take the rest off the processor's hands; it is not built, and is
+    the owner's open decision (\code{docs/PERFORMANCE.md}).
+\end{itemize}
+
 \section{Retargeting}
 With a clip open on the rig it was made for, \ui{Retarget} lists the scene's other humanoid rigs; pick one and the clip
 is remade for it by what each body part does (the 21 parts of the humanoid map found on any naming scheme), the hips'
@@ -114,5 +137,5 @@ UnityHumanoidAvatars}; the physics for animation follows Cascadeur's ideas \cite
 follows ProtoRes \cite{Oreshkin2022Protores} on CMU data \cite{CMUmocap2026}; the spring chains follow Jakobsen and
 the position-based solvers \cite{Jakobsen2001, Macklin2016}; the theory is in \cite{Gregory2018vol2} (animation,
 physics). Learn: \emph{Modifiers vs Components} (vertex groups, weights, bones, IK, keyframes, curves, sequences),
-\emph{Play Mode and the Game Loop}, \emph{Animating Any Property}.
+\emph{Play Mode and the Game Loop}, \emph{Animating Any Property}, \emph{Where a Posing Frame Goes}.
 \end{fromnote}

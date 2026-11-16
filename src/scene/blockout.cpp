@@ -1824,4 +1824,68 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
   return true;
 }
 
+/* Round 514 (ADR 0138): a piece's own shape as a mesh, for the modifier stack it carries. */
+bool piece_shape_mesh(const Piece &piece, Mesh &out) {
+  out = Mesh();
+  if (piece.shape == Shape::Mesh) {  // (its geometry only: the source's caches may be filled on the main thread meanwhile)
+    if (!piece.mesh || piece.mesh->face_count() == 0) return false;
+    out.positions = piece.mesh->positions;
+    out.face_offsets = piece.mesh->face_offsets;
+    out.corner_verts = piece.mesh->corner_verts;
+    out.touch();
+    return true;
+  }
+  Piece p = piece;
+  p.to_blockout = Mat4::identity(), p.op = Op::Add, p.room = false, p.blend = 0.0f;
+  if (!finite_piece(p)) return false;
+  Solid s;
+  const double identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+  bool one = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : p.shape == Shape::Sphere ? local_sphere(p, s)
+             : p.shape == Shape::Wedge ? local_wedge(p, identity, nullptr, s) : false;
+  if (p.shape == Shape::Convex) {  // (round 500's convex piece: its hull, in the piece's space)
+    Hull h;
+    if (convex_hull(p.points, h)) return false;
+    s.verts = h.verts;
+    for (const std::vector<uint32_t> &f : h.faces) {
+      s.face_verts.insert(s.face_verts.end(), f.begin(), f.end());
+      s.face_offsets.push_back((uint32_t)s.face_verts.size());
+    }
+    one = true;
+  }
+  if (!one) {  // (stairs, an arch, an outline: several convex parts, united - on the grid, by a cell fine enough for the piece's smallest part)
+    double small = std::min((double)std::fabs(p.height), 1e30);
+    if (p.shape == Shape::Stairs) small = std::min({(double)std::fabs(p.size.x), (double)std::fabs(p.size.y) / std::max(1, p.steps), (double)std::fabs(p.size.z) / std::max(1, p.steps)});
+    if (p.shape == Shape::Arch) small = std::min((double)std::fabs(p.height), (double)std::fabs(p.radius - p.inner_radius));
+    for (size_t i = 0; p.shape == Shape::Outline && i < p.outline.size(); i++) {
+      const Vec2 a = p.outline[i], b = p.outline[(i + 1) % p.outline.size()];
+      const double len = std::sqrt((double)(b.x - a.x) * (b.x - a.x) + (double)(b.y - a.y) * (b.y - a.y));
+      if (len > 0.0) small = std::min(small, len);
+    }
+    Settings st;
+    if (small > 0.0 && small < 1e29) st.cell = (float)std::max(0.002, std::min(0.1, small / 4.0));
+    return build({p}, st, out) && out.face_count() > 0;
+  }
+  for (const V3 &v : s.verts) out.positions.push_back(Vec3((float)v.x, (float)v.y, (float)v.z));
+  out.corner_verts.assign(s.face_verts.begin(), s.face_verts.end());
+  out.face_offsets.assign(s.face_offsets.begin(), s.face_offsets.end());
+  /* The local solid's faces are not all wound one way before the solid is placed: each face of a convex solid is turned to look away
+   * from its middle, so a modifier (a Bevel) meets one closed, outward surface. */
+  V3 mid(0, 0, 0);
+  for (const V3 &v : s.verts) mid = mid + v;
+  mid = mid * (1.0 / (double)std::max<size_t>(1, s.verts.size()));
+  for (size_t f = 0; f + 1 < out.face_offsets.size(); f++) {
+    const uint32_t a = out.face_offsets[f], b = out.face_offsets[f + 1];
+    V3 n(0, 0, 0), c(0, 0, 0);
+    for (uint32_t i = a; i < b; i++) {
+      const V3 &p0 = s.verts[out.corner_verts[i]], &p1 = s.verts[out.corner_verts[i + 1 < b ? i + 1 : a]];
+      n = n + V3((p0.y - p1.y) * (p0.z + p1.z), (p0.z - p1.z) * (p0.x + p1.x), (p0.x - p1.x) * (p0.y + p1.y));
+      c = c + p0;
+    }
+    c = c * (1.0 / (double)std::max<uint32_t>(1, b - a));
+    if (dot(n, c - mid) < 0.0) std::reverse(out.corner_verts.begin() + a, out.corner_verts.begin() + b);
+  }
+  out.touch();
+  return out.face_count() > 0;
+}
+
 }  // namespace bl::blockout

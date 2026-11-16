@@ -190,6 +190,10 @@ compile() {  # src -> object path (only rebuilds when the source or any header i
   local obj="$OBJ/$(echo "$src" | tr '/' '_').o"
   local newest_header
   newest_header="$(ls -t src/*/*.h src/*/*/*.h extern/*.hh 2>/dev/null | head -1)"  # (src/render/optix/: the committed PTX)
+  case "$src" in  # (round 512: a test or stress source also depends on its own headers - a helper changed there left its objects stale)
+    tests/*) newest_header="$(ls -t "$newest_header" tests/*.h tests/fixtures/*.h 2>/dev/null | head -1)" ;;
+    stress/*) newest_header="$(ls -t "$newest_header" stress/*.inc tests/fixtures/*.h 2>/dev/null | head -1)" ;;
+  esac
   if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
     local extra=""
     case "$src" in *.mm) extra="-fobjc-arc" ;; esac

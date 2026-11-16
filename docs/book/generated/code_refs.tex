@@ -39,7 +39,7 @@ NVIDIA OptiX's loader & compiled into builds with OptiX's headers - the Windows 
 The OptiX kernel's PTX & Blendity's own GPL kernel compiled with NVRTC against NVIDIA's OptiX device headers (their \code{\_optix\_*} intrinsic calls), committed (task 0169, ADR 0054) & \cite{libTheOptiXkernelsPTX} \\
 Embree 4.4.1 & path tracer ray casting & \cite{libEmbree} \\
 OpenImageDenoise 2.5.0 & path tracer denoising & \cite{libOpenImageDenoise} \\
-oneTBB 2022.3.0 & job system & \cite{liboneTBB} \\
+oneTBB 2022.3.0 & job system; since round 419 (ADR 0112) also the memory allocator of the Windows build (\code{tbbmalloc\_proxy}, as Blender's own build uses it) & \cite{liboneTBB} \\
 Eigen (commit 8a1083e) & LSCM sparse solver (header-only) & \cite{libEigen} \\
 OpenSubdiv 3.7.0 & optional Catmull-Clark backend & \cite{libOpenSubdiv} \\
 OpenEXR + Imath 3.4.10 / 3.2.2 & EXR read/write & \cite{libOpenEXRImath} \\
@@ -63,4 +63,5 @@ x265 4.1 & H.265 encoding, inside FFmpeg (Linux, macOS) & \cite{libx265} \\
 libaom 3.13.1 & AV1, inside FFmpeg (\code{aom.dll} on Windows) & \cite{liblibaom} \\
 libvpx, Opus, libvorbis / libogg / libtheora 1.15.2, 1.3.1, - & codecs inside FFmpeg & \cite{liblibvpxOpuslibvorbislibogglibth} \\
 LAME 3.100 & MP3, inside FFmpeg & \cite{libLAME} \\
+Tracy client 0.11.1 & a developer's frame profiler (\code{BLENDITY\_TRACY=1} builds only; never in a release) & \cite{libTracyclient} \\
 \end{longtable}

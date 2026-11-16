@@ -3,6 +3,7 @@
 #include "../scene/unity_scene.h"
 #include "../scene/budget.h"
 #include "editor.h"
+#include "../scene/blockout_piece_stack.h"  // (round 514)
 #include "../core/profiling.h"
 #include "../core/hash.h"
 #include "../render/canvas.h"
@@ -763,6 +764,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   poll_unity_package();  // (round 369)
   poll_unity_gloss();    // (round 485: after the package - an unpack writes its own table)
   poll_unity_export();   // (round 372)
+  poll_budget_job();     // (round 507: `budget pc` and the Profiler's recount, counted on a job)
+  edit_open_poll();      // (round 508: the Editing window's picture lands, and a failed read warns, with the window hidden too)
   poll_unity_model_ids();  // (round 395)
   poll_unity_lighting();   // (round 400)
   anim_tick();
@@ -781,7 +784,10 @@ void Editor::frame_body(std::vector<Event> &events) {
    * state holding the tick had refitted at once, Ctrl+Z stuck). */
   if (scene_) update_collider_fits();
   /* Undo: commit once the interaction that changed things has finished. */
-  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
+  if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) {  // (an extrude: one step, on its click)
+    if (scene_ && !playing_) blockout_sync_leaves();  // (round 515: a leaf made, removed or turned by what the step holds lands in the step, not in one after it)
+    commit_undo();
+  }
 
   std::string title = scene_display_name() + (scene_dirty_ ? "*" : "") + " - Blendity" + (playing_ ? " [Playing]" : "");
   if (title != last_title_ && window_) {
@@ -2500,6 +2506,7 @@ void Editor::redo() {
 void Editor::new_scene() {
   save_job_wait();  // (round 413: a save in flight lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's - the next scene's ids start again)
+  blockout_piece_stack_cache_clear();  // (round 514: the pieces' evaluated stacks are the scene's too)
   blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: a footprint drawn in the last scene made a room in this one at the next click)
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
@@ -2581,6 +2588,7 @@ void Editor::open_job_poll() {
 bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s) {
   save_job_wait();  // (round 413: a save started while the file loaded lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's)
+  blockout_piece_stack_cache_clear();  // (round 514: the pieces' evaluated stacks are the scene's too)
   blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: the last scene's drag and footprint)
   export_waits_drop("another scene opened");  // (review 354)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)

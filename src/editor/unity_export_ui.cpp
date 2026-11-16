@@ -73,6 +73,8 @@ std::string fresh_meta(const std::string &guid, bool folder, const std::string &
 /* The worker: each file read, patched and compressed in turn; the file written whole at the end (none on Cancel). */
 void Editor::ExportJob::run() {
   try {
+    if (walk_folder) walk_folder(), walk_folder = nullptr;  // (released: its copies of the GUIDs and edits needn't outlive the walk)
+    if (items.empty() && !cancel.load()) return finish(empty_message);  // (an empty folder: said by poll_unity_export, no package)
     GzipWriter gz;
     for (size_t i = 0; i < items.size() && !cancel.load(); i++) {
       UnityExportItem &it = items[i];
@@ -321,34 +323,43 @@ bool Editor::export_unity_package(const std::string &folder_in, const std::strin
   const std::string out = fs::normalize(!out_in.empty() ? resolve_asset_path(out_in) : fs::join(fs::join(project_root_, "Exports"), fs::filename(abs_folder) + ".unitypackage"));
   if (forward_slashes(out).rfind(forward_slashes(abs_folder) + "/", 0) == 0) return Log::warn("Export Unity Package: not into the package's own folder (the next export would carry it)"), false;
   if (fs::exists(out) && fs::extension(out) != ".unitypackage") return Log::warn("Export Unity Package: %s is another kind of file - not written over", out.c_str()), false;
+  if (fs::list(abs_folder).empty()) return Log::warn("Export Unity Package: %s is empty", folder_rel.c_str()), false;  // (said at once, as before the walk moved to the worker)
+  ScopedTimer call_t;
   auto job = std::make_shared<ExportJob>();
   job->out = out, job->folder = folder_rel;
   save_dirty_clip_assets();  // (round 407: the clips as edited, not as last saved)
-  const std::map<std::string, Known> known = known_guids(abs_folder);
+  /* The folder walk (two filesystem calls a file) runs on the worker, over copies the job owns; only what reads the scene
+   * (the clips, the edits) is done here. */
   const auto edits = unity_edits(folder_rel, job->nested, job->copies);
-  std::function<void(const std::string &, const std::string &, int)> walk = [&](const std::string &dir, const std::string &unity_dir, int depth) {
-    if (depth > 16) return (void)job->skipped.push_back(unity_dir + " (deeper than 16 folders)");
-    for (const DirEntry &de : fs::list(dir)) {
-      const std::string abs = fs::join(dir, de.name), key = forward_slashes(folder_rel + abs.substr(abs_folder.size()));
-      const auto k = known.find(key);
-      UnityExportItem it;
-      it.abs = abs, it.folder = de.is_dir;
-      it.pathname = k != known.end() ? k->second.pathname : unity_dir + "/" + de.name;
-      it.guid = k != known.end() ? k->second.guid : stable_unity_guid(folder_rel, it.pathname);
-      job->fresh += k == known.end();
-      std::string meta;
-      it.meta = fs::read_file(fs::join(fs::join(abs_folder, ".unity-meta"), it.guid + ".meta"), meta) ? meta : fresh_meta(it.guid, it.folder, fs::extension(de.name), de.name, fs::exists(fs::join(dir, "LightingData.bin")));
-      const auto e = edits.find(key);
-      if (e != edits.end()) it.edits = e->second;
-      job->items.push_back(std::move(it));
-      if (de.is_dir) walk(abs, job->items.back().pathname, depth + 1);
-    }
+  job->walk_folder = [job_raw = job.get(), known = known_guids(abs_folder), edits, abs_folder, folder_rel]() {
+    ExportJob &j = *job_raw;
+    std::function<void(const std::string &, const std::string, int)> walk = [&](const std::string &dir, const std::string unity_dir, int depth) {  // (unity_dir by value: a reference into j.items dangled when the vector grew)
+      if (depth > 16) return (void)j.skipped.push_back(unity_dir + " (deeper than 16 folders)");
+      for (const DirEntry &de : fs::list(dir)) {
+        if (j.cancel.load()) return;
+        const std::string abs = fs::join(dir, de.name), key = forward_slashes(folder_rel + abs.substr(abs_folder.size()));
+        const auto k = known.find(key);
+        UnityExportItem it;
+        it.abs = abs, it.folder = de.is_dir;
+        it.pathname = k != known.end() ? k->second.pathname : unity_dir + "/" + de.name;
+        it.guid = k != known.end() ? k->second.guid : stable_unity_guid(folder_rel, it.pathname);
+        j.fresh += k == known.end();
+        std::string meta;
+        it.meta = fs::read_file(fs::join(fs::join(abs_folder, ".unity-meta"), it.guid + ".meta"), meta) ? meta : fresh_meta(it.guid, it.folder, fs::extension(de.name), de.name, fs::exists(fs::join(dir, "LightingData.bin")));
+        const auto e = edits.find(key);
+        if (e != edits.end()) it.edits = e->second;
+        const std::string pathname = it.pathname;
+        j.items.push_back(std::move(it));
+        if (de.is_dir) walk(abs, pathname, depth + 1);
+      }
+    };
+    walk(abs_folder, "Assets", 0);
   };
-  walk(abs_folder, "Assets", 0);
-  if (job->items.empty()) return Log::warn("Export Unity Package: %s is empty", folder_rel.c_str()), false;
+  job->empty_message = folder_rel + " is empty";
+  job->call_ms = call_t.ms();
   export_job_ = job;
   Log::info("Export Unity Package: writing %s", out.c_str());
-  if (headless_) return job->run(), poll_unity_export(), true;
+  if (headless_) return job->run(), poll_unity_export(), !job->items.empty();
   std::thread([job] { job->run(); }).detach();
   return true;
 }
@@ -358,7 +369,7 @@ void Editor::poll_unity_export() {
   if (!export_job_ || !export_job_->done.load()) return;
   const std::shared_ptr<ExportJob> job = std::move(export_job_);
   export_last_ = job;
-  for (const std::string &p : job->skipped) Log::warn("Export Unity Package: %s left out (couldn't be read)", p.c_str());
+  for (const std::string &p : job->skipped) Log::warn("Export Unity Package: %s left out", p.c_str());  // (each says why: deeper than 16, or not readable)
   if (!job->why.empty()) return Log::warn("Export Unity Package: %s", job->why.c_str());
   Log::info("Export Unity Package: %s - %d file(s) and folder(s) under their GUIDs (%d new), %d line(s) of changes in the prefabs and scenes%s%s%s",
             job->out.c_str(), job->written, job->fresh, job->lines, job->nested ? strprintf("; %d object(s) of nested prefabs left as they were", job->nested).c_str() : "",

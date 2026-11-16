@@ -13,8 +13,14 @@
 #include "../core/core.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <set>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace bl {
 
@@ -68,14 +74,118 @@ GuidIndex unity_guid_index(const std::string &assets_dir, const std::string &pro
   return out;
 }
 
-std::shared_ptr<const UnityGuidIndex> unity_guid_index_cached(const std::string &assets_dir, const std::string &project_root, bool fresh) {
-  static std::shared_ptr<const UnityGuidIndex> kept;
-  static std::string kept_root;
-  static double kept_at = -1e9;
-  if (!fresh && kept && kept_root == assets_dir && now_seconds() - kept_at < 5.0) return kept;
-  kept = std::make_shared<const UnityGuidIndex>(unity_guid_index(assets_dir, project_root));
-  kept_root = assets_dir, kept_at = now_seconds();
+namespace {
+
+struct KeptGuidIndex {
+  std::shared_ptr<const UnityGuidIndex> index;
+  std::string root;
+  double at = -1e9;
+  uint64_t signature = 0;
+  bool signed_ = false;  // (the signature is of the state this index was walked from)
+  /* Round 511: the files the index reads that were written just before it was signed, by path and a hash of their contents
+   * (see assets_signature). */
+  std::vector<std::pair<std::string, uint64_t>> racy;
+};
+KeptGuidIndex &kept_guid_index() {
+  static KeptGuidIndex kept;
   return kept;
+}
+
+/* Round 507: a fingerprint of everything unity_guid_index reads - every entry under Assets, the hidden .unity-guids / .unity-stats /
+ * .unity-meta ones too, by name, size and write time (a sum of per-entry hashes: the walk's order doesn't matter). Listing the folders
+ * costs a few ms where reading each .meta costs seconds in a project of tens of thousands of files; any difference rebuilds the index.
+ * On Windows a file replaced by one of the same size with the same write time (a copy or an unpack that keeps archive times) is not
+ * seen; POSIX's change time catches that when the replacement lands in a later second.
+ *
+ * Round 511, git's "racy" rule: a write time can't tell two edits apart inside one tick of the file clock - CI's quick Windows runner
+ * wrote a .meta, read the index, rewrote it with another GUID of the same size and read again inside one tick, and the stale index
+ * answered. So when `racy` is given, the files the index reads (.meta, .unity-guids, .unity-stats) written within kRacySeconds of now
+ * are listed with a hash of their contents; unity_guid_index_checked keeps them with the index and reuses it only while each still
+ * hashes the same. The signature itself stays free of contents and of the clock, so an untouched Assets matches itself however
+ * long ago it was written. A racy file that can't be read, or more than kRacyBytes of them (a package unpacked a moment ago, write
+ * times in the future), makes the state unkeepable (`keepable` false: the next import walks again). A clock skewed by more than
+ * the window between the editor and a network drive is not covered. */
+constexpr int kRacySeconds = 3;
+constexpr uint64_t kRacyBytes = 32ull << 20;
+
+bool index_reads(const std::string &name) {
+  return fs::extension(name) == ".meta" || name == ".unity-guids" || name == ".unity-stats";
+}
+
+uint64_t content_hash(const std::string &path, bool &ok) {
+  std::string bytes;
+  ok = fs::read_file(path, bytes);
+  uint64_t h = 1469598103934665603ull;
+  for (char c : bytes) h = (h ^ (unsigned char)c) * 1099511628211ull;
+  return h;
+}
+
+uint64_t assets_signature(const std::string &assets_dir, std::vector<std::pair<std::string, uint64_t>> *racy = nullptr, bool *keepable = nullptr) {
+  namespace sfs = std::filesystem;
+  uint64_t sum = 0, racy_bytes = 0;
+  std::error_code ec;
+  const sfs::file_time_type racy_after = sfs::file_time_type::clock::now() - std::chrono::seconds(kRacySeconds);
+  if (keepable) *keepable = true;
+  sfs::recursive_directory_iterator it(sfs::u8path(assets_dir), sfs::directory_options::skip_permission_denied, ec), end;
+  for (; !ec && it != end; it.increment(ec)) {
+    if (it.depth() > 16) {
+      it.disable_recursion_pending();
+      continue;
+    }
+    std::error_code e2;
+    const std::string name = it->path().generic_u8string();
+    uint64_t h = 1469598103934665603ull;
+    for (char c : name) h = (h ^ (unsigned char)c) * 1099511628211ull;
+    if (!it->is_directory(e2)) {  // (a folder by its name only: NTFS updates a folder's time in its parent's listing late, so it differs from one walk to the next)
+      std::error_code size_err;
+      const uint64_t size = (uint64_t)it->file_size(size_err);
+      const sfs::file_time_type written = it->last_write_time(e2);
+      const uint64_t when = (uint64_t)written.time_since_epoch().count();
+      uint64_t changed = 0;  // (POSIX: the change time too - an unpack that keeps write times still moves it; Windows' is not cheap)
+#ifndef _WIN32
+      struct stat st;
+      if (::stat(it->path().c_str(), &st) == 0) changed = (uint64_t)st.st_ctime;
+#endif
+      for (uint64_t v : {size, when, changed}) h = (h ^ v) * 1099511628211ull, h ^= h >> 29;
+      /* (Regular files only, with a size: a FIFO named x.meta would block the read, and a failed size would wrap the total.) */
+      if (racy && !size_err && written >= racy_after && it->is_regular_file(e2) && index_reads(it->path().filename().u8string())) {
+        racy_bytes += size;
+        bool ok = racy_bytes <= kRacyBytes;
+        if (ok) racy->push_back({it->path().u8string(), content_hash(it->path().u8string(), ok)});
+        if (!ok && keepable) *keepable = false;
+      }
+    }
+    sum += h;
+  }
+  return ec ? ~0ull ^ (uint64_t)std::time(nullptr) : sum;  // (a walk that failed matches nothing: the next import walks again)
+}
+
+}  // namespace
+
+std::shared_ptr<const UnityGuidIndex> unity_guid_index_cached(const std::string &assets_dir, const std::string &project_root, bool fresh) {
+  KeptGuidIndex &k = kept_guid_index();
+  if (!fresh && k.index && k.root == assets_dir && now_seconds() - k.at < 5.0) return k.index;
+  k.index = std::make_shared<const UnityGuidIndex>(unity_guid_index(assets_dir, project_root));
+  k.root = assets_dir, k.at = now_seconds(), k.signed_ = false, k.racy.clear();
+  return k.index;
+}
+
+std::shared_ptr<const UnityGuidIndex> unity_guid_index_checked(const std::string &assets_dir, const std::string &project_root, bool *reused) {
+  KeptGuidIndex &k = kept_guid_index();
+  std::vector<std::pair<std::string, uint64_t>> racy;
+  bool keepable = true;
+  const uint64_t sig = assets_signature(assets_dir, &racy, &keepable);  // (before the walk: a change during it makes the next check differ)
+  bool same = k.index && k.signed_ && k.root == assets_dir && k.signature == sig;
+  for (const auto &r : k.racy) {  // (round 511: the files written just before the index was signed must still hold what it read)
+    if (!same) break;
+    bool ok = false;
+    same = content_hash(r.first, ok) == r.second && ok;
+  }
+  if (reused) *reused = same;
+  if (same) return k.at = now_seconds(), k.index;
+  k.index = std::make_shared<const UnityGuidIndex>(unity_guid_index(assets_dir, project_root));
+  k.root = assets_dir, k.at = now_seconds(), k.signature = sig, k.signed_ = keepable, k.racy = std::move(racy);
+  return k.index;
 }
 
 std::string unity_shader_name(const UnityGuidIndex &index, const std::string &guid, int64_t file_id) {
@@ -273,15 +383,19 @@ struct ImportCache {
   std::map<std::string, ImportResult> models;          // (by path)
   std::map<std::string, YamlNode> metas;               // (by GUID: a model's .meta, parsed)
   std::map<std::string, std::vector<UnityDoc>> prefabs; // (by GUID; empty: not one)
+  std::map<std::string, MaterialPtr> materials;         // (round 507: by GUID, null: not a .mat in the project)
   int first_mesh_fallbacks = 0;
+  double model_ms = 0.0, material_ms = 0.0;  // (round 507: the time of the model reads and of the material lookups, for the parts table)
 };
 
 const ImportResult &model_of(ImportCache &c, const std::string &path) {
   auto m = c.models.find(path);
   if (m != c.models.end()) return m->second;
   m = c.models.emplace(path, ImportResult{}).first;
+  const double t0 = now_seconds();
   if (!import_model(path, m->second)) Log::warn("Import Unity: %s - %s", fs::filename(path).c_str(), m->second.error.c_str());
   unity_drop_unused_materials(m->second);  // (round 399: as Unity's submeshes - only the materials in use)
+  c.model_ms += (now_seconds() - t0) * 1000.0;
   return m->second;
 }
 
@@ -330,14 +444,23 @@ std::string Editor::unity_scene_path(const std::string &path) const {
  * (round 395: a .unity opened): its objects at the top, its ambient and fog the scene's. */
 bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::vector<UnityDoc> *read) {
   const std::string path = unity_scene_path(typed);
+  unity_import_parts_.clear();
+  double lap_at = now_seconds();
+  auto lap = [&](const char *name) {  // (round 507: the parts table - each step's ms since the last lap)
+    const double t = now_seconds();
+    unity_import_parts_.push_back({name, (t - lap_at) * 1000.0});
+    lap_at = t;
+  };
   std::string text, why;
   std::vector<UnityDoc> docs;
   if (read) docs = std::move(*read);  // (re-check 395: an opened scene's documents, read once)
   if (!read && !fs::read_file(path, text)) return Log::warn("Import Unity %s: can't read %s", fs::extension(path).c_str(), path.c_str()), false;
   if (!read && !parse_unity_yaml(text, docs, why))
     return Log::warn("Import Unity %s: %s - %s", fs::extension(path).c_str(), fs::filename(path).c_str(), why.c_str()), false;
-  const std::shared_ptr<const GuidIndex> kept = unity_guid_index_cached(assets_dir_, project_root_, true);
+  lap("read + parse");
+  const std::shared_ptr<const GuidIndex> kept = unity_guid_index_checked(assets_dir_, project_root_, &unity_import_index_reused_);  // (round 507: not walked again when Assets is as it was)
   const GuidIndex &index = *kept;
+  lap("guid index");
   ImportCache cache;
   auto model_path = [&](const std::string &guid) {
     const auto it = index.find(guid);
@@ -394,8 +517,17 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     unity_bakes.push_back({&g, light_volume_from_unity(sh)});
   };
   ctx.material = [&](const std::string &guid) -> MaterialPtr {  // (round 371: a Unity .mat, converted as it loads)
-    const auto it = index.find(guid);
-    return it == index.end() || fs::extension(it->second.path) != ".mat" ? nullptr : material_asset(make_asset_relative(it->second.path));
+    /* Round 507: once a GUID per import - a scene's ten thousand renderers wear a few hundred materials, and the library's lookup (path
+     * normalised, redirects followed) cost 190 us a call: 1.9 s of a 2.4 s import. The library hands out one shared instance a path, so the
+     * answer can't differ within the import. */
+    const double t0 = now_seconds();
+    auto kept = cache.materials.find(guid);
+    if (kept == cache.materials.end()) {
+      const auto it = index.find(guid);
+      kept = cache.materials.emplace(guid, it == index.end() || fs::extension(it->second.path) != ".mat" ? nullptr : material_asset(make_asset_relative(it->second.path))).first;
+    }
+    cache.material_ms += (now_seconds() - t0) * 1000.0;
+    return kept->second;
   };
   const std::map<std::string, UnityModelIds> tables = read_model_id_tables(unity_model_ids_path());
   ctx.model = [&](const std::string &guid, Scene &scene, UnityTargets &parts) -> GameObject * {
@@ -413,12 +545,22 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     unity_model_targets(r, root, made, ids, parts);
     return unity_collapse_model_root(scene, root);  // (round 399: one top node is Unity's root itself)
   };
+  lap("model id tables");
   commit_undo();
+  lap("commit_undo");
   std::set<uint64_t> before;
   scene_->for_each([&](GameObject &g) { before.insert(g.id); });
   GameObject *root = scene_->create(fs::stem(path));
   if (!as_scene) root->set_world_position(cam_.pivot);
+  lap("walk before");
+  std::vector<std::pair<std::string, double>> passes;
+  ctx.pass_ms = &passes;
   build_unity_objects(docs, *scene_, root, ctx);
+  lap("build (all passes)");
+  for (const auto &p : passes) unity_import_parts_.push_back({"  " + p.first, p.second});
+  unity_import_parts_.push_back({"  (model reads, inside the passes)", cache.model_ms});
+  unity_import_parts_.push_back({"  (material lookups, inside the passes)", cache.material_ms});
+  lap_at = now_seconds();
   if (as_scene && unity_render_settings(docs, scene_->environment, ctx.notes, [&](const std::string &guid, UnitySkybox &sb) { return load_unity_skybox(guid, sb); }, &scene_->unity))
     Log::info("Import Unity: the scene's ambient, skybox and fog came in");
   if (as_scene) scene_->unity.file = make_asset_relative(path);  // (round 401: Export Unity Package writes the world, cameras and lights back into it)
@@ -437,11 +579,14 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   if (ctx.reflection_probes) ctx.notes.push_back(std::to_string(ctx.reflection_probes) + " reflection probe(s) came in (their bakes come with Unity's lightmaps, or Generate Lighting's)");  // (round 401)
   if (lightmapped && !fs::exists(path + ".unity-lighting"))  // (round 400: fetched once by Unity, shown after)
     ctx.notes.push_back("the scene's baked lightmaps are Unity's: Lighting > Use Unity's Lightmaps (or: unity lightmaps) has Unity read them - written back unchanged");
+  lap("scene settings");
   std::vector<GameObject *> strays;  // (review 370: a variant's base, a parent loop - anything left at the top goes under the root)
   scene_->for_each([&](GameObject &g) {
     if (!g.parent && &g != root && !before.count(g.id)) strays.push_back(&g);
   });
+  lap("walk strays");
   for (GameObject *g : strays) scene_->set_parent(g, root, -1, false);
+  lap("set_parent strays");
   for (auto &[g, sh] : unity_bakes) light_volume_bakes_[g->id] = std::move(sh), volume_bakes++;  // (round 398: shown till Blendity bakes it)
   if (volume_bakes) livelink_light_volume_bakes_changed(), Log::info("Import Unity: %d Light Volume bake(s) read back from Unity", volume_bakes);
   if (ctx.objects == 0 && strays.empty() && root->children.empty()) {  // (nothing in it: no object, no Undo step)
@@ -453,8 +598,10 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     for (GameObject *g : kids) scene_->set_parent(g, nullptr, -1, true);
     scene_->destroy(root), root = nullptr;
   }
+  lap("unparent to top");
   if (root) expanded_.insert(root->id), select(root->id);
   mark_changed("Import " + fs::filename(path));
+  lap("mark_changed");
   unity_ids_waiting_ = ctx.models_waiting;
   unity_ids_last_import_ = typed, unity_ids_last_opened_ = as_scene;
   if (lightmapped && fs::extension(path) == ".unity")  // (round 400: where Unity's lightmaps come from - a scene's, not a prefab's)
@@ -489,6 +636,7 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
             ctx.overrides_kept ? strprintf(", %d prefab override(s) applied, %d Blendity doesn't hold left to Unity", ctx.overrides_applied, ctx.overrides_kept).c_str()
                                : ctx.overrides_applied ? strprintf(", %d prefab override(s) applied", ctx.overrides_applied).c_str() : "");
   poll_unity_gloss();  // (round 485: its materials' gloss maps not measured yet go to the worker now - at once in a headless run)
+  lap("notes, log, gloss poll");
   return true;
 }
 

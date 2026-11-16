@@ -13,9 +13,11 @@ dependency-free build, as the prebuilt Jolt has no RTTI. The GPU path tracer's s
 the OptiX kernel's PTX is committed so no CUDA toolkit is needed.
 
 \section{The test suites}
-\code{blendity\_tests} runs every test (\code{test("what the user sees", []\{ CHECK(...) \})}) in 16 groups
-(\code{--list-groups}, \code{--group <name>}; \code{BLENDITY\_TEST\_FILTER} for one by name): modeling, render,
-lighting, gpu, assets, animation, physics, editor, livelink, input, sketch, board, sculpt, hci, vr and main. UI tests
+\code{blendity\_tests} runs every test (\code{test("what the user sees", []\{ CHECK(...) \})}) in 20 groups
+(\code{--list-groups}; \code{--group a,b,c} takes a comma list and a name that is no group fails the run;
+\code{BLENDITY\_TEST\_FILTER} for one test by name): modeling, render, lighting, gpu, assets, animation, physics, editor,
+livelink, input, sketch, board, sculpt, hci, vr, the four Blockout groups (blockout, blockout\_modifiers,
+blockout\_join, blockout\_piece\_modifiers) and runner (the test program's own options). UI tests
 drive the editor headless with synthetic mouse and key events; geometry tests call \code{meshops}; every test runs in
 a scratch project. \code{tools/run\_suites.py} runs every group of every build given as its own process, each with its
 share of the cores, longest first, and exits 1 on a failure or a crash: both Windows builds in about a minute and a
@@ -48,7 +50,22 @@ tables not drifted, every entry cited). The HCI sweep (\code{tests/test\_hci.cpp
 narrow panes and contrast.
 
 \section{Continuous integration}
-\code{build.yml} on every push and pull request: windows, linux (ubuntu-latest) and macos build everything, run the
+Since \adr{0133} and \adr{0134} the checks are laid out so that a round's own work is quick and the whole suite is run once,
+by CI. \code{build.yml} runs on a pull request and on a push to \code{main} only, so a branch is built once and not twice;
+the four required names (\code{windows}, \code{linux}, \code{macos}, \code{linux-sanitizers}) are \emph{gate} jobs that
+need every part of their platform and pass only when all of it ended in success, so branch protection did not change.
+Each platform builds once (the programs are uploaded; \code{build.bat release all} and \code{build.sh} compile each source
+once and link the three programs) and then runs its unit tests and its quick stress pass side by side. The sanitizer
+tests, which took longer than the rest together, are run in six shards, each \code{blendity\_tests --group a,b,c}, balanced
+by the measured minutes of each group in \code{tools/dev/test\_shards.py}, whose \code{--check} fails when a group is in no
+shard or in two. A \code{changes} job lets a pull request that only adds a task spec or a changelog fragment skip
+the builds, and \code{ccache} (kept with GitHub's own cache action) shortens the Linux and macOS builds. A \code{stack}
+job runs \code{tools/dev/stack\_check.sh} (every pull request targets \code{main}, each stack has exactly one top; an
+integration pull request carries every green stack, \adr{0132}) and a \code{docs-fragments} job fails a commit that edits
+\code{CHANGELOG.md}, the README's count or the shared documents other than through a changelog fold (\adr{0123}).
+Locally, \code{tools/dev/chain.sh} with \code{TEST\_GROUPS="a,b"} runs the round's groups and \code{editor} in each build.
+
+In outline, windows, linux (ubuntu-latest) and macos each build everything, run the
 unit tests with each failing check as an annotation, run a quick stress pass under a 15-minute alarm, take a headless
 screenshot and upload the executables; linux-sanitizers builds the tests with ASan + UBSan and runs them. All four are
 required to merge. \code{release.yml} on a \code{v*} tag, on a merge into \code{main} and on a pull request touching

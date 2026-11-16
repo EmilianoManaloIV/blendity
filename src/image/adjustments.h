@@ -9,6 +9,7 @@
 #include "../core/math.h"
 #include "masks.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -57,10 +58,40 @@ struct Adjustment {
 };
 Adjustment make_adjustment(const std::string &type);  // its defaults (type "" when unknown)
 
+/* What Clarity, Sharpen, Dehaze and Noise Reduction work out from their input picture alone, kept between two calls
+ * on the same input (round 508): dragging a slider moves the amount, not the picture, so the luminance, its blur,
+ * the dark channel, the smoothed luminance and the blurred chroma are not made again. Each part carries the
+ * settings it was made with (a radius, the luminance strength) and is made again when they differ; the picture
+ * itself is the caller's to vouch for - it calls clear() when the input may have changed (Pipeline::run does: a
+ * change to an earlier step, an undo, another picture). */
+struct FilterKeep {
+  int w = 0, h = 0;                                 // the input's size the parts are of
+  bool persistent = false;                          // set by apply: this keep outlives the call (a filter at amount 0 makes its parts ahead)
+  std::vector<float> lum;                           // luminance
+  std::vector<float> lum_blur;                      // lum blurred by lum_blur_radius (Clarity, Sharpen)
+  int lum_blur_radius = 0;
+  std::vector<float> dark;                          // Dehaze's blurred dark channel
+  int dark_radius = 0;
+  float airlight = 0.0f;
+  std::vector<float> display_lum;                   // lum on the display axis (Noise Reduction's range test)
+  std::vector<float> smooth_lum;                    // Noise Reduction's bilateral-smoothed luminance
+  float smooth_lum_sr = -1.0f;                      // (the range sigma it was made with)
+  std::vector<float> chroma[3];                     // colour minus luminance, blurred by chroma_radius (0: not blurred)
+  int chroma_radius = -1;
+  void clear() { *this = FilterKeep(); }
+};
+
 /* `in` through `a` into `out` (may be another size: Crop, Rotate), blended with `in` by its mask's weight. */
 /* `scale`: the picture's size over the source's (a preview): the fields in pixels (Crop's rectangle, Sharpen's
- * radius) follow it. */
-void apply(const Adjustment &a, const Image &in, Image &out, float scale = 1.0f);
+ * radius) follow it. `keep` (optional): the parts of the four filters above worth keeping, for pictures up to
+ * kKeepPixels (a preview; a 4K picture's parts would be hundreds of megabytes). */
+void apply(const Adjustment &a, const Image &in, Image &out, float scale = 1.0f, FilterKeep *keep = nullptr);
+constexpr int64_t kKeepPixels = 4200000;
+/* True for the adjustments whose FilterKeep is worth holding. */
+bool adjustment_keeps_parts(const std::string &type);
+/* How many times a filter has made one of those parts since the process began (the tests count them: a drag of the
+ * amount alone must not raise it). */
+uint64_t filter_parts_made();
 
 /* One line of an .edit file ("Exposure: Exposure=1 | ..."), and back (false when the line isn't one). */
 std::string to_text(const Adjustment &a);

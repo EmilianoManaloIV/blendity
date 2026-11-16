@@ -13,6 +13,8 @@ source code. A built-in **Learn** tab teaches each piece interactively.
 | ![Rendered](docs/images/rendered.png) | ![UV editor](docs/images/uv.png) |
 | **Edit Mode: loop cuts** | **Learn tab** |
 | ![Edit mode](docs/images/editmode.png) | ![Learn tab](docs/images/learn.png) |
+| **Blockout: a whole interior from rooms and openings** | **Blockout: a grid and an arched window drawn on a wall** |
+| ![Inside a blocked-out interior: rooms joined by an arched doorway](docs/images/blockout_inside.png) | ![A Blockout room with a grid window and an arched window drawn on its wall with Draw Piece](docs/images/blockout_openings.png) |
 
 **→ The [manual](docs/MANUAL.md)** walks through the work stage by stage, with examples.
 
@@ -124,7 +126,7 @@ Each stage is a **layout** that arranges the windows and shows only that stage's
 everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
-- **Blocking Out** - primitives and parametric shapes, a **Blockout** whose boxes, cylinders and spheres add to or cut one mesh that follows them as they move (round 477), with **rooms** - air that brings its walls, floor and ceiling and merges with its neighbours or keeps its walls - doors, windows and pieces that intersect (round 478), dragged out with handles on every face that snap to the other pieces and a **Room tool** that draws a room on the ground or a face (round 479), SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
+- **Blocking Out** - primitives and parametric shapes, a **Blockout** whose boxes, cylinders and spheres add to or cut one mesh that follows them as they move (round 477), with **rooms** - air that brings its walls, floor and ceiling and merges with its neighbours or keeps its walls - doors, windows and pieces that intersect (round 478), dragged out with handles on every face that snap to the other pieces and a **Room tool** that draws a room on the ground or a face (round 479), **windows and doors with a style** - frame, bars, sill board and glass; single, double, sliding, arched and revolving - made from numbers (rounds 498 and 499), **architectural pieces** - columns, pilasters, beams, railings, roofs, stairs with a landing, spiral stairs and arcades - each one piece with numbers (round 500), Blockouts that **snap to each other and join when they touch** (round 501), **modifiers on a Blockout** (round 502) and **on a single piece** - Bevel the arches, Array ten columns from one (round 514), door leaves that are objects and swing about their hinge without a rebuild (round 515), with a **Blend radius** a piece that rounds its join like a metaball while the rest stays crisp (round 481), **materials by floor, wall and ceiling with world-scale UVs, Bake to Mesh and back** (round 482), **a Draw Piece tool that shows the piece while it is drawn, scale that never shears a piece** (round 496), with **wedges, stairs, arches, outlines pulled up and any mesh** as pieces (round 480), pieces drawn straight onto a Blockout's faces - a Subtract box pushed in, a ramp, stairs, an arch (round 495), SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
   **drawing in perspective** with a pen - SketchBook-style rulers, ellipses, symmetry and a 3-point guide that *is* the
   camera, strokes corrected to what the hand meant, canvases on the ground and on faces, and boxes, cylinders, faces and
   whole scaffolds built from the construction lines, never guessed.
@@ -156,6 +158,7 @@ everything):
   a bake's filter reads each texel's noise by the samples that carry its light, so a texel lit by a few lucky rays is smoothed away and a bake leaves far fewer specks (round 486);
   Generate Lighting's gather runs on every ticked graphics card, as F12 does, in batches sized by the cards' speed, and says which cards gathered (round 487: SideRail's lightmaps 37.7 s to 16.2 s);
   Remove Ringing (Hanning or Lanczos, a view setting) softens the dark ring a bright lamp leaves in baked probes, and Light Probe Groups are objects - placed and moved in the Scene view, imported from Unity - that Generate Lighting bakes at in place of the automatic grid (round 455);
+  Draw Piece draws a door or a window onto a wall of a Blockout by dragging a rectangle, from a Shape list that groups them under Openings (round 513);
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
   the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
@@ -359,6 +362,28 @@ screen with the fixes it found (labels that don't fit, narrow panes, contrast); 
 (docs/hci/checklist.md); the Unity bridge run in Unity 6000.6. Round 350: a VRChat avatar, a VRChat world and a short
 film made in Blendity and compared stage by stage with Blender, Unity, Godot and Unreal (docs/hci/compare-2026-10.md):
 the export's missing shape keys and painted textures lead the 15 ranked findings.
+Rounds 468-475, Pass 22: posing and playing an avatar cost what the avatar cost, whatever was moved; a mesh is skinned once a frame and only
+when its bones moved, a posed mesh follows in place, the world's rows stay on the card, the full-body solver works on a pose buffer and the
+scene is written once a frame (dragging an IK target on a 140,000-triangle stand-in 48 ms -> 10 ms; whole-body poses 35 to 53 ms, skinning
+on the card waits for a decision).
+Rounds 476-483, 494-502 and 513-515, Blockout: a mesh built from boxes, cylinders and spheres that add, cut or intersect and follow as they
+move - rooms, handles, the Room tool, wedges, stairs, arches, outlines and any mesh as pieces, a Blend radius, materials by floor, wall and
+ceiling, Bake to Mesh, outlines you click, Draw Piece with a Shape list that ends in Door and Window, styled windows and doors,
+architectural pieces, snap and join between Blockouts, modifiers on the Blockout and on a piece, door leaves as objects - measured on 100- and
+400-piece interiors (`blendity_stress --only blockout`) and taught by lessons.
+Rounds 484-488, Pass 24: SideRail's look - Unity's materials keep their maps and gloss, the bake's specks, Generate Lighting on every
+ticked graphics card.
+Rounds 504-517, Pass 25, speed and usability: every part of the program has a timed row (`image_edit`, `sculpt_paint`, `sequencer`,
+`importers`, `unity_export`, `asset_windows`, `cold_first_use`, `scene_views`) and the ranked list is `docs/perf/sweep-504.md`; the Scene
+view of 50,000 cubes went from 33 ms a frame to 10 by keeping what the scene holds, the image editor's heavy sliders from 30-51 ms to 10,
+a 4K picture opens in the Editing window on a worker, a 500k-face sculpt stroke and a bake's landing frame are shorter, and a Unity import,
+`budget pc` and an export's folder walk leave the main thread. A live sweep of every screen in 12 configurations (three sizes, Dark and
+Light, UI scale 1 and 1.5; `docs/hci/sweep-505.md`) found what was wrong and rounds 509, 510 and 513 fixed it: **the keyboard reaches every
+control** (F6 into a window, F10 or Alt for the menus, then Tab, Space, Enter and the arrows; Tab stays Edit Mode until you ask), no control
+lies on another, 42 of 49 cut labels are whole (the 7 left are named in `docs/hci/sweep-509.md`), every button has a tooltip that ends a sentence, every target is a row at mouse density and
+7 mm at Tablet Mode's scale (`docs/hci/sweep-509.md`, `docs/requirements.md` U-01 to U-07). Round 511 measured it all again on the joined
+tree (`docs/perf/verify-511.md`: what is still over budget, and why), round 512 brought these docs and both books up to
+date, and round 517 made the unit checks that failed only on a busy machine check behaviour, their times now stress rows.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -392,7 +417,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (27385 unit checks in 2027 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (62782 unit checks in 3162 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

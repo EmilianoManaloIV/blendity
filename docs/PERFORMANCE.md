@@ -4150,3 +4150,210 @@ miss in the world by 1 to 8 ms: there the cheaper view or the shells would do.
 Still over an ADR 0105 budget: the first Puppet drag's longest frame (103 ms against 100: the body model, built on
 the frame; a job would take it off), AutoPhysics (58 ms against 50), the scrub with trails, onion skins and the
 zoetrope (98 ms a frame), and the drag beside a path-traced view (829 ms: the path tracer restarts on every pose).
+
+## Pass 23: more shapes (round 480)
+
+Round 480 adds wedges, stairs, arches, outlines pulled up and meshes as pieces. The questions for the numbers: what do
+the shapes of several solids cost a building, what does a mesh piece cost, and do hostile arrangements of them leave
+a sound mesh? `blendity_stress --only blockout`, release builds, this machine (AMD Ryzen 9 5900XT, 32 threads),
+2026-11-11 23:50-23:55 with nothing else building or running. `interior 100 + stairs + arch` is round 476's building
+with a flight of stairs and an arch in it; `interior rooms 100 + a 10k-face mesh` is round 478's with a 10,000-face
+mesh as one more piece.
+
+| ms from a piece moving until the mesh can be drawn | exact (Manifold) | grid, cell 0.2 m | grid, cell 0.1 m | grid, cell 0.05 m |
+|---|---|---|---|---|
+| `interior 100`, with Blender's libraries | 11.6 | 13.2 | 41.9 | 183 (over) |
+| `interior 100 + stairs + arch`, with the libraries | **15.6** | 13.6 | **41.7** | 184 (over) |
+| `interior rooms 100 + a 10k-face mesh`, with the libraries | **72.7** | 35.8 | 60.4 | 207 |
+| `interior 100`, dependency-free | - | 15.6 | 48.2 | 198 (over) |
+| `interior 100 + stairs + arch`, dependency-free | - | 14.9 | **48.0** | 195 (over) |
+| `interior rooms 100 + a 10k-face mesh`, dependency-free | - | 44.1 | 68.0 | 218 |
+
+Of the mesh row's 72.7 ms on the exact path 16.6 ms make the solids (the mesh's triangles), 33.1 ms are Manifold and
+10.2 ms the render mesh of the 16,704 faces that come out; on the grid the mesh costs 8 ms to make and the result is
+as coarse as the cell (897 faces at 0.2 m).
+
+| live, `interior 100` in the editor, 120 frames | frame median ms | frame worst ms | move to landing, median ms | worst ms | landings |
+|---|---|---|---|---|---|
+| a door moved every frame, with the libraries | 2.87 | 3.38 | 2.93 | 37.2 | 110 |
+| a face handle dragged, with the libraries | 2.97 | 3.27 | 3.03 | 80.3 | 109 |
+| a door moved every frame, dependency-free | 0.98 | 10.5 | 47.7 | 89.1 | 31 |
+| a face handle dragged, dependency-free | 1.18 | 10.7 | 48.5 | 103 | 30 |
+
+| sweep, 2,000 arrangements a kind | pieces skipped | refused | problems | with small faces on others | with flat faces meeting at a ridge | with faces of no area | unresolved places |
+|---|---|---|---|---|---|---|---|
+| exact, wedges, stairs, arches and outlines | 738 | 0 | **0** (see below) | 165 | **2** | 96 | 405 |
+| exact, hostile meshes among boxes, rooms and wedges | 1,805 | 0 | **0** | 183 | 0 | 122 | 352 |
+| grid 0.08 m, wedges, stairs, arches and outlines | 738 | 0 | **0** | 26 | 0 | 48 | 158,703 |
+| grid 0.08 m, hostile meshes among boxes, rooms and wedges | 346 | 0 | **0** | 123 | 0 | 31 | 13,200 |
+
+The eight older rows are 0 problems as before, with 0 in the new column, and their other counts are the same to
+the number. The timed rows are of 2026-11-11 on main `d03f3f4c`; the sweep's rows are of the rerun on main
+`e978001a` with the judge as it is now (the kernel's files are the same in both).
+
+**What changed in the judge, and what did not change in the kernel.** The timed run's exact row of the new shapes
+read 2 problems - seeds 475 and 1337, "flat faces on top of each other". Both are a flat side against a round room's
+wall, an outline of 256 points, along the ridge between two facets 1.4 degrees apart:
+
+- **seed 475:** a stairs' side touches the ridge. The ridge is a float's rounding past the side at one end (a
+  millionth of a metre) and on it at the other; a needle of the side 2.5 m long and 0.18 mm wide is left, back to
+  back with the two facets - a closed crack a micron thick.
+- **seed 1337:** a cutter's end is 0.04 mm short of the ridge. That is the pieces' own numbers, not rounding: the
+  room's inner outline is mitred, 0.5 m x (1 / cos(pi / 256) - 1) = 0.038 mm past its circle. A skin of wall 0.04 mm
+  thick and 3.1 mm wide is left between the cutter's end and the facets.
+
+Both meshes are closed and are what was asked for; neither is a doubled wall. The check for faces on top of each
+other takes two back-to-back faces for one plane within a hundred-thousandth of the result's size and names these
+pairs because the strip stays inside that distance; the two planes are 0.7 degrees apart and cross in a line. The
+judge (`meet_at_a_ridge`, `stress/stress_blockout.inc`) now sets such a pair apart when all of this holds: the two
+faces are back to back; each is flat to that distance and 0.1 mm wide or more (so the angle is the planes' own and
+not the rounding of a needle's corners); their planes are 5e-3 (0.3 degrees) or more apart. At that angle the check
+itself cannot name a strip wider than four thousandths of the size (2 cm of a 5 m result). Pairs that look the same
+way - a pocket or a doubled skin - and two faces of one plane are problems as before. The set-apart pairs have a
+column of their own. A kernel pass that snaps a round piece's corners onto another piece's flat side within the
+tolerance would close seed 475's crack; it is not in this round (it would move every row, and seed 1337's skin is
+eight tolerances thick - how rooms are offset, not a defect).
+
+The exact path skips more mesh pieces than the grid (1,805 against 346): a mesh Manifold refuses is skipped by name
+there, and the grid takes it.
+
+## Pass 23: the goal on a whole interior (round 483, task 0459)
+Timed 2026-11-13 13:47, alone on the machine (AMD64, 32 threads, RTX 4070 SUPER), the section's bench rows
+(`BLENDITY_BLOCKOUT_BENCH=1 blendity_stress --only blockout`; the whole section at 12:22, before the L room moved 0.1 m), with
+Blender's libraries / without. `benchscene blockout`: 100 pieces, 16,438 faces; `benchscene blockout 400`: 400 pieces,
+18,222 faces. A drag is 600 frames, one every 16.7 ms; a frame is the main thread's whole `step_frame_headless`; a
+landing is timed from the first move whose mesh had not yet been shown. The goal: no frame over 16.7 ms, the mesh
+within 100 ms.
+
+| drag | frame median ms | 1 % slowest ms | worst ms | frames a second, 1 % low | move to mesh median ms | worst ms | landings | verdict |
+|---|---|---|---|---|---|---|---|---|
+| libraries, 100 pieces, a door slid | 1.91 | 17.57 | 20.20 | 56.9 | 32.85 | 60.37 | 245 | OVER (the frame) |
+| libraries, 100 pieces, a face handle | 1.64 | 16.36 | 17.18 | 60.0 | 32.70 | 92.64 | 237 | OVER (the frame) |
+| libraries, 400 pieces, a door slid | 2.05 | 20.35 | 21.06 | 49.1 | 65.25 | 112.60 | 123 | OVER (the frame) |
+| libraries, 400 pieces, a face handle | 1.78 | 19.50 | 19.98 | 51.3 | 65.08 | 143.99 | 124 | OVER (the frame) |
+| no libraries, 100 pieces, a door slid | 1.72 | 21.70 | 26.57 | 46.1 | 33.43 | 75.40 | 202 | OVER (the frame) |
+| no libraries, 100 pieces, a face handle | 1.36 | 21.05 | 26.53 | 47.5 | 33.10 | 105.54 | 202 | OVER (the frame) |
+| no libraries, 400 pieces, a door slid | 1.87 | 28.87 | 36.85 | 34.6 | 159.94 | 208.79 | 56 | OVER (both) |
+| no libraries, 400 pieces, a face handle | 1.61 | 27.88 | 33.42 | 35.9 | 159.54 | 250.80 | 56 | OVER (both) |
+
+No kernel call ran on the main thread in any row. The old test interior (`interior 100`, 392 faces) in the 12:22 run:
+frame median 3.0 ms, worst 4.7 ms with the libraries (ok); 1.1 / 9.4 ms without, its mesh in 48 ms. The slow frames
+are those that first draw a newly landed mesh of 16 to 18 thousand faces (read from the code, not profiled). The 14
+robustness sweeps (28,000 + 1,000 arrangements) are the same as round 482's row for row: 0 refused, 0 problems.
+
+## Round 504: the performance survey's sections
+
+`blendity_stress --only image_edit | sculpt_paint | sequencer | importers | unity_export | asset_windows | cold_first_use`
+(named-only; `--quick` for the smallest size). Their numbers and the ranked list are `docs/perf/sweep-504.md`.
+
+## Round 508: the image editor's heavy sliders, sculpting 500k faces, the bake's pages
+
+The four blur-based filters (Clarity, Dehaze, Sharpen, Noise Reduction) redid their whole filter each slider move although the
+blur does not depend on the amount: their parts are kept per step (`FilterKeep`), the blur's vertical pass runs in blocks over
+the job threads, and Dehaze's airlight is a histogram's bin sorted, not the plane. Sliders 30 - 51 -> 10.1 - 10.4 ms (Noise
+Reduction 18.3). Opening a 4096 x 4096 picture: the decode on a worker, 181 -> 33 ms. A sculpt dab on 500k faces scanned the
+whole mesh for what moved, made every face's normals and the whole box again; it now tells the render mesh what it moved
+(`Mesh::note_moved`): 19.6 - 20.6 -> 15.4 - 16.6 ms on CPU views, 6 - 8 ms on the card. A finished bake's lightmap pages go to
+the card before it lands (ADR 0140): the landing frame 78 -> 41 ms at 4.19 M texels, 28 -> 19 ms at 0.26 M.
+
+## Pass 25: the speed survey and what it fixed (rounds 504, 506-508, 511)
+
+Pass 25's speed stream timed every part of the program that had no row, ranked what a user would notice by how far a row
+is over its ADR 0105 budget (the ratio) times how often it is met, and fixed from the top. The ranked list, with the
+machine and the method, is `docs/perf/sweep-504.md` (tables in `sweep-504-tables.md`); round 506's Scene view tables are
+`sweep-506-scene-views.md`. The budgets: 16.7 ms for a live drag, scroll or typed letter; 50 ms for a frame while a job
+runs; 100 ms for the one frame an indivisible operation lands in; a single call that blocks the window for over 100 ms is
+OVER whatever it is.
+
+The "after the fixing round" column is the number the fixing round reported (one run on its own, named in its CHANGELOG
+entry). The "Round 511" column is round 511's timed run of the whole suite on a tree holding every open round, in a quiet
+window; the tables of that run, its method and the regression checks are `docs/perf/verify-511.md`, and they are not
+repeated here. A cell it has no number for says so.
+
+### The survey's new sections (round 504)
+
+Seven named-only stress sections in `stress/stress_survey.inc` (`blendity_stress --only <name>`, `--quick` for the smallest
+size), all in `tools/perf_suite.py`'s default sections: `image_edit`, `sculpt_paint`, `sequencer`, `importers`,
+`unity_export`, `asset_windows`, `cold_first_use`; round 506 added `scene_views` (50,000 and 10,000 cubes on the card,
+six actions, each off / on / off again). One timed run of all 23 sections took 28 minutes. Most of what was newly timed
+is inside its budget: the sequencer (scrub and play at 32 strips: 2 ms), the History window, the command palette (a
+letter under 3 ms), the Materials window at 2,000 materials, texture, weight and mask paint, the VRM and PMX imports
+(landing frames 12-88 ms) and every cold first use but the Render window's.
+
+### What each round fixed, by the survey's ranked line
+
+| Line | What the user sees | Before (the fixing round's own measurement) | After the fixing round | Round 511 (joined tree, timed) | Budget |
+|---|---|---|---|---|---|
+| 1 (round 506) | Scene view of 50,000 cubes on the card, camera orbiting, Shaded, windowed app | 32.6 - 39.8 ms a frame | 9.6 - 10.2 ms | 12.0 ms (ok) | 16.7 ms |
+| 1 (round 506) | The same, Solid shading | 53.6 ms | 18.0 ms (over by 1.3 ms) | 15.3 ms (ok) | 16.7 ms |
+| 1 (round 506) | A Scene view and a Game view both drawn, 50,000 cubes | 121.4 ms | 77.2 ms (OVER) | 81.6 ms (OVER) | 16.7 ms |
+| 1 (round 506) | One object moved every frame, 50,000 cubes | 243.3 ms | 206.1 ms (OVER; not slower was the criterion) | 216.7 ms (OVER; still not slower than the 243.3 before) | 16.7 ms |
+| 1 (round 506) | 10,000 cubes: orbit Shaded / Solid / both views / a drag | 6.9 / 9.0 / 25.1 / 46.2 ms | 3.7 / 3.4 / 18.4 / 39.6 ms | not re-timed in round 511 (`verify-511.md` has no 10,000-cube rows) | 16.7 ms |
+| 4 (round 508) | Dragging Clarity, Dehaze, Sharpen in the Editing window | 30 - 51 ms the slider's longest frame | 10.1 - 10.4 ms (Noise Reduction 18.3 ms) | 10.2 / 9.9 / 10.5 ms (ok); Noise Reduction 18.1 / 19.4 ms (OVER, as before) | 16.7 ms |
+| 15 (round 508) | Opening a 4096 x 4096 picture in the Editing window | the frame 181 ms (decode 152 ms) | the frame 33 ms (decode on a worker) | 30.4 ms (ok) | 100 ms |
+| 5 (round 508) | Sculpting a 500k-face mesh, a working frame, CPU views | 19.6 - 20.6 ms | 15.4 - 16.6 ms (6 - 8 ms on the card) | 15.0 - 19.2 ms (at the edge: 6 - 7 of 10 brushes ok); card views 5.9 - 7.7 ms (ok) | 16.7 ms |
+| 9 (round 508) | The frame a finished bake lands in (lightmap pages to the card) | 78 ms at 4.19 M texels, 28 ms at 0.26 M | 41 ms, 19 ms | 33.8 ms at 4.19 M texels (ok); 0.26 M not re-timed in round 511 | 100 ms |
+| 6 (round 507) | A Unity scene's import, the one call | 1,000 objects 247 ms, 10,000 objects 1.74 s | a third to a quarter of that; 111 ms at 1,000 objects, 533 ms at 10,000 (still over; the parse and the build in slices are a round of their own) | 104 / 493 ms with the index kept, 174 / 565 ms the first import (OVER) | 100 ms (250 ms for the first import) |
+| 7 (round 507) | `export unitypackage` | threw `bad allocation` on nested folders; the folder walk on the main thread | fixed; the walk on the worker, the call 0.4 - 0.9 ms (100 objects) | 0.2 ms (ok) | no call over 100 ms |
+| 8 (round 507) | `budget pc` | SideRail 10 s in one call (on record) | counted on a worker, the call returns at once (101 objects: 1.1 ms); SideRail not re-measured | the call 0.8 ms (ok); SideRail not re-timed in round 511 | no call over 100 ms |
+| 10 (round 507) | A render to video's frames | the longest frame 181 ms (the start frame alone) | start frame 349 ms - 2.3 s (first use), steady frames median 2.0 ms and longest 6.2 ms warm | steady frames 1.9 ms median, 7.0 ms longest; start frame 185 ms; end 24 ms (ok, start frame named) | 50 ms a frame |
+
+How the rounds moved each number:
+- **Round 506, the Scene view's kept work.** What the CPU did for every object every frame and did not change is kept while
+  the scene holds (ADR 0115's change counter): the card's per-instance buffers, the lights and probes, the instances' key,
+  the draw-item list, the refusal check, Solid's item list and the Hierarchy's rows. Each keep turned off alone over the
+  Shaded orbit is worth: the lights 7.6 ms, the card's buffers 5.6, the refusal check 3.4, the item copy 1.2, the
+  instance key 1.0. Two keeps that did not move the frame by 0.5 ms were taken out again.
+- **Round 507, landing frames.** `export unitypackage`'s folder walk and `budget pc`'s count run on a worker; a bake's
+  files are moved by a job of their own; a Unity import asks the library once a GUID and keeps the GUID index while
+  Assets is unchanged.
+- **Round 508.** The four blur-based filters keep what they work out from their input, the blur's vertical pass goes by
+  blocks of 64 columns, Dehaze's airlight is a histogram's bin, a picture opens on a worker; a sculpt dab says which
+  vertices it moved (`Mesh::note_moved`) so the render mesh's scan, bounds and retriangulation walk those and not the
+  mesh; a finished bake's pages go to the card before it lands (ADR 0140).
+
+### Rows round 504 saw move against the baseline (not over a budget)
+
+`perf_suite.py` reported 11 rows more than 20 % slower than `stress/results/baseline.md`, on one run each: Scene save of a
+393k-vertex mesh (10.8 -> 22.6 ms), Subdivide 2 levels on the 50k sphere, the longest frame (3.1 -> 12.1 ms), opening the
+10,000 cubes' scene (1.0 -> 8.3 ms), fbx / obj export of the 50k sphere (3.4 / 3.0 -> 7.1 / 4.3 ms), F12 rasterized on 400
+spheres (3.5 -> 5.1 ms), moving an object with glass / transparent materials in Solid and Shaded (12.35 -> 19.68 ms and
+13.00 -> 16.44 ms), and with toon materials (8.98 -> 11.11 ms).
+Round 511 ran the whole suite again (49 findings against the old baseline) and each section with one again in two more
+quiet windows, on the joined tree, on main, on main + #412 alone and with round 506's keeps off (`verify-511.md`,
+"Regressions"). None is a regression from the open rounds. Save / open / export of the bench scenes (4.3 - 11.5 ms, all
+under 21 ms against 50) are the same on main: merged rounds, not a regression of note. Imports of the 50k sphere (2 - 7 ms)
+and F12 path traced on the CPU (7.2 ms against 3.0) are noise-sized and under budget. The three card rows of moving an
+object (toon, glass in Solid, camera filters on the Main Camera) give one of two levels from run to run on the same build,
+main included (toon 4.9 or 12 ms, glass in Solid 15.9 or 20 ms), so a single run cannot call them a regression; a quiet
+repeat of `editor_render` is the open item.
+
+### What is left over budget (confirmed on round 511's joined tree)
+
+- The Scene view with both a Scene and a Game view at 50,000 cubes (77 ms) and with an object moved every frame (206 ms):
+  their cost is the work per object that changes, not the kept work (round 511: 81.6 ms and 216.7 ms against 16.7).
+- Solid shading's orbit at 50,000 cubes is no longer over: 15.3 ms in round 511 (Shaded 12.0).
+- Noise Reduction's slider (18.1 - 19.4 ms against 16.7) and the four filters' whole-picture results at 4096 (111 - 325 ms,
+  one call on the main thread for an export).
+- A Unity scene's import at 10,000 objects (493 ms with the index kept, 565 ms the first import, against 250; 1,000
+  objects 104 / 174 against 100): the parse on a worker, then the objects made in slices.
+- Posing a whole body (35 - 53 ms; Pass 22's open decision: skinning on the card), outside this pass.
+- Blockout's kernel at 100 interior pieces (180 - 187 ms a build, Pass 23b's) and Enter Edit Mode on the 500k sphere
+  (round 511: 94 - 100 ms against 100, at the edge, CPU views only; the Blockout kernel's builds 182 - 196 ms).
+- Sculpting 500k faces on the CPU views (15.0 - 19.2 ms; 3 - 4 of 10 brushes over, at the edge; card views 5.9 - 7.7 ms) and
+  a render to video's start frame (185 ms against 100; steady frames 1.9 ms).
+- The Render window's first open (182 ms), the Textures window's first open at 2,000 textures (273 ms), an MMD motion of
+  30,000 keys (347 - 355 ms), a Godot scene of 10,000 nodes (180 ms) and a colour mask's whole-picture result at 4096
+  (109 ms), none taken up in this pass.
+- The whole suite's count of rows over budget: 51 against the old baseline and 51 in the new one (`verify-511.md`: "51 rows
+  over as before"); round 504's count for the rows outside this pass was posing 41, Blockout 8, Edit Mode entry 1. The
+  rows Pass 25 fixed (the Scene view orbit, the image sliders, the picture open, the bake landing, `export unitypackage`,
+  `budget pc`) are ok in round 511; the rows still over are listed above. Round 511 gives no split of the 51 by section,
+  so none is given here.
+
+## Round 511: Pass 25's verify
+
+The whole suite again on a merge of every open round, and the survey's ranked list before / after:
+`docs/perf/verify-511.md`. The new `stress/results/baseline.md` is that run's. The rows still over budget are listed
+there with their cause and owner; three card rows while dragging (toon, glass in Solid, camera filters) give one of two
+levels from run to run on the same build and want a quiet repeat before anyone calls them a regression.

@@ -206,6 +206,51 @@ AABB Mesh::bounds() const {
   return b;
 }
 
+/* The same box, a chunk of vertices on each thread (round 508: a sculpt dab at 500k faces spent 5 ms here on one). The
+ * min and max of a set don't depend on the order, so the box is the same bits. */
+AABB Mesh::positions_bounds() const {
+  const size_t n = positions.size(), chunk = 32768, chunks = (n + chunk - 1) / chunk;
+  if (chunks <= 1) return bounds();
+  std::vector<AABB> part(chunks);
+  JobSystem::global().parallel_for((int64_t)chunks, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++)
+      for (size_t i = (size_t)k * chunk; i < std::min(n, ((size_t)k + 1) * chunk); i++) part[(size_t)k].add(positions[i]);
+  });
+  AABB all;
+  for (const AABB &p : part) all.add(p);
+  return all;
+}
+
+void Mesh::note_moved(const std::vector<uint32_t> &ids) {
+  MovedLog &log = moved_log_;
+  if (!log.entries.empty() && log.entries.back().to == deform_version) {  // (said twice of one bump: both count)
+    log.entries.back().ids.insert(log.entries.back().ids.end(), ids.begin(), ids.end());
+    log.ids += ids.size();
+    return;
+  }
+  if (!log.entries.empty() && log.entries.back().to + 1 != deform_version) log.entries.clear(), log.ids = 0;  // (a bump nobody noted in between: the chain starts here)
+  log.entries.push_back({deform_version, ids});
+  log.ids += ids.size();
+  /* Bounded: a render cache a few frames behind is served, one further behind scans (the oldest notes go first). */
+  while (log.entries.size() > 1 && (log.entries.size() > 32 || log.ids > positions.size() * 2 + 1024)) {
+    log.ids -= log.entries.front().ids.size();
+    log.entries.erase(log.entries.begin());
+  }
+}
+
+bool Mesh::noted_moved(int ci, std::vector<uint32_t> &verts) const {
+  const MovedLog &log = moved_log_;
+  /* A `version` bump since the cache (touch(): an edit nobody noted) breaks the chain whatever the notes say. */
+  if (log.entries.empty() || log.entries.back().to != deform_version || cache_deform_[ci] >= deform_version || cache_version_[ci] != version) return false;
+  const uint64_t first = cache_deform_[ci] + 1;
+  if (log.entries.front().to > first) return false;  // (the notes begin after the cache's last: some bump is unnoted)
+  verts.clear();
+  for (size_t e = (size_t)(first - log.entries.front().to); e < log.entries.size(); e++) verts.insert(verts.end(), log.entries[e].ids.begin(), log.entries[e].ids.end());
+  std::sort(verts.begin(), verts.end());
+  verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
+  return true;
+}
+
 void Mesh::edges(std::vector<std::pair<uint32_t, uint32_t>> &out) const {
   /* Linear-time edge table: bucket every corner edge by its lower vertex
    * (counting sort / CSR), then de-duplicate each tiny bucket in place.
@@ -260,6 +305,8 @@ std::atomic<uint64_t> g_partial_normals{0};
 std::atomic<uint64_t> g_in_place_normals_us{0}, g_in_place_tangents_us{0};  // (round 468: parts of kStatInPlace's time)
 std::atomic<uint64_t> g_in_place_refused{0}, g_in_place_split{0};            // (round 468: moves refused; round 470: corners split in place)
 std::atomic<uint64_t> g_settled{0};
+std::atomic<uint64_t> g_normal_faces{0};
+std::atomic<uint64_t> g_in_place_scan_us{0}, g_in_place_retri_us{0}, g_in_place_bounds_us{0};  // (round 508: parts of kStatInPlace's time)
 std::atomic<float> g_partial_share{0.25f};  // (corner_normals_moved: the share of faces moved up to which it runs)
 std::atomic<bool> g_whole_tangents{false};  // tests (round 470): the quick tangents always for the whole mesh, to compare against
 std::atomic<bool> g_serial_build{false};  // tests: the build before task 0109 (one thread, a map of corners), to compare against
@@ -285,6 +332,10 @@ MeshCounts mesh_counts() {
   c.partial_normals = g_partial_normals.load(std::memory_order_relaxed);
   c.ms_in_place_normals = g_in_place_normals_us.load(std::memory_order_relaxed) / 1000.0;
   c.ms_in_place_tangents = g_in_place_tangents_us.load(std::memory_order_relaxed) / 1000.0;
+  c.normal_faces = g_normal_faces.load(std::memory_order_relaxed);
+  c.ms_in_place_scan = g_in_place_scan_us.load(std::memory_order_relaxed) / 1000.0;
+  c.ms_in_place_retri = g_in_place_retri_us.load(std::memory_order_relaxed) / 1000.0;
+  c.ms_in_place_bounds = g_in_place_bounds_us.load(std::memory_order_relaxed) / 1000.0;
   c.in_place_refused = g_in_place_refused.load(std::memory_order_relaxed);
   c.in_place_split = g_in_place_split.load(std::memory_order_relaxed);
   c.settled = g_settled.load(std::memory_order_relaxed);
@@ -299,6 +350,9 @@ MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
   d.ms_copies = ms_copies - o.ms_copies, d.ms_full_builds = ms_full_builds - o.ms_full_builds;
   d.ms_in_place = ms_in_place - o.ms_in_place, d.ms_tangents = ms_tangents - o.ms_tangents, d.ms_edges = ms_edges - o.ms_edges;
   d.ms_in_place_normals = ms_in_place_normals - o.ms_in_place_normals, d.ms_in_place_tangents = ms_in_place_tangents - o.ms_in_place_tangents;
+  d.normal_faces = normal_faces - o.normal_faces;
+  d.ms_in_place_scan = ms_in_place_scan - o.ms_in_place_scan, d.ms_in_place_retri = ms_in_place_retri - o.ms_in_place_retri;
+  d.ms_in_place_bounds = ms_in_place_bounds - o.ms_in_place_bounds;
   d.in_place_refused = in_place_refused - o.in_place_refused, d.in_place_split = in_place_split - o.in_place_split;
   d.settled = settled - o.settled;
   return d;
@@ -912,9 +966,10 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return refused();
   /* Which faces moved, before anything is written: only they are split into triangles again (task 0090). */
   std::vector<uint32_t> faces;
-  moved_faces(ci, faces);
-  std::vector<uint8_t> fmoved(face_count(), 0);
-  for (uint32_t f : faces) fmoved[f] = 1;
+  ScopedTimer scan_timer;
+  BoundsGrowth grown;
+  moved_faces(ci, faces, &grown);
+  g_in_place_scan_us.fetch_add((uint64_t)(scan_timer.ms() * 1000.0), std::memory_order_relaxed);
   /* Task 0099: only the normals around the moved faces, from what this cache's last in-place pass kept (the same to
    * the bit), and only their corners written. The first frame after a build or a copy works out the whole mesh. */
   NormalState &ns = nstate_[ci];
@@ -923,11 +978,14 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   ScopedTimer normals_timer;  // (round 468: the normals and their corners, apart in MeshCounts)
   const bool partial = !custom_normals_fit() && corner_normals_moved(ns, flat, faces, verts);
   if (!partial) corner_normals(flat, ns.cnormal, &ns);
+  g_normal_faces.fetch_add(partial ? faces.size() : face_count(), std::memory_order_relaxed);
   std::vector<uint32_t> split;  // (corners whose normal left their render vertex's: each got one of its own)
   const bool written = partial ? write_corners_at(ci, ns.cnormal, verts, changed, split) : write_corners(ci, ns.cnormal, changed, split);
   g_in_place_normals_us.fetch_add((uint64_t)(normals_timer.ms() * 1000.0), std::memory_order_relaxed);
   if (!written) return refused();
-  if (!retriangulate(rm, crv, &fmoved)) return refused();
+  ScopedTimer retri_timer;
+  if (!retriangulate(rm, crv, &faces)) return refused();
+  g_in_place_retri_us.fetch_add((uint64_t)(retri_timer.ms() * 1000.0), std::memory_order_relaxed);
   split_slots(ci, split);
   g_in_place_split.fetch_add(split.size(), std::memory_order_relaxed);
   bool tangents_rewritten = false;
@@ -951,7 +1009,10 @@ bool Mesh::update_in_place(int ci, bool flat) const {
     cache_approx_[ci] = true;
     g_in_place_tangents_us.fetch_add((uint64_t)(tangents_timer.ms() * 1000.0), std::memory_order_relaxed);
   }
-  rm.bounds = bounds();
+  ScopedTimer bounds_timer;
+  if (grown.exact) rm.bounds.add(grown.box);  // (no vertex stood on the old box's sides: the same box as a scan finds)
+  else rm.bounds = positions_bounds();
+  g_in_place_bounds_us.fetch_add((uint64_t)(bounds_timer.ms() * 1000.0), std::memory_order_relaxed);
   record_moved(rm, changed, faces);
   if (tangents_rewritten) rm.moved_from = 0;  // (every tangent written again: copies take it whole)
   rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
@@ -965,7 +1026,8 @@ bool Mesh::update_in_place(int ci, bool flat) const {
 
 /* One test per vertex, against the render vertex of its first corner (every render vertex of a vertex carries its
  * position), and the faces from the moved vertices' own: no pass over every corner and face. */
-void Mesh::moved_faces(int ci, std::vector<uint32_t> &faces) const {
+void Mesh::moved_faces(int ci, std::vector<uint32_t> &faces, BoundsGrowth *grown) const {
+  if (grown) *grown = BoundsGrowth();
   const RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   std::vector<uint32_t> &first = nstate_[ci].vfirst;
@@ -975,6 +1037,34 @@ void Mesh::moved_faces(int ci, std::vector<uint32_t> &faces) const {
       if (corner_verts[c] < first.size()) first[corner_verts[c]] = crv[c];
   }
   const VertexFaces &vf = vertex_faces();
+  /* Round 508: told which vertices moved (a sculpt dab), only those are compared and the faces are gathered from them -
+   * nothing here grows with the mesh. */
+  std::vector<uint32_t> noted;
+  if (noted_moved(ci, noted)) {
+    faces.clear();
+    /* The box follows too: it is the old box grown by the new positions as long as no moved vertex stood on the old
+     * box's sides (then another vertex still stands there, unmoved) and every new position is a number; else the caller
+     * takes the whole scan (`grown->exact` false). */
+    bool exact = grown && rm.bounds.valid();
+    for (uint32_t v : noted) {
+      if (v >= positions.size()) continue;
+      const uint32_t rv = first[v];
+      if (rv >= rm.positions.size()) {  // (a vertex no face uses: no render vertex to compare with; the box is scanned)
+        exact = false;
+        continue;
+      }
+      if (std::memcmp(&rm.positions[rv], &positions[v], sizeof(Vec3)) == 0) continue;
+      faces.insert(faces.end(), vf.faces.begin() + vf.offsets[v], vf.faces.begin() + vf.offsets[v + 1]);
+      if (!exact) continue;
+      const Vec3 &was = rm.positions[rv], &now = positions[v];
+      for (int a = 0; a < 3; a++) exact = exact && std::isfinite(now[a]) && was[a] != rm.bounds.min[a] && was[a] != rm.bounds.max[a];
+      grown->box.add(now);
+    }
+    if (grown) grown->exact = exact;
+    std::sort(faces.begin(), faces.end());
+    faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+    return;
+  }
   std::vector<uint8_t> mark(face_count(), 0);
   size_t marked = 0;
   for (size_t v = 0; v < positions.size(); v++) {
@@ -1102,7 +1192,7 @@ void Mesh::record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const st
 /* Quads and n-gons triangulated from the current positions, written over the build's triangles in place: face f's
  * triangles start where the faces before it end (n - 2 each, as the build emits them). False if the slots don't add
  * up (a render mesh from another topology). */
-bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint8_t> *moved) const {
+bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint32_t> *moved) const {
   const size_t nf = face_count();
   const uint64_t topo = topology_serial();
   if (tri_topo_ != topo) {  // (once per topology, not every frame of a drag or a deform)
@@ -1118,19 +1208,21 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
   const std::vector<uint32_t> &start = tri_start_;
   if ((size_t)start[nf] * 3 != rm.indices.size() || rm.tri_corner.size() != rm.indices.size()) return false;
   if (!tri_big_) return true;
-  JobSystem::global().parallel_for((int64_t)nf, 1024, [&](int64_t f0, int64_t f1) {
-    std::vector<uint32_t> local;
-    for (int64_t f = f0; f < f1; f++) {
-      if (face_size((size_t)f) <= 3 || face_hidden((size_t)f)) continue;
-      if (moved && (size_t)f < moved->size() && !(*moved)[(size_t)f]) continue;  // (its triangles stand: only its own corners decide them)
-      triangulate_face(*this, (size_t)f, local);
-      const uint32_t base = face_offsets[(size_t)f];
-      const size_t t0 = (size_t)start[(size_t)f] * 3;
-      for (size_t i = 0; i < local.size(); i++) {
-        rm.indices[t0 + i] = crv[base + local[i]];
-        rm.tri_corner[t0 + i] = base + local[i];
-      }
+  /* (A face that didn't move keeps its triangles: only its own corners decide them.) */
+  auto one = [&](size_t f, std::vector<uint32_t> &local) {
+    if (f >= nf || face_size(f) <= 3 || face_hidden(f)) return;
+    triangulate_face(*this, f, local);
+    const uint32_t base = face_offsets[f];
+    const size_t t0 = (size_t)start[f] * 3;
+    for (size_t i = 0; i < local.size(); i++) {
+      rm.indices[t0 + i] = crv[base + local[i]];
+      rm.tri_corner[t0 + i] = base + local[i];
     }
+  };
+  const int64_t count = moved ? (int64_t)moved->size() : (int64_t)nf;
+  JobSystem::global().parallel_for(count, 1024, [&](int64_t a, int64_t b) {
+    std::vector<uint32_t> local;
+    for (int64_t i = a; i < b; i++) one(moved ? (size_t)(*moved)[(size_t)i] : (size_t)i, local);
   });
   return true;
 }

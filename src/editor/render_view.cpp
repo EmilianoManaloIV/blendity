@@ -5,6 +5,8 @@
 //   * Rendered viewport + final render: progressive path tracer (Blender: Cycles)
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
+#include "view_keeps.h"
+#include "../core/view_perf.h"
 #include "../core/profiling.h"
 #include "../render/dof.h"
 #include "../render/display.h"
@@ -14,6 +16,7 @@
 #include "../render/sky.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <atomic>
 #include <cstring>
@@ -431,30 +434,79 @@ uint64_t Editor::items_view_key() const {
  * tables. In verify mode (the render cache's) a kept list is gathered again and compared: a difference is a stale
  * picture. */
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  uint64_t gen = 0;
+  const std::vector<DrawItem> &kept = collect_items_ref(game, want_tangents, &gen);
+  view_perf::counters.item_copies++;
+  view_perf::miss(view_perf::ItemsCopy);
+  view_perf::Timed copy_time(view_perf::counters.items_copy_ms);
+  return kept;
+}
+
+/* The list itself, a reference into items_cache_: it holds until the next gather of the same [game][tangents] replaces it, so a
+ * caller that keeps the reference (render_deferred) must not run another collect_items of that variant meanwhile. `gen` is the
+ * list's generation, 0 for a list that isn't kept (it is still the cache's vector - cleared by the next gather). */
+const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tangents, uint64_t *gen) {
   /* (Of what is shown: the preview's own staleness while there is one.) */
   lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
                    (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
   bool view_dep = false, lod = false;
-  ItemsCache &c = items_cache_[game][want_tangents];
+  const int variant = game ? (lod_view_.on ? 1 : 2) : 0;  // (the Game view sets lod_view_; the Camera Preview and the rest do not: items_key differs, so each has an entry)
+  ItemsCache &c = items_cache_[variant][want_tangents];
   const uint64_t base = items_key(game, want_tangents);
   const uint64_t view = items_view_key();
   /* (A render job's gather holds the outline shells its items point at - collect_hold_ - so it gathers: review 436.) */
   const bool hit = c.valid && c.base == base && (!c.view_dep || c.view == view) && !collect_hold_;
+  assert(keeps_.cur_items != &c.items || hit);  // (a gather that replaces the list render_deferred is working on)
   if (hit && !cache_verify_) {
     prof_.items_kept++;
     flatten_pivots_.clear(), view_refs_.clear();  // (as the gather leaves them for a scene without either)
     flatten_any_ = view_shapes_any_ = false;
+    *gen = keeps_.items_gen[variant][want_tangents];
     return c.items;
   }
+  view_perf::counters.item_gathers++;
   std::vector<DrawItem> items = collect_items_build(game, want_tangents, view_dep, lod);
-  if (hit && !same_draw_items(items, c.items)) note_render_cache_mismatch();
+  const bool same = hit && same_draw_items(items, c.items);  // (verify mode: the kept list gathered again)
+  if (hit && !same) note_render_cache_mismatch();
   c.base = base, c.view = view, c.view_dep = view_dep;
   c.flattening = flatten_any_ || view_shapes_any_;
   c.lod = lod;
   c.valid = !c.flattening && !c.lod;
-  if (c.valid) c.items = items;
-  else c.items.clear();
-  return items;
+  if (!same) c.items = std::move(items);
+  if (c.valid && !same) keeps_.items_gen[variant][want_tangents] = view_keeps::next_items_gen();  // (a new list: what was kept of the old one is stale)
+  *gen = c.valid ? keeps_.items_gen[variant][want_tangents] : 0;
+  return c.items;
+}
+
+/* Round 506: Solid shading's items kept on the scene's hash, as the other lists are (its own cache per [game], its own generation:
+ * the card's keeps below it work there too). The hash holds everything the items are made from - the objects' flags, meshes,
+ * materials, placements - except what Edit Mode, Weight Paint and Sculpt put in them (the cage, the highlight, the weight colours:
+ * per-frame state), so those frames gather as before. Verify mode gathers again and compares. */
+const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, uint64_t *gen) {
+  ItemsCache &c = solid_cache_[game];
+  *gen = 0;
+  const bool kept_kind = view_perf::on(view_perf::SolidItems) && &s == scene_.get() && !edit_mode_ && !weight_paint_ && !sculpt_;
+  uint64_t base = 0;
+  bool hit = false;
+  if (kept_kind) {
+    base = scene_render_hash() ^ ((uint64_t)game + 1) * 0x9E3779B97F4A7C15ull;
+    hit = c.valid && (c.base == base || view_perf::stale(view_perf::SolidItems));
+    if (hit && !cache_verify_) {
+      *gen = keeps_.solid_gen[game];
+      view_perf::hit(view_perf::SolidItems);
+      return c.items;
+    }
+  }
+  view_perf::miss(view_perf::SolidItems);
+  view_perf::counters.solid_item_builds++;
+  std::vector<DrawItem> items = solid_items(s, game);
+  const bool same = hit && same_draw_items(items, c.items);
+  if (hit && !same) note_render_cache_mismatch();
+  c.valid = kept_kind, c.base = base;
+  if (!same) c.items = std::move(items);
+  if (kept_kind && !same) keeps_.solid_gen[game] = view_keeps::next_items_gen();
+  *gen = kept_kind ? keeps_.solid_gen[game] : 0;
+  return c.items;
 }
 
 std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod) {
@@ -666,6 +718,32 @@ std::string apply_render_components(const std::string &spec, LightingEnv &env, s
   return applied;
 }
 
+namespace {
+bool same_light(const RenderLight &a, const RenderLight &b) {
+  return a.type == b.type && a.bake_mode == b.bake_mode && std::memcmp(&a.direction, &b.direction, sizeof(Vec3)) == 0 &&
+         std::memcmp(&a.right, &b.right, sizeof(Vec3)) == 0 && a.cos_outer == b.cos_outer && a.cos_inner == b.cos_inner && a.width == b.width &&
+         a.height == b.height && a.disk == b.disk && std::memcmp(&a.position, &b.position, sizeof(Vec3)) == 0 &&
+         std::memcmp(&a.color, &b.color, sizeof(Vec3)) == 0 && a.intensity == b.intensity && a.range == b.range && a.shadows == b.shadows &&
+         a.shadow_radius == b.shadow_radius && a.shadow_angle == b.shadow_angle && a.baked_falloff == b.baked_falloff;
+}
+
+bool same_probe(const RenderProbe &a, const RenderProbe &b) {
+  return std::memcmp(&a.position, &b.position, sizeof(Vec3)) == 0 && std::memcmp(&a.box_min, &b.box_min, sizeof(Vec3)) == 0 &&
+         std::memcmp(&a.box_max, &b.box_max, sizeof(Vec3)) == 0 && a.projection == b.projection && a.intensity == b.intensity && a.blend == b.blend &&
+         a.importance == b.importance && a.map == b.map;
+}
+
+/* Verify mode: the walks just made are what the keep held. */
+bool same_lighting(const std::vector<RenderLight> &lights, const std::vector<RenderProbe> &probes, const Vec3 &sun, const view_keeps::LightingKeep &k) {
+  if (lights.size() != k.lights.size() || probes.size() != k.probes.size() || std::memcmp(&sun, &k.sun, sizeof(Vec3)) != 0) return false;
+  for (size_t i = 0; i < lights.size(); i++)
+    if (!same_light(lights[i], k.lights[i])) return false;
+  for (size_t i = 0; i < probes.size(); i++)
+    if (!same_probe(probes[i], k.probes[i])) return false;
+  return true;
+}
+}  // namespace
+
 LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
   LightingEnv env;
   const EnvironmentSettings &es = scene_->environment;
@@ -687,23 +765,79 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
     env.sky = env.equator = env.ground = Vec3(0.35f);
     return env;
   }
-  scene_->for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    auto *l = g.get<Light>();
-    if (!l || !l->enabled) return;
-    /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
-     * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
-    if (rasterized && l->mode == 2) return;
-    RenderLight rl = to_render_light(g, *l, unity_lights_gamma());  // (review 401: a Unity scene's lights shine as Unity's do)
-    /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
-     * Realtime since must not shine twice, and one added since must not vanish. */
-    const LightingData &ld = shown_lighting();
-    auto baked = ld.light_modes.find(g.id);
-    rl.bake_mode = baked != ld.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
-    env.lights.push_back(rl);
-  });
-  env.reflection_probes = render_reflection_probes();  // (round 401)
-  update_environment();
+  /* The scene's lights (a Baked one only before its bake shows), its reflection probes with a bake, and the sky's sun: three
+   * walks of the scene. Round 506 (keep 2): kept while the scene and what else they are made from hold still - the change counter,
+   * or, when it moved only by transforms (a cube dragged: no structure bump), the placement of the lights and probes themselves -
+   * walked again on an edit and, as the other walks are, on the interval. Everything made from the camera or the frame - the headlight, the exposure, the view transform - is above
+   * and is made every frame. */
+  view_keeps::LightingKeep &lk = keeps_.lighting[rasterized ? 1 : 0];
+  /* What the walks read beside the scene's objects: how they are asked, the gamma Unity's lights shine by, the bake shown (whose
+   * light modes each light takes) and the probe bakes (their places in memory: a bake that lands is a new one). */
+  const LightingData &ld = shown_lighting();
+  uint64_t key = kFnvBasis;
+  auto mix = [&](uint64_t v) { key = (key ^ v) * kFnvPrime; };
+  mix((uint64_t)rasterized | (uint64_t)unity_lights_gamma() << 1 | (uint64_t)scene_->lighting.baked_gi << 2);
+  mix((uint64_t)(uintptr_t)&ld), mix((uint64_t)ld.light_modes.size()), mix(lighting_gen_);
+  mix((uint64_t)reflection_probe_bakes_.size()), mix(reflection_probe_gen_);
+  for (const auto &[id, bake] : reflection_probe_bakes_) mix(id), mix((uint64_t)(uintptr_t)&bake);
+  const uint64_t epoch = edit_epoch::now(), structure = edit_epoch::structure();  // (read before the walks: a bump during them walks again next frame)
+  const bool stale = view_perf::stale(view_perf::Lighting);  // (a test's: the invalidation skipped)
+  auto tracked_stand = [&] {  // (the lights and probes are where the walks found them)
+    if (view_perf::stale_for_test & view_perf::kStaleTrackedBit) return true;  // (a test's)
+    for (const view_keeps::LightingKeep::Tracked &t : lk.tracked) {
+      GameObject *o = scene_->find(t.id);
+      if (!o || std::memcmp(o->world_matrix().m, t.world, sizeof(t.world)) != 0) return false;
+    }
+    return true;
+  };
+  const bool holds = view_perf::on(view_perf::Lighting) && in_frame_ && lk.valid &&
+                     (stale || (lk.stamp.scene == scene_.get() && lk.stamp.serial == scene_->serial && lk.key == key && lk.stamp.frame <= hash_frame_ &&
+                                !scene_hash_volatile() && (lk.stamp.epoch == epoch || (lk.stamp.structure == structure && tracked_stand()))));
+  const bool interval = holds && !stale && hash_frame_ - lk.stamp.frame >= (uint64_t)scene_hash_check_every_;
+  if (holds && !interval && !cache_verify_) {
+    env.lights = lk.lights;
+    env.reflection_probes = lk.probes;
+    view_perf::hit(view_perf::Lighting);
+    lk.stamp.epoch = epoch;  // (checked against this counter now)
+    const Vec3 kept_sun = lk.sun;
+    update_environment(&kept_sun, nullptr);
+    env.environment = &env_;
+    return env;
+  }
+  view_perf::miss(view_perf::Lighting);
+  view_perf::counters.light_walks++;
+  {
+    view_perf::Timed walk_time(view_perf::counters.lighting_ms);
+    std::vector<view_keeps::LightingKeep::Tracked> tracked;
+    scene_->for_each([&](GameObject &g) {
+      auto *l = g.get<Light>();
+      if (l || g.get<ReflectionProbeComponent>()) {  // (their placement is what the keep is kept on)
+        view_keeps::LightingKeep::Tracked t;
+        t.id = g.id;
+        std::memcpy(t.world, g.world_matrix().m, sizeof(t.world));
+        tracked.push_back(t);
+      }
+      if (!g.active_in_hierarchy()) return;
+      if (!l || !l->enabled) return;
+      /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
+       * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
+      if (rasterized && l->mode == 2) return;
+      RenderLight rl = to_render_light(g, *l, unity_lights_gamma());  // (review 401: a Unity scene's lights shine as Unity's do)
+      /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
+       * Realtime since must not shine twice, and one added since must not vanish. */
+      auto baked = ld.light_modes.find(g.id);
+      rl.bake_mode = baked != ld.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
+      env.lights.push_back(rl);
+    });
+    env.reflection_probes = render_reflection_probes();  // (round 401)
+    Vec3 sun = lk.sun;
+    update_environment(nullptr, &sun);
+    /* Verify mode: the walks the keep would have answered with, compared to these. */
+    if (holds && !interval && !same_lighting(env.lights, env.reflection_probes, sun, lk)) note_render_cache_mismatch();
+    lk.lights = env.lights, lk.probes = env.reflection_probes, lk.sun = sun, lk.key = key, lk.valid = true;
+    lk.tracked = std::move(tracked);
+    lk.stamp = {scene_.get(), scene_->serial, epoch, hash_frame_, structure, true};
+  }
   env.environment = &env_;
   return env;
 }
@@ -739,13 +873,16 @@ std::vector<RenderProbe> Editor::render_reflection_probes() {
   return out;
 }
 
-void Editor::update_environment() {
+void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   const EnvironmentSettings &es = scene_->environment;
   Vec3 sun{0.35f, 0.75f, -0.55f};
-  scene_->for_each([&](GameObject &g) {
-    if (auto *l = g.get<Light>())
-      if (l->enabled && l->type == 0 && g.active_in_hierarchy()) sun = -normalize(g.world_rotation().rotate({0, 0, 1}));
-  });
+  if (sun_in) sun = *sun_in;  // (round 506: make_lighting's keep holds the sun; no walk)
+  else
+    scene_->for_each([&](GameObject &g) {
+      if (auto *l = g.get<Light>())
+        if (l->enabled && l->type == 0 && g.active_in_hierarchy()) sun = -normalize(g.world_rotation().rotate({0, 0, 1}));
+    });
+  if (sun_out) *sun_out = sun;
   /* Cache key: everything the baked environment depends on. */
   uint64_t key = kFnvBasis;
   auto mix = [&](const void *p, size_t n) { key = fnv1a(p, n, key); };
@@ -1179,8 +1316,37 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
   if (game && game_view_drawing_) lod_view_ = {true, eye, 0.5f * p.m[5], p.m[15] == 1.0f};  // (round 363: the LOD Groups' levels, the Game view's alone)
+  const int list_variant = game ? (lod_view_.on ? 1 : 2) : 0;  // (as collect_items_ref picks its entry: the keeps below hold one slot a list)
   if (game) set_flatten_view(v, p, eye, 0, cam);  // (round 334: Camera Flatten in the Game view and renders, not the Scene view)
-  std::vector<DrawItem> items = collect_items(game, true);
+  /* Round 506 (keep 4): a kept list is used where it lies, not copied: `kept` is a reference into items_cache_ (collect_items_ref)
+   * and holds until the next gather of this variant, so no nested collect_items(game, true) may run while it is held (debug builds
+   * check it there). `owned` holds the list when it isn't the kept one - keeps off, or realtime GI's lightmaps written into the
+   * items below. */
+  std::vector<DrawItem> owned;
+  const std::vector<DrawItem> *kept = nullptr;
+  uint64_t items_gen = 0;
+  if (view_perf::keeps) kept = &collect_items_ref(game, true, &items_gen);
+  else owned = collect_items(game, true);
+  /* Realtime GI traces only what the bake doesn't hold (task 0017): with a current bake of every light
+   * that bounces, the views cost what Realtime GI off costs. Manual (task 0020): nothing traced, but the last realtime
+   * lightmaps and live probes stay up. (Decided here, after the gather it reads, and before the items are used.) */
+  const bool live_gi = scene_lights && live_gi_needed();
+  const bool frozen = scene_lights && lighting_frozen();
+  const bool lightmaps_written = (live_gi || frozen) && !vgi_[game ? 1 : 0].rtlm.shown.empty();
+  /* (A copy where the items are changed below - and, when the stress section turns this keep off alone, as before; the kept list's
+   * generation still names the copy, which is the same list.) */
+  const bool copy = kept && (lightmaps_written || !view_perf::on(view_perf::ItemsCopy));
+  if (copy) {
+    view_perf::Timed copy_time(view_perf::counters.items_copy_ms);
+    view_perf::counters.item_copies++;
+    view_perf::miss(view_perf::ItemsCopy);
+    owned = *kept;
+  }
+  else if (kept) view_perf::hit(view_perf::ItemsCopy);
+  if (kept && lightmaps_written) kept = nullptr, items_gen = 0;
+  const std::vector<DrawItem> &items = kept && !copy ? *kept : owned;
+  /* What the keeps below may know of this list: it is the kept one, under this generation, until the frame is done with it. */
+  view_keeps::CurrentList current(keeps_, kept ? &items : nullptr, kept ? items_gen : 0, list_variant * 2 + 1);
   outline_view_.on = false;
   lod_view_.on = false;
   flatten_view_.on = false;
@@ -1194,12 +1360,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
       env.shadow = sm;
     }
   }
-  /* Realtime GI traces only what the bake doesn't hold (task 0017): with a current bake of every light
-   * that bounces, the views cost what Realtime GI off costs. */
-  const bool live_gi = scene_lights && live_gi_needed();
   if (live_gi) env.gi = update_voxel_gi(items, env, game);
-  /* Manual (task 0020): nothing traced, but the last realtime lightmaps and live probes stay up. */
-  const bool frozen = scene_lights && lighting_frozen();
   bool bounce_not_baked = env.gi && env.gi->bounce_not_baked;
   if (frozen && !env.gi) {
     /* As update_voxel_gi decides it: the first directional light's bounce isn't in the shown bake. */
@@ -1218,7 +1379,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
      * Lightmaps, as Unity's realtime GI). */
     const RealtimeLightmaps &rl = vgi_[game ? 1 : 0].rtlm;
     if (!rl.shown.empty())
-      for (DrawItem &it : items) {
+      for (DrawItem &it : owned) {  // (`lightmaps_written` made `owned` the items)
         if (!it.realtime_lm || !it.mesh) continue;
         auto e = rl.shown.entries.find(it.id);
         if (e == rl.shown.entries.end() || e->second.page < 0 || (size_t)e->second.page >= rl.shown.bounce.size()) continue;

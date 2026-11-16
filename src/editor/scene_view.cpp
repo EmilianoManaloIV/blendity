@@ -562,12 +562,16 @@ Camera *Editor::main_camera(const Scene &s, GameObject **owner) {
   return best;
 }
 
-static LightingEnv build_env(const Scene &s) {
+static LightingEnv build_env(const Scene &s, const std::vector<RenderLight> *kept_lights = nullptr) {
   LightingEnv env;
   env.sky = s.environment.sky;
   env.equator = s.environment.equator;
   env.ground = s.environment.ground;
   env.unity_brdf = !s.unity.file.empty() && !unity_brdf_off();  // (round 405: lights or none)
+  if (kept_lights) {  // (round 506: Solid's lights kept with its item list: the scene hash holds them)
+    env.lights = *kept_lights;
+    return env;
+  }
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
@@ -716,7 +720,14 @@ void Editor::render_scene_view(const Recti &view) {
 
 void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
   TextureStreamScope stream(streaming_views());  // (round 447: the Scene view's frame)
-  LightingEnv env = build_env(*scene_);
+  /* Round 506: the items first - kept on the scene hash (solid_items_ref), and with them the lights the environment is made from. */
+  uint64_t items_gen = 0;
+  const std::vector<DrawItem> none;
+  const std::vector<DrawItem> &items = shading_ != Shading::Wireframe ? solid_items_ref(*scene_, false, &items_gen) : none;
+  view_keeps::CurrentList current(keeps_, items_gen != 0 ? &items : nullptr, items_gen, 6);
+  const bool kept_lights = items_gen != 0 && keeps_.solid_lights_gen == items_gen && keeps_.solid_lights_gamma == scene_->unity.gamma_lights();
+  LightingEnv env = build_env(*scene_, kept_lights ? &keeps_.solid_lights : nullptr);
+  if (items_gen != 0 && !kept_lights) keeps_.solid_lights = env.lights, keeps_.solid_lights_gen = items_gen, keeps_.solid_lights_gamma = scene_->unity.gamma_lights();
   env.camera_pos = cam_.position();
   if (!scene_lighting_) {
     env.lights.clear();
@@ -729,8 +740,6 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
   scene_r3d_.begin(&rt, v, p, env, raster_opt_);
   /* Task 0195: on the card when it can - the same items, the headlight, the editor's sky (scene_lights false: the
    * editor's background), no shadow map, as here; Gouraud (the default) lit per vertex by shade()'s formulas. */
-  std::vector<DrawItem> items;
-  if (shading_ != Shading::Wireframe) items = solid_items(*scene_, false);
   if (raster_opt_.shade != ShadeMode::DepthOnly && gpu_view_may_draw(rt, env, items, nullptr) &&
       gpu_view_draw(rt, v, p, env.camera_pos, env, items, nullptr, false, nullptr, raster_opt_)) {
     size_t tris = 0;

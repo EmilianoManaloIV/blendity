@@ -94,6 +94,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "view_keeps.h"
+
 namespace bl {
 
 namespace video {
@@ -249,6 +251,7 @@ struct FrameProfile {
   double ms_gpu_instances = 0, ms_gpu_corners = 0, ms_gpu_see = 0, ms_gpu_render = 0;  // (ms_gpu_render: the render call whole - and, when the picture is copied back this frame, the fence wait inside it, which ms_gpu_readback also holds; ms_gpu_corners holds the lightmap pages' uploads too)
   uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
   uint64_t gpu_cage_vert_builds = 0;                      // task 0205: frames whose cage vertices (and Face mode's dots) were worked out again
+  double ms_sculpt = 0;  // round 508 (part D): the Sculpt brush's own dabs (gather, brush, moves, delta), inside ms_ui
   double ms_gpu = 0;
   /* Task 0159: inside ms_gpu, the card's own time in each pass (the raster device's timestamps) and the read-back's
    * wall time; what is left of ms_gpu is the wait (submitting, the fence, the driver). 0 on a card without timestamps. */
@@ -291,8 +294,8 @@ struct FrameProfile {
     gpu_texture_uploads += o.gpu_texture_uploads;
     gpu_overlay_frames += o.gpu_overlay_frames, gpu_face_dot_frames += o.gpu_face_dot_frames;
     gpu_cage_vert_builds += o.gpu_cage_vert_builds;
-    ms_gpu += o.ms_gpu;
-    ms_gpu_shadow += o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
+    ms_gpu += o.ms_gpu, ms_sculpt += o.ms_sculpt;
+    ms_gpu_shadow +=o.ms_gpu_shadow, ms_gpu_gbuffer += o.ms_gpu_gbuffer, ms_gpu_lighting += o.ms_gpu_lighting, ms_gpu_readback += o.ms_gpu_readback;
   }
 };
 /* Adds the time to the end of its scope to a FrameProfile field. */
@@ -800,6 +803,10 @@ class Editor {
   size_t window_count_for_test() const { return windows_.size() + 1; }
   EditorWindow *window_for_test(int id) { return editor_window(id); }
   const Image &main_fb_for_test() const { return fb_; }
+  const Mesh *collider_wire_for_test(const GameObject &g) {  // (round 515: the collider wire's cache, for tests)
+    const ColliderComponent *c = g.get<ColliderComponent>();
+    return c ? collider_wire(g, *c) : nullptr;
+  }
   void set_monitors_for_test(const std::vector<platform::Monitor> &m) { test_monitors_ = m; }
   std::string windows_layout_for_test() { return windows_layout(); }
   void restore_windows_for_test(const std::string &s) { restore_windows(s); }
@@ -1670,6 +1677,9 @@ class Editor {
   bool unity_ids_auto_reopen_ = false;       // (e2e 407: the import started the numbering itself - open the scene again when it's done)
   uint64_t unity_ids_reopen_serial_ = 0;     // (the undo serial when it started: the scene must be as it was, else only the toast)
   std::string unity_ids_last_import_;
+  /* Round 507: the last Unity import's parts in ms (read + parse, guid index, model reads, each pass of the build, the walks after) - the stress table's. */
+  std::vector<std::pair<std::string, double>> unity_import_parts_;
+  bool unity_import_index_reused_ = false;  // (round 507: the last import found the GUID index as it was and didn't walk Assets again)
   bool unity_ids_last_opened_ = false;  // (review 395: an opened scene is opened again, not imported on top of itself)
   std::string unity_editor_program() const;
   std::string unity_model_ids_path() const;
@@ -1782,7 +1792,9 @@ class Editor {
   };
   struct ExportJob {
     std::vector<UnityExportItem> items;
-    std::string out, folder, why;
+    std::string out, folder, why, empty_message;
+    std::function<void()> walk_folder;  // (round 507: the folder walk, run first on the worker; owns copies of what it reads)
+    double call_ms = 0.0;  // (round 507: what the call that made the job blocked for, before the worker started)
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel{false}, done{false};
     int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0, converted = 0, dropped_tracks = 0, zeroed_axes = 0;  // (converted, dropped_tracks, zeroed_axes: round 407's clips)
@@ -1791,6 +1803,8 @@ class Editor {
     void finish(const std::string &failure);
   };
   const ExportJob *last_export_for_test() const { return export_last_.get(); }
+  const std::vector<std::pair<std::string, double>> &unity_import_parts_for_test() const { return unity_import_parts_; }  // (round 507)
+  bool unity_import_index_reused_for_test() const { return unity_import_index_reused_; }
   void import_package_dialog();
   const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
   /* Round 485: a package "still unpacking" for a test, which has no worker to wait on (a headless import runs to its
@@ -2190,6 +2204,9 @@ class Editor {
   void nest_armature(GameObject *armature, GameObject *mesh);  // into the mesh's rig root, unless another mesh uses it
   void nest_armature_for_test(GameObject *armature, GameObject *mesh) { nest_armature(armature, mesh); }
   std::vector<std::string> asset_paths_with_ext(const std::string &ext);
+  void set_hierarchy_expanded_for_test(uint64_t id, bool on) { on ? (void)expanded_.insert(id) : (void)expanded_.erase(id); }  // (round 506)
+  void set_hierarchy_search_for_test(const std::string &s) { hierarchy_search_ = s; }
+  void clear_hierarchy_rows_for_test() { hierarchy_rows_.clear(); }  // (headless runs keep every row ever drawn, by name: a test asking who is gone starts it empty)
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -2326,7 +2343,13 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
-  std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  std::vector<DrawItem> collect_items(bool game, bool want_tangents);  // (a copy of collect_items_ref's)
+  /* Round 506 (keep 4): the list itself - a reference into items_cache_, valid until the next gather of the same variant (no nested
+   * collect_items(game, tangents) may run while it is held) - and its generation (0: not a kept list: a Camera Flatten or an LOD level). */
+  const std::vector<DrawItem> &collect_items_ref(bool game, bool want_tangents, uint64_t *gen);
+  /* Round 506: Solid shading's items kept on the scene hash (a reference into solid_cache_, its generation 0 when it is not kept: Edit Mode,
+   * Weight Paint, Sculpt). */
+  const std::vector<DrawItem> &solid_items_ref(const Scene &s, bool game, uint64_t *gen);
   /* Round 436: the gather itself; `view_dep` set when an item depends on this view's eye (an outline's width, an LOD
    * Group's level, a camera-shaped mesh), so the kept list is keyed by the eye too. */
   std::vector<DrawItem> collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod);
@@ -2372,7 +2395,9 @@ class Editor {
     bool flattening = false;  // (a Camera Flatten or View Angle Shapes was in the scene: the gather filled side tables - never kept)
     bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
     std::vector<DrawItem> items;
-  } items_cache_[2][2];
+  } items_cache_[3][2];  // (round 506: [0 Scene view, 1 Game view (its LOD levels), 2 any other game gather - the Camera Preview, VR, renders][tangents]: the Game view and the preview each keep theirs)
+  ItemsCache solid_cache_[2];  // (round 506: Solid shading's [game])
+  mutable view_keeps::PerEditor keeps_;  // (round 506: what the Scene view's keeps hold between frames)
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
    * per metre at one metre; off between views (exports, bakes: the plain thickness). */
@@ -2436,7 +2461,8 @@ class Editor {
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
-  void update_environment();
+  /* Round 506: `sun_in` is the sun the lights' keep holds (no walk for it), `sun_out` where a walk leaves the one it found. */
+  void update_environment(const Vec3 *sun_in = nullptr, Vec3 *sun_out = nullptr);
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */
   /* frame_only (task 0096): only the fitted frame, for the GPU views that render the map themselves. */
@@ -2928,6 +2954,8 @@ class Editor {
   void draw_livelink_window(const Recti &r);
   /* ---- Editing (task 0181, ADR 0058: editing_window.cpp) ---- */
   bool edit_open_file(const std::string &path);  // an image or an .edit
+  bool edit_open_poll();                          // round 508: the finished background read opens, once a frame the window draws (and the console's commands ask)
+  void edit_opened(const std::string &path, bool is_edit);
   bool edit_open_render();
   void edit_open_dialog();
   std::string edit_default_export_path() const;
@@ -3861,6 +3889,24 @@ class Editor {
     BudgetCounts counts;
     double at = -1.0;
   } budget_cache_;
+  /* Round 507 (budget_ui.cpp): a window's count runs on a job over a snapshot; headless counts in the call. */
+  struct BudgetJob {
+    std::future<BudgetCounts> counts;
+    std::string what;  // (the report's words; empty: only the Profiler's counts are kept)
+    size_t objects = 0;
+    uint64_t scene_ident = 0;  // (the scene counted: a New Scene or Open meanwhile drops the result)
+  };
+  std::unique_ptr<BudgetJob> budget_job_;
+  bool budget_windowed_for_test_ = false;
+  bool budget_windowed() const { return !headless_ || budget_windowed_for_test_; }
+  void budget_start_count(const std::string &what);
+  void poll_budget_job();
+  void budget_print(const BudgetCounts &c, const char *what);
+ public:
+  void set_budget_windowed_for_test(bool on) { budget_windowed_for_test_ = on; }
+  bool budget_counting_for_test() const { return budget_job_ != nullptr; }
+  bool budget_cache_kept_for_test() const { return budget_cache_.at >= 0.0; }
+ private:
   std::vector<GameObject *> budget_objects();
   void draw_budget(ui::Layout &lay);
   void budget_command(const std::vector<std::string> &t);
@@ -4198,9 +4244,22 @@ class Editor {
   bool blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out);  // (round 478: a room's wall under the mouse in the Scene view)
   bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478; round 499: the middle of a room's most upright wall - -X of an upright room's air; false when none is within 2 degrees of vertical)
   bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall, std::string *why = nullptr);  // (round 478; round 499: a door or window upright in a wall that is vertical within 2 degrees, its feet on the floor under it; `why` names a refusal)
+  bool blockout_opening_feet(GameObject &bo, const BlockoutHit &wall, float width, float &feet_y);  // (round 513: the floor height an opening of that width stands on in the wall - blockout_stand_opening's feet, for Draw Piece's drawn doors and windows)
+  static constexpr float kOpeningWallLean = 0.0348995f;  // (how far from vertical a wall may lean for a door or window: 2 degrees, sin 2 deg; round 513 shares it with Draw Piece)
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   void draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::Layout &lay);  // (round 496: Apply Scale to Size)
+  /* Round 515 (task 0497, ADR 0136): a door's leaves are objects (BlockoutLeaf) the editor makes and keeps in step with the door's numbers, on each walk of update_blockouts. */
+  void blockout_sync_leaves();
+  void blockout_sync_door(GameObject &door);
+  void blockout_leaf_made(GameObject &leaf, const BlockoutLeafPlan &plan, const std::string &material, float texture_scale, uint64_t key);  // (mesh, collider, materials, key)
+  void blockout_leaf_command(const std::vector<std::string> &t);  // (blockout leaf select)
+  void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
+  std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_leaves_seen_;  // (door id -> its leaf objects' ids as the last walk left them: one gone with the door still there was deleted by hand)
+  const Scene *blockout_leaves_scene_ = nullptr;  // (the scene those ids are of: another scene - a load, an undo - starts them again; the address can repeat, the ids are checked against the scene too)
+  std::vector<uint64_t> blockout_sync_doors_, blockout_sync_strays_;  // (the walk's scratch: not allocated again for a scene whose doors did not change)
+  bool blockout_preview_now_ = false, blockout_preview_was_ = false, blockout_preview_ended_ = false;  // (a preview or Play moves objects: leaves only follow; the walk after it ends settles them)
+  void blockout_join_step(const char *label);  // (a change the leaf sync makes: the pending step's, or the last kept one amended - never a step of its own after a user's)
   bool blockout_apply_scale(const std::vector<GameObject *> &roots, const char *label);  // (round 496: the scale of the roots and of what is between them and their pieces moved into the pieces' numbers; one undo step; false: nothing to move)
   void blockout_apply_scale_command(const std::vector<std::string> &t);  // (round 496: blockout applyscale [size])
   bool blockout_refuses_edit_mode(const GameObject *g);
@@ -4291,6 +4350,8 @@ class Editor {
   void room_options_command(const std::vector<std::string> &t);
   void draw_room_tools(ui::Layout &lay);
   void record_blockout_last(GameObject *piece);
+  bool f9_is_about_selection();
+  void refresh_blockout_last();  // (round 503: after a `blockout set` of the piece F9 is about, F9's record takes the piece's numbers)
   void join_selected();
   GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
@@ -6024,7 +6085,7 @@ class Editor {
     BlockoutPiece pre;  // a preset just made (round 500, n 7): its numbers - F9 edits this copy and puts it back on the piece
     /* A door (round 499): style is then BlockoutDoorStyle (-1: not a door or window), `opening` says which (1 door, 2 window); these are its leaf's numbers. */
     int opening = 0, hinge = 0, slide = 0;
-    bool leaf = true;
+    bool leaf = true, wings = false;
     float leaf_thickness = 0.04f, open_amount = 0.0f, drum_radius = 1.0f;
   };
   bool obj_last_valid() const;
@@ -6277,7 +6338,7 @@ class Editor {
     std::map<uint64_t, ReflectionProbeBake> probe_bakes;
     std::map<uint64_t, TexturePtr> probe_maps;  // (round 428: each bake's map with its prefiltered levels, made on the worker)
     /* What the tray and the Lighting window read while it runs. */
-    std::atomic<int> phase{0};  // 0 the lightmaps, 1 the probe volume, 2 the volumes, 3 the reflection probes, 4 done
+    std::atomic<int> phase{0};  // 0 the lightmaps, 1 the probe volume, 2 the volumes, 3 the reflection probes, 4 done, 5 the pages going to the card (round 508)
     double phase_ms[5] = {-1, -1, -1, -1, -1};  // (round 421: the lightmaps, the probes, the Light Volumes, the reflection probes, saving; -1 not reached)
     double lightmap_finish_ms = 0;         // (the lightmaps' filter and dilation, inside phase 0)
     size_t lightmap_texels = 0;
@@ -6302,16 +6363,31 @@ class Editor {
   std::unique_ptr<BakeJob> bake_job_;
   void bake_job_run(BakeJob &j);   // (the worker)
   void bake_job_land(BakeJob &j);  // (the main thread: the results into the scene, saved)
+  bool bake_pages_ready(BakeJob &j);  // (round 508, ADR 0140: a finished bake's pages sent to the card before it lands)
   /* Round 421: the last Generate Lighting's phases (ms): the lightmaps, the probes, the Light Volumes, the reflection
    * probes, saving, and the frame that landed it; the lightmaps' texels, rays and GPU share. */
   struct BakeTimes {
     double phase_ms[5] = {0, 0, 0, 0, 0}, finish_ms = 0, land_ms = 0, total_ms = 0;
+    double land_move_ms = 0, land_save_ms = 0;  // (round 507: the landing frame's file moves, and save_lighting_data's)
     size_t texels = 0, gpu_texels = 0;
     uint64_t rays = 0;
     std::string gpu_cards;  // (round 487: the cards that gathered, with their shares)
     uint64_t pick_texels = 0, chance_kept = 0, chance_dropped = 0;  // (round 484: light picking, counted - Lightmapper::pick_texels)
   };
   BakeTimes last_bake_times_;
+  double land_move_ms_ = 0, land_save_ms_ = 0;  // (round 507: this landing's parts, read by its timer)
+  /* Round 507 (lighting.cpp): a windowed bake's files moved into the scene's lighting folder on a job of their own. */
+  struct LightingMove {
+    std::future<bool> moved;
+    std::string dir;
+  };
+  std::unique_ptr<LightingMove> lighting_move_;
+  static bool move_baked_files(const std::string &save_dir, const std::string &tmp, bool drop_probes);
+  void land_baked_files(const std::string &save_dir, bool moved);
+  void lighting_move_poll(bool wait);
+ public:
+  bool lighting_moving_for_test() const { return lighting_move_ != nullptr; }
+ private:
   double last_bake_start_ms_ = 0;  // (round 422: the frame that starts Generate Lighting)
  public:
   const BakeTimes &last_bake_times_for_test() const { return last_bake_times_; }
@@ -7015,6 +7091,19 @@ class Editor {
   uint64_t rename_id_ = 0;
   std::string rename_buf_;
   std::string hierarchy_search_;
+  /* Round 506: the Hierarchy's flattened rows, kept between frames and made again when what they are made from changes - the scene, its
+   * structure counter (an object added, deleted, re-parented, renamed, re-ordered, activated), the folds and the search text. */
+  struct HierRow {
+    GameObject *g;
+    int depth;
+  };
+  std::vector<HierRow> hier_rows_;
+  struct HierKey {
+    const Scene *scene = nullptr;
+    uint64_t serial = 0, structure = 0, folds = 0, names = 0, frame = 0;  // (names: the names' fold, under a search only)
+    std::string search;
+    bool valid = false;
+  } hier_key_;
   uint64_t hier_drag_ = 0;
   bool hier_dragging_ = false;
   int hier_press_x_ = 0, hier_press_y_ = 0;
@@ -7388,6 +7477,7 @@ class Editor {
   bool blockout_baked_edited_for_test(const GameObject &g) const { return blockout_baked_edited(g); }
   void sculpt_mask_stroked_for_test() { sculpt_mask_version_++; }  // (what a mask stroke does besides writing the mask in place: the Inspector's cache must follow it)
   uint64_t blockout_started_for_test() const { return blockout_started_; }
+  std::vector<std::pair<std::string, bool>> blockout_status_lines_for_test(const GameObject &g) const { return blockout_status_lines(g, *g.get<Blockout>()); }  // (round 515: what the Inspector says of the Blockout)
   bool blockout_wall_under_mouse_for_test(GameObject &bo) {
     BlockoutHit h;
     return blockout_wall_under_mouse(bo, h);
@@ -7432,7 +7522,7 @@ class Editor {
   bool open_job_running_for_test() const { return open_job_ && !open_job_->done.load(); }
   bool import_job_running_for_test() const { return import_job_ && !import_job_->done.load(); }
   bool file_export_running_for_test() const { return file_export_job_ && !file_export_job_->done.load(); }
-  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_ || shot_job_; }  // (the headless runner waits for these between its lines)
+  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_ || shot_job_ || edit_doc_.loading(); }  // (the headless runner waits for these between its lines; round 508: the Editing window's picture read)
   int render_job_phase_for_test() const { return render_job_ ? render_job_->phase.load() : -1; }
   int render_shadow_size_for_test() const { return render_shadow_res_; }  // (round 412: the F12's map is the job's, not the views' cache's)
   void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }

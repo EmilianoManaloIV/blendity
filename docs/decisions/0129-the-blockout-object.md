@@ -210,6 +210,12 @@ work on the spot.
   stays zero; Post Spacing scales (the same posts, farther apart); a roof's Pitch follows the slope (tan(pitch) times
   the Y scale over the span's).
 
+## Amended in round 515 (task 0497): a door's leaf is its own object
+- A styled door's leaves (a Revolving door's wings) are child objects of its piece, made and kept by the editor, not
+  faces of the Blockout's mesh: the one exception to "no child objects" for a styled piece. Open Amount turns them
+  without a build, and the kernel makes the doorway without the leaf (no swing cut). The decision and its details are
+  ADR 0136.
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.

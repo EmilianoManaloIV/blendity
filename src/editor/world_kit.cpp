@@ -8,6 +8,7 @@
 #include "../scene/export.h"
 #include "../core/core.h"
 #include "../image/image.h"
+#include <cstring>
 
 namespace bl {
 
@@ -51,7 +52,13 @@ const Mesh *Editor::collider_wire(const GameObject &g, const ColliderComponent &
   const Mesh *m = g.evaluated_mesh();
   const Mesh &src = m ? *m : kEmpty;  // (an empty's Box, Sphere or Capsule: an invisible wall)
   uint64_t key = (uint64_t)c.shape * 1000003ull + src.version;
-  for (float f : {c.center.x, c.center.y, c.center.z, c.size.x, c.size.y, c.size.z, c.radius, c.height}) key = key * 31 + (uint64_t)(f * 10000.0f);
+  /* The fields' bits, not (uint64_t)(f * 10000): that conversion is undefined for a negative centre (a door leaf's
+   * collider, round 515), a NaN or a huge size, and UBSan stops on it; the bits are exact and defined for every float. */
+  for (float f : {c.center.x, c.center.y, c.center.z, c.size.x, c.size.y, c.size.z, c.radius, c.height}) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &f, sizeof bits);
+    key = key * 31 + bits;
+  }
   ColliderWire &w = collider_wires_[g.id];
   if (w.mesh && w.key == key) return w.mesh.get();
   w = {key, collider_mesh(c, src)};

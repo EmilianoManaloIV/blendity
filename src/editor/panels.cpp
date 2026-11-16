@@ -3,9 +3,11 @@
 // Project (Blender: File/Asset Browser), Console (Blender: Info editor),
 // Profiler (Blender: Statistics overlay / --debug timings).
 #include "editor.h"
+#include "../core/edit_epoch.h"
 #include "../texture/procedural_texture.h"
 #include "../texture/surface.h"
 #include "../scene/stroke_object.h"
+#include "../scene/blockout_piece_stack.h"  // (round 514: a Blockout piece's modifiers)
 
 #include "../core/core.h"
 #include <cstring>
@@ -82,23 +84,49 @@ void Editor::draw_hierarchy(const Recti &r) {
   u.text_field(u.id("hier_search"), {plus.right() + u.px(6), bar.y + u.px(4), bar.right() - plus.right() - u.px(12), h},
                hierarchy_search_, nullptr, "Search...");
 
-  /* Flatten the visible tree (only expanded branches; virtualised drawing). */
-  struct Row { GameObject *g; int depth; };
-  std::vector<Row> rows;
-  std::string filter = to_lower(hierarchy_search_);
-  if (!filter.empty()) {
-    scene_->for_each_ordered([&](GameObject &g, int) {
-      if (to_lower(g.name).find(filter) != std::string::npos) rows.push_back({&g, 0});
-    });
+  /* Flatten the visible tree (only expanded branches; virtualised drawing). Round 506: kept between frames, made again when what it
+   * is made from changes - the scene and its structure counter (an object added, deleted, re-parented, renamed, re-ordered,
+   * activated), the folds and the search text - and, as the other walks are, on the check interval. */
+  uint64_t folds = expanded_.size();
+  for (uint64_t id : expanded_) {  // (a sum of a mixed id - splitmix64 - so the set's order doesn't matter and {5,7} is not {4,8})
+    uint64_t z = id + 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    folds += z ^ (z >> 31);
   }
+  const uint64_t structure = edit_epoch::structure();
+  /* Under a search the rows also depend on every name, and a name typed in the Inspector changes with each key without moving the
+   * structure counter (it moves when the rename is committed): the names are folded into the key, so the row appears the frame the
+   * name starts to match. One pass of hashes, far less than the filter's lower-casing and search; nothing is walked with no search. */
+  uint64_t names = 0;
+  if (!hierarchy_search_.empty() && view_perf::on(view_perf::Hierarchy))
+    scene_->for_each_ordered([&](GameObject &g, int) { names += (std::hash<std::string>()(g.name) ^ g.id) * 0x9E3779B97F4A7C15ull; });
+  const bool rows_kept = view_perf::on(view_perf::Hierarchy) && hier_key_.valid && (view_perf::stale(view_perf::Hierarchy) || (hier_key_.scene == scene_.get() && hier_key_.serial == scene_->serial &&
+                         hier_key_.structure == structure && hier_key_.folds == folds && hier_key_.names == names && hier_key_.search == hierarchy_search_ &&
+                         hash_frame_ >= hier_key_.frame && hash_frame_ - hier_key_.frame < (uint64_t)scene_hash_check_every_));
+  if (rows_kept) view_perf::hit(view_perf::Hierarchy);
   else {
-    std::function<void(GameObject *, int)> walk = [&](GameObject *g, int d) {
-      rows.push_back({g, d});
-      if (expanded_.count(g->id))
-        for (GameObject *c : g->children) walk(c, d + 1);
-    };
-    for (GameObject *g : scene_->roots) walk(g, 0);
+    view_perf::miss(view_perf::Hierarchy);
+    view_perf::counters.hierarchy_rebuilds++;
+    hier_rows_.clear();
+    const std::string filter = to_lower(hierarchy_search_);
+    if (!filter.empty()) {
+      scene_->for_each_ordered([&](GameObject &g, int) {
+        if (to_lower(g.name).find(filter) != std::string::npos) hier_rows_.push_back({&g, 0});
+      });
+    }
+    else {
+      std::function<void(GameObject *, int)> walk = [&](GameObject *g, int d) {
+        hier_rows_.push_back({g, d});
+        if (expanded_.count(g->id))
+          for (GameObject *c : g->children) walk(c, d + 1);
+      };
+      for (GameObject *g : scene_->roots) walk(g, 0);
+    }
+    hier_key_ = {scene_.get(), scene_->serial, structure, folds, names, hash_frame_, hierarchy_search_, true};
   }
+  const std::vector<HierRow> &rows = hier_rows_;
+  const std::string filter = to_lower(hierarchy_search_);  // (as the rows were made: the row drawing below reads it)
 
   int rh = u.row_h();
   Recti list{r.x, bar.bottom(), r.w, r.h - bh};
@@ -1835,6 +1863,13 @@ void Editor::draw_inspector(const Recti &r) {
       ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
       ir.owner = g;
       BlockoutPiece *edited_piece = dynamic_cast<BlockoutPiece *>(c);
+      /* Round 503: the piece Adjust Last (F9) is about, when it is selected and F9 is the newest step - and its hash now, before the edit: F9 follows the edit only if the piece
+       * changed (below). Asked before the edit and before mark_changed, after which the step is not the one F9 was made in. */
+      const uint64_t f9_piece = edited_piece && f9_is_about_selection() ? obj_last_.obj : 0;
+      uint64_t f9_before = 0;
+      if (f9_piece)
+        if (GameObject *fg = scene_->find(f9_piece))
+          if (BlockoutPiece *fp = fg->get<BlockoutPiece>()) f9_before = hash_component(*fp);
       const int style_before = edited_piece ? edited_piece->style : 0, opening_before = edited_piece ? edited_piece->opening : 2;
       c->reflect(ir);
       if (edited_piece && ir.changed) blockout_piece_edited(*edited_piece, style_before, opening_before);  // (round 498: a Round window is a circle; round 499: a door keeps its style, Door <-> Window starts at Opening Only; the same undo step)
@@ -1864,6 +1899,14 @@ void Editor::draw_inspector(const Recti &r) {
             apply_edit_to(oc, fe, (int)i, (int)multi.size(), self, edited_piece ? edited_piece->opening : -1);
           }
       }
+      /* An Inspector edit that changed the piece F9 is about leaves F9 showing its new numbers, as `blockout set` does. The refresh comes after the edit has gone to every
+       * selected piece and any expression has been applied, or F9 would copy the old value and write it back at its next edit. A piece the edit did not change (a Style edited
+       * on a door while F9 is on a window, a field the other kind has not) leaves F9 alone, and its step is no longer the newest, so the panel closes as before round 503. */
+      if (f9_piece && ir.changed) {
+        GameObject *fg = scene_->find(f9_piece);
+        BlockoutPiece *fp = fg ? fg->get<BlockoutPiece>() : nullptr;
+        if (fp && hash_component(*fp) != f9_before) refresh_blockout_last();
+      }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
       if (auto *pg = dynamic_cast<LightProbeGroupComponent *>(c)) draw_probe_group_extras(*g, *pg, lay);  // (round 455)
       if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
@@ -1871,6 +1914,7 @@ void Editor::draw_inspector(const Recti &r) {
       if (auto *bj = dynamic_cast<Blockout *>(c)) draw_blockout_join_row(*g, *bj, lay);  // (round 501: "touches 'Name'" and Join Blockouts)
       if (auto *bk = dynamic_cast<BlockoutBaked *>(c)) draw_blockout_baked_extras(*g, *bk, lay);  // (round 482: Unbake)
       if (auto *bpc = dynamic_cast<BlockoutPiece *>(c)) draw_blockout_piece_extras(*g, *bpc, lay);  // (round 496: Apply Scale to Size)
+      if (auto *bl = dynamic_cast<BlockoutLeaf *>(c)) draw_blockout_leaf_extras(*g, *bl, lay);  // (round 515: "Made by Door ...")
       if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
         const Recti row = lay.row(u.row_h() + u.px(2));
         const int bw = (row.w - u.px(16)) / 3;
@@ -1998,8 +2042,9 @@ void Editor::draw_inspector(const Recti &r) {
   }
 
   /* The modifier stack (Blender's Modifier Properties): applied top to
-   * bottom, each with Blender's header toggles and menu. */
-  if (g->get<MeshFilter>()) {
+   * bottom, each with Blender's header toggles and menu. Round 514 (ADR 0138): a Blockout piece has one too - run on its own shape. */
+  const BlockoutPiece *mod_piece = g->get<BlockoutPiece>();
+  if (g->get<MeshFilter>() || mod_piece) {
     std::vector<size_t> mods;
     for (size_t ci = 0; ci < g->components.size(); ci++)
       if (g->components[ci]->is_modifier()) mods.push_back(ci);
@@ -2017,9 +2062,13 @@ void Editor::draw_inspector(const Recti &r) {
       u.tooltip("Blender: Modifier Properties > Add Modifier (Edit / Generate / Deform).");
       /* Round 502 (task 0486): Apply on a Blockout is refused with the way on - its mesh is rebuilt from its pieces, so what Apply
        * wrote would go at the next rebuild; baked, the object is an ordinary mesh with the same stack still on it. */
-      const bool on_blockout = g->get<Blockout>() != nullptr;
+      const bool on_blockout = g->get<Blockout>() != nullptr || mod_piece;  // (a piece's stack runs at every build too: Apply is refused there as well)
       bool apply_all = false;  // (run after the rows are drawn: it takes the modifiers off the list the rows walk - round 502's test engineer: a crash when the last component was a modifier)
-      auto refuse_apply_on_blockout = [this, g](const std::string &what) {
+      auto refuse_apply_on_blockout = [this, g, mod_piece](const std::string &what) {
+        if (mod_piece)
+          return refuse(what + ": '" + g->name + "' is a Blockout piece - it has no mesh of its own, its modifiers run over its shape at every build. "
+                               "Bake the Blockout to Mesh to keep the result as a mesh (the pieces keep their modifiers)",
+                        "blockout bake", "Bake to Mesh");
         refuse(what + ": '" + g->name + "' is a Blockout - its mesh is rebuilt from its pieces, so what Apply wrote would go at the next rebuild. "
                       "Bake to Mesh first (the modifiers stay on the baked mesh)",
                "blockout bake", "Bake to Mesh");
@@ -2028,15 +2077,30 @@ void Editor::draw_inspector(const Recti &r) {
         if (on_blockout) refuse_apply_on_blockout("Apply All");
         else apply_all = true;
       }
-      u.tooltip(on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
+      u.tooltip(mod_piece ? "Refused on a Blockout piece: Bake the Blockout to Mesh to keep the result as a mesh."
+                : on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
-      if (on_blockout && !mods.empty()) {
+      if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
+        const std::string why = blockout_piece_stack_refusal(*mod_piece);
+        const bool live = mods.empty() || blockout_piece_stack_live(*g);  // (no modifiers yet: nothing to warn of)
+        Recti nr = lay.row();
+        u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h},
+                !why.empty() ? "This piece takes no modifiers: " + why + "." : live ? std::string("Runs on this piece's own shape before it is added or cut.")
+                                                                            : std::string("Its modifiers do nothing yet - the Blockout's status says why."),
+                why.empty() && live ? u.theme.text_dim : u.theme.warning);
+        u.tooltip(!why.empty() ? "Modifiers on a room, a door or window, a preset or an Intersect piece are not built yet: a stack put on one stays on it and does nothing."
+                  : live ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
+                           "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
+                           "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
+                         : "None of this piece's modifiers runs: each is off, or of a kind a piece does not take. The Blockout's status names each and why.");
+      }
+      if (on_blockout && !mod_piece && !mods.empty()) {
         Recti nr = lay.row();
         u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, "Live over the Blockout's result: runs again when a piece moves.", u.theme.text_dim);
         u.tooltip("The modifiers take the mesh the pieces make and run again, on a background worker, each time a piece moves or changes. "
                   "The handles and the Draw Piece tool keep working on the pieces. Apply needs Bake to Mesh first.");
       }
-      u.popup(add_mod, u.px(230), [this] {
+      u.popup(add_mod, u.px(230), [this, for_piece = mod_piece != nullptr] {
         auto &u = ui_;
         struct Item { const char *label, *type; };
         static const Item kEdit[] = {{"Weld", "WeldModifier"}};
@@ -2051,8 +2115,10 @@ void Editor::draw_inspector(const Recti &r) {
         auto group = [&](const char *name, const Item *items, size_t n) {
           u.menu_label(name);
           for (size_t i = 0; i < n; i++) {
-            if (u.menu_item(items[i].label, nullptr, false, true, Icon::Gear)) add_component_to_selection(items[i].type);
-            if (const ComponentInfo *info = find_component_info(items[i].type)) u.tooltip(info->help + "\nBlender: " + info->blender);
+            const std::string no = for_piece ? blockout_piece_modifier_refusal(items[i].type) : std::string();  // (round 514: off for a piece, with the reason)
+            if (u.menu_item(items[i].label, nullptr, false, no.empty(), Icon::Gear)) add_component_to_selection(items[i].type);
+            if (!no.empty()) u.tooltip("Off for a Blockout piece: " + no + ".");
+            else if (const ComponentInfo *info = find_component_info(items[i].type)) u.tooltip(info->help + "\nBlender: " + info->blender);
           }
         };
         group("Edit", kEdit, 1);
@@ -2226,11 +2292,19 @@ void Editor::draw_inspector(const Recti &r) {
           }
           case CopyToSelected: {
             int n = 0;
-            for (GameObject *o : selected_objects(false))
-              if (o != g && o->get<MeshFilter>()) {
-                o->add_component(g->components[act_ci]->clone());
-                n++;
+            const char *type = g->components[act_ci]->type_name();
+            for (GameObject *o : selected_objects(false)) {
+              const BlockoutPiece *to_piece = o->get<BlockoutPiece>();  // (round 514: a piece takes a stack too - one that cannot is skipped and named)
+              if (o == g || (!o->get<MeshFilter>() && !to_piece)) continue;
+              const std::string kind_no = to_piece ? blockout_piece_modifier_refusal(type) : std::string();
+              const std::string no = !to_piece ? std::string() : !kind_no.empty() ? kind_no : blockout_piece_stack_refusal(*to_piece);
+              if (!no.empty()) {
+                Log::warn("Copy to Selected: not to '%s' - %s", o->name.c_str(), no.c_str());
+                continue;
               }
+              o->add_component(g->components[act_ci]->clone());
+              n++;
+            }
             Log::info("Copied %s to %d object(s)", g->components[act_ci]->type_name(), n);
             mark_changed("Copy Modifier to Selected");
             break;

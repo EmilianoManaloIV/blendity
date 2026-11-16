@@ -37,6 +37,44 @@ A refusal is a toast over the Scene view, and most carry a \ui{Fix}:
   \item ``the Scene view has no Rendered mode'': path trace with \key{F12}; the Render window's \ui{Preview} is the quick look.
 \end{itemize}
 
+\section{When a Blockout refuses}
+A Blockout says why in a toast, in the log or in its \ui{status} lines under its Inspector (select the Blockout; \code{blockout
+info} prints them). The status always ends a refusal with ``the last mesh stays'': a refused build never damages the mesh you
+had.
+\begin{itemize}
+  \item ``\emph{That wall leans N degrees: a door or window stands in an upright wall -- drag on a vertical face instead}'':
+    a door or window can only go into a wall within 2 degrees of upright. Drag on a vertical face, or turn the room upright.
+    ``\emph{no wall here}'' beside the Draw Piece label means the pointer is not on a wall at all.
+  \item ``\emph{The mouse is not on a wall (a floor, a ceiling or nothing)}'': the \ui{Door} or \ui{Window} button went in the
+    middle of the selected room's first wall instead; point at a wall and press it again, or drag it there with Draw Piece.
+  \item ``\emph{Room has no upright wall}'': every side of that room leans more than 2 degrees, or it is flat: turn it upright.
+  \item ``\emph{is a Blockout piece / is a Blockout -- its mesh is rebuilt from its pieces}'' (Edit Mode, Sculpt, Apply and
+    the other things that write a mesh by hand): the pieces are the model. Edit the pieces, or \ui{Bake to Mesh} first.
+  \item ``\emph{scaled unevenly: turned pieces are sheared}'': an old scene holds an uneven Scale on a Blockout, a folder or a
+    piece. \ui{Apply Scale to Pieces} (\code{blockout applyscale}) moves it into the pieces' numbers; a Scale you typed
+    yourself stays literal.
+  \item ``\emph{its frame or ring is finer than Field Cell}'': without Blender's libraries the Blockout is meshed on a
+    grid and a door's 4~cm leaf is finer than the cell; lower \ui{Field Cell} to the size the status gives (the exact
+    build with the libraries shows any size).
+  \item A piece \emph{skipped} and named in the status has a number that is not finite, no size, or is thinner than the
+    kernel can place; a piece's modifier stack whose result is not one closed solid is refused with the reason and the piece
+    is built from its numbers.
+  \item ``\emph{Join Blockouts}'' is offered only when two Blockouts touch (a wall, floor, ceiling or added piece of one
+    meeting the other's). Two that stand a metre apart do not; select both to join them anyway, and it says so.
+  \item ``\emph{Bake to Mesh: has no mesh yet}'': the Blockout has no pieces, or its build was refused; look at its status.
+\end{itemize}
+
+\section{When the keyboard does not reach a control}
+A bare \key{Tab} over the Scene view is Edit Mode, by design. To reach controls from the keyboard press \key{F6} over the
+window you want (\key{Shift+F6} goes back), or \key{F10} for the menu bar, then \key{Tab} and \key{Space}
+(chapter~\ref{ch:windows}). If nothing seems to be focused, a mouse press or a tool that started let the focus go: press
+\key{F6} again.
+
+\section{A slow pose}
+Moving an IK target should stay within a frame; turning the chest or scrubbing a clip on a whole avatar costs 35 to
+53~ms on a thin avatar and a mid-range card (chapter~\ref{ch:animate}). The Profiler's \emph{Posing} block says which part;
+the first things to try are a lower quality tier and keeping the Game view closed.
+
 \section{Without Blender's libraries}
 Preferences $>$ Libraries shows why a build runs without them (missing, damaged, turned off, offline) and offers
 \ui{Download} or the switch. Without them: no Boolean or Decimate modifier, no EXR, no OpenColorIO views, slower path
@@ -62,5 +100,5 @@ of date, that is a bug too.
 
 \begin{fromnote}{Learn}
 \emph{Performance and Stress Testing > Quality tiers}, \emph{Rendering on the GPU > A small graphics card},
-\emph{Libraries and Performance}.
+\emph{Libraries and Performance}, \emph{Where the Time Goes}, \emph{Where a Posing Frame Goes}, \emph{Rooms: air, walls, doors and windows}, \emph{Modifiers on a piece}.
 \end{fromnote}
