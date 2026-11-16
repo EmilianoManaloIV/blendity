@@ -11471,6 +11471,939 @@ static void tests_round470() {
   });
 }
 
+/* ---- Round 537 (task 0517): LoopTools built in (Relax, Space, To Circle, Flatten, Curve), written from the spec's
+ * acceptance criteria 1 to 7 before reading the implementation ---- */
+#include "../src/scene/mesh_tools_loop.h"
+
+namespace lt537 {
+using SelVec = std::vector<uint8_t>;
+using OpFn = std::function<int(Mesh &, const SelVec &, const bool *)>;
+struct NamedOp {
+  const char *name;
+  OpFn run;
+};
+
+/* The five operators at Blender's defaults (Relax has no lock). */
+static const std::vector<NamedOp> &ops() {
+  static const std::vector<NamedOp> list = {
+      {"relax_loops", [](Mesh &m, const SelVec &s, const bool *) { return meshops::relax_loops(m, s, 2, 0, true); }},
+      {"space_loops", [](Mesh &m, const SelVec &s, const bool *l) { return meshops::space_loops(m, s, 1.0f, 0, l); }},
+      {"circularize", [](Mesh &m, const SelVec &s, const bool *l) { return meshops::circularize(m, s, 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, l); }},
+      {"flatten_loops", [](Mesh &m, const SelVec &s, const bool *l) { return meshops::flatten_loops(m, s, 1.0f, 0, Vec3(0, 0, 1), l); }},
+      {"curve_loops", [](Mesh &m, const SelVec &s, const bool *l) { return meshops::curve_loops(m, s, 1.0f, 0, 0, false, true, l); }},
+  };
+  return list;
+}
+
+static float axis(Vec3 p, int a) { return a == 0 ? p.x : a == 1 ? p.y : p.z; }
+static float wrap(float d) {
+  while (d > kPi) d -= 2.0f * kPi;
+  while (d <= -kPi) d += 2.0f * kPi;
+  return d;
+}
+
+/* Points joined by wire edges (a closed loop when `closed`). */
+static Mesh wire(const std::vector<Vec3> &p, bool closed) {
+  Mesh m;
+  for (Vec3 v : p) m.add_vert(v);
+  for (size_t i = 0; i + 1 < p.size(); i++) m.add_loose_edge((uint32_t)i, (uint32_t)i + 1);
+  if (closed && p.size() > 2) m.add_loose_edge((uint32_t)p.size() - 1, 0);
+  return m;
+}
+/* n points round a circle in the XZ plane at height y. */
+static std::vector<Vec3> circle_pts(int n, float r, float y = 0.0f) {
+  std::vector<Vec3> p;
+  for (int i = 0; i < n; i++) {
+    const float a = 2.0f * kPi * (float)i / (float)n;
+    p.push_back({r * std::cos(a), y, r * std::sin(a)});
+  }
+  return p;
+}
+/* A quad grid, x = i, z = j, height h(i, j); vertex j * nx + i. */
+static Mesh grid(int nx, int nz, const std::function<float(int, int)> &h) {
+  Mesh m;
+  for (int j = 0; j < nz; j++)
+    for (int i = 0; i < nx; i++) m.add_vert({(float)i, h(i, j), (float)j});
+  for (int j = 0; j + 1 < nz; j++)
+    for (int i = 0; i + 1 < nx; i++) {
+      const uint32_t a = (uint32_t)(j * nx + i);
+      m.add_face({a, a + (uint32_t)nx, a + (uint32_t)nx + 1, a + 1});
+    }
+  return m;
+}
+static SelVec all(const Mesh &m) { return SelVec(m.vert_count(), 1); }
+static std::vector<uint32_t> ids(size_t n) {
+  std::vector<uint32_t> v(n);
+  for (size_t i = 0; i < n; i++) v[i] = (uint32_t)i;
+  return v;
+}
+
+static bool same_bits(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() &&
+         (a.positions.empty() || std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0);
+}
+static bool same_topology(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && a.face_offsets == b.face_offsets && a.corner_verts == b.corner_verts &&
+         a.loose_edges == b.loose_edges;
+}
+/* The mesh's arrays agree with each other and every index names a real vertex. */
+static bool valid(const Mesh &m) {
+  if (m.face_offsets.empty() || m.face_offsets.front() != 0 || m.face_offsets.back() != m.corner_verts.size()) return false;
+  for (size_t f = 0; f < m.face_count(); f++)
+    if (m.face_offsets[f + 1] < m.face_offsets[f] + 3) return false;
+  for (uint32_t c : m.corner_verts)
+    if (c >= m.vert_count()) return false;
+  for (uint64_t k : m.loose_edges)
+    if ((uint32_t)(k >> 32) >= m.vert_count() || (uint32_t)(k & 0xFFFFFFFFu) >= m.vert_count()) return false;
+  if (m.has_uvs() && m.uvs.size() != m.corner_verts.size()) return false;
+  return true;
+}
+static bool finite3(Vec3 p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
+
+static Vec3 centroid(const Mesh &m, const std::vector<uint32_t> &id) {
+  Vec3 c(0, 0, 0);
+  for (uint32_t i : id) c = c + m.positions[i];
+  return c / (float)std::max<size_t>(1, id.size());
+}
+/* Largest distance of the vertices from their best plane (three well spread points make it; for a flat set, 0). */
+static float plane_dev(const Mesh &m, const std::vector<uint32_t> &id) {
+  const Vec3 a = m.positions[id[0]];
+  Vec3 b = a, c = a;
+  float best = 0;
+  for (uint32_t i : id)
+    if (length(m.positions[i] - a) > best) best = length(m.positions[i] - a), b = m.positions[i];
+  best = 0;
+  for (uint32_t i : id) {
+    const float s = length(cross(b - a, m.positions[i] - a));
+    if (s > best) best = s, c = m.positions[i];
+  }
+  const Vec3 n = normalize(cross(b - a, c - a));
+  float dev = 0;
+  for (uint32_t i : id) dev = std::max(dev, std::fabs(dot(m.positions[i] - a, n)));
+  return dev;
+}
+/* Distance and arc position of p on the polyline `pl` (to test "stays on the original curve"). */
+static float on_polyline(Vec3 p, const std::vector<Vec3> &pl, float *arc) {
+  float best = 1e30f, run = 0;
+  for (size_t i = 0; i + 1 < pl.size(); i++) {
+    const Vec3 d = pl[i + 1] - pl[i];
+    const float len = length(d);
+    float t = len > 0 ? dot(p - pl[i], d) / (len * len) : 0.0f;
+    t = std::min(1.0f, std::max(0.0f, t));
+    const float dist = length(p - (pl[i] + d * t));
+    if (dist < best) {
+      best = dist;
+      if (arc) *arc = run + t * len;
+    }
+    run += len;
+  }
+  return best;
+}
+static float radius_spread(const Mesh &m, const std::vector<uint32_t> &id) {
+  const Vec3 c = centroid(m, id);
+  float lo = 1e30f, hi = 0;
+  for (uint32_t i : id) {
+    const float r = std::hypot(m.positions[i].x - c.x, m.positions[i].z - c.z);
+    lo = std::min(lo, r), hi = std::max(hi, r);
+  }
+  return hi - lo;
+}
+static float angle_of(const Mesh &m, uint32_t i, Vec3 c) { return std::atan2(m.positions[i].z - c.z, m.positions[i].x - c.x); }
+
+/* The shared check for criterion 7: every operator on `base` leaves a valid mesh, the same topology, no new NaN / Inf
+ * (vertex `skip` may keep its own bad coordinate), nothing flung far away, and -1 / 0 only when the mesh is untouched. */
+static void robust(const char *what, const Mesh &base, const SelVec &sel, int skip = -1) {
+  float extent = 1e-30f;
+  for (Vec3 p : base.positions)
+    for (int a = 0; a < 3; a++)
+      if (std::isfinite(axis(p, a))) extent = std::max(extent, std::fabs(axis(p, a)));
+  for (const NamedOp &op : ops()) {
+    Mesh m = base;
+    const int ret = op.run(m, sel, nullptr);
+    bool fin = true, bounded = true;
+    for (size_t i = 0; i < m.positions.size(); i++) {
+      if ((int)i == skip && !finite3(m.positions[i])) continue;
+      if (!finite3(m.positions[i])) fin = false;
+      else
+        for (int a = 0; a < 3; a++)
+          if (std::fabs(axis(m.positions[i], a)) > 100.0f * extent) bounded = false;
+    }
+    const bool untouched = same_bits(m, base);
+    const bool ok = valid(m) && same_topology(m, base) && fin && bounded && ((ret > 0) == !untouched);  // (-1 refused, 0 moved nothing: both untouched)
+    if (!ok)
+      std::printf("    %s / %s: ret %d valid %d topology %d finite %d bounded %d untouched %d\n", what, op.name, ret, (int)valid(m),
+                  (int)same_topology(m, base), (int)fin, (int)bounded, (int)untouched);
+    CHECK(ok);
+  }
+}
+static Mesh scaled(Mesh m, float s) {
+  for (Vec3 &p : m.positions) p = p * s;
+  return m;
+}
+/* A jittered 16-ring (wire loop) with every third vertex nudged in height. */
+static Mesh jittered_ring() {
+  std::vector<Vec3> p = circle_pts(16, 1.0f);
+  for (int i = 0; i < 16; i++) {
+    const float r = 1.0f + 0.15f * (float)(((i * 7) % 5) - 2) / 2.0f;
+    p[i].x *= r, p[i].z *= r, p[i].y = 0.05f * (float)((i % 3) - 1);
+  }
+  return wire(p, true);
+}
+static Mesh bumpy_grid(int n = 6) {
+  return grid(n, n, [](int i, int j) { return 0.4f * std::sin(0.9f * (float)i) * std::cos(0.7f * (float)j) + 0.05f * (float)i; });
+}
+/* Curve's case: a 7 x 5 flat grid, the end columns and the middle vertex of the middle row selected, the middle one lifted. */
+static Mesh curve_case(float lift, SelVec &sel) {
+  Mesh m = grid(7, 5, [](int, int) { return 0.0f; });
+  m.positions[2 * 7 + 3].y = lift;
+  sel.assign(35, 0);
+  for (int j = 0; j < 5; j++) sel[j * 7] = sel[j * 7 + 6] = 1;
+  sel[2 * 7 + 3] = 1;
+  return m;
+}
+/* Review fixes: an open cylinder band of `nr` rings of 8 vertices (ring k at height k, vertex k * 8 + i), rings jittered in
+ * radius and in angle (so Relax and Space have work), quads between neighbouring rings. */
+static Mesh band(int nr) {
+  Mesh m;
+  for (int k = 0; k < nr; k++)
+    for (int i = 0; i < 8; i++) {
+      const float a = 2.0f * kPi * ((float)i + 0.3f * std::sin(2.0f * (float)i + (float)k)) / 8.0f;
+      const float r = 1.0f + 0.15f * (float)(((i * 7 + k) % 5) - 2) / 2.0f;
+      m.add_vert({r * std::cos(a), (float)k, r * std::sin(a)});
+    }
+  for (int k = 0; k + 1 < nr; k++)
+    for (int i = 0; i < 8; i++) {
+      const uint32_t a = (uint32_t)(k * 8 + i), b = (uint32_t)(k * 8 + (i + 1) % 8);
+      m.add_face({a, b, b + 8, a + 8});
+    }
+  return m;
+}
+static void ring_edges(int k, std::unordered_set<uint64_t> &set) {
+  for (int i = 0; i < 8; i++) set.insert(Mesh::edge_key((uint32_t)(k * 8 + i), (uint32_t)(k * 8 + (i + 1) % 8)));
+}
+static bool moved_any(const Mesh &a, const Mesh &b, uint32_t first, uint32_t count) {
+  for (uint32_t i = first; i < first + count; i++)
+    if (std::memcmp(&a.positions[i], &b.positions[i], sizeof(Vec3)) != 0) return true;
+  return false;
+}
+}  // namespace lt537
+
+static void tests_round537() {
+  using namespace lt537;
+  /* ---- 1. Relax ---- */
+  test("LoopTools: Relax Edge Loops pulls a zig-zag open chain toward a smooth line and keeps its two ends, Cubic and Linear", [] {
+    for (int interp = 0; interp < 2; interp++) {
+      std::vector<Vec3> p;
+      for (int i = 0; i < 9; i++) p.push_back({(float)i, (i % 2) ? 0.5f : 0.0f, 0.0f});
+      const Mesh base = wire(p, false);
+      /* Roughness: the sum of second differences. Not the distance from y = 0.25: the ends stay at y = 0, so the relaxed
+       * chain heads for the line between them (the first version of this test measured from 0.25 and saw it "get worse"). */
+      auto rough = [](const Mesh &mm) {
+        float r = 0;
+        for (int i = 1; i < 8; i++) r += std::fabs(mm.positions[i - 1].y - 2.0f * mm.positions[i].y + mm.positions[i + 1].y);
+        return r;
+      };
+      const float before = rough(base);
+      Mesh one = base;
+      CHECK(meshops::relax_loops(one, all(one), 1, interp, true) > 0);
+      Mesh m = base;
+      const int ret = meshops::relax_loops(m, all(m), 3, interp, true);
+      CHECK(ret > 0);
+      CHECK(std::memcmp(&m.positions[0], &base.positions[0], sizeof(Vec3)) == 0);
+      CHECK(std::memcmp(&m.positions[8], &base.positions[8], sizeof(Vec3)) == 0);
+      const float after1 = rough(one), after3 = rough(m);
+      std::printf("    interpolation %d: zig-zag %.3f -> %.3f (1 iteration) -> %.3f (3)\n", interp, before, after1, after3);
+      CHECK(after1 < before);
+      CHECK(after3 < after1);
+      CHECK(after3 < 0.7f * before);
+      CHECK(valid(m) && same_topology(m, base));
+    }
+  });
+  test("LoopTools: Relax Edge Loops makes a jittered 16-vertex ring rounder every iteration, Cubic and Linear", [] {
+    for (int interp = 0; interp < 2; interp++) {
+      Mesh m = jittered_ring();
+      const std::vector<uint32_t> id = ids(16);
+      float prev = radius_spread(m, id);
+      for (int k = 0; k < 3; k++) {
+        CHECK(meshops::relax_loops(m, all(m), 1, interp, true) > 0);
+        const float now = radius_spread(m, id);
+        std::printf("    interpolation %d, iteration %d: radius spread %.4f -> %.4f\n", interp, k + 1, prev, now);
+        CHECK(now < prev);
+        prev = now;
+      }
+    }
+  });
+  test("LoopTools: Relax Edge Loops leaves a chain of two vertices and vertices that are not selected alone", [] {
+    Mesh m = wire({{0, 0, 0}, {1, 1, 0}, {2, 0, 0}, {3, 1, 0}, {4, 0, 0}}, false);
+    const Mesh base = m;
+    SelVec sel(5, 0);
+    sel[1] = sel[2] = 1;  // (two vertices: under three, skipped)
+    CHECK(meshops::relax_loops(m, sel, 3, 0, true) == -1 && same_bits(m, base));  // (no chain of three: refused)
+    sel[3] = 1;  // three selected: only the middle one may move; the ends of the chain (1 and 3) stay
+    CHECK(meshops::relax_loops(m, sel, 3, 0, true) > 0);
+    CHECK(std::memcmp(&m.positions[0], &base.positions[0], sizeof(Vec3)) == 0 && std::memcmp(&m.positions[4], &base.positions[4], sizeof(Vec3)) == 0);
+    CHECK(std::memcmp(&m.positions[1], &base.positions[1], sizeof(Vec3)) == 0 && std::memcmp(&m.positions[3], &base.positions[3], sizeof(Vec3)) == 0);
+  });
+
+  /* ---- 2. Space ---- */
+  test("LoopTools: Space Edge Loops Evenly gives an unevenly spaced chain equal edge lengths and keeps its ends, Cubic and Linear", [] {
+    for (int interp = 0; interp < 2; interp++) {
+      const float xs[] = {0.0f, 0.1f, 0.15f, 0.6f, 1.0f, 1.1f, 3.0f};
+      std::vector<Vec3> p;
+      for (float x : xs) p.push_back({x, 0.0f, 0.0f});
+      Mesh m = wire(p, false);
+      const Mesh base = m;
+      CHECK(meshops::space_loops(m, all(m), 1.0f, interp, nullptr) > 0);
+      CHECK(std::memcmp(&m.positions[0], &base.positions[0], sizeof(Vec3)) == 0 && std::memcmp(&m.positions[6], &base.positions[6], sizeof(Vec3)) == 0);
+      float total = 0;
+      for (int i = 0; i < 6; i++) total += length(m.positions[i + 1] - m.positions[i]);
+      for (int i = 0; i < 6; i++) CHECK_NEAR(length(m.positions[i + 1] - m.positions[i]), total / 6.0f, 1e-4f * total / 6.0f);
+      CHECK_NEAR(total, 3.0f, 1e-3);
+    }
+  });
+  test("LoopTools: Space Edge Loops Evenly at factor 0.5 goes half way from the old positions to the even ones", [] {
+    const float xs[] = {0.0f, 0.1f, 0.15f, 0.6f, 1.0f, 1.1f, 3.0f};
+    std::vector<Vec3> p;
+    for (float x : xs) p.push_back({x, 0.0f, 0.0f});
+    Mesh full = wire(p, false), half = full;
+    const Mesh base = full;
+    CHECK(meshops::space_loops(full, all(full), 1.0f, 1, nullptr) > 0);
+    CHECK(meshops::space_loops(half, all(half), 0.5f, 1, nullptr) > 0);
+    for (size_t i = 0; i < 7; i++) CHECK_NEAR(half.positions[i].x, 0.5f * (base.positions[i].x + full.positions[i].x), 1e-4);
+  });
+  test("LoopTools: Space Edge Loops Evenly in Linear keeps the bent chain's shape: the vertices stay on the old polyline at equal arc length", [] {
+    const std::vector<Vec3> pl = {{0, 0, 0}, {0.3f, 0, 0}, {1, 0, 0}, {1, 0.2f, 0}, {1, 1.5f, 0}, {1, 2, 0}};  // (a corner at the third vertex; length 3)
+    Mesh m = wire(pl, false);
+    CHECK(meshops::space_loops(m, all(m), 1.0f, 1, nullptr) > 0);
+    float prev_arc = 0;
+    for (size_t i = 0; i < pl.size(); i++) {
+      float arc = 0;
+      const float d = on_polyline(m.positions[i], pl, &arc);
+      CHECK(d < 1e-4f);
+      CHECK_NEAR(arc, 0.6f * (float)i, 2e-3);
+      CHECK(i == 0 || arc > prev_arc);
+      prev_arc = arc;
+    }
+  });
+  test("LoopTools: Space Edge Loops Evenly on an arc with uneven steps keeps the arc round and the chords even; a closed ring gets even too", [] {
+    std::vector<Vec3> p;
+    const float angles[] = {0.0f, 0.1f, 0.5f, 0.6f, 1.2f, 1.4f, 1.57f};
+    for (float a : angles) p.push_back({std::cos(a), 0.0f, std::sin(a)});
+    Mesh m = wire(p, false);
+    CHECK(meshops::space_loops(m, all(m), 1.0f, 0, nullptr) > 0);
+    float lo = 1e30f, hi = 0;
+    for (size_t i = 0; i + 1 < p.size(); i++) {
+      const float l = length(m.positions[i + 1] - m.positions[i]);
+      lo = std::min(lo, l), hi = std::max(hi, l);
+      CHECK_NEAR(std::hypot(m.positions[i].x, m.positions[i].z), 1.0f, 3e-2);
+    }
+    CHECK(hi - lo < 5e-2f * hi);
+    std::vector<Vec3> r;
+    for (int i = 0; i < 12; i++) {
+      const float a = 2.0f * kPi * ((float)i + 0.35f * std::sin(2.0f * (float)i)) / 12.0f;
+      r.push_back({std::cos(a), 0.0f, std::sin(a)});
+    }
+    Mesh ring = wire(r, true);
+    CHECK(meshops::space_loops(ring, all(ring), 1.0f, 0, nullptr) > 0);
+    lo = 1e30f, hi = 0;
+    for (size_t i = 0; i < 12; i++) {
+      const float l = length(ring.positions[(i + 1) % 12] - ring.positions[i]);
+      lo = std::min(lo, l), hi = std::max(hi, l);
+    }
+    CHECK(hi - lo < 5e-2f * hi);
+  });
+
+  /* ---- 3. To Circle ---- */
+  test("LoopTools: To Circle turns a square-ish loop of 8 into 8 vertices at one radius from their centre, on one plane, at equal angles", [] {
+    const int sq[8][2] = {{-1, -1}, {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}};
+    std::vector<Vec3> p;
+    for (int i = 0; i < 8; i++) p.push_back({(float)sq[i][0], 0.05f * (float)((i % 3) - 1), (float)sq[i][1]});
+    Mesh m = wire(p, true);
+    const std::vector<uint32_t> id = ids(8);
+    CHECK(meshops::circularize(m, all(m), 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    const Vec3 c = centroid(m, id);
+    float mean = 0;
+    for (uint32_t i : id) mean += length(m.positions[i] - c) / 8.0f;
+    std::printf("    radius %.4f\n", mean);
+    CHECK(mean > 0.5f && mean < 2.0f);
+    for (uint32_t i : id) CHECK_NEAR(length(m.positions[i] - c), mean, 1e-3f * mean);
+    CHECK(plane_dev(m, id) < 1e-3f);
+    for (uint32_t i = 0; i < 8; i++) CHECK_NEAR(std::fabs(wrap(angle_of(m, (i + 1) % 8, c) - angle_of(m, i, c))), kPi / 4.0f, 2e-2);
+    CHECK(valid(m));
+  });
+  test("LoopTools: To Circle at factor 0.5 lands half way between the loop and the circle", [] {
+    const Mesh base = jittered_ring();
+    Mesh full = base, half = base;
+    CHECK(meshops::circularize(full, all(full), 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    CHECK(meshops::circularize(half, all(half), 0.5f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    for (size_t i = 0; i < 16; i++) CHECK(length(half.positions[i] - 0.5f * (base.positions[i] + full.positions[i])) < 1e-3f);
+  });
+  test("LoopTools: To Circle with Interior Fit moves no vertex of a star outward, and fits inside the best-fit circle", [] {
+    std::vector<Vec3> p;
+    for (int i = 0; i < 16; i++) {
+      const float a = 2.0f * kPi * (float)i / 16.0f, r = (i % 2) ? 0.5f : 1.0f;
+      p.push_back({r * std::cos(a), 0.0f, r * std::sin(a)});
+    }
+    const Mesh base = wire(p, true);
+    Mesh interior = base, best = base;
+    CHECK(meshops::circularize(interior, all(interior), 1.0f, 1, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    CHECK(meshops::circularize(best, all(best), 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    const Vec3 c = centroid(base, ids(16));
+    float ri = 0, rb = 0;
+    for (size_t i = 0; i < 16; i++) {
+      CHECK(length(interior.positions[i] - c) <= length(base.positions[i] - c) + 1e-4f);
+      ri += length(interior.positions[i] - c) / 16.0f, rb += length(best.positions[i] - c) / 16.0f;
+    }
+    std::printf("    interior radius %.4f, best fit %.4f\n", ri, rb);
+    CHECK(ri <= rb + 1e-4f);
+  });
+  test("LoopTools: To Circle with a custom radius makes the circle exactly that big, from a small or a big loop", [] {
+    for (float scale : {0.2f, 5.0f}) {
+      Mesh m = scaled(jittered_ring(), scale);
+      CHECK(meshops::circularize(m, all(m), 1.0f, 0, 0.0f, true, 0.37f, true, 1.0f, nullptr) > 0);
+      const Vec3 c = centroid(m, ids(16));
+      for (size_t i = 0; i < 16; i++) CHECK_NEAR(length(m.positions[i] - c), 0.37f, 1e-3);
+    }
+  });
+  test("LoopTools: To Circle's Space Evenly gives equal angles, and without it the loop's own uneven angles stay", [] {
+    std::vector<Vec3> p;
+    for (int i = 0; i < 8; i++) {
+      const float a = 2.0f * kPi * ((float)i + 0.4f * std::sin(2.0f * (float)i)) / 8.0f;
+      p.push_back({std::cos(a), 0.0f, std::sin(a)});
+    }
+    const Mesh base = wire(p, true);
+    for (int regular = 0; regular < 2; regular++) {
+      Mesh m = base;
+      meshops::circularize(m, all(m), 1.0f, 0, 0.0f, false, 1.0f, regular != 0, 1.0f, nullptr);
+      const Vec3 c = centroid(m, ids(8));
+      float lo = 10, hi = 0;
+      for (uint32_t i = 0; i < 8; i++) {
+        const float s = std::fabs(wrap(angle_of(m, (i + 1) % 8, c) - angle_of(m, i, c)));
+        lo = std::min(lo, s), hi = std::max(hi, s);
+      }
+      std::printf("    Space Evenly %d: angle steps %.3f .. %.3f\n", regular, lo, hi);
+      if (regular) CHECK(hi - lo < 2e-2f);
+      else CHECK(hi - lo > 5e-2f);
+    }
+  });
+  test("LoopTools: To Circle's rotation turns the circle by that angle", [] {
+    const Mesh base = wire(circle_pts(8, 1.0f), true);
+    Mesh a = base, b = base;
+    meshops::circularize(a, all(a), 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr);
+    CHECK(meshops::circularize(b, all(b), 1.0f, 0, kPi / 2.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    const Vec3 c = centroid(base, ids(8));
+    const float d = wrap(angle_of(b, 0, c) - angle_of(a, 0, c));
+    std::printf("    first vertex turned %.3f rad\n", d);
+    CHECK_NEAR(std::fabs(d), kPi / 2.0f, 2e-2);
+    for (uint32_t i = 0; i < 8; i++) CHECK_NEAR(length(b.positions[i] - c), 1.0f, 1e-3);
+  });
+  test("LoopTools: To Circle on a selected face region (3 x 3 vertices of a flat grid) rounds the region's border and leaves the rest", [] {
+    const Mesh base = grid(5, 5, [](int, int) { return 0.0f; });
+    Mesh m = base;
+    SelVec sel(25, 0);
+    std::vector<uint32_t> border;
+    for (int j = 1; j <= 3; j++)
+      for (int i = 1; i <= 3; i++) {
+        sel[j * 5 + i] = 1;
+        if (i == 1 || i == 3 || j == 1 || j == 3) border.push_back((uint32_t)(j * 5 + i));
+      }
+    CHECK(meshops::circularize(m, sel, 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    const Vec3 c(2, 0, 2);
+    float mean = 0;
+    for (uint32_t i : border) mean += std::hypot(m.positions[i].x - c.x, m.positions[i].z - c.z) / (float)border.size();
+    std::printf("    border radius %.4f\n", mean);
+    CHECK(mean > 0.5f);
+    for (uint32_t i : border) CHECK_NEAR(std::hypot(m.positions[i].x - c.x, m.positions[i].z - c.z), mean, 1e-3f * mean);
+    for (size_t i = 0; i < 25; i++)
+      if (!sel[i]) CHECK(std::memcmp(&m.positions[i], &base.positions[i], sizeof(Vec3)) == 0);
+    CHECK(valid(m) && same_topology(m, base));
+  });
+  test("LoopTools: To Circle rounds a jittered 12-sided face's border (an n-gon)", [] {
+    Mesh m;
+    uint32_t v[12];
+    for (int i = 0; i < 12; i++) {
+      const float a = 2.0f * kPi * (float)i / 12.0f, r = 1.0f + 0.2f * (float)((i * 5) % 3 - 1);
+      v[i] = m.add_vert({r * std::cos(a), 0.0f, r * std::sin(a)});
+    }
+    m.add_face(v, 12);
+    CHECK(meshops::circularize(m, all(m), 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) > 0);
+    CHECK(radius_spread(m, ids(12)) < 1e-3f);
+  });
+
+  /* ---- 4. Flatten ---- */
+  test("LoopTools: Flatten puts a bumpy grid patch on one plane, Best Fit and Normal", [] {
+    for (int method = 0; method < 2; method++) {
+      Mesh m = bumpy_grid();
+      const Mesh base = m;
+      CHECK(plane_dev(m, ids(36)) > 0.1f);
+      CHECK(meshops::flatten_loops(m, all(m), 1.0f, method, Vec3(0, 0, 1), nullptr) > 0);
+      std::printf("    method %d: distance from the plane %.2e\n", method, plane_dev(m, ids(36)));
+      CHECK(plane_dev(m, ids(36)) < 1e-4f);
+      CHECK(valid(m) && same_topology(m, base));
+    }
+  });
+  test("LoopTools: Flatten in View mode flattens perpendicular to the given direction, moving vertices along it", [] {
+    const Vec3 d = normalize(Vec3(1.0f, 2.0f, 0.5f));
+    Mesh m = bumpy_grid();
+    const Mesh base = m;
+    CHECK(meshops::flatten_loops(m, all(m), 1.0f, 2, d, nullptr) > 0);
+    const float h0 = dot(m.positions[0], d);
+    for (size_t i = 0; i < m.vert_count(); i++) {
+      CHECK_NEAR(dot(m.positions[i], d), h0, 1e-4);
+      CHECK(length(cross(m.positions[i] - base.positions[i], d)) < 1e-4f);  // (the move is along the view direction)
+    }
+  });
+  test("LoopTools: Flatten at factor 0.5 halves every vertex's offset from the plane", [] {
+    const Mesh base = bumpy_grid();
+    Mesh full = base, half = base;
+    CHECK(meshops::flatten_loops(full, all(full), 1.0f, 2, Vec3(0, 1, 0), nullptr) > 0);
+    CHECK(meshops::flatten_loops(half, all(half), 0.5f, 2, Vec3(0, 1, 0), nullptr) > 0);
+    const float plane = full.positions[0].y;
+    for (size_t i = 0; i < base.vert_count(); i++) {
+      CHECK_NEAR(full.positions[i].y, plane, 1e-4);
+      CHECK_NEAR(half.positions[i].y - plane, 0.5f * (base.positions[i].y - plane), 1e-4);
+      CHECK_NEAR(half.positions[i].x, base.positions[i].x, 1e-5);
+      CHECK_NEAR(half.positions[i].z, base.positions[i].z, 1e-5);
+    }
+  });
+  test("LoopTools: Flatten leaves the unselected part of the patch where it is", [] {
+    const Mesh base = bumpy_grid();
+    Mesh m = base;
+    SelVec sel(36, 0);
+    for (int j = 1; j <= 4; j++)
+      for (int i = 1; i <= 4; i++) sel[j * 6 + i] = 1;
+    CHECK(meshops::flatten_loops(m, sel, 1.0f, 0, Vec3(0, 0, 1), nullptr) > 0);
+    std::vector<uint32_t> inner;
+    for (uint32_t i = 0; i < 36; i++) {
+      if (sel[i]) inner.push_back(i);
+      else CHECK(std::memcmp(&m.positions[i], &base.positions[i], sizeof(Vec3)) == 0);
+    }
+    CHECK(plane_dev(m, inner) < 1e-4f);
+  });
+
+  /* ---- 5. Curve ---- */
+  test("LoopTools: Curve Edge Loops Between Selected bends the loop through two selected end columns and a lifted middle vertex onto a smooth curve", [] {
+    SelVec sel;
+    const Mesh base = curve_case(1.0f, sel);
+    Mesh m = base;
+    CHECK(meshops::curve_loops(m, sel, 1.0f, 0, 0, false, true, nullptr) > 0);
+    for (size_t i = 0; i < 35; i++)
+      if (sel[i]) CHECK(std::memcmp(&m.positions[i], &base.positions[i], sizeof(Vec3)) == 0);
+    const float y1 = m.positions[2 * 7 + 1].y, y2 = m.positions[2 * 7 + 2].y, y4 = m.positions[2 * 7 + 4].y, y5 = m.positions[2 * 7 + 5].y;
+    std::printf("    the middle row's heights: %.3f %.3f (1.0) %.3f %.3f\n", y1, y2, y4, y5);
+    CHECK(y1 > 1e-3f && y1 < y2 && y2 < 1.0f);
+    CHECK_NEAR(y4, y2, 1e-3);
+    CHECK_NEAR(y5, y1, 1e-3);
+    for (int i = 1; i < 6; i++) {
+      CHECK_NEAR(m.positions[0 * 7 + i].y, 0.0f, 1e-5);  // (rows whose ends and middle are all level stay level)
+      CHECK_NEAR(m.positions[4 * 7 + i].y, 0.0f, 1e-5);
+    }
+    CHECK(valid(m) && same_topology(m, base));
+    Mesh lin = base;  // Linear: a straight run from the end to the lifted vertex
+    CHECK(meshops::curve_loops(lin, sel, 1.0f, 1, 0, false, true, nullptr) > 0);
+    CHECK_NEAR(lin.positions[2 * 7 + 1].y, 1.0f / 3.0f, 2e-2);
+    CHECK_NEAR(lin.positions[2 * 7 + 2].y, 2.0f / 3.0f, 2e-2);
+  });
+  test("LoopTools: Curve Edge Loops's Only Raise never lowers a vertex and Only Lower never raises one, whichever way the middle was lifted", [] {
+    for (int dir = 0; dir < 2; dir++) {
+      SelVec sel;
+      Mesh probe = curve_case(0.0f, sel);
+      const float s = probe.face_normal(0).y >= 0 ? 1.0f : -1.0f;  // (the surface's up, whichever way the faces wind)
+      const float lift = dir == 0 ? s : -s;                        // toward the normal, then against it
+      const Mesh base = curve_case(lift, sel);
+      for (int clamp = 1; clamp <= 2; clamp++) {
+        Mesh m = base;
+        meshops::curve_loops(m, sel, 1.0f, 0, clamp, false, true, nullptr);
+        float lowest = 0, highest = 0;
+        for (size_t i = 0; i < base.vert_count(); i++) {
+          const float d = (m.positions[i].y - base.positions[i].y) * s;
+          lowest = std::min(lowest, d), highest = std::max(highest, d);
+        }
+        std::printf("    lifted %s the normal, clamp %d: moved %.3f .. %.3f along it\n", dir == 0 ? "toward" : "against", clamp, lowest, highest);
+        if (clamp == 1) CHECK(lowest >= -1e-5f);
+        else CHECK(highest <= 1e-5f);
+        CHECK(valid(m));
+      }
+    }
+    SelVec sel;  // the clamp is the only difference: with none, the vertices do move
+    Mesh free_run = curve_case(1.0f, sel);
+    CHECK(meshops::curve_loops(free_run, sel, 1.0f, 0, 0, false, true, nullptr) > 0);
+  });
+  test("LoopTools: Curve Edge Loops's Extend Loop carries the curve past the selected ends to the row's ends; without it those vertices stay", [] {
+    /* A row of 9; 2, 4 and 6 selected, 4 lifted. Without Extend the loop runs 2..6. With it, it runs the whole row with its
+     * two ends pinned (Blender adds an open chain's ends as knots), so 1 and 7 move onto the curve and 0 and 8 stay. */
+    Mesh base = grid(9, 5, [](int, int) { return 0.0f; });
+    const int row = 2 * 9;
+    base.positions[row + 4].y = 0.8f;
+    SelVec sel(45, 0);
+    sel[row + 2] = sel[row + 4] = sel[row + 6] = 1;
+    Mesh plain = base, extended = base;
+    CHECK(meshops::curve_loops(plain, sel, 1.0f, 0, 0, false, true, nullptr) > 0);
+    CHECK(meshops::curve_loops(extended, sel, 1.0f, 0, 0, true, true, nullptr) > 0);
+    for (int x : {0, 1, 7, 8}) CHECK_NEAR(plain.positions[row + x].y, 0.0f, 1e-6);
+    CHECK(std::fabs(plain.positions[row + 3].y) > 1e-3f);
+    std::printf("    with Extend Loop: vertex 1 at %.4f, 7 at %.4f; the ends at %.4f, %.4f\n", extended.positions[row + 1].y,
+                extended.positions[row + 7].y, extended.positions[row].y, extended.positions[row + 8].y);
+    CHECK(std::fabs(extended.positions[row + 1].y) > 1e-3f && std::fabs(extended.positions[row + 7].y) > 1e-3f);
+    CHECK_NEAR(extended.positions[row].y, 0.0f, 1e-6);
+    CHECK_NEAR(extended.positions[row + 8].y, 0.0f, 1e-6);
+  });
+
+  /* ---- 6. Lock ---- */
+  test("LoopTools: a locked axis keeps that coordinate of every vertex, for every operator that locks (X, Y and Z in turn)", [] {
+    struct Case {
+      int op;
+      Mesh mesh;
+      SelVec sel;
+    };
+    std::vector<Case> cases;
+    {
+      std::vector<Vec3> p;
+      for (int i = 0; i < 10; i++) {
+        const float t = 0.1f * (float)(i * i);
+        p.push_back({t, 0.5f * std::sin(t), 0.3f * std::cos(1.3f * t)});
+      }
+      Mesh m = wire(p, false);
+      cases.push_back({1, m, all(m)});
+    }
+    {
+      std::vector<Vec3> p;
+      for (int i = 0; i < 12; i++) {
+        const float a = 2.0f * kPi * (float)i / 12.0f + 0.05f * std::sin((float)i), r = 1.0f + 0.1f * std::sin(3.0f * a + 1.0f);
+        p.push_back({r * std::cos(a), 0.4f * r * std::cos(a) + 0.1f * std::sin(5.0f * a), r * std::sin(a)});
+      }
+      Mesh m = wire(p, true);
+      cases.push_back({2, m, all(m)});
+    }
+    {
+      Mesh m = bumpy_grid(5);
+      cases.push_back({3, m, all(m)});
+    }
+    {
+      SelVec sel;
+      Mesh m = curve_case(1.0f, sel);
+      cases.push_back({4, m, sel});
+    }
+    for (const Case &cs : cases) {
+      Mesh free_run = cs.mesh;
+      CHECK(ops()[cs.op].run(free_run, cs.sel, nullptr) > 0);  // (the lock below is not a lock on a run that moves nothing)
+      for (int a = 0; a < 3; a++) {
+        bool lock[3] = {false, false, false};
+        lock[a] = true;
+        Mesh m = cs.mesh;
+        const int ret = ops()[cs.op].run(m, cs.sel, lock);
+        bool kept = true;
+        for (size_t i = 0; i < m.vert_count(); i++)
+          if (axis(m.positions[i], a) != axis(cs.mesh.positions[i], a)) kept = false;
+        if (!kept) std::printf("    %s with axis %d locked moved a vertex along it\n", ops()[cs.op].name, a);
+        CHECK(kept);
+        CHECK(ret >= 0 && valid(m) && same_topology(m, cs.mesh));
+      }
+    }
+  });
+
+  /* ---- 7. Robustness ---- */
+  test("LoopTools: nothing selected, a single edge and a lone vertex are refused (-1) and do nothing, for every operator", [] {
+    const Mesh chain = wire({{0, 0, 0}, {1, 0.3f, 0}, {2, 0, 0.2f}, {3, 0.4f, 0}, {4, 0, 0}}, false);
+    const Mesh ring = jittered_ring();
+    const Mesh patch = bumpy_grid();
+    for (const NamedOp &op : ops()) {
+      for (const Mesh *base : {&chain, &ring, &patch}) {
+        SelVec none(base->vert_count(), 0), lone(base->vert_count(), 0), edge(base->vert_count(), 0);
+        lone[2] = 1;
+        edge[2] = edge[3] = 1;
+        for (const SelVec *sel : {&none, &lone, &edge}) {
+          Mesh m = *base;
+          const int ret = op.run(m, *sel, nullptr);
+          if (ret != -1 || !same_bits(m, *base)) std::printf("    %s: ret %d, selection of %d vertices\n", op.name, ret, (int)std::count(sel->begin(), sel->end(), 1));
+          CHECK(ret == -1);  // refused, not "ran and moved nothing"
+          CHECK(same_bits(m, *base));
+        }
+      }
+      Mesh empty;  // (no mesh at all)
+      CHECK(op.run(empty, SelVec(), nullptr) == -1 && empty.vert_count() == 0);
+    }
+  });
+  test("LoopTools: a doubled vertex (a zero-length edge), a collinear loop and coincident vertices leave a valid finite mesh", [] {
+    {
+      std::vector<Vec3> p = circle_pts(8, 1.0f);
+      p.insert(p.begin() + 4, p[3]);  // (vertex 4 sits on vertex 3)
+      const Mesh m = wire(p, true);
+      robust("doubled vertex on a closed loop", m, all(m));
+    }
+    {
+      std::vector<Vec3> p = {{0, 0, 0}, {1, 0, 0}, {1, 0, 0}, {2, 0, 0}, {3, 0, 0}};
+      const Mesh m = wire(p, false);
+      robust("doubled vertex on an open chain", m, all(m));
+    }
+    {
+      std::vector<Vec3> p;
+      for (int i = 0; i < 6; i++) p.push_back({(float)i, 0.0f, 0.0f});
+      const Mesh closed = wire(p, true), open = wire(p, false);
+      robust("collinear closed loop", closed, all(closed));
+      robust("collinear open chain", open, all(open));
+    }
+    {
+      const Mesh m = wire(std::vector<Vec3>(6, Vec3(1, 2, 3)), true);
+      robust("six coincident vertices", m, all(m));
+    }
+    {
+      Mesh m;
+      uint32_t v[9];
+      for (int i = 0; i < 9; i++) {
+        const int k = i > 3 ? i - 1 : i;  // (vertices 3 and 4 are one place)
+        const float a = 2.0f * kPi * (float)k / 8.0f;
+        v[i] = m.add_vert({std::cos(a), 0.0f, std::sin(a)});
+      }
+      m.add_face(v, 9);
+      robust("an n-gon with a doubled vertex", m, all(m));
+    }
+    {
+      Mesh m = grid(4, 4, [](int, int) { return 0.0f; });  // (a flat patch: every plane fit is degenerate in one direction)
+      robust("a perfectly flat patch", m, all(m));
+    }
+  });
+  test("LoopTools: a non-manifold edge with three faces and a T-junction in the chain leave a valid finite mesh", [] {
+    {
+      Mesh m;  // three quads hinged on the edge 0-1
+      m.add_vert({0, 0, 0});
+      m.add_vert({1, 0, 0});
+      for (int k = 0; k < 3; k++) {
+        const float a = 2.0f * kPi * (float)k / 3.0f;
+        const uint32_t b = m.add_vert({1, std::cos(a), std::sin(a)});
+        const uint32_t c = m.add_vert({0, std::cos(a), std::sin(a)});
+        m.add_face({0, 1, b, c});
+      }
+      robust("three faces on one edge", m, all(m));
+      SelVec edge_only(m.vert_count(), 0);
+      edge_only[0] = edge_only[1] = 1;
+      robust("three faces on one edge, only the edge selected", m, edge_only);
+    }
+    {
+      Mesh m = wire({{0, 0, 0}, {0.5f, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}, true);
+      const uint32_t arm = m.add_vert({0.5f, 0, -1});
+      m.add_loose_edge(1, arm);  // vertex 1 now has three selected edges
+      const uint32_t arm2 = m.add_vert({0.5f, 0.5f, 0});
+      m.add_loose_edge(1, arm2);  // ... and four
+      robust("a wire loop with arms (a junction)", m, all(m));
+    }
+    {
+      Mesh m;  // a quad and a vertex in the middle of its first edge that only a wire edge uses
+      m.add_vert({0, 0, 0});
+      m.add_vert({1, 0, 0});
+      m.add_vert({1, 0, 1});
+      m.add_vert({0, 0, 1});
+      m.add_vert({0.5f, 0, 0});
+      m.add_face({0, 1, 2, 3});
+      m.add_loose_edge(4, 0);
+      m.add_loose_edge(4, 1);
+      robust("a T-junction beside a face", m, all(m));
+    }
+  });
+  test("LoopTools: at 1e7 and 1e-7 scale every operator leaves a valid finite mesh that stays where it was", [] {
+    for (float s : {1e7f, 1e-7f}) {
+      robust("a jittered ring", scaled(jittered_ring(), s), all(jittered_ring()));
+      const Mesh g = bumpy_grid();
+      robust("a bumpy patch", scaled(g, s), all(g));
+      std::vector<Vec3> p;
+      for (int i = 0; i < 9; i++) p.push_back({(float)i, (i % 2) ? 0.5f : 0.0f, 0.0f});
+      const Mesh chain = wire(p, false);
+      robust("a zig-zag chain", scaled(chain, s), all(chain));
+      SelVec sel;
+      const Mesh cc = curve_case(1.0f, sel);
+      robust("curve's grid", scaled(cc, s), sel);
+    }
+  });
+  test("LoopTools: a NaN or infinite coordinate on the chain writes no new NaN or infinity, for every operator", [] {
+    for (int bad = 0; bad < 2; bad++) {
+      Mesh ring = wire(circle_pts(8, 1.0f), true);
+      ring.positions[2].x = bad ? kInf : kNaN;
+      robust(bad ? "ring with an infinite vertex" : "ring with a NaN vertex", ring, all(ring), 2);
+      Mesh chain = wire({{0, 0, 0}, {1, 0.4f, 0}, {2, 0, 0}, {3, 0.4f, 0}, {4, 0, 0}, {5, 0.3f, 0}}, false);
+      chain.positions[3].y = bad ? kInf : kNaN;
+      robust(bad ? "chain with an infinite vertex" : "chain with a NaN vertex", chain, all(chain), 3);
+      Mesh g = bumpy_grid();
+      g.positions[14].z = bad ? -kInf : kNaN;
+      robust(bad ? "patch with an infinite vertex" : "patch with a NaN vertex", g, all(g), 14);
+      SelVec sel;
+      Mesh cc = curve_case(1.0f, sel);
+      cc.positions[2 * 7 + 3].y = bad ? kInf : kNaN;
+      robust(bad ? "curve's grid with an infinite lift" : "curve's grid with a NaN lift", cc, sel, 2 * 7 + 3);
+    }
+  });
+  test("LoopTools: running an operator twice on its own result stays valid and finite, and a result that was already round or flat is left (almost) alone", [] {
+    for (const NamedOp &op : ops()) {
+      Mesh m = jittered_ring();
+      const Mesh base = m;
+      op.run(m, all(m), nullptr);
+      Mesh again = m;
+      op.run(again, all(again), nullptr);
+      CHECK(valid(again) && same_topology(again, base));
+      for (const Vec3 &p : again.positions) CHECK(finite3(p));
+    }
+    Mesh flat = bumpy_grid();
+    meshops::flatten_loops(flat, all(flat), 1.0f, 0, Vec3(0, 0, 1), nullptr);
+    Mesh twice = flat;
+    meshops::flatten_loops(twice, all(twice), 1.0f, 0, Vec3(0, 0, 1), nullptr);
+    for (size_t i = 0; i < flat.vert_count(); i++) CHECK(length(flat.positions[i] - twice.positions[i]) < 1e-4f);
+  });
+
+  /* ---- 8. Review fixes ---- */
+  test("LoopTools: in Edge mode two neighbouring rings of a band selected as edges are two loops for Relax and Space (the rungs do not count)", [] {
+    const Mesh base = band(4);
+    SelVec sel(32, 0);
+    for (uint32_t i = 8; i < 24; i++) sel[i] = 1;
+    std::unordered_set<uint64_t> es;
+    ring_edges(1, es);
+    ring_edges(2, es);
+    meshops::EdgeSelectionScope scope(&es);
+    for (int which = 0; which < 2; which++) {
+      Mesh m = base;
+      const int ret = which == 0 ? meshops::relax_loops(m, sel, 2, 0, true) : meshops::space_loops(m, sel, 1.0f, 0, nullptr);
+      std::printf("    %s: ret %d\n", which == 0 ? "relax" : "space", ret);
+      CHECK(ret > 0);
+      CHECK(moved_any(m, base, 8, 8));   // ring 1 changed
+      CHECK(moved_any(m, base, 16, 8));  // ring 2 changed
+      CHECK(!moved_any(m, base, 0, 8) && !moved_any(m, base, 24, 8));
+      for (int k = 1; k <= 2; k++)
+        for (int i = 0; i < 8; i++) CHECK_NEAR(m.positions[k * 8 + i].y, (float)k, 1e-4);  // each ring stays on its own height
+      CHECK(valid(m) && same_topology(m, base));
+    }
+  });
+  test("LoopTools: in Edge mode a U of three sides of a quad is an open chain whose two ends do not move under Relax and Space", [] {
+    Mesh base;
+    base.add_vert({0, 0, 0});
+    base.add_vert({1.6f, 0.3f, 0});
+    base.add_vert({1.6f, 0, 1.0f});
+    base.add_vert({0, 0.2f, 1.0f});
+    base.add_face({0, 1, 2, 3});
+    const SelVec sel(4, 1);
+    std::unordered_set<uint64_t> es = {Mesh::edge_key(0, 1), Mesh::edge_key(1, 2), Mesh::edge_key(2, 3)};
+    meshops::EdgeSelectionScope scope(&es);
+    for (int which = 0; which < 2; which++) {
+      Mesh m = base;
+      const int ret = which == 0 ? meshops::relax_loops(m, sel, 3, 0, true) : meshops::space_loops(m, sel, 1.0f, 1, nullptr);
+      std::printf("    %s: ret %d\n", which == 0 ? "relax" : "space", ret);
+      CHECK(ret > 0);
+      CHECK(!moved_any(m, base, 0, 1) && !moved_any(m, base, 3, 1));
+      CHECK(moved_any(m, base, 1, 2));
+      CHECK(valid(m) && same_topology(m, base));
+    }
+  });
+  test("LoopTools: in Face mode a ring of 8 faces round an unselected centre quad gets both its outer and its inner border rounded", [] {
+    Mesh m = grid(4, 4, [](int, int) { return 0.0f; });
+    m.positions[5].x -= 0.2f, m.positions[5].z -= 0.2f;  // (the hole's border starts out lopsided)
+    const Mesh base = m;
+    SelVec face_sel(9, 1);
+    face_sel[4] = 0;
+    const std::vector<uint32_t> outer = {0, 1, 2, 3, 7, 11, 15, 14, 13, 12, 8, 4}, inner = {5, 6, 10, 9};
+    CHECK(radius_spread(base, inner) > 0.05f);
+    const int ret = meshops::circularize(m, all(m), 1.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr, &face_sel);
+    std::printf("    ret %d, spread outer %.4f -> %.4f, inner %.4f -> %.4f\n", ret, radius_spread(base, outer), radius_spread(m, outer),
+                radius_spread(base, inner), radius_spread(m, inner));
+    CHECK(ret > 0);
+    CHECK(radius_spread(m, outer) < 1e-3f);
+    CHECK(radius_spread(m, inner) < 1e-3f);
+    CHECK(valid(m) && same_topology(m, base));
+    for (const Vec3 &p : m.positions) CHECK(finite3(p));
+  });
+  test("LoopTools: in Edge mode Flatten puts two separate non-flat rings each on its own plane", [] {
+    Mesh m = band(4);
+    for (int i = 0; i < 8; i++) {
+      m.positions[8 + i].y += 0.1f * (float)((i % 3) - 1);                        // ring 1: bumpy
+      m.positions[16 + i].y += 0.3f * m.positions[16 + i].x + 0.08f * (float)((i % 2) * 2 - 1);  // ring 2: tilted and bumpy
+    }
+    const Mesh base = m;
+    SelVec sel(32, 0);
+    for (uint32_t i = 8; i < 24; i++) sel[i] = 1;
+    std::unordered_set<uint64_t> es;
+    ring_edges(1, es);
+    ring_edges(2, es);
+    meshops::EdgeSelectionScope scope(&es);
+    CHECK(plane_dev(base, ids(24)) > 0.1f);
+    const int ret = meshops::flatten_loops(m, sel, 1.0f, 0, Vec3(0, 0, 1), nullptr);
+    std::vector<uint32_t> r1, r2;
+    for (uint32_t i = 0; i < 8; i++) r1.push_back(8 + i), r2.push_back(16 + i);
+    std::printf("    ret %d, ring 1 off its plane %.2e, ring 2 %.2e\n", ret, plane_dev(m, r1), plane_dev(m, r2));
+    CHECK(ret > 0);
+    CHECK(plane_dev(m, r1) < 1e-4f);
+    CHECK(plane_dev(m, r2) < 1e-4f);
+    CHECK(!moved_any(m, base, 0, 8) && !moved_any(m, base, 24, 8));
+    CHECK(valid(m) && same_topology(m, base));
+  });
+  test("LoopTools: Relax and Space refuse (-1) and leave the mesh alone when a face is selected", [] {
+    const Mesh base = bumpy_grid();
+    SelVec face_sel(25, 0);
+    face_sel[7] = 1;
+    Mesh a = base, b = base;
+    CHECK(meshops::relax_loops(a, all(a), 2, 0, true, &face_sel) == -1 && same_bits(a, base));
+    CHECK(meshops::space_loops(b, all(b), 1.0f, 0, nullptr, &face_sel) == -1 && same_bits(b, base));
+  });
+  test("LoopTools: Relax of a loop that closes on a junction gives the same result whatever order its edges were added in, and the junction stays", [] {
+    const Vec3 P[5] = {{0, 0, 0}, {1, 0.3f, 0}, {1.5f, 0, 1.2f}, {0.3f, 0.4f, 1.0f}, {-1, 0, -1}};  // J, b, c, d, e
+    const uint32_t e1[5][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {0, 4}};
+    const uint32_t e2[5][2] = {{4, 0}, {0, 3}, {3, 2}, {2, 1}, {1, 0}};
+    Mesh a, b;
+    for (Vec3 p : P) a.add_vert(p), b.add_vert(p);
+    for (int i = 0; i < 5; i++) a.add_loose_edge(e1[i][0], e1[i][1]), b.add_loose_edge(e2[i][0], e2[i][1]);
+    const Mesh base = a;
+    const SelVec sel(5, 1);
+    const int ra = meshops::relax_loops(a, sel, 2, 0, true), rb = meshops::relax_loops(b, sel, 2, 0, true);
+    std::printf("    ret %d / %d\n", ra, rb);
+    CHECK(ra == rb);
+    CHECK(ra > 0);
+    for (int i = 0; i < 5; i++) CHECK(length(a.positions[i] - b.positions[i]) < 1e-5f);  // (compared by vertex identity)
+    CHECK(!moved_any(a, base, 0, 1) && !moved_any(b, base, 0, 1));
+    CHECK(!moved_any(a, base, 4, 1));  // (the tail end is not on the loop)
+    for (const Vec3 &p : a.positions) CHECK(finite3(p));
+  });
+  test("LoopTools: Flatten on a selection that is already flat returns 0 (not refused) and changes nothing; Factor 0 changes nothing", [] {
+    Mesh flat = grid(4, 4, [](int, int) { return 0.0f; });
+    const Mesh flat_base = flat;
+    CHECK(meshops::flatten_loops(flat, all(flat), 1.0f, 0, Vec3(0, 0, 1), nullptr) == 0);
+    CHECK(same_bits(flat, flat_base));
+    CHECK(meshops::flatten_loops(flat, all(flat), 1.0f, 1, Vec3(0, 0, 1), nullptr) == 0 && same_bits(flat, flat_base));
+    {
+      Mesh m = jittered_ring();
+      const Mesh base = m;
+      CHECK(meshops::space_loops(m, all(m), 0.0f, 0, nullptr) >= 0 && same_bits(m, base));
+      CHECK(meshops::circularize(m, all(m), 0.0f, 0, 0.0f, false, 1.0f, true, 1.0f, nullptr) >= 0 && same_bits(m, base));
+      CHECK(meshops::flatten_loops(m, all(m), 0.0f, 0, Vec3(0, 0, 1), nullptr) >= 0 && same_bits(m, base));
+    }
+    {
+      Mesh g = bumpy_grid();
+      const Mesh base = g;
+      CHECK(meshops::flatten_loops(g, all(g), 0.0f, 0, Vec3(0, 0, 1), nullptr) >= 0 && same_bits(g, base));
+    }
+    {
+      SelVec sel;
+      Mesh m = curve_case(1.0f, sel);
+      const Mesh base = m;
+      CHECK(meshops::curve_loops(m, sel, 0.0f, 0, 0, false, true, nullptr) >= 0 && same_bits(m, base));
+    }
+  });
+  test("LoopTools: To Circle with Flatten below 1 on a non-planar neighbourhood stays finite, valid and near where it was", [] {
+    for (float flatten : {0.0f, 0.3f, 0.7f}) {
+      const Mesh base = bumpy_grid();
+      Mesh m = base;
+      SelVec sel(36, 0);
+      for (int j = 1; j <= 3; j++)
+        for (int i = 1; i <= 3; i++) sel[j * 6 + i] = 1;
+      const int ret = meshops::circularize(m, sel, 1.0f, 0, 0.0f, false, 1.0f, true, flatten, nullptr);
+      bool fin = true, bounded = true;
+      for (const Vec3 &p : m.positions) {
+        if (!finite3(p)) fin = false;
+        else if (std::fabs(p.x) > 20.0f || std::fabs(p.y) > 20.0f || std::fabs(p.z) > 20.0f) bounded = false;
+      }
+      std::printf("    flatten %.1f: ret %d finite %d bounded %d\n", flatten, ret, (int)fin, (int)bounded);
+      CHECK(ret >= -1);
+      CHECK(fin && bounded && valid(m) && same_topology(m, base));
+      for (size_t i = 0; i < 36; i++)
+        if (!sel[i]) CHECK(std::memcmp(&m.positions[i], &base.positions[i], sizeof(Vec3)) == 0);
+    }
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -11523,4 +12456,5 @@ void run_modeling_tests() {
   tests_round470();
   tests_round470_share();
   run_weight_paint_tests();
+  tests_round537();
 }

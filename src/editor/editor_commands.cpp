@@ -2021,6 +2021,10 @@ void Editor::run_console_command(const std::string &line) {
     else if (k == "orientation") last_op_.orientation = (int)v;
     else if (k == "fuse") last_op_.fuse = v != 0;
     else if (k == "clamp") last_op_.clamp = v != 0;
+    else if (k == "axis") last_op_.axis = (int)v;  // array's axis, LoopTools' interpolation / plane method / fit
+    else if (k == "individual") last_op_.individual = v != 0;  // inset's mode, LoopTools' Even / Regular
+    else if (k == "lock") last_op_.lock = (int)v & 7;  // LoopTools: bit 0 X, 1 Y, 2 Z
+    else if (k == "size") last_op_.size = Vec3(v, (float)std::atof(arg(3, "1").c_str()), (float)std::atof(arg(4, "1").c_str()));
     else if (k == "move") last_op_.move = Vec3(v, (float)std::atof(arg(3, "0").c_str()), (float)std::atof(arg(4, "0").c_str()));
     else { Log::warn("redo: unknown parameter '%s'", k.c_str()); return; }
     run_last_op(false);
