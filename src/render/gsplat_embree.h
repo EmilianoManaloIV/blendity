@@ -22,6 +22,9 @@
 
 namespace bl {
 
+struct PointCloud;  // scene/pointcloud.h (round 530)
+class Scene;
+
 /* One splat cloud as the renderer reads it: arrays owned by the caller (round 530's PointCloud), alive while the set
  * built from them is used. `sh_rest` holds `sh_rest_per_point` RGB coefficients a splat, coefficient-major
  * (gsplat_math.h sh_color). `uid` names the cloud and `key` changes when its arrays do (round 530: caches key on the
@@ -40,7 +43,15 @@ struct SplatCloudView {
   uint64_t key = 0;
   Mat4 model;       // object to world
   uint32_t id = 0;  // the object's id (the path tracer's id plane)
+  /* Keeps the arrays alive while a render or bake on another thread reads them: a cloud is copy-on-write
+   * (pointcloud_make_mutable), so an edit meanwhile makes a copy and leaves these as they are. */
+  std::shared_ptr<const void> owner;
 };
+
+/* The view of a Gaussian Splats cloud placed by `model` (count 0 for a Points cloud, an empty or inconsistent one). */
+SplatCloudView splat_view_of(const std::shared_ptr<const PointCloud> &pc, const Mat4 &model, uint32_t id);
+/* Every active Gaussian Splats object of a scene, placed in the world: what F12, the previews and the bakes trace. */
+std::vector<SplatCloudView> scene_splat_views(Scene &scene);
 
 /* A kept splat hit. */
 struct SplatHit {

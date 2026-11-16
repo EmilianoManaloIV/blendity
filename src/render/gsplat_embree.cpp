@@ -6,6 +6,8 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../scene/pointcloud.h"
+#include "../scene/pointcloud_object.h"
 
 #include <algorithm>
 #include <cmath>
@@ -541,6 +543,37 @@ Vec3 SplatSet::normal(const SplatHit &h, Vec3 world_dir) const {
   const Vec3 w{m[0] * n.x + m[1] * n.y + m[2] * n.z, m[4] * n.x + m[5] * n.y + m[6] * n.z, m[8] * n.x + m[9] * n.y + m[10] * n.z};
   const float l = length(w);
   return finite_bits(l) && l > 1e-20f ? w * (1.0f / l) : Vec3(0, 0, 1);
+}
+
+SplatCloudView splat_view_of(const std::shared_ptr<const PointCloud> &pc, const Mat4 &model, uint32_t id) {
+  SplatCloudView v;
+  if (!pc || !pc->is_splats() || pc->count() == 0 || !pc->consistent()) return v;
+  v.position = pc->position.data();
+  v.color = pc->color.data();
+  v.opacity = pc->opacity.data();
+  v.scale = pc->scale.data();
+  v.rotation = pc->rotation.data();
+  v.sh_rest_per_point = pc->sh_rest_per_point();
+  v.sh_rest = v.sh_rest_per_point ? pc->sh_rest.data() : nullptr;
+  v.count = pc->count();
+  v.uid = pc->uid.v;
+  v.key = pc->version;
+  v.model = model;
+  v.id = id;
+  v.owner = pc;
+  return v;
+}
+
+std::vector<SplatCloudView> scene_splat_views(Scene &scene) {
+  std::vector<SplatCloudView> out;
+  scene.for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    const PointCloudObject *po = g.get<PointCloudObject>();
+    if (!po || !po->data) return;
+    SplatCloudView v = splat_view_of(po->data, g.world_matrix(), g.id);
+    if (v.count) out.push_back(std::move(v));
+  });
+  return out;
 }
 
 uint32_t SplatSet::object_id(const SplatHit &h) const { return h.cloud < d_->clouds.size() ? d_->clouds[h.cloud].view.id : 0; }

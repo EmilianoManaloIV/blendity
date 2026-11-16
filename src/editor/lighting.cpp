@@ -491,6 +491,7 @@ void Editor::bake_start() {
   job->env = env_;
   part(1);
   BakeSettings &s = job->settings;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the splats shine on the lightmaps and shade them)
   s.texels_per_unit = ls.texels_per_unit;
   s.max_size = ls.max_size;
   s.padding = ls.padding;
@@ -627,6 +628,7 @@ void Editor::bake_job_run(BakeJob &j) {
       ps.max_bounces = std::max(0, j.bounces - 1);
       ps.denoise = false;
       ps.use_guiding = false;
+      ps.splats = j.settings.splats;  // (round 533)
       pt.set_settings(ps);
       const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
       pt.build(objs, lights, j.env);

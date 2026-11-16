@@ -5,6 +5,8 @@
 #include "test_common.h"
 
 #include "../src/render/gsplat_math.h"
+#include "../src/scene/pointcloud.h"
+#include "../src/scene/pointcloud_object.h"
 
 using namespace bl;
 
@@ -74,7 +76,9 @@ void run_r533_math() {
     float t, a;
     CHECK(gsplat::intersect(p, g3(0, 0.5f, 0), g3(0, 0, 1), 1e-4f, 100.0f, t, a));
     CHECK_NEAR(a, std::exp(-0.5f), 1e-4f);
-    CHECK(!gsplat::intersect(p, g3(0.5f, 0, 0), g3(0, 0, 1), 1e-4f, 100.0f, t, a));  // 5 sigma: outside the sphere
+    /* 5 sigma across the short axis: inside the bounding sphere (it ignores the turn, as Cycles'), all but unseen. */
+    CHECK(gsplat::intersect(p, g3(0.5f, 0, 0), g3(0, 0, 1), 1e-4f, 100.0f, t, a));
+    CHECK_NEAR(a, std::exp(-12.5f), 1e-6f);
     /* A quaternion that is not unit turns the same. */
     gsplat::Prepared q;
     CHECK(gsplat::prepare(g3(0, 0, 5), g3(0.5f, 0.1f, 0.1f), gsplat::Q4{0, 0, 3 * h, 3 * h}, 1.0f, q));
@@ -355,18 +359,18 @@ void run_r533_trace() {
     std::vector<MaterialPtr> glow = {make_material("glow", {0, 0, 0})};
     glow[0]->emission = {0.0f, 0.0f, 1.0f};
     glow[0]->emission_strength = 1.0f;
-    /* The quad faces -Z (towards the camera) when turned about X; double-sided anyway for the test. */
+    /* primitives::quad lies in XY facing -Z, towards the camera at z = -5. */
     glow[0]->double_sided = true;
-    const Mat4 in_front = Mat4::trs({0, 0, -1}, Quat::axis_angle({1, 0, 0}, -kPi / 2), {4, 4, 4});
-    const Mat4 behind = Mat4::trs({0, 0, 1}, Quat::axis_angle({1, 0, 0}, -kPi / 2), {4, 4, 4});
+    const Mat4 in_front = Mat4::trs({0, 0, -1}, Quat(), {4, 4, 4});
+    const Mat4 behind = Mat4::trs({0, 0, 1}, Quat(), {4, 4, 4});
     const std::vector<float> front = trace_splats({c.view()}, {{&quad->render_mesh_tangents(), in_front, &glow}}, 32, false);
     const Vec3 f = px(front, kW / 2, kH / 2);
     CHECK(f.x < 0.02f && f.z > 0.5f);  // the blue panel, no splat white
     const std::vector<float> back = trace_splats({c.view()}, {{&quad->render_mesh_tangents(), behind, &glow}}, 64, false);
     const Vec3 b = px(back, kW / 2, kH / 2);
     CHECK(b.x > 0.6f);  // the splat over the panel
-    /* Off the splat's middle (about 2 sigma) the panel's blue comes through its low alpha. */
-    const Vec3 edge = px(back, kW / 2 + 5, kH / 2);
+    /* Off the splat's middle (9 pixels: about 2 sigma) the panel's blue comes through its low alpha. */
+    const Vec3 edge = px(back, kW / 2 + 9, kH / 2);
     CHECK(edge.z > edge.x);
   });
 
@@ -405,7 +409,7 @@ void run_r533_trace() {
     mirror[0]->metallic = 1.0f;
     mirror[0]->roughness = 0.0f;
     mirror[0]->double_sided = true;
-    const Mat4 wall = Mat4::trs({0, 0, 1}, Quat::axis_angle({1, 0, 0}, -kPi / 2), {6, 6, 6});
+    const Mat4 wall = Mat4::trs({0, 0, 1}, Quat(), {6, 6, 6});  // (the quad faces the camera)
     const std::vector<float> img = trace_splats({c.view()}, {{&quad->render_mesh_tangents(), wall, &mirror}}, 32, false);
     const Vec3 m = px(img, kW / 2, kH / 2);
     CHECK(m.x > 0.3f && m.x > 2.0f * m.y);
@@ -527,9 +531,64 @@ void run_r533_trace() {
   });
 }
 
+void run_r533_scene() {
+  test("Splats in bakes: a lightmap under a bright splat sheet gains its light, with no lamps and a black world", [] {
+    TestCloud c;
+    c.add({0, 1.0f, 0}, {1.0f, 1.0f, 1.0f}, 0.95f, {1.5f, 0.05f, 1.5f});
+    auto plane = primitives::plane(4.0f, 2);
+    const Mat4 model = Mat4::identity();
+    auto bake = [&](bool with_splats) {
+      Lightmapper lm;
+      BakeSettings s = r35_small(8.0f, 64);
+      s.denoise = false;
+      if (with_splats) s.splats = {c.view()};
+      return r35_run(lm, {r35_object(1, plane, model)}, {}, black_world(), s);
+    };
+    Vec3 lit(0.0f), dark(0.0f);
+    CHECK(r35_sample(bake(true), 1, *plane, model, {0.1f, 0, 0.1f}, lit));
+    CHECK(r35_sample(bake(false), 1, *plane, model, {0.1f, 0, 0.1f}, dark));
+    std::printf("    lightmap under the splat sheet: %.3f (without it %.3f)\n", lit.x, dark.x);
+    CHECK(lit.x > 0.05f);
+    CHECK(dark.x == 0.0f);
+    CHECK(r35_finite(lit));
+  });
+
+  test("Splats in renders: the scene's Gaussian Splats objects are gathered, placed, kept alive; Points and hidden ones not", [] {
+    Scene scene;
+    GameObject *g = create_point_cloud_object(scene, PointCloudType::GaussianSplats);
+    PointCloudObject *po = g->get<PointCloudObject>();
+    po->data = pointcloud_random(PointCloudType::GaussianSplats, 200, 1, 3u);
+    g->set_world_position({2, 0, 0});
+    GameObject *pts = create_point_cloud_object(scene, PointCloudType::Points);
+    pts->get<PointCloudObject>()->data = pointcloud_random(PointCloudType::Points, 50, 0, 4u);
+    GameObject *hidden = create_point_cloud_object(scene, PointCloudType::GaussianSplats);
+    hidden->get<PointCloudObject>()->data = pointcloud_random(PointCloudType::GaussianSplats, 30, 0, 5u);
+    hidden->active = false;
+    std::vector<SplatCloudView> views = scene_splat_views(scene);
+    CHECK(views.size() == 1);
+    if (views.size() != 1) return;
+    CHECK(views[0].count == 200 && views[0].id == (uint32_t)g->id && views[0].sh_rest_per_point == 3);
+    CHECK_NEAR(views[0].model.m[12], 2.0f, 1e-5f);
+    CHECK(views[0].uid == po->data->uid.v && views[0].key == po->data->version);
+    /* An edit while a render holds the view copies the cloud: the render's arrays stay as they were. */
+    const Vec3 *before = views[0].position;
+    const Vec3 first = before[0];
+    PointCloudPtr &mine = pointcloud_make_mutable(po->data);
+    mine->position[0] = Vec3(99, 99, 99);
+    mine->touch();
+    CHECK(views[0].position[0].x == first.x);
+    CHECK(scene_splat_views(scene)[0].key != views[0].key);
+    /* And it traces. */
+    size_t kept = 0;
+    trace_splats(views, {}, 1, false, &kept);
+    CHECK(kept > 150);
+  });
+}
+
 }  // namespace
 
 void run_splats_trace_tests() {
   run_r533_math();
   run_r533_trace();
+  run_r533_scene();
 }

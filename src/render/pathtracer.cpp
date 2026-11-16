@@ -190,7 +190,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   gpu_error_.clear();
   /* Round 533: the splat clouds (Cycles 5.3's Gaussian splats), a scene of their own beside the meshes. */
   if (!splats_) splats_ = std::make_shared<SplatSet>();
-  splats_->build(splat_views_, embree_available() && settings_.use_embree);
+  splats_->build(settings_.splats, embree_available() && settings_.use_embree);
   bool cpu_only = has_volume_;
   /* Round 331: the GPU kernel has no volumes yet - a scene with fog is traced on the CPU, and says so. */
   if (has_volume_ && !settings_.gpus.empty()) gpu_note_ = "a Volume (fog) material: traced on the CPU (the GPU kernel has no volumes yet)";

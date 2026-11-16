@@ -78,6 +78,9 @@ struct PTSettings {
    * Embree for ray queries, OpenImageDenoise for denoising. Changing
    * use_embree takes effect on the next build(). */
   bool use_embree = true;
+  /* Round 533: the Gaussian splat clouds (scene_splat_views), traced after the meshes; a scene with splats is traced
+   * on the CPU until round 534. Their arrays are kept alive by each view's owner. */
+  std::vector<SplatCloudView> splats;
   bool use_oidn = true;
   /* Task 0094: where OpenImageDenoise runs. 0 Auto (a GPU when OIDN's CUDA or HIP module finds one, unless
    * BLENDITY_DENOISE_DEVICE=cpu), 1 CPU, 2 GPU (the CPU without one). A GPU error denoises on the CPU. */
@@ -156,10 +159,10 @@ class PathTracer {
    * and glass surfaces and an outline's back faces are looked through; cutout holes too. */
   void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
-  /* Round 533: the Gaussian splat clouds to trace with the meshes (their arrays stay alive and unchanged while this
-   * tracer uses them). Takes effect on the next build(). A scene with splats is traced on the CPU for now. */
-  void set_splats(std::vector<SplatCloudView> clouds) { splat_views_ = std::move(clouds); }
-  const std::vector<SplatCloudView> &splat_views() const { return splat_views_; }
+  /* Round 533: the Gaussian splat clouds to trace with the meshes - PTSettings::splats, set here or with the settings
+   * (an F12 job's and a bake's settings carry them). Takes effect on the next build(). */
+  void set_splats(std::vector<SplatCloudView> clouds) { settings_.splats = std::move(clouds); }
+  const std::vector<SplatCloudView> &splat_views() const { return settings_.splats; }
   size_t splat_count() const { return splats_ ? splats_->splat_count() : 0; }  // kept by the last build()
   size_t memory_bytes() const;  // (task 0421) the sample planes, the bottom-level trees and the object list, by capacity
 
@@ -384,8 +387,7 @@ class PathTracer {
   Media camera_media_;       // the fogs the camera is in (each render() call)
   void build_embree(double &ms);
   bool use_embree_ = false;  // decided at build()
-  /* Round 533: the splat clouds given, and their scene (gsplat_embree.h), built by build(). */
-  std::vector<SplatCloudView> splat_views_;
+  /* Round 533: the splat clouds' scene (gsplat_embree.h), built by build() from settings_.splats. */
   std::shared_ptr<SplatSet> splats_;
   /* occluded() and transmittance() without the splats. */
   bool occluded_meshes(const Ray &r, float tmax) const;

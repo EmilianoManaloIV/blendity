@@ -1683,6 +1683,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   s.use_guiding = rs.path_guiding;
   s.view_transform = view_transform_from_setting(rs.view_transform);
   s.exposure = rs.exposure;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the Gaussian splat objects, traced after the meshes)
   return s;
 }
 
