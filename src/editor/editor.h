@@ -3895,6 +3895,7 @@ class Editor {
   public:
   FixModelOptions &fix_model_options_for_test() { return fix_model_options_; }
   private:
+  int action_mods_ = -1;  // (round 548: the modifiers as the shortcut's key went down while handle_shortcuts runs an action; -1 from a menu)
   const std::vector<AvatarCheck> &avatar_checklist(GameObject &root);
   void run_avatar_fix(const AvatarCheck &c);  // (its object selected by id first)
   /* The checklist kept half a second for the window (review 356: humanoid::map, gait::analyse and the budget every frame). */

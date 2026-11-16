@@ -318,7 +318,8 @@ bool Editor::delete_menu_item(size_t selected, const char *one, const char *plur
 
 bool Editor::select_all_key(const Recti &over, bool blocked) {
   auto &u = ui_;
-  if (blocked || !u.in.ctrl() || !u.in.key_pressed[platform::KEY_A]) return false;
+  // (round 548: Ctrl as A went down)
+  if (blocked || !(u.in.chord_mods(platform::KEY_A) & platform::MOD_CTRL) || !u.in.key_pressed[platform::KEY_A]) return false;
   if (!u.hovered(over) || u.wants_keyboard() || u.any_editing()) return false;
   u.in.key_pressed[platform::KEY_A] = false;  // (never the scene's Select All from over this window)
   return true;
