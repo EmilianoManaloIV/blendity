@@ -83,6 +83,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     u.submenu("Point Cloud", u.px(170), [this, child] {  // (round 530)
       if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud", child);
       if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats", child);
+      if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats", child);
     });
     if (u.menu_item("Armature")) create_object("Armature", child);
   };
