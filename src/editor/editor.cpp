@@ -259,6 +259,7 @@ bool Editor::wants_continuous_redraw() const {
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
          !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_) ||
+         gsplat_sorts_running() > 0 ||  // (round 532: a worker's splat order lands; the frame after it shows it)
          vr_running();  // (round 383: the headset wants every frame - idle, the editor would draw one a second - review 383)
 }
 

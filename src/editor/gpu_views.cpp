@@ -1536,7 +1536,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   /* Round 532: Gaussian splats go to the card as the CPU's projected, ordered splats (scene_splats_to_card); a card
    * without the pass, more clouds than it numbers, or a picture kept in linear light (the splats' pixels would need the
    * "none" mark in it) draw such a view on the CPU. */
-  const bool splats = scene_has_splats(*scene_);
+  /* (Wireframe draws no splats, as on the CPU: render_solid gathers none there.) */
+  const bool splats = shading_ != Shading::Wireframe && scene_has_splats(*scene_);
   if (splats && !g->can_draw_splats()) return gpu_view_refuse(slot, "Gaussian splats (the card's splat pass couldn't be made)");
   if (splats && scene_splat_draws(*scene_).size() > kCardMaxSplatClouds) return gpu_view_refuse(slot, "Gaussian splats in more than 255 clouds");
   if (splats && rt.want_hdr) return gpu_view_refuse(slot, "Gaussian splats over a picture kept in linear light (drawn on the CPU)");

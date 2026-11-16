@@ -567,6 +567,11 @@ static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, c
   sp.has_probe = true;
 }
 
+SplatPass &Renderer3D::splat_pass() {
+  if (!own_splats_) own_splats_ = std::make_shared<SplatPass>();
+  return *own_splats_;
+}
+
 void Renderer3D::flush() {
   uses_++;  // (task 0421)
   ScopedTimer total;
@@ -575,7 +580,7 @@ void Renderer3D::flush() {
   if (!opt_.multithreaded) js.set_max_threads(1);
 
   const int W = rt_->width, H = rt_->height;
-  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; js.set_max_threads(saved_threads); return; }
+  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; splats_ = nullptr; js.set_max_threads(saved_threads); return; }
   if (!(rt_->want_hdr && opt_.shade == ShadeMode::Deferred) || rt_->hdr.size() != (size_t)W * H) rt_->hdr.clear();  // begin() allocates it
   const int T = opt_.tile_size;
   tiles_x_ = (W + T - 1) / T;

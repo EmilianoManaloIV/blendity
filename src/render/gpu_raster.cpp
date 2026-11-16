@@ -807,7 +807,7 @@ void main() {
  * gl_FragCoord's do, so no flip). The colour pass blends premultiplied over the lit picture, hidden where the mesh depth
  * is nearer than the splat's centre (the CPU's s.z > depth), writing no depth; BL_SPLAT_IDS: the ids pass, a splat with
  * alpha 0.1 or more writes its object's pick id and the instance plane a flagged cloud index (the outline pass reads it
- * back through the id table, binding 39). Draw order is the array's order (back to front). */
+ * back through the id table, binding 41). Draw order is the array's order (back to front). */
 const char *kSplatCommon = R"(
 struct SplatG { vec4 a; vec2 inv; uint e0; uint rgbc; };  // x, y, z, opacity; 1 / axis lengths (a dot: radius, 0); the first axis (two halves); colour bytes | cloud << 24
 layout(std430, set = 0, binding = 40) readonly buffer Splats { SplatG sp[]; };

@@ -979,7 +979,7 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (cloud) {  // (round 532: the views draw its splats - where it is, which cloud and its version, how)
       const Mat4 w = g.world_matrix();
       const PointCloud *d = cloud->data.get();
-      const uint64_t key[5] = {gsplat_sort_generation(), d ? d->uid.v : 0, d ? d->version : 0,
+      const uint64_t key[4] = {d ? d->uid.v : 0, d ? d->version : 0,
                                (uint64_t)cloud->enabled | (uint64_t)g.active_in_hierarchy() << 1 | (uint64_t)(d ? (int)d->type : 0) << 2,
                                (uint64_t)std::hash<float>()(cloud->point_size)};
       mix(w.m, sizeof(w.m));
@@ -1140,6 +1140,10 @@ uint64_t Editor::scene_hash_tail() {
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
+  /* Round 532 (review): a worker's splat order landed - here, not in an object's part, which the scene hash reuses while
+   * the edit counter holds (a landing sort moves no counter: it would be a change the counter missed). */
+  const uint64_t splat_gen = gsplat_sort_generation();
+  mix(&splat_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
   mix(&scene_->lighting.shadowmask_mode, sizeof(int));  // (round 454: Distance Shadowmask redraws without a rebake)
   mix(&scene_->lighting.shadow_distance, sizeof(float));

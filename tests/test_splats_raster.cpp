@@ -3,6 +3,9 @@
 // (round 531's importers are not needed).
 #include "test_common.h"
 
+#include <chrono>
+#include <thread>
+
 #include "../src/editor/scene_splats.h"
 #include "../src/render/gpu_raster.h"
 #include "../src/render/gsplat_raster.h"
@@ -546,7 +549,103 @@ static void splat_raster_round532_test_pass() {
   });
 }
 
+/* ===================================================================== */
+/* Round 532, the review's findings                                      */
+/* ===================================================================== */
+static void splat_raster_round532_review() {
+  test("splats: two views of one big cloud keep their own back-to-front orders (no sort ping-pong between them)", [] {
+    auto pc = pointcloud_random(PointCloudType::GaussianSplats, SplatSorter::kInlineMax + 5000, 0, 11, 1.5f);
+    CHECK(pc != nullptr);
+    if (!pc) return;
+    const std::vector<SplatDraw> draws = {SplatDraw{pc, Mat4::identity(), 7, false, 1}};
+    const Mat4 p = Mat4::perspective(60 * kDeg2Rad, 1.0f, 0.1f, 100.0f);
+    const SplatView a{Mat4::look_at({0, 0, -5}, {0, 0, 0}, {0, 1, 0}), p, 200, 200, ViewTransform::Standard, 0.0f};
+    const SplatView b{Mat4::look_at({5, 1, 0}, {0, 0, 0}, {0, 1, 0}), p, 200, 200, ViewTransform::Standard, 0.0f};
+    Renderer3D ra, rb;
+    /* Each view's first frame sorts in place; after that, drawing the two in turn (as the editor's windows do) must
+     * reuse each one's own order - no worker started, nothing sorted again. */
+    ra.splat_pass().prepare(draws, a, true);
+    rb.splat_pass().prepare(draws, b, true);
+    int async_frames = 0;
+    for (int k = 0; k < 4; k++) {
+      ra.splat_pass().prepare(draws, a, true);
+      async_frames += ra.splat_pass().stats().sort_async;
+      rb.splat_pass().prepare(draws, b, true);
+      async_frames += rb.splat_pass().stats().sort_async;
+    }
+    CHECK(async_frames == 0);
+    CHECK(gsplat_sorts_running() == 0);
+    /* The editor swaps each window's renderer into its views by value: the pass goes with it. */
+    SplatPass *pa = &ra.splat_pass(), *pb = &rb.splat_pass();
+    std::swap(ra, rb);
+    CHECK(&ra.splat_pass() == pb && &rb.splat_pass() == pa);
+  });
+
+  test("splats: when a worker's order lands the Scene view draws it, and the scene hash saw the change", [] {
+    Editor ed;
+    GameObject *g = r532_scene(ed, "create Gaussian Splats", pointcloud_random(PointCloudType::GaussianSplats, SplatSorter::kInlineMax + 20000, 0, 5, 1.5f));
+    CHECK(g != nullptr);
+    if (!g) return;
+    const uint64_t misses0 = ed.scene_hash_misses_for_test();
+    ed.command("camera 60 20 7 0 0 0");  // a new camera: the big cloud's order goes to a worker
+    ed.step_frame_headless();
+    const uint64_t moved = ed.render_hash_for_test();
+    /* The worker lands (a few hundred ms at most); the editor keeps drawing frames while one runs. */
+    ScopedTimer t;
+    while (gsplat_sorts_running() > 0 && t.ms() < 20000.0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(gsplat_sorts_running() == 0);
+    r34_steps(ed, 2);
+    CHECK(ed.render_hash_for_test() != moved);  // (the landed order is a new picture)
+    CHECK(ed.scene_hash_misses_for_test() == misses0);  // (and not one the edit counter missed: ADR 0115)
+    std::printf("    hash misses %llu -> %llu\n", (unsigned long long)misses0, (unsigned long long)ed.scene_hash_misses_for_test());
+  });
+
+  test("splats: a camera inside huge splats stays within the frame's pixel budget, leaving the biggest out", [] {
+    auto pc = pointcloud_random(PointCloudType::GaussianSplats, 20000, 0, 3, 0.5f);
+    CHECK(pc != nullptr);
+    if (!pc) return;
+    for (Vec3 &s : pc->scale) s = Vec3(5.0f);  // every splat far bigger than the screen: each box at the 1024 px cap
+    pc->touch();
+    SplatShot s;
+    s.W = 1600, s.H = 900;
+    s.p = Mat4::perspective(60 * kDeg2Rad, 1600.0f / 900.0f, 0.1f, 100.0f);
+    ScopedTimer t;
+    s.draw({SplatDraw{pc, Mat4::identity(), 7, false, 0}});
+    std::printf("    %zu submitted, %zu drawn, %zu left out over the budget; %.1f ms\n", s.pass.stats().submitted, s.pass.stats().drawn,
+                s.pass.stats().dropped, t.ms());
+    CHECK(s.pass.stats().dropped > 0);
+    CHECK(s.pass.stats().drawn > 0);  // (the nearest still draw: the camera is not left blind)
+    double area = 0.0;
+    for (const SplatScreen &sp : s.pass.screen()) {
+      const double w = std::min<double>(s.W, sp.x + sp.rx) - std::max<double>(0.0, sp.x - sp.rx);
+      const double h = std::min<double>(s.H, sp.y + sp.ry) - std::max<double>(0.0, sp.y - sp.ry);
+      area += w > 0.0 && h > 0.0 ? (w + 1.0) * (h + 1.0) : 1.0;
+    }
+    CHECK(area <= kSplatPixelBudget);
+  });
+
+  test("splats: NaN, zero-scale and transparent splats leave the picture and the id plane untouched", [] {
+    SplatShot s;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    auto pc = std::make_shared<PointCloud>();
+    pc->type = PointCloudType::GaussianSplats;
+    pc->resize(4);
+    pc->position[0] = {nan, 0, 0};
+    pc->scale[1] = Vec3(0.0f);
+    pc->opacity[2] = 0.0f;
+    pc->scale[3] = Vec3(nan);
+    pc->opacity[0] = pc->opacity[1] = pc->opacity[3] = 1.0f;
+    s.draw({});
+    const std::vector<uint32_t> before = s.img.pixels, ids_before = s.rt.ids;
+    s.draw({SplatDraw{pc, Mat4::identity(), 7, false, 0}});
+    CHECK(s.pass.stats().drawn == 0);
+    CHECK(s.img.pixels == before);
+    CHECK(s.rt.ids == ids_before);
+  });
+}
+
 void run_splats_raster_tests() {
   splat_raster_round532_tests();
   splat_raster_round532_test_pass();
+  splat_raster_round532_review();
 }

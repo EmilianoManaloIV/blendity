@@ -11,7 +11,7 @@
 // 0.1).
 //
 // The pass runs after the opaque meshes and before the overlays, on the CPU rasterizer's target (its colour, depth
-// and id planes) or on the card (gpu_raster's splat pass, the same projection in its vertex shader). A splat is hidden
+// and id planes) or on the card (gpu_raster's splat pass draws the splats this projection made, as quads). A splat is hidden
 // where a mesh is nearer than its centre and writes its pick id where its alpha reaches 0.1. Like a Transparent surface
 // it writes no depth (the card's lighting pass has no depth attachment, and both devices must agree): overlays drawn
 // after it are not hidden by it.
@@ -36,7 +36,7 @@ struct SplatDraw {
   std::shared_ptr<const PointCloud> cloud;
   Mat4 model;
   uint32_t id = 0;         // the pick id (as DrawItem::id)
-  bool selected = false;   // (the caller passes the selected ids to outline_ids as for meshes)
+  bool selected = false;   // (not read: the outline comes from the id plane, as for meshes - kept for the callers' brace lists)
   uint64_t key = 0;        // what the sorter keeps its order by (the object's id); 0 = never kept between frames
   float point_size = 0.02f;  // a Points cloud's dot size, object units (PointCloudObject::point_size)
 };
@@ -72,6 +72,11 @@ constexpr float kSplatMinOpacity = 1.0f / 255.0f;
 constexpr float kSplatMaxAxisPx = 1024.0f;
 constexpr float kSplatMinEigen = 0.001f;
 constexpr float kSplatPickAlpha = 0.1f;
+/* The most pixel evaluations one frame's splats may cost (the sum of their on-screen boxes; review 532, ADR 0105): about
+ * 25 ms on 16 threads. A camera inside a dense cloud makes most splats hit the 1024 px cap (a million boxes of 4096 px
+ * across); past the budget the biggest boxes are left out - the nearest splats, which hide the rest anyway - and
+ * SplatStats::dropped counts them. */
+constexpr double kSplatPixelBudget = 2.0e8;
 /* The smallest dot a Points cloud's point draws as, in pixels (radius): a far cloud stays visible. */
 constexpr float kPointDotMinRadiusPx = 1.0f;
 
@@ -103,32 +108,32 @@ class SplatSorter {
  public:
   static constexpr size_t kInlineMax = 200000;
   ~SplatSorter();
-  /* The order (indices into the cloud, farthest first) for `view_model` (view x model: the cloud's space to the
-   * camera's). `async` false sorts inside the call whatever the size (tests, F12). */
-  std::shared_ptr<const std::vector<uint32_t>> order(const SplatDraw &d, const Mat4 &view_model, bool async = true);
+  /* The order (indices into the cloud, farthest first) for `mvp` (proj x view x model: the cloud's space to clip space;
+   * the order is drawn by the camera of that matrix). `async` false sorts inside the call whatever the size (tests, F12). */
+  std::shared_ptr<const std::vector<uint32_t>> order(const SplatDraw &d, const Mat4 &mvp, bool async = true);
   bool last_was_async() const { return last_async_; }
   bool busy() const { return busy_.load(); }
   /* Waits for a running worker sort (tests; the destructor). */
   void wait();
   /* Tests: hold a worker sort until release_hold() - the frame must not wait for it. */
   void hold_worker_for_test(bool on);
-  double last_sort_ms() const { return last_sort_ms_; }
+  double last_sort_ms() const { return last_sort_ms_.load(); }
 
  private:
   struct State;
   std::shared_ptr<State> state_;
   bool last_async_ = false;
   std::atomic<bool> busy_{false};
-  double last_sort_ms_ = 0;
+  std::atomic<double> last_sort_ms_{0.0};  // (written by the worker too)
 };
 
-/* The sort itself: `order` gets the indices of `pc`'s splats by descending view depth (-z of view_model x position,
+/* The sort itself: `order` gets the indices of `pc`'s splats by descending clip depth (z / w of mvp x position,
  * the farthest first). Parallel over the job system. */
-void gsplat_sort_back_to_front(const PointCloud &pc, const Mat4 &view_model, std::vector<uint32_t> &order);
+void gsplat_sort_back_to_front(const PointCloud &pc, const Mat4 &mvp, std::vector<uint32_t> &order);
 
 /* What the last splat pass did (`splat stats`). */
 struct SplatStats {
-  size_t submitted = 0, culled = 0, drawn = 0;
+  size_t submitted = 0, culled = 0, drawn = 0, dropped = 0;  // (dropped: over kSplatPixelBudget)
   double ms_project = 0, ms_sort = 0, ms_draw = 0;
   bool sort_async = false;
 };
@@ -146,8 +151,9 @@ class SplatPass {
   SplatSorter &sorter(uint64_t key);
 
  private:
+  void limit_to_budget(int width, int height);
   std::vector<SplatScreen> screen_;
-  SplatStats stats_;
+  mutable SplatStats stats_;  // (draw_cpu adds its time)
   std::vector<std::pair<uint64_t, std::unique_ptr<SplatSorter>>> sorters_;
   SplatSorter scratch_sorter_;  // draws with key 0
 };
@@ -155,6 +161,9 @@ class SplatPass {
 /* Moves each time a worker's sort lands: the views' render hash mixes it, so a view showing an older camera's order
  * redraws with the new one. */
 uint64_t gsplat_sort_generation();
+/* How many worker sorts run now: the editor keeps drawing frames while one does, so the frame after it lands shows its
+ * order (an idle editor would otherwise sleep on its last picture). */
+int gsplat_sorts_running();
 
 /* The last frame's stats from any view (the console's `splat stats`). */
 SplatStats gsplat_last_stats();

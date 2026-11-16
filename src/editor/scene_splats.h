@@ -15,7 +15,7 @@ struct RenderTarget;
 
 /* The scene's point clouds that draw (active, enabled, not empty) as the frame's splat draws. */
 std::vector<SplatDraw> scene_splat_draws(const Scene &scene);
-/* True when the scene has a point cloud that draws (the card refuses such a view until it draws them itself). */
+/* True when the scene has a point cloud that draws (kept on the structure counter: every view's frame asks). */
 bool scene_has_splats(const Scene &scene);
 
 /* Projects and orders the scene's splats for `r3d`'s next flush() and hands them to it (set_splats). The pass is

@@ -24,6 +24,7 @@ namespace {
 std::mutex g_stats_mutex;
 SplatStats g_last_stats;
 std::atomic<uint64_t> g_sort_generation{1};
+std::atomic<int> g_sorts_running{0};
 
 /* A float's bits made to sort as unsigned integers in the float's order (negatives flipped whole, positives' sign set). */
 inline uint32_t float_flip(float f) {
@@ -93,10 +94,12 @@ bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int wid
     const float rad = std::sqrt(0.25f * (a - d) * (a - d) + b * b);
     const float l1 = mid + rad, l2 = std::max(mid - rad, kSplatMinEigen);
     if (!(l1 > 0.0f)) return false;
-    float ex = b, ey = l1 - a;
+    /* The first axis from the row that keeps its precision (review 532): (b, l1 - a) loses it when b is near 0 and a > d -
+     * l1 - a is then a difference of near-equal numbers and can come out turned 90 degrees - (l1 - d, b) when a >= d. */
+    float ex = a >= d ? l1 - d : b, ey = a >= d ? b : l1 - a;
     float el = std::sqrt(ex * ex + ey * ey);
-    if (!(el > 1e-20f)) {
-      /* Already diagonal: the larger of a and d is the first axis. */
+    if (!(el > 1e-20f) || std::fabs(b) <= 1e-7f * (std::fabs(a) + std::fabs(d))) {
+      /* Diagonal (to float precision): the larger of a and d is the first axis. */
       ex = a >= d ? 1.0f : 0.0f, ey = a >= d ? 0.0f : 1.0f, el = 1.0f;
     }
     out.e0x = ex / el, out.e0y = ey / el;
@@ -274,8 +277,9 @@ std::shared_ptr<const std::vector<uint32_t>> SplatSorter::order(const SplatDraw 
     std::shared_ptr<State> keep = state_;
     std::shared_ptr<const PointCloud> cloud = d.cloud;
     std::atomic<bool> *busy = &busy_;
-    double *ms_out = &last_sort_ms_;
+    std::atomic<double> *ms_out = &last_sort_ms_;
     const uint64_t version = pc->version;
+    g_sorts_running++;
     s.worker = std::thread([keep, cloud, mvp, busy, ms_out, version]() {
       ScopedTimer t;
       auto ord = std::make_shared<std::vector<uint32_t>>();
@@ -287,8 +291,9 @@ std::shared_ptr<const std::vector<uint32_t>> SplatSorter::order(const SplatDraw 
       if (cloud->version == version && ord->size() == cloud->count())
         keep->done = ord, keep->done_mvp = mvp, keep->done_version = version, keep->done_cloud = cloud->uid.v, g_sort_generation++;
       keep->running = false;
-      *ms_out = t.ms();
+      ms_out->store(t.ms());
       busy->store(false);
+      g_sorts_running--;
     });
   }
   return s.done;
@@ -367,9 +372,47 @@ void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v,
                [](const SplatScreen &a, const SplatScreen &b) { return a.z > b.z; });
     screen_.swap(merged);
   }
+  limit_to_budget(v.width, v.height);
   stats_.drawn = screen_.size();
   std::lock_guard<std::mutex> lk(g_stats_mutex);
   g_last_stats = stats_;
+}
+
+/* Keeps the frame's work under kSplatPixelBudget: the boxes' on-screen areas in power-of-two classes, the largest classes
+ * left out until the rest fit (classes, not a sort: a million splats a frame). */
+void SplatPass::limit_to_budget(int width, int height) {
+  constexpr int kClasses = 64;
+  double area_in[kClasses] = {};
+  auto area_of = [&](const SplatScreen &s) {
+    const double w = std::min<double>(width, s.x + s.rx) - std::max<double>(0.0, s.x - s.rx);
+    const double h = std::min<double>(height, s.y + s.ry) - std::max<double>(0.0, s.y - s.ry);
+    return w > 0.0 && h > 0.0 ? (w + 1.0) * (h + 1.0) : 1.0;
+  };
+  auto class_of = [](double a) { return std::min(kClasses - 1, (int)std::ilogb(std::max(1.0, a))); };
+  double total = 0.0;
+  for (const SplatScreen &s : screen_) {
+    const double a = area_of(s);
+    area_in[class_of(a)] += a;
+    total += a;
+  }
+  if (total <= kSplatPixelBudget) return;
+  int edge = kClasses;  // classes above `edge` are left out; `edge` itself keeps what still fits
+  while (edge > 0 && total > kSplatPixelBudget) total -= area_in[--edge];
+  /* The edge class's splats that fit the rest of the budget, the nearest first (the list is back to front): a camera
+   * inside a cloud of equal splats still sees the ones around it. */
+  double left = kSplatPixelBudget - total;
+  std::vector<uint8_t> keep(screen_.size(), 0);
+  for (size_t k = screen_.size(); k-- > 0;) {
+    const double a = area_of(screen_[k]);
+    const int c = class_of(a);
+    if (c < edge) keep[k] = 1;
+    else if (c == edge && a <= left) keep[k] = 1, left -= a;
+  }
+  size_t out = 0;
+  for (size_t k = 0; k < screen_.size(); k++)
+    if (keep[k]) screen_[out++] = screen_[k];
+  stats_.dropped = screen_.size() - out;
+  screen_.resize(out);
 }
 
 void SplatPass::draw_cpu(RenderTarget &rt) const {
@@ -388,7 +431,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
     y0 = std::max(0, (int)std::floor(s.y - s.ry)) / kTile;
     y1 = std::min(H - 1, (int)std::floor(s.y + s.ry)) / kTile;
   };
-  std::vector<uint32_t> offsets((size_t)tiles + 1, 0);
+  std::vector<size_t> offsets((size_t)tiles + 1, 0);  // (size_t: a frame's bins may pass 2^32 before the budget trims it)
   for (const SplatScreen &s : screen_) {
     int x0, x1, y0, y1;
     tile_range(s, x0, x1, y0, y1);
@@ -397,7 +440,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
   }
   for (int i = 0; i < tiles; i++) offsets[(size_t)i + 1] += offsets[(size_t)i];
   std::vector<uint32_t> list(offsets[(size_t)tiles]);
-  std::vector<uint32_t> fill(offsets.begin(), offsets.end() - 1);
+  std::vector<size_t> fill(offsets.begin(), offsets.end() - 1);
   for (uint32_t k = 0; k < (uint32_t)screen_.size(); k++) {
     int x0, x1, y0, y1;
     tile_range(screen_[k], x0, x1, y0, y1);
@@ -410,7 +453,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
     uint32_t idbuf[kTile * kTile];
     uint8_t touched[kTile * kTile];
     for (int64_t ti = tb; ti < te; ti++) {
-      const uint32_t first = offsets[(size_t)ti], last = offsets[(size_t)ti + 1];
+      const size_t first = offsets[(size_t)ti], last = offsets[(size_t)ti + 1];
       if (first == last) continue;
       std::memset(touched, 0, sizeof(touched));
       const int ox = (int)(ti % tx) * kTile, oy = (int)(ti / tx) * kTile;
@@ -424,7 +467,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
           zbuf[y * kTile + x] = has_depth ? rt.depth[pi] : 1.0f;
           idbuf[y * kTile + x] = has_ids ? rt.ids[pi] : 0u;
         }
-      for (uint32_t li = first; li < last; li++) {
+      for (size_t li = first; li < last; li++) {
         const SplatScreen &s = screen_[list[li]];
         const int x0 = std::max(ox, (int)std::floor(s.x - s.rx)), x1 = std::min(ox + tw - 1, (int)std::floor(s.x + s.rx));
         const int y0 = std::max(oy, (int)std::floor(s.y - s.ry)), y1 = std::min(oy + th - 1, (int)std::floor(s.y + s.ry));
@@ -459,12 +502,13 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
         }
     }
   });
-  const_cast<SplatStats &>(stats_).ms_draw = t.ms();
+  stats_.ms_draw = t.ms();
   std::lock_guard<std::mutex> lk(g_stats_mutex);
   g_last_stats.ms_draw = stats_.ms_draw;
 }
 
 uint64_t gsplat_sort_generation() { return g_sort_generation.load(); }
+int gsplat_sorts_running() { return g_sorts_running.load(); }
 
 SplatStats gsplat_last_stats() {
   std::lock_guard<std::mutex> lk(g_stats_mutex);

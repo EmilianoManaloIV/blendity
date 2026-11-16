@@ -1,6 +1,6 @@
 # 0512: Gaussian splats drawn in the Scene view and the rasterizer (round 532)
 
-- **Status:** in progress
+- **Status:** done (review fixes in; published as the PR below)
 - **Requirements:** R-render (Scene view drawing), Q-06 (responsiveness, ADR 0105)
 - **Decisions:** ADR 0147 (the splat layout, round 530) - this round adds no new architecture of its own: a new
   pass in its own files with call sites, as the plan for Pass 27 asks.

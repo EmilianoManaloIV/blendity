@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The views' Gaussian splats (round 532, task 0512): see scene_splats.h.
-/* Scene as scene.h declares it, before material.h's `struct Scene` (through gsplat_raster.h) is met: MSVC names a
- * function by the keyword it saw first, and the callers see `class`. */
-namespace bl {
-class Scene;
-}
 #include "scene_splats.h"
 
+#include "../core/edit_epoch.h"
 #include "../render/raster.h"
 #include "../scene/pointcloud_object.h"
 #include "../scene/scene.h"
@@ -30,23 +26,31 @@ const PointCloudObject *drawn_cloud(const GameObject &g) {
   return pc;
 }
 
-/* One pass per renderer (each view's, the Game view's, F12's), made on first use. A renderer lives as long as the
- * editor's views do; a pass left behind by a gone renderer only keeps its last order. */
+/* The card's passes, by view slot (the CPU's travel with their renderer: Renderer3D::splat_pass). Never destroyed: a
+ * worker sort still running at exit must not be joined into a job system already gone (review 532) - the process ends
+ * them. */
 std::mutex g_passes_mutex;
-std::map<const Renderer3D *, std::unique_ptr<SplatPass>> g_passes;
-std::map<int, std::unique_ptr<SplatPass>> g_card_passes;  // the card's, by view slot (guarded by the same mutex)
-
-SplatPass &pass_for(const Renderer3D &r3d) {
-  std::lock_guard<std::mutex> lk(g_passes_mutex);
-  auto &p = g_passes[&r3d];
-  if (!p) p = std::make_unique<SplatPass>();
-  return *p;
+std::map<int, std::unique_ptr<SplatPass>> &card_passes() {
+  static auto *m = new std::map<int, std::unique_ptr<SplatPass>>();
+  return *m;
 }
+
+/* Whether a scene has a point cloud that draws, kept on the structure counter (review 532, ADR 0115): every view's
+ * frame asks, and a 50,000-object scene is not walked again until something is made, deleted or edited - a cloud
+ * added, filled, switched off or hidden is a structure change; a move is not, and doesn't make or remove one. */
+struct HasSplatsKeep {
+  const Scene *scene = nullptr;
+  uint64_t structure = 0;
+  bool any = false;
+};
+std::mutex g_keep_mutex;
+HasSplatsKeep g_keep;
 
 }  // namespace
 
 std::vector<SplatDraw> scene_splat_draws(const Scene &scene) {
   std::vector<SplatDraw> out;
+  if (!scene_has_splats(scene)) return out;
   scene.for_each([&](GameObject &g) {
     const PointCloudObject *pc = drawn_cloud(g);
     if (!pc) return;
@@ -62,8 +66,15 @@ std::vector<SplatDraw> scene_splat_draws(const Scene &scene) {
 }
 
 bool scene_has_splats(const Scene &scene) {
+  const uint64_t structure = edit_epoch::structure();
+  {
+    std::lock_guard<std::mutex> lk(g_keep_mutex);
+    if (g_keep.scene == &scene && g_keep.structure == structure) return g_keep.any;
+  }
   bool any = false;
   scene.for_each([&](GameObject &g) { any = any || drawn_cloud(g) != nullptr; });
+  std::lock_guard<std::mutex> lk(g_keep_mutex);
+  g_keep = HasSplatsKeep{&scene, structure, any};
   return any;
 }
 
@@ -71,7 +82,7 @@ bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarge
                           ViewTransform vt, float exposure, bool async) {
   std::vector<SplatDraw> draws = scene_splat_draws(scene);
   if (draws.empty()) return false;
-  SplatPass &pass = pass_for(r3d);
+  SplatPass &pass = r3d.splat_pass();
   SplatView sv{v, p, rt.width, rt.height, vt, exposure};
   pass.prepare(draws, sv, async);
   r3d.set_splats(&pass);
@@ -85,7 +96,7 @@ const SplatPass *scene_splats_prepare_pass(const Scene &scene, int owner_key, in
   SplatPass *pass;
   {
     std::lock_guard<std::mutex> lk(g_passes_mutex);
-    auto &slot = g_card_passes[owner_key];
+    auto &slot = card_passes()[owner_key];
     if (!slot) slot = std::make_unique<SplatPass>();
     pass = slot.get();
   }
