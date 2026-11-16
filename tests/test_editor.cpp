@@ -14701,6 +14701,50 @@ static void tests_round508_te_open() {
   });
 }
 
+/* ---------------------------------------------------------------- round 542 (task 0522): the sky's sun and the lighting keep */
+static void tests_round542() {
+  test("Sky world's sun: Sun Lights Scene, Sun Intensity, Turbidity and the world changed with no edit show the same frame - the views drawn with the lighting keep on are the ones drawn with it off", [] {
+    R506Switches restore;
+    Editor ed;
+    r506_open(ed);
+    /* A Sky world with its Directional Light switched off: the sky's own sun lights the scene. */
+    GameObject *dir = ed.scene().find_by_name("Directional Light");
+    CHECK(dir != nullptr && dir->get<Light>() != nullptr);
+    if (!dir || !dir->get<Light>()) return;
+    dir->get<Light>()->enabled = false;
+    ed.scene().environment.mode = 1;
+    ed.mark_changed_for_test("a Sky world, no sun lamp");
+    r506_orbit(ed, 4);
+    EnvironmentSettings &es = ed.scene().environment;
+    /* Each change made straight on the settings, no undo step: only the keep's key can see it. */
+    const std::pair<const char *, std::function<void()>> edits[] = {
+        {"Sun Lights Scene off", [&] { es.sun_lights_scene = false; }},
+        {"Sun Lights Scene on", [&] { es.sun_lights_scene = true; }},
+        {"Sun Intensity 3", [&] { es.sun_intensity = 3.0f; }},
+        {"Turbidity 8", [&] { es.turbidity = 8.0f; }},
+        {"the Gradient world", [&] { es.mode = 0; }},
+    };
+    for (const auto &[name, edit] : edits) {
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the keeps-off picture\n", name, r.shown, r.kept_vs_fresh);
+      CHECK(r.shown > 0);
+      CHECK(r.kept_vs_fresh == 0);
+    }
+    /* Verify mode (every keep hit walked again and compared): back to the Sky, then the switch flipped with no edit. */
+    es.mode = 1;
+    r506_orbit(ed, 4);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    es.sun_lights_scene = false;
+    r506_orbit(ed, 3);
+    es.sun_lights_scene = true, es.sun_intensity = 1.5f;
+    r506_orbit(ed, 3);
+    ed.set_render_cache_verify(false);
+    std::printf("    stale lighting found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - m0));
+    CHECK(Editor::render_cache_mismatches_all() == m0);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -14808,5 +14852,6 @@ void run_editor_tests() {
   tests_round508_te();
   tests_round508_te_open();
   tests_round515_collider_wire();
+  tests_round542();
   coverage_tests();
 }

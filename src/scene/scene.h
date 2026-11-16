@@ -1916,6 +1916,10 @@ struct EnvironmentSettings {
   float rotation = 0.0f;
   float turbidity = 3.0f;
   float ground_albedo = 0.3f;
+  /* Round 542 (task 0522, Blender 5.3): the Sky world's sun lights the scene as a directional light when no Directional
+   * Light drives it - off is the look before 5.3 (the sky's ambient alone). Sun Intensity scales it, as Blender's. */
+  bool sun_lights_scene = true;
+  float sun_intensity = 1.0f;
   /* The stylized sky (task 0248, ADR 0084) on the Gradient world: a painted sun disc (its size in degrees, 0 off; toward the
    * first directional light) and a horizon band (its half-width as a share of the sky, 0 off). */
   float sun_disc = 0.0f, sun_disc_softness = 0.3f;

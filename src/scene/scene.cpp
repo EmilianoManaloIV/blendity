@@ -528,8 +528,13 @@ void EnvironmentSettings::reflect(Reflector &r) {
   r.group_end();
   if (all || mode == 1) {
     r.field("Turbidity", turbidity, 0.02f, 1.0f, 10.0f);
-    r.help("Haze in the atmosphere (Hosek-Wilkie model). The sun direction comes from the first Directional Light.");
+    r.help("Haze in the atmosphere (Hosek-Wilkie model). The sun direction comes from the first Directional Light;\n"
+           "with none, the sun stands about 49 degrees up.");
     r.field("Ground Albedo", ground_albedo, 0.01f, 0.0f, 1.0f);
+    r.field("Sun Lights Scene", sun_lights_scene);
+    r.help("The sky's sun lights the scene when no Directional Light drives it (Blender 5.3's EEVEE). Off: the look before\n"
+           "5.3 - the sky's ambient light alone. With a Directional Light that light is the sun, either way.");
+    if (sun_lights_scene || all) r.field("Sun Intensity", sun_intensity, 0.01f, 0.0f, 100.0f);
   }
   if (all || mode == 2) {
     r.texture("HDRI", hdri);

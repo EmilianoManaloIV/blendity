@@ -10,6 +10,7 @@ It also compiles in a few libraries that Blender itself bundles. They are copied
 | [fast_float](https://github.com/fastfloat/fast_float) 5.0.0 | fast, exact float parsing in the scene loader | MIT (`fast_float-MIT.txt`) | `extern/fast_float` |
 | MikkTSpace (Blender's C++ port) | tangents for normal maps | Apache-2.0 (`Apache-2.0.txt`) | `intern/mikktspace` |
 | Hosek-Wilkie sky model | physical sky | BSD-3-Clause (`BSD-3-Clause.txt`) | `intern/sky` |
+| Nishita sky's multiple scattering (`extern/sky/source/sky_multiple_scattering.cpp`, Fernando García Liñán and Blender Authors) | the sun's light through the atmosphere (round 542, task 0522) | MIT (`MIT.txt`) | `intern/sky` |
 | [QuadriFlow](https://github.com/hjwdzh/QuadriFlow) 27a6867 (Blender's patched copy, Boost's max-flow replaced) | quad remeshing (task 0241); with it LEMON 1.3.1 (Boost Software License 1.0) and pcg32 (Apache-2.0); pss (Intel, BSD-3-Clause) is in the copy but not compiled | BSD-3-Clause (`quadriflow-BSD-3-Clause.txt`, the text of `extern/quadriflow/LICENSE.txt` - Blender's README.blender says MIT, the file is BSD-3; `extern/quadriflow/3rd/lemon-1.3.1/LICENSE`) | `extern/quadriflow` |
 | cuew (CUDA Wrangler) | loads NVIDIA's CUDA driver at run time (builds with OptiX: the Windows and Linux installers since task 0169) | Modified Apache 2.0 (`cuew-Apache-2.0.txt`) | `extern/cuew` |
 | NVIDIA OptiX's loader (`optix_stubs.h`, `optix_function_table_definition.h`) | compiled into builds with OptiX's headers - the Windows and Linux installers since task 0169 (ADR 0054; ADR 0037 before it) | BSD-3-Clause (`OptiX-BSD-3-Clause.txt`) | (NVIDIA's `optix-dev` headers, fetched at build) |
@@ -91,6 +92,7 @@ copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
 | File | From | License of the origin | How it is distributed |
 |---|---|---|---|
 | `src/render/sky.cpp` (`sky_radiance_internal`, the sky texture's evaluation) | Cycles' `intern/cycles/kernel/svm/sky.h` | Apache-2.0 (`Apache-2.0.txt`; "2011-2022 Blender Foundation", kept word for word in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+| `src/render/sky_sun.cpp` (the Sky world's sun as one directional light, round 542) | Blender 5.3's `draw/engines/eevee/shaders/eevee_lightprobe_sphere_bake.bsl.hh` (`sun_extraction`) and `source/blender/nodes/shader/nodes/node_shader_tex_sky.cc` (the sun disc's parameters) | GPL-2.0-or-later ("2019-2026 Blender Authors", kept in the header) | GPL-2.0-or-later, like Blendity's own source |
 
 ## Read, not copied
 

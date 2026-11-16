@@ -14,6 +14,7 @@
 #include "../core/core.h"
 #include "../core/jobs.h"
 #include "../render/sky.h"
+#include "../render/sky_sun.h"
 
 #include <algorithm>
 #include <cassert>
@@ -779,6 +780,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   mix((uint64_t)rasterized | (uint64_t)unity_lights_gamma() << 1 | (uint64_t)scene_->lighting.baked_gi << 2);
   mix((uint64_t)(uintptr_t)&ld), mix((uint64_t)ld.light_modes.size()), mix(lighting_gen_);
   mix((uint64_t)reflection_probe_bakes_.size()), mix(reflection_probe_gen_);
+  mix(sky_sun_key(es));  // (round 542: the sky's sun is in the list)
   for (const auto &[id, bake] : reflection_probe_bakes_) mix(id), mix((uint64_t)(uintptr_t)&bake);
   const uint64_t epoch = edit_epoch::now(), structure = edit_epoch::structure();  // (read before the walks: a bump during them walks again next frame)
   const bool stale = view_perf::stale(view_perf::Lighting);  // (a test's: the invalidation skipped)
@@ -809,6 +811,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   {
     view_perf::Timed walk_time(view_perf::counters.lighting_ms);
     std::vector<view_keeps::LightingKeep::Tracked> tracked;
+    bool sun_light = false;  // (an enabled Directional Light: it is the sky's sun)
     scene_->for_each([&](GameObject &g) {
       auto *l = g.get<Light>();
       if (l || g.get<ReflectionProbeComponent>()) {  // (their placement is what the keep is kept on)
@@ -819,6 +822,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
       }
       if (!g.active_in_hierarchy()) return;
       if (!l || !l->enabled) return;
+      if (l->type == 0) sun_light = true;  // (a Baked one too: it still turns the sky, as update_environment's walk)
       /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
        * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
       if (rasterized && l->mode == 2) return;
@@ -832,6 +836,10 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
     env.reflection_probes = render_reflection_probes();  // (round 401)
     Vec3 sun = lk.sun;
     update_environment(nullptr, &sun);
+    /* Round 542 (task 0522, Blender 5.3): with no Directional Light, the Sky world's sun lights the scene - in this list,
+     * so the rasterizers and the path tracer take the same light. */
+    const std::optional<RenderLight> sky_sun = sun_light ? std::nullopt : sky_sun_light(es, sun);
+    if (sky_sun) env.lights.push_back(*sky_sun);
     /* Verify mode: the walks the keep would have answered with, compared to these. */
     if (holds && !interval && !same_lighting(env.lights, env.reflection_probes, sun, lk)) note_render_cache_mismatch();
     lk.lights = env.lights, lk.probes = env.reflection_probes, lk.sun = sun, lk.key = key, lk.valid = true;
@@ -1116,6 +1124,8 @@ uint64_t Editor::scene_hash_tail() {
   mix(&es.strength, 4);
   mix(&es.rotation, 4);
   mix(&es.turbidity, 4);
+  const uint64_t sky_sun = sky_sun_key(es);  // (round 542)
+  mix(&sky_sun, 8);
   mix(&es.color, sizeof(Vec3));
   mix(&es.sky, sizeof(Vec3) * 3);
   mix(es.hdri.path.data(), es.hdri.path.size());
