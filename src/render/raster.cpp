@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raster.h"
+#include "gsplat_raster.h"
 #include "voxel_gi.h"
 #include "probe_volume.h"
 #include "light_volume_bake.h"
@@ -944,6 +945,13 @@ void Renderer3D::flush() {
     shade_deferred();
     stats_.ms_shade = tsh.ms();
   }
+  if (splats_ && !depth_only && rt_->color) {
+    /* Round 532: Gaussian splats over the opaque surfaces, under the see-through ones (gsplat_raster.h). */
+    ScopedTimer tsp;
+    splats_->draw_cpu(*rt_);
+    stats_.ms_shade += tsp.ms();
+  }
+  splats_ = nullptr;
   if (any_see_through && !depth_only && rt_->color) {
     ScopedTimer tst;
     draw_see_through(see_through);
