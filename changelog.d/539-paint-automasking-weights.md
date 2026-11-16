@@ -19,6 +19,11 @@ with Set Weight beside it, and a Blur that accumulates at low strength.
   (was Draw; `wpbrush set`, `draw` still works) and Blur. Ctrl with Set Weight paints towards 1 - Weight, as Blender's
   flip does.
 
+**Fixed**
+- The rasterizer's colour packing (`pack_rgb`, `src/render/raster.cpp`) cast a NaN or infinite shade to an int - a
+  mesh with NaN positions, lit through its NaN normals, in the Scene view (UBSan in CI's sanitizer shard, found by
+  this round's robustness test). It now clamps as a float first; NaN packs as 0.
+
 **Checked against 5.3**
 - Blur already read the weights as they are, dab after dab, so it accumulated at low strength before this round; a
   test now pins it.
