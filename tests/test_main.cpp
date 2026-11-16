@@ -94,6 +94,7 @@ void run_splats_tests();
 void run_splats_raster_tests();
 void run_runner_tests();
 void run_splats_trace_tests();
+void run_splats_gpu_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -118,6 +119,7 @@ static const TestGroup kTestGroups[] = {
     {"splats", run_splats_tests},  // (Pass 27: point clouds and Gaussian splats)
     {"splats_raster", run_splats_raster_tests},  // (round 532)
     {"splats_trace", run_splats_trace_tests},
+    {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 

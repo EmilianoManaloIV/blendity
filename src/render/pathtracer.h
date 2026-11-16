@@ -389,6 +389,7 @@ class PathTracer {
   bool use_embree_ = false;  // decided at build()
   /* Round 533: the splat clouds' scene (gsplat_embree.h), built by build() from settings_.splats. */
   std::shared_ptr<SplatSet> splats_;
+  mutable std::atomic<bool> splats_too_big_noted_{false};  // round 534: "splats don't fit the card" said once
   /* occluded() and transmittance() without the splats. */
   bool occluded_meshes(const Ray &r, float tmax) const;
   Vec3 transmittance_meshes(const Ray &r, float tmax, const Media *in) const;
