@@ -497,7 +497,7 @@ class VulkanRenderer final : public Renderer {
   bool upload(const Scene &s, std::string *err) override {
     wait_all(nullptr);
     f_.vkDeviceWaitIdle(dev_);
-    for (int i = 3; i < 16; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers
+    for (int i = 3; i < kBufs; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers (16 is the TLAS: never a buffer)
     free_accel();
     scene_params_ = s.params;
     const VkBufferUsageFlags as_input = rt_ ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) : 0;
@@ -510,7 +510,9 @@ class VulkanRenderer final : public Renderer {
                     batch_put(b, 10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight), 0, err) &&
                     batch_put(b, 11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4, 0, err) && batch_put(b, 12, s.tex8.data(), s.tex8.size() * 4, 0, err) &&
                     batch_put(b, 13, s.texf.data(), s.texf.size() * 4, 0, err) && batch_put(b, 14, s.textures.data(), s.textures.size() * sizeof(GTexInfo), 0, err) &&
-                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err);
+                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err) &&
+                    batch_put(b, 17, s.splats.data(), s.splats.size() * sizeof(GSplat), 0, err) &&  // round 534: the splats
+                    batch_put(b, 18, s.splat_sh.data(), s.splat_sh.size() * 4, 0, err);
     if (!ok || !batch_send(b, err)) return false;
     if (rt_ && !build_accel(s, err)) return false;
     if (pixels_ == 0) set_params(s.params);  // (the first scene: the pixel buffers; later reset() sends the parameters at the frame's size)
@@ -828,7 +830,9 @@ class VulkanRenderer final : public Renderer {
   VkPipeline pipeline_ = VK_NULL_HANDLE;
   VkDescriptorPool dpool_ = VK_NULL_HANDLE;
   VkDescriptorSet set_ = VK_NULL_HANDLE;
-  Buffer bufs_[16];
+  /* By binding: 0-15 and the splats' 17-18 (round 534); 16 is the TLAS, a descriptor of its own. */
+  static constexpr int kBufs = 19;
+  Buffer bufs_[kBufs];
   Buffer readback_;
   bool readback_coherent_ = true;
   void invalidate_readback() {
@@ -951,7 +955,8 @@ class VulkanRenderer final : public Renderer {
       return false;
     }
     std::vector<VkDescriptorSetLayoutBinding> b;
-    for (uint32_t i = 0; i < 16; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+    for (uint32_t i = 0; i < (uint32_t)kBufs; i++)
+      if (i != 16) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
     if (rt_) b.push_back({16, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
@@ -996,7 +1001,7 @@ class VulkanRenderer final : public Renderer {
       pipeline_ = VK_NULL_HANDLE;
       return false;
     }
-    std::vector<VkDescriptorPoolSize> ps = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16}};
+    std::vector<VkDescriptorPoolSize> ps = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)kBufs - 1}};
     if (rt_) ps.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 1;
@@ -1012,10 +1017,10 @@ class VulkanRenderer final : public Renderer {
   }
 
   void update_descriptors() {
-    VkDescriptorBufferInfo infos[16];
+    VkDescriptorBufferInfo infos[kBufs];
     std::vector<VkWriteDescriptorSet> w;
-    for (uint32_t i = 0; i < 16; i++) {
-      if (!bufs_[i].buf) continue;
+    for (uint32_t i = 0; i < (uint32_t)kBufs; i++) {
+      if (i == 16 || !bufs_[i].buf) continue;
       infos[i] = {bufs_[i].buf, 0, VK_WHOLE_SIZE};
       VkWriteDescriptorSet ws{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       ws.dstSet = set_;
@@ -1053,13 +1058,21 @@ class VulkanRenderer final : public Renderer {
                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, err))
       return false;
     as_buffers_.push_back(ib);
+    /* Round 534: the splats' boxes, for the clouds' BLASes of AABBs. */
+    Buffer ab;
+    if (!s.splat_aabbs.empty()) {
+      if (!make_device_buffer(ab, s.splat_aabbs.data(), s.splat_aabbs.size() * 4,
+                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, err))
+        return false;
+      as_buffers_.push_back(ab);
+    }
     std::vector<VkDeviceAddress> blas_addr;
-    if (!build_blases(s, ib, blas_addr, err)) return false;
+    if (!build_blases(s, ib, ab, blas_addr, err)) return false;
     blas_addr_ = blas_addr;
     return build_tlas(s, err);
   }
   /* Every BLAS built in one submission (task 0162: it was one each), their addresses out. */
-  bool build_blases(const Scene &s, const Buffer &ib, std::vector<VkDeviceAddress> &blas_addr, std::string *err) {
+  bool build_blases(const Scene &s, const Buffer &ib, const Buffer &ab, std::vector<VkDeviceAddress> &blas_addr, std::string *err) {
     const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     std::vector<VkAccelerationStructureGeometryKHR> geos(s.blas.size());
@@ -1071,16 +1084,25 @@ class VulkanRenderer final : public Renderer {
       const GBlas &gb = s.blas[k];
       VkAccelerationStructureGeometryKHR &geo = geos[k];
       geo = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-      geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-      geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-      auto &tr = geo.geometry.triangles;
-      tr.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-      tr.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-      tr.vertexData.deviceAddress = bufs_[6].address + (VkDeviceAddress)gb.vtx_off * sizeof(GVertex);
-      tr.vertexStride = sizeof(GVertex);
-      tr.maxVertex = std::max(1u, gb.vtx_count) - 1;
-      tr.indexType = VK_INDEX_TYPE_UINT32;
-      tr.indexData.deviceAddress = ib.address + (VkDeviceAddress)gb.idx_off * 12;
+      if (gb.kind == kBlasSplats) {
+        /* Round 534: a splat cloud - one box a splat; the kernel's ray query tests the splat itself (gsplat_gpu_glsl.h). */
+        geo.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+        geo.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+        geo.geometry.aabbs.data.deviceAddress = ab.address + (VkDeviceAddress)gb.idx_off * 24;
+        geo.geometry.aabbs.stride = 24;
+      }
+      else {
+        geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        auto &tr = geo.geometry.triangles;
+        tr.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        tr.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        tr.vertexData.deviceAddress = bufs_[6].address + (VkDeviceAddress)gb.vtx_off * sizeof(GVertex);
+        tr.vertexStride = sizeof(GVertex);
+        tr.maxVertex = std::max(1u, gb.vtx_count) - 1;
+        tr.indexType = VK_INDEX_TYPE_UINT32;
+        tr.indexData.deviceAddress = ib.address + (VkDeviceAddress)gb.idx_off * 12;
+      }
       VkAccelerationStructureBuildGeometryInfoKHR &bi = infos[k];
       bi = VkAccelerationStructureBuildGeometryInfoKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
       bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;

@@ -91,6 +91,7 @@ void run_blockout_modifiers_tests();
 void run_blockout_join_tests();
 void run_blockout_piece_modifiers_tests();
 void run_runner_tests();
+void run_splats_gpu_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -112,6 +113,7 @@ static const TestGroup kTestGroups[] = {
     {"blockout_modifiers", run_blockout_modifiers_tests},
     {"blockout_join", run_blockout_join_tests},
     {"blockout_piece_modifiers", run_blockout_piece_modifiers_tests},
+    {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 
