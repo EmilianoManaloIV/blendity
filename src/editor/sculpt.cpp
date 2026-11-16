@@ -166,12 +166,12 @@ bool Editor::sculpt_own_mesh(GameObject *g, MeshFilter *mf) {
 /* The world point under the Scene view pixel (x, y) when the sculpted object is there: the depth plane's value turned
  * into a distance along the pixel's ray by bisection on the renderer's own projection (the depth grows with the
  * distance whatever the projection's form), forty halvings from a millimetre to ten kilometres. False over nothing or
- * another object. */
-bool Editor::sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist) {
+ * another object. `obj` names another object to hit (task 0519: Weight Paint's stroke start). */
+bool Editor::sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist, uint64_t obj) {
   const int ix = (int)x, iy = (int)y;
   if (ix < 0 || iy < 0 || ix >= view.w || iy >= view.h) return false;
   ensure_scene_planes();  // (task 0204: the GPU view keeps them on the card until a CPU reader asks)
-  if (scene_rt_.id_at(ix, iy) != (uint32_t)sculpt_obj_) return false;
+  if (scene_rt_.id_at(ix, iy) != (uint32_t)(obj ? obj : sculpt_obj_)) return false;
   const float z = scene_rt_.depth_at(ix, iy);
   const Ray ray = scene_r3d_.screen_ray(x, y);
   auto depth_at = [&](float t, float &out) {

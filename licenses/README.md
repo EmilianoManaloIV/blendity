@@ -91,6 +91,7 @@ copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
 | File | From | License of the origin | How it is distributed |
 |---|---|---|---|
 | `src/render/sky.cpp` (`sky_radiance_internal`, the sky texture's evaluation) | Cycles' `intern/cycles/kernel/svm/sky.h` | Apache-2.0 (`Apache-2.0.txt`; "2011-2022 Blender Foundation", kept word for word in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+| `src/editor/weight_paint_automask.cpp` (Weight Paint automasking, task 0519) | Blender's `source/blender/editors/sculpt_paint/mesh/sculpt_automasking.cc` | GPL-2.0-or-later ("2020 Blender Authors", kept in the header with Blender's SPDX line) | GPL-3.0-or-later through the "or later" clause, like the executables |
 
 ## Read, not copied
 

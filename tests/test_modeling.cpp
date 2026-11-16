@@ -10,6 +10,8 @@
 #include <atomic>
 #include "../src/scene/partfield.h"
 
+void run_weight_paint_tests();  // (tests/test_weight_paint.cpp: run at the end of run_modeling_tests)
+
 static void first_tests() {
   test("math: matrix inverse", [] {
     Mat4 m = Mat4::trs({1, 2, 3}, Quat::euler({10, 20, 30}), {2, 3, 4});
@@ -11520,4 +11522,5 @@ void run_modeling_tests() {
   tests_round462_review();
   tests_round470();
   tests_round470_share();
+  run_weight_paint_tests();
 }
