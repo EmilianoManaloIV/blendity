@@ -1533,8 +1533,13 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.gpu_fallbacks++;
     return false;
   }
-  /* Round 532: Gaussian splats are blended by the CPU rasterizer's pass; a view with them draws there for now. */
-  if (scene_has_splats(*scene_)) return gpu_view_refuse(slot, "Gaussian splats (drawn on the CPU)");
+  /* Round 532: Gaussian splats go to the card as the CPU's projected, ordered splats (scene_splats_to_card); a card
+   * without the pass, more clouds than it numbers, or a picture kept in linear light (the splats' pixels would need the
+   * "none" mark in it) draw such a view on the CPU. */
+  const bool splats = scene_has_splats(*scene_);
+  if (splats && !g->can_draw_splats()) return gpu_view_refuse(slot, "Gaussian splats (the card's splat pass couldn't be made)");
+  if (splats && scene_splat_draws(*scene_).size() > kCardMaxSplatClouds) return gpu_view_refuse(slot, "Gaussian splats in more than 255 clouds");
+  if (splats && rt.want_hdr) return gpu_view_refuse(slot, "Gaussian splats over a picture kept in linear light (drawn on the CPU)");
   ProfileScope ps{prof_.ms_gpu};
   gpu_calls_++;
   std::string err;
@@ -2054,6 +2059,10 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.slot = slot;
   fr.width = rt.width;
   fr.height = rt.height;
+  if (splats) {  // (round 532: this slot's own pass, so each view keeps its sorted orders)
+    const SplatPass *pass = scene_splats_prepare_pass(*scene_, slot, rt.width, rt.height, v, p, env.view_transform, env.exposure);
+    if (pass) scene_splats_to_card(*pass, fr.splats, fr.splat_ids);
+  }
   std::memcpy(fr.view_proj, vp.m, 64);
   set3(fr.eye, eye);
   fr.shadow_size = env.shadow && env.shadow_light >= 0 ? env.shadow->size : 0;

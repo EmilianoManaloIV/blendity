@@ -4,6 +4,7 @@
 // renderer, so each view keeps its own sorted orders between frames.
 #pragma once
 
+#include "../render/gpu_raster.h"
 #include "../render/gsplat_raster.h"
 
 namespace bl {
@@ -22,6 +23,18 @@ bool scene_has_splats(const Scene &scene);
  * false sorts inside the frame whatever the size (a final render). */
 bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarget &rt, const Mat4 &v, const Mat4 &p,
                           ViewTransform vt, float exposure, bool async = true);
+
+/* The card's pass: the same projection and order, kept per card slot (`owner_key`: the slot, not a renderer). Returns
+ * the prepared pass, or null when the scene has no splats. The pass belongs to the key; it stays valid until the key's
+ * next call. */
+const SplatPass *scene_splats_prepare_pass(const Scene &scene, int owner_key, int width, int height, const Mat4 &v, const Mat4 &p,
+                                           ViewTransform vt, float exposure, bool async = true);
+/* The most clouds the card's splat pass takes (a cloud index is a byte of RasterSplat::rgbc). */
+constexpr size_t kCardMaxSplatClouds = 255;
+/* The scene's clouds that draw, as the card's frame wants them: `splats` from the pass's screen splats in draw order,
+ * `ids` the clouds' pick ids (a splat's cloud index is its position there). False when there are more clouds than the
+ * card takes (nothing filled). */
+bool scene_splats_to_card(const SplatPass &pass, std::vector<gpu::RasterSplat> &splats, std::vector<uint32_t> &ids);
 
 /* `splat stats`: the last frame's splats - submitted, culled, drawn, the project / sort / draw times. */
 std::string splat_stats_text();
