@@ -94,6 +94,7 @@ copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
 | `src/scene/pointcloud.h`, `pointcloud.cpp` (the point cloud's types, the splat attributes' meaning and decoding, round 530) | Blender 5.3's `blenkernel/BKE_pointcloud.hh`, `intern/pointcloud.cc`, `makesdna/DNA_pointcloud_types.h`, `io/common/IO_gsplat.hh` | GPL-2.0-or-later ("2023-2026 Blender Authors", kept in the headers) | GPL-3.0-or-later, like the executables |
 | `src/editor/weight_paint_automask.cpp` (Weight Paint automasking, task 0519) | Blender's `source/blender/editors/sculpt_paint/mesh/sculpt_automasking.cc` | GPL-2.0-or-later ("2020 Blender Authors", kept in the header with Blender's SPDX line) | GPL-3.0-or-later through the "or later" clause, like the executables |
 | `src/scene/mesh_tools_loop.cpp` (`meshops::relax_loops`, `space_loops`, `circularize`, `flatten_loops`, `curve_loops`; round 537) | Blender 5.3's native LoopTools: `source/blender/bmesh/operators/bmo_relax_edge_loops.cc`, `bmo_space_edge_loops_evenly.cc`, `bmo_circularize.cc`, `bmo_curve_edge_loops_between_selected.cc`, `bmo_flatten.cc`, `editors/mesh/editmesh_flatten.cc` | GPL-2.0-or-later ("2026 Blender Authors", kept in the header) | as Blendity's source, GPL-2.0-or-later; in the binaries GPL-3.0-or-later |
+| `src/scene/import_splat.cpp` (PLY splat detection and decoding, the SPZ v2-v4 readers, round 531) | Blender 5.3's `io/ply/importer/ply_import.cc`, `ply_import_gsplat.cc`, `io/spz/intern/` | GPL-2.0-or-later ("2026 Blender Authors", kept in the header) | GPL-3.0-or-later, like the executables |
 
 ## Read, not copied
 
@@ -107,6 +108,7 @@ Nothing of their code is in the tree, so no licence text ships; the original's l
 | [Poiyomi Toon](https://github.com/poiyomi/PoiyomiToonShader), [UniVRM / MToon](https://github.com/vrm-c/UniVRM), UTS2 | material property names read by the Unity material converter and the texture presets | Poiyomi's own licence; MIT; Unity Companion License |
 | [CATS Blender Plugin](https://github.com/absolute-quantum/cats-blender-plugin) | the Avatar window's tools (Fix Model, visemes, decimation, eye tracking, merging), re-implemented | MIT |
 | [Cascadeur](https://cascadeur.com/) (Nekki) | the ideas behind physics for animation (ADRs 0042-0045, 0087) | proprietary; ideas only |
+| [glTF-Blender-IO](https://github.com/KhronosGroup/glTF-Blender-IO), [SPZ](https://github.com/nianticlabs/spz) (Niantic) | `KHR_gaussian_splatting`'s attribute names, and SPZ version 1's float16 positions, read by `src/scene/import_splat.cpp` (round 531) | Apache-2.0; MIT |
 | [OpenMoonRay](https://github.com/dreamworksanimation/openmoonray) (DreamWorks) | an optional external renderer run as a program of its own (ADR 0041, `moonray.yml`); never linked, never shipped | Apache-2.0 |
 | The Live Link bridges (`bridges/`) | Blendity's own code under GPL-2.0-or-later, run inside Blender, Unity, Godot and Unreal as their plug-in terms allow; nothing of Blendity's links into them | - |
 

@@ -1214,9 +1214,10 @@ void Editor::draw_menubar(const Recti &r) {
       u.submenu("Point Cloud", u.px(170), [this] {  // (round 530, ADR 0147)
         if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud");
         if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats");
+        if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats");
       });
       u.tooltip("An empty point cloud: plain dots, or Gaussian Splats (soft turned ellipsoids whose colour changes with the view).\n"
-                "Fill it with `pointcloud random` (a test cloud). Blender 5.3: Add > Point Cloud.");
+                "Test Splats makes one already filled: 10,000 random splats to look at. Blender 5.3: Add > Point Cloud.");
     }
     if (shows(FocusRig)) {
       if (u.menu_item("Armature")) create_object("Armature");
@@ -2731,7 +2732,7 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae", ".spz"}}, {"Motions", {".vmd"}},
                                                  {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Unity animation clips", {".anim"}}, {"Godot scenes", {".tscn"}}, {"Blender files (through Blender)", {".blend"}}};  // (rounds 370, 373, 374)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
@@ -4309,7 +4310,7 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 std::string Editor::known_create_kind(const std::string &kind) {
   static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
                                        "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice",
-                                       "Blockout", "Point Cloud", "Gaussian Splats"};
+                                       "Blockout", "Point Cloud", "Gaussian Splats", "Test Splats"};
   for (const char *k : kKinds)
     if (to_lower(kind) == to_lower(k)) return k;
   static const std::string kPiece = "blockout piece:";  // (round 477: "Blockout Piece: Subtract Box"; the rest is matched where it's made)
@@ -4377,8 +4378,15 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     mark_changed("Create Light Probe Group");
     return g;
   }
-  if (kind == "Point Cloud" || kind == "Gaussian Splats") {  // (round 530, ADR 0147: an empty cloud at the pivot)
+  if (kind == "Point Cloud" || kind == "Gaussian Splats" || kind == "Test Splats") {  // (round 530, ADR 0147: an empty cloud at the pivot)
     GameObject *g = create_point_cloud_object(*scene_, kind == "Point Cloud" ? PointCloudType::Points : PointCloudType::GaussianSplats, parent);
+    if (kind == "Test Splats") {  // (10,000 seeded splats of degree 3 in a 2 m cube: something to look at without a file)
+      PointCloudPtr cloud = pointcloud_random(PointCloudType::GaussianSplats, 10000, 3, 1u, 1.0f);
+      if (cloud) {
+        cloud->name = g->name;
+        g->get<PointCloudObject>()->data = cloud;
+      }
+    }
     if (!parent) g->set_world_position(cam_.pivot);
     if (parent) expanded_.insert(parent->id);
     select(g->id);
@@ -5105,7 +5113,7 @@ void Editor::draw_dialogs() {
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
-      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}) scan_files(assets_dir_, ext, dialog_files_);
+      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".spz"}) scan_files(assets_dir_, ext, dialog_files_);
     }
   }
   u.popup(id, w, [this, id] {

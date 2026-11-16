@@ -12,6 +12,8 @@ importers and the three splat renderers build on.
   cloud shared by every renderer.
 - The Inspector shows Type, Count, SH Degree (splats) and Point Size (Points). Undo, duplicate and delete share the
   arrays until an edit; scenes save the cloud as a binary datablock and refuse a cut or inconsistent one.
+- Create > Point Cloud > Test Splats makes a cloud already filled with 10,000 random splats, so there is something to
+  look at without a file. A Learn section, "Point clouds and Gaussian splats", has a Try-it and two questions.
 
 **Checked:** the `splats` group (112 checks) and `editor` (3,224 checks) on Windows with Blender's libraries. Two editor
 tests failed: the Scatter / Strokes dropdowns and the console's Fix buttons. Both read the shared scratch project, and

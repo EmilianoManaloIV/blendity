@@ -118,6 +118,7 @@ static const SweepCommand kSweepCommands[] = {
   {"pickfocus", "pickfocus", ""},
   {"pilot", "pilot", ""},
   {"play", "play", ""},
+  {"pointcloud", "pointcloud degree 1", ""},
   {"points", "points merge Path 0 99", ""},
   {"position", "position 0 1 0", ""},
   {"preferences", "preferences", ""},

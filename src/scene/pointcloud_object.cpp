@@ -26,7 +26,7 @@ void PointCloudObject::reflect(Reflector &r) {
   int count = data ? (int)std::min<size_t>(data->count(), (size_t)INT32_MAX) : 0;
   r.greyed(true);
   r.field("Count", count, 0, INT32_MAX);
-  r.help("How many points the cloud holds (an import or `pointcloud random` sets it).");
+  r.help("How many points the cloud holds: an imported file's, or 10,000 for Create > Point Cloud > Test Splats.");
   r.greyed(false);
   if (!data || data->is_splats() || !r.inspector()) {
     int degree = data ? data->sh_degree : 0;
