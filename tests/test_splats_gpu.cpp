@@ -152,20 +152,24 @@ void check_card_matches_cpu(const PointCloudPtr &pc, const Mat4 &model, bool mir
   none->opacity[0] = 0.0f;  // (under 1%: nothing to see)
   const SplatRender bare = splat_scene_render(0, none, 64, model, mirror);
   CHECK(image_diff(cpu.rgb, bare.rgb).worst > 0.1);
+  /* The pixels the splats change by more than a fifth: on the grey floor their shadow and the splats seen in front of
+   * it, on the mirror the splats and their reflection. */
   std::vector<uint8_t> darker(64 * 64, 0);
-  size_t shadowed = 0;
+  size_t shadowed = 0, lowest = 0;
   for (size_t p = 0; p < darker.size(); p++) {
     const float with = cpu.rgb[p * 3] + cpu.rgb[p * 3 + 1] + cpu.rgb[p * 3 + 2], without = bare.rgb[p * 3] + bare.rgb[p * 3 + 1] + bare.rgb[p * 3 + 2];
-    darker[p] = with < 0.8f * without;
+    darker[p] = std::fabs(with - without) > 0.2f * without;
     shadowed += darker[p];
+    if (darker[p]) lowest = std::max(lowest, p / 64);
   }
+  std::printf("    the splats change %zu pixels, down to row %zu of 64\n", shadowed, lowest);
   CHECK(shadowed > 40);
   const double cpu_dark = masked_mean(cpu.rgb, darker);
   for (int d : card_devices()) {
     const SplatRender card = splat_scene_render(d, pc, 256, model, mirror);
     const ImageDiff diff = image_diff(cpu.rgb, card.rgb);
     const double card_dark = masked_mean(card.rgb, darker);
-    std::printf("    %s (%s%s%s): mean %.4f against the CPU's %.4f, worst 4x4 block %.4f; the %zu darkened pixels %.4f against %.4f\n", names[d],
+    std::printf("    %s (%s%s%s): mean %.4f against the CPU's %.4f, worst 4x4 block %.4f; the %zu changed pixels %.4f against %.4f\n", names[d],
                 card.device.c_str(), card.error.empty() ? "" : " - ", card.error.c_str(), diff.mean_b, diff.mean_a, diff.worst, shadowed, card_dark,
                 cpu_dark);
     CHECK(card.error.empty());
