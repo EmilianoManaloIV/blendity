@@ -21,6 +21,7 @@
 #include "raster.h"
 #include "../core/core.h"
 #include "gpu_device.h"
+#include "gsplat_embree.h"
 #include "light_tree.h"
 #include "shading.h"
 
@@ -155,6 +156,11 @@ class PathTracer {
    * and glass surfaces and an outline's back faces are looked through; cutout holes too. */
   void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
+  /* Round 533: the Gaussian splat clouds to trace with the meshes (their arrays stay alive and unchanged while this
+   * tracer uses them). Takes effect on the next build(). A scene with splats is traced on the CPU for now. */
+  void set_splats(std::vector<SplatCloudView> clouds) { splat_views_ = std::move(clouds); }
+  const std::vector<SplatCloudView> &splat_views() const { return splat_views_; }
+  size_t splat_count() const { return splats_ ? splats_->splat_count() : 0; }  // kept by the last build()
   size_t memory_bytes() const;  // (task 0421) the sample planes, the bottom-level trees and the object list, by capacity
 
   /* Adds samples for up to `budget_ms` (at least one full sample pass).
@@ -378,6 +384,12 @@ class PathTracer {
   Media camera_media_;       // the fogs the camera is in (each render() call)
   void build_embree(double &ms);
   bool use_embree_ = false;  // decided at build()
+  /* Round 533: the splat clouds given, and their scene (gsplat_embree.h), built by build(). */
+  std::vector<SplatCloudView> splat_views_;
+  std::shared_ptr<SplatSet> splats_;
+  /* occluded() and transmittance() without the splats. */
+  bool occluded_meshes(const Ray &r, float tmax) const;
+  Vec3 transmittance_meshes(const Ray &r, float tmax, const Media *in) const;
   std::shared_ptr<PTEmbreeData> embree_;
   std::shared_ptr<PTGuidingData> guiding_;
   void guiding_begin_scene();

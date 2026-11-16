@@ -188,11 +188,20 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   /* GPU devices first: one without ray tracing hardware traverses Blendity's
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
+  /* Round 533: the splat clouds (Cycles 5.3's Gaussian splats), a scene of their own beside the meshes. */
+  if (!splats_) splats_ = std::make_shared<SplatSet>();
+  splats_->build(splat_views_, embree_available() && settings_.use_embree);
+  bool cpu_only = has_volume_;
   /* Round 331: the GPU kernel has no volumes yet - a scene with fog is traced on the CPU, and says so. */
   if (has_volume_ && !settings_.gpus.empty()) gpu_note_ = "a Volume (fog) material: traced on the CPU (the GPU kernel has no volumes yet)";
   else gpu_note_.clear();
-  if (!settings_.gpus.empty() && gpu::available() && !has_volume_) sync_gpus();
-  else if (has_volume_ && !settings_.gpus.empty()) {  // (set aside, open, for the scene without fog: not torn down on every toggle)
+  /* Round 533: nor splats, until round 534 puts them on the card (that round deletes this branch). */
+  if (!splats_->empty()) {
+    cpu_only = true;
+    if (!settings_.gpus.empty() && gpu_note_.empty()) gpu_note_ = "Gaussian splats: traced on the CPU (the GPU kernel has no splats yet)";
+  }
+  if (!settings_.gpus.empty() && gpu::available() && !cpu_only) sync_gpus();
+  else if (cpu_only && !settings_.gpus.empty()) {  // (set aside, open, for the scene without fog: not torn down on every toggle)
     stop_all_workers();
     for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
     gpus_.clear();
@@ -514,6 +523,12 @@ bool PathTracer::intersect(const Ray &r, Hit &h) const {
 }
 
 bool PathTracer::occluded(const Ray &r, float tmax) const {
+  /* Round 533: any splat on the way counts (transmittance() then says how much light it lets by). */
+  if (splats_ && !splats_->empty() && splats_->any(r, tmax)) return true;
+  return occluded_meshes(r, tmax);
+}
+
+bool PathTracer::occluded_meshes(const Ray &r, float tmax) const {
 #ifdef BL_WITH_EMBREE
   if (use_embree_) return embree_occluded(embree_.get(), r, tmax);
 #endif
@@ -523,7 +538,18 @@ bool PathTracer::occluded(const Ray &r, float tmax) const {
 }
 
 Vec3 PathTracer::transmittance(const Ray &r, float tmax, const Media *in) const {
-  if (!see_through_) return occluded(r, tmax) ? Vec3(0.0f) : Vec3(1.0f);
+  /* Round 533: the splats let through the product of (1 - alpha) of those the ray crosses - the expected value of
+   * Cycles' stochastic test, without its noise, so a bake's repeated shadow ray converges. */
+  if (splats_ && !splats_->empty()) {
+    const float ts = splats_->transmittance(r, tmax);
+    if (!(ts > 0.0f)) return Vec3(0.0f);
+    if (ts < 1.0f) return transmittance_meshes(r, tmax, in) * ts;
+  }
+  return transmittance_meshes(r, tmax, in);
+}
+
+Vec3 PathTracer::transmittance_meshes(const Ray &r, float tmax, const Media *in) const {
+  if (!see_through_) return occluded_meshes(r, tmax) ? Vec3(0.0f) : Vec3(1.0f);
   if (has_volume_) return transmittance_volumes(r, tmax, in);
   /* Step through see-through surfaces (Cycles: transparent shadows). Glass
    * blocks, as in Cycles without caustics: its light arrives through paths. */
@@ -865,6 +891,7 @@ size_t PathTracer::memory_bytes() const {
              tlas_.capacity() * sizeof(Node) + instances_.capacity() * sizeof(Instance);
   for (const auto &kv : blas_cache_)
     if (kv.second) n += kv.second->tris.capacity() * sizeof(Tri) + kv.second->prim.capacity() * sizeof(uint32_t) + kv.second->nodes.capacity() * sizeof(Node);
+  if (splats_) n += splats_->memory_bytes();  // (round 533)
   return n;
 }
 
@@ -1250,8 +1277,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     Hit h;
     rays++;
     const bool hit_any = intersect(ray, h);
+    /* Round 533: a splat kept before the mesh hit (Cycles 5.3's stochastic test, its seed from the path's numbers). */
+    SplatHit sh;
+    const bool hit_splat = splats_ && !splats_->empty() && splats_->intersect(ray, hit_any ? h.t : 1e30f, pcg_hash(rng++), sh);
     const Ray before_scatter = ray;
-    if (media.n && volume_scatter(media, ray, hit_any ? h.t : 1e30f, beta, L, rng, rays)) {  // (round 331: a scatter in the fog)
+    if (media.n && volume_scatter(media, ray, hit_splat ? sh.t : hit_any ? h.t : 1e30f, beta, L, rng, rays)) {  // (round 331: a scatter in the fog)
       if (bounce == 0 && camera_path && albedo_out) {  // (the denoiser's guides, as Cycles writes a volume's: its colour, no normal, the depth)
         *albedo_out = vmax(Vec3(0.0f), vmin(Vec3(1.0f), media.top()->mat->volume_color));
         *normal_out = Vec3(0.0f);
@@ -1262,6 +1292,23 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       last_pdf = 0.0f;  // (a surface's light found next counts in full: the fog samples no mesh lights)
       since_scatter = 0.0f;
       continue;
+    }
+    if (hit_splat) {
+      /* Round 533: a kept splat shines its SH colour along the ray and scatters nothing (Cycles' default_gsplat
+       * shader: Emission, strength 1). Not light-sampled, so its light found by a bounce counts in full. */
+      Vec3 c = beta * splats_->radiance(sh, ray.dir);
+      if (bounce > 0 && clamp > 0) {
+        const float m = std::max({c.x, c.y, c.z});
+        if (m > clamp) c = c * (clamp / m);
+      }
+      L += c;
+      if (bounce == 0 && camera_path && albedo_out) {  // (the denoiser's guides: the splat's colour and flattest axis)
+        *albedo_out = vmax(Vec3(0.0f), vmin(Vec3(1.0f), splats_->radiance(sh, ray.dir)));
+        *normal_out = splats_->normal(sh, ray.dir);
+        *depth_out = sh.t;  // (as a mesh hit's: the ray's parameter)
+        if (id_out) *id_out = splats_->object_id(sh);
+      }
+      break;
     }
     if (!hit_any) {
       Vec3 Le = env_.radiance(ray.dir);
@@ -3339,6 +3386,12 @@ bool PathTracer::gpu_gather_on(const std::vector<int> &devices, int mode, const 
   if (hit) hit->clear();
   gpu_gather_waiting_ = false;
   if (origins.size() != dirs.size() || (mode != 1 && mode != 2)) return false;
+  /* Round 533: the card has no splats until round 534 - a bake with splats gathers on the CPU (that round deletes
+   * this branch). */
+  if (splats_ && !splats_->empty()) {
+    if (error) *error = "Gaussian splats: gathered on the CPU (the GPU kernel has no splats yet)";
+    return false;
+  }
   if (!gpu::available() || devices.empty()) {
     if (error) *error = "no such GPU";
     return false;
