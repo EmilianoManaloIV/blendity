@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The views' Gaussian splats (round 532, task 0512): see scene_splats.h.
+/* Scene as scene.h declares it, before material.h's `struct Scene` (through gsplat_raster.h) is met: MSVC names a
+ * function by the keyword it saw first, and the callers see `class`. */
+namespace bl {
+class Scene;
+}
 #include "scene_splats.h"
 
 #include "../render/raster.h"

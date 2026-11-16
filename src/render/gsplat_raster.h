@@ -82,7 +82,7 @@ constexpr float kPointDotMinRadiusPx = 1.0f;
 bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, Vec3 cam_local,
                         Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out, float dot_px_at_w1 = 0.0f);
 /* A splat's linear colour seen along `dir_local` (from the camera, the cloud's own space): the one place the rasterizer
- * takes it, so the card, the CPU path tracer and this agree (Pass 27: S3's gsplat::radiance_linear when it lands). */
+ * takes it - gsplat_math.h's sh_color then radiance_linear, as both path tracers - so all three agree. */
 Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local);
 
 /* The alpha of a projected splat at pixel centre (px, py) (pixel coordinates, centres at +0.5): 0 outside its

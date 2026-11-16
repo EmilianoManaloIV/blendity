@@ -7,6 +7,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "gsplat_math.h"
 #include "raster.h"
 
 #include <algorithm>
@@ -119,7 +120,17 @@ bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int wid
   return true;
 }
 
-Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local) { return splat_color(pc, i, dir_local); }
+/* As both path tracers (round 533's gsplat_math.h, Cycles'): the SH colour is in the training photos' sRGB, turned into
+ * linear light before the view transform. */
+Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local) {
+  const Vec3 base = i < pc.color.size() ? pc.color[i] : Vec3(1.0f);
+  const int rest = pc.sh_rest_per_point();
+  const bool has_rest = rest > 0 && (i + 1) * (size_t)rest <= pc.sh_rest.size();
+  const float *sh = has_rest ? &pc.sh_rest[i * (size_t)rest].x : nullptr;
+  const gsplat::F3 c = gsplat::sh_color(gsplat::f3(base.x, base.y, base.z), sh, has_rest ? rest : 0, gsplat::f3(dir_local.x, dir_local.y, dir_local.z));
+  const gsplat::F3 l = gsplat::radiance_linear(c);
+  return Vec3(l.x, l.y, l.z);
+}
 
 /* -------------------------------------------------------------------- sorting */
 

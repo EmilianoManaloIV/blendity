@@ -63,7 +63,8 @@ static void splat_raster_round532_tests() {
     const float a1 = gsplat_alpha_at(sp, sp.x + sig, sp.y);
     CHECK(std::fabs(a1 - 0.8f * std::exp(-0.5f)) < 2.0f / 255.0f);
     CHECK(std::fabs(gsplat_alpha_at(sp, sp.x, sp.y + sig) - a1) < 2.0f / 255.0f);
-    CHECK(std::abs(red(s.px(100, 100)) - (int)std::lround(sp.r * 0.8f * 255.0f)) <= 2);
+    /* Over black, the pixel (its centre at 100.5, 100.5) is the colour times the alpha there. */
+    CHECK(std::abs(red(s.px(100, 100)) - (int)std::lround(sp.r * gsplat_alpha_at(sp, 100.5f, 100.5f) * 255.0f)) <= 2);
     CHECK(s.id(100, 100) == 7);
     CHECK(s.id(100 + (int)(3.0f * sig), 100) == 0);  // alpha under 0.1: not picked there
   });
@@ -76,7 +77,8 @@ static void splat_raster_round532_tests() {
     auto behind = one_splat({0, 0, 2}, {0.5f, 0.5f, 0.5f}, Quat(), {1, 0, 0}, 1.0f);
     s.draw({SplatDraw{behind, Mat4::identity(), 7, false, 0}}, sc.items);
     CHECK(s.id(100, 100) == 9);
-    CHECK(s.id(100 + 40, 100) == 7);  // beside the cube, the splat shows
+    /* Beside the cube (5 px across at 5 m), well inside the splat (sigma 12 px at 7 m: alpha 0.27 at 20 px). */
+    CHECK(s.id(100 + 20, 100) == 7);
     auto front = one_splat({0, 0, -1}, {0.5f, 0.5f, 0.5f}, Quat(), {1, 0, 0}, 1.0f);
     s.draw({SplatDraw{front, Mat4::identity(), 7, false, 0}}, sc.items);
     CHECK(s.id(100, 100) == 7);
