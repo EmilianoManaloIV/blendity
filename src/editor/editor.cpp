@@ -4,6 +4,7 @@
 #include "../scene/budget.h"
 #include "editor.h"
 #include "../scene/blockout_piece_stack.h"  // (round 514)
+#include "../scene/pointcloud_object.h"     // (round 530: Create > Point Cloud)
 #include "../core/profiling.h"
 #include "../core/hash.h"
 #include "../render/canvas.h"
@@ -1210,6 +1211,12 @@ void Editor::draw_menubar(const Recti &r) {
       if (u.menu_item("Lattice")) create_object("Lattice");
       u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
                 "or taper the mesh. Blender: Add > Lattice.");
+      u.submenu("Point Cloud", u.px(170), [this] {  // (round 530, ADR 0147)
+        if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud");
+        if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats");
+      });
+      u.tooltip("An empty point cloud: plain dots, or Gaussian Splats (soft turned ellipsoids whose colour changes with the view).\n"
+                "Fill it with `pointcloud random` (a test cloud). Blender 5.3: Add > Point Cloud.");
     }
     if (shows(FocusRig)) {
       if (u.menu_item("Armature")) create_object("Armature");
@@ -4302,7 +4309,7 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 std::string Editor::known_create_kind(const std::string &kind) {
   static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
                                        "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice",
-                                       "Blockout"};
+                                       "Blockout", "Point Cloud", "Gaussian Splats"};
   for (const char *k : kKinds)
     if (to_lower(kind) == to_lower(k)) return k;
   static const std::string kPiece = "blockout piece:";  // (round 477: "Blockout Piece: Subtract Box"; the rest is matched where it's made)
@@ -4368,6 +4375,14 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     if (parent) expanded_.insert(parent->id);
     select(g->id);
     mark_changed("Create Light Probe Group");
+    return g;
+  }
+  if (kind == "Point Cloud" || kind == "Gaussian Splats") {  // (round 530, ADR 0147: an empty cloud at the pivot)
+    GameObject *g = create_point_cloud_object(*scene_, kind == "Point Cloud" ? PointCloudType::Points : PointCloudType::GaussianSplats, parent);
+    if (!parent) g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create " + kind);
     return g;
   }
   if (kind == "Lattice") {
