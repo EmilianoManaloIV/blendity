@@ -3980,13 +3980,40 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (!painting) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
-  br.help("Add raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+  br.help("Add Weight raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Set Weight moves towards Weight (Ctrl: towards 1 - Weight), Blur evens out with the neighbours.");
   br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
   br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
   br.field("Front Faces Only", wp_brush_.front_only);
+  /* Task 0519 (Blender 5.3): automasking holds parts of the mesh back from the brush; the options multiply. */
+  if (br.group("Automasking", false)) {
+    br.field("Topology", wp_brush_.am_topology);
+    br.help("Only the connected piece the stroke starts on.");
+    br.field("Mesh Boundary", wp_brush_.am_boundary);
+    br.help("Keeps the brush off the mesh's open edges, fading in over Propagation Steps edges.");
+    if (wp_brush_.am_boundary) br.field("Propagation Steps", wp_brush_.am_boundary_steps, 1, 20);
+    br.enumeration("Cavity", wp_brush_.am_cavity, kWeightCavityModes, 3);
+    br.help("Cavity paints the hollows more than the ridges; Inverted the ridges more than the hollows.");
+    if (wp_brush_.am_cavity != 0) {
+      br.field("Cavity Factor", wp_brush_.am_cavity_factor, 0.01f, 0.0f, 5.0f);
+      br.field("Cavity Blur", wp_brush_.am_cavity_blur, 0, 25);
+    }
+    br.field("View Normal", wp_brush_.am_view_normal);
+    br.help("Only the faces turned towards you, up to Limit degrees.");
+    if (wp_brush_.am_view_normal) {
+      br.field("View Limit", wp_brush_.am_view_limit, 1.0f, 0.0f, 180.0f);
+      br.field("View Falloff", wp_brush_.am_view_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+    br.field("Area Normal", wp_brush_.am_area_normal);
+    br.help("Only the faces turned the way the surface faced where the stroke began.");
+    if (wp_brush_.am_area_normal) {
+      br.field("Area Limit", wp_brush_.am_area_limit, 1.0f, 0.0f, 180.0f);
+      br.field("Area Falloff", wp_brush_.am_area_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+  }
+  br.group_end();
   br.field("Clean Below", wp_clean_below_, 0.005f, 0.0f, 1.0f);  // (task 0287: Clean's threshold)
   const int hw = (lay.area.w - u.px(16)) / 2;
   Recti brow = lay.row(u.row_h() + u.px(2));

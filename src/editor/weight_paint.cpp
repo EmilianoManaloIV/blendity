@@ -13,7 +13,9 @@
 
 namespace bl {
 
-const char *const kWeightBrushModes[4] = {"Add", "Subtract", "Draw", "Blur"};
+/* Blender 5.3's names (task 0519): Add Weight is the default brush, Set Weight (Blender's Mix, Blendity's "Draw" until
+ * then) beside it. */
+const char *const kWeightBrushModes[4] = {"Add Weight", "Subtract", "Set Weight", "Blur"};
 const char *const kWeightFalloffs[6] = {"Smooth", "Sphere", "Root", "Sharp", "Linear", "Constant"};
 
 /* Blender's weight colours: blue 0, cyan 0.25, green 0.5, yellow 0.75, red 1. */
@@ -144,6 +146,8 @@ bool Editor::wp_begin_stroke() {
   wp_prepare(m);
   wp_start_ = m.vertex_groups[(size_t)wp_group(m)].weights;  // a stroke's changes are measured from here (no accumulation)
   wp_stroke_mode_ = wp_effective_mode(ui_.in.ctrl(), ui_.in.eraser);  // (task 0259: the mode for the whole stroke)
+  wp_stroke_flip_ = wp_brush_.mode == 2 && (ui_.in.ctrl() || ui_.in.eraser);  // (task 0519: Set Weight paints 1 - Weight, as Blender's flip)
+  wp_am_started_ = false;  // (task 0519: the automask is made at the first dab that reaches a vertex)
   wp_alpha_.assign(m.vert_count(), 0.0f);
   wp_stroke_mesh_ = &m;
   wp_stroking_ = true;
@@ -184,10 +188,15 @@ void Editor::wp_dab(float x, float y) {
   const float R = std::max(1.0f, wp_brush_.radius * ui_.scale);
   const float pen = std::isfinite(ui_.in.pressure) ? std::max(0.0f, std::min(ui_.in.pressure, 1.0f)) : 1.0f;  // (a pen presses lighter)
   const float strength = finite_bits(wp_brush_.strength) ? std::max(0.0f, std::min(wp_brush_.strength, 1.0f)) * pen : 0.0f;
-  const float target = finite_bits(wp_brush_.weight) ? std::max(0.0f, std::min(wp_brush_.weight, 1.0f)) : 1.0f;
+  float target = finite_bits(wp_brush_.weight) ? std::max(0.0f, std::min(wp_brush_.weight, 1.0f)) : 1.0f;
+  if (wp_stroke_flip_) target = 1.0f - target;
   const Vec3 eye = cam_.position(), fwd = cam_.forward();
   const size_t n = m.vert_count();
+  /* Task 0519: the stroke's automask, made once a dab reaches a vertex (before that no dab paints anything). */
+  const bool masked = wp_automask_any();
+  if (masked && !wp_am_started_ && !wp_automask_start(m, W, N, x, y, R)) return;
   std::vector<float> amount(n, 0.0f);  // how much each vertex takes this dab (0: outside the brush)
+  std::vector<float> am(masked ? n : 0, 1.0f);  // each vertex's automask (task 0519)
   JobSystem::global().parallel_for((int64_t)n, 2048, [&](int64_t b, int64_t e) {
     for (int64_t v = b; v < e; v++) {
       const Vec3 p = W.point(m.positions[(size_t)v]);
@@ -201,15 +210,20 @@ void Editor::wp_dab(float x, float y) {
         const Vec3 to_cam = cam_.ortho ? -fwd : eye - p;
         if (!(dot(nw, to_cam) > 0.0f)) continue;
       }
-      amount[(size_t)v] = strength * falloff(wp_brush_.falloff, d / R);
+      const float k = masked ? wp_automask(m, N, (size_t)v) : 1.0f;
+      if (masked) am[(size_t)v] = k;
+      amount[(size_t)v] = strength * falloff(wp_brush_.falloff, d / R) * k;
     }
   });
-  /* Mirror X: a twin takes the larger of its own and its partner's amount (each pair painted once). */
+  /* Mirror X: a twin takes the larger of its own and its partner's amount, with the partner's automask (each pair
+   * painted once). */
   if (wp_brush_.mirror_x)
     for (size_t v = 0; v < n; v++)
       if (amount[v] > 0.0f && v < wp_mirror_.size() && wp_mirror_[v] != UINT32_MAX) {
         const uint32_t t = wp_mirror_[v];
-        amount[t] = std::max(amount[t], amount[v]);
+        if (amount[v] <= amount[t]) continue;
+        amount[t] = amount[v];
+        if (masked) am[t] = am[v];
       }
   bool changed = false;
   if (wp_brush_.mode == 3) {  // Blur: towards the neighbours' average, dab after dab
@@ -231,7 +245,10 @@ void Editor::wp_dab(float x, float y) {
       wp_alpha_[v] = amount[v];
       const float a = wp_alpha_[v], s = wp_start_[v];
       const int mode = wp_stroke_mode_;  // (task 0259: Ctrl or the pen's eraser at the stroke's start makes an Add stroke subtract)
-      float nw = mode == 0 ? s + a * target : mode == 1 ? s - a * target : s + (target - s) * a;
+      /* Blender's blend takes the automask twice (task 0519: the target too), so a half-masked vertex settles at half
+       * the weight under Set Weight rather than being washed out to all of it. */
+      const float tv = target * (masked ? am[v] : 1.0f);
+      float nw = mode == 0 ? s + a * tv : mode == 1 ? s - a * tv : s + (tv - s) * a;
       nw = std::max(0.0f, std::min(nw, 1.0f));
       changed = changed || nw != w[v];
       w[v] = nw;
@@ -328,7 +345,7 @@ const std::vector<Vec3> *Editor::wp_colors(const Mesh &m, const RenderMesh &rm) 
 int Editor::wp_effective_mode(bool ctrl, bool eraser) const { return wp_brush_.mode == 0 && (ctrl || eraser) ? 1 : wp_brush_.mode; }
 
 /* weightpaint on|off|toggle; wpbrush <add|subtract|draw|blur> [radius] [strength] [weight]; wpfalloff <name>;
- * wpmirror on|off; wpfront on|off; wpstroke x y x y ... (window pixels: one stroke); wpnormalize; wpclean [threshold]. */
+ * wpmirror on|off; wpfront on|off; wpautomask (task 0519: weight_paint_automask.cpp); wpstroke x y x y ... (window pixels: one stroke); wpnormalize; wpclean [threshold]. */
 void Editor::weight_paint_command(const std::vector<std::string> &t) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
   const std::string &c = t[0];
@@ -338,12 +355,20 @@ void Editor::weight_paint_command(const std::vector<std::string> &t) {
     return;
   }
   if (c == "wpbrush") {
+    /* The short names, the 5.3 names without their space, and "draw" / "paint" for Set Weight (task 0519). */
     const std::string mode = to_lower(arg(1, ""));
+    static const char *const kNames[][3] = {{"add", "addweight", "add"}, {"subtract", "sub", "subtract"}, {"set", "setweight", "draw"}, {"blur", "blur", "blur"}};
     for (int i = 0; i < 4; i++)
-      if (mode == to_lower(kWeightBrushModes[i])) wp_brush_.mode = i;
+      for (const char *nm : kNames[i])
+        if (mode == nm) wp_brush_.mode = i;
+    if (mode == "paint") wp_brush_.mode = 2;
     if (t.size() > 2) wp_brush_.radius = std::max(1.0f, std::min((float)std::atof(t[2].c_str()), 1000.0f));
     if (t.size() > 3) wp_brush_.strength = std::max(0.0f, std::min((float)std::atof(t[3].c_str()), 1.0f));
     if (t.size() > 4) wp_brush_.weight = std::max(0.0f, std::min((float)std::atof(t[4].c_str()), 1.0f));
+    return;
+  }
+  if (c == "wpautomask") {
+    wp_automask_command(t);
     return;
   }
   if (c == "wpfalloff") {
