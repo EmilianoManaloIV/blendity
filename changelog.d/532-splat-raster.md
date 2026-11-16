@@ -32,7 +32,10 @@ editor keeps drawing while one runs, so the view shows it without a missed chang
 declare `class Scene` as `scene.h` defines it (MSVC named functions by the keyword it met first); Wireframe draws no
 splats on the card either.
 
-**Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux).
+**Checked:** the round's groups with `editor` - `splats_raster` (17 + 4 review tests), `splats`, `splats_trace` and `editor`: 7,709 checks on
+Windows with Blender's libraries, none failed (on #424's head); on Linux (WSL, with the libraries) `splats_raster`, `splats` and `editor`,
+3,431 checks, none failed (before #424 was merged in). The card against the CPU on a small splat scene: mean 0.435 / 255, the same ids.
+The full suite and the dependency-free builds on CI. The 1M-splat timed rows (`--only splat_raster`) wait for the hub's batched timed window.
 
 <!-- README -->
 after: Point Cloud objects - Points or Gaussian Splats with spherical harmonics up to degree 3 (round 530);
