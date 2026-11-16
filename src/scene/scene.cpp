@@ -3858,6 +3858,7 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
   if (kind == "Cube") mesh = primitives::cube();
   else if (kind == "Sphere") mesh = primitives::uv_sphere();
   else if (kind == "Icosphere") mesh = primitives::ico_sphere();
+  else if (kind == "Quad Sphere") mesh = primitives::quad_sphere();  // (round 535)
   else if (kind == "Cylinder") mesh = primitives::cylinder();
   else if (kind == "Capsule") mesh = primitives::capsule();  // (round 367)
   else if (kind == "Cone") mesh = primitives::cone();

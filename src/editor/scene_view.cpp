@@ -1137,7 +1137,10 @@ bool Editor::gizmo_update(const Recti &view) {
         }
         gizmo_vsnap_ = best < 1e29f;
       }
-      else gizmo_vsnap_ = nearest_vertex_on_screen(view, in.mx, in.my, 1e9f, true, false, gizmo_vsnap_anchor_);
+      else {
+        gizmo_vsnap_ = nearest_vertex_on_screen(view, in.mx, in.my, 1e9f, true, false, gizmo_vsnap_anchor_);
+        prefer_origin_target(view, in.mx, in.my, 1e9f, true, false, gizmo_vsnap_, gizmo_vsnap_anchor_);  // (a selected object's origin may be the anchor)
+      }
     }
     if (eo && in.shift()) {
       /* Shift + drag: extrude first, then the handle moves, turns or scales the new
@@ -1235,7 +1238,8 @@ bool Editor::gizmo_update(const Recti &view) {
         /* Vertex snapping (Unity's V): the anchor vertex lands on the vertex under the mouse. */
         Vec3 target;
         ScopedTimer st;
-        const bool found = nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target);
+        bool found = nearest_vertex_on_screen(view, in.mx, in.my, (float)u.px(24), false, !eo, target);
+        prefer_origin_target(view, in.mx, in.my, (float)u.px(24), false, !eo, found, target);
         prof_.ms_snap_pick += st.ms();
         if (found) {
           delta = target - gizmo_vsnap_anchor_;
@@ -1425,8 +1429,10 @@ void Editor::draw_gizmo(const Recti &view) {
     Vec3 mark;
     bool show = false;
     if (drag_ == Drag::Gizmo && gizmo_snap_shown_) mark = gizmo_snap_point_, show = true;
-    else if (drag_ != Drag::Gizmo && u.in.key_down[platform::KEY_V] && scene_hovered_ && !edit_mode_)
+    else if (drag_ != Drag::Gizmo && u.in.key_down[platform::KEY_V] && scene_hovered_ && !edit_mode_) {
       show = nearest_vertex_on_screen(view, u.in.mx, u.in.my, 1e9f, true, false, mark);
+      prefer_origin_target(view, u.in.mx, u.in.my, 1e9f, true, false, show, mark);
+    }
     Vec2 s;
     float z;
     if (show && scene_r3d_.project(mark, s, z)) {

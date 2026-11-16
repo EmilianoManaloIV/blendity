@@ -11469,6 +11469,86 @@ static void tests_round470() {
   });
 }
 
+/* ---- Round 535 (task 0515): Quad Sphere ---- */
+static void tests_round535() {
+  test("round 535: a Quad Sphere is 6 s^2 quads on a sphere, closed, outward, with UVs, both methods; bad numbers fall back", [] {
+    for (int method = 0; method < 2; method++)
+      for (int s : {1, 2, 4, 16}) {
+        MeshPtr m = primitives::quad_sphere(0.5f, s, method);
+        CHECK(m->face_count() == (size_t)(6 * s * s) && m->vert_count() == (size_t)(6 * s * s + 2));
+        bool quads = true, round = true, outward = true, uv_ok = m->uvs.size() == m->corner_count();
+        for (size_t f = 0; f < m->face_count(); f++) {
+          quads = quads && m->face_size(f) == 4;
+          outward = outward && dot(m->face_normal(f), m->face_center(f)) > 0;
+        }
+        for (const Vec3 &p : m->positions) round = round && std::fabs(length(p) - 0.5f) < 1e-5f;
+        for (const Vec2 &t : m->uvs) uv_ok = uv_ok && t.x >= 0 && t.x <= 1 && t.y >= 0 && t.y <= 1;
+        std::map<uint64_t, int> uses;
+        for (size_t f = 0; f < m->face_count(); f++)
+          for (uint32_t i = 0; i < 4; i++) uses[Mesh::edge_key(m->face_verts(f)[i], m->face_verts(f)[(i + 1) % 4])]++;
+        bool closed = true;
+        for (auto &e : uses) closed = closed && e.second == 2;
+        CHECK(quads && round && outward && uv_ok && closed);
+      }
+    CHECK(primitives::quad_sphere(0.5f, 0)->face_count() == 6 && primitives::quad_sphere(0.5f, -3)->face_count() == 6);
+    for (float bad : {0.0f, -1.0f, std::nanf("")}) CHECK(std::fabs(length(primitives::quad_sphere(bad, 2)->positions[0]) - 0.5f) < 1e-5f);
+  });
+
+  test("round 535: Even Angle puts the vertices on a great circle at equal angles; Even Area's biggest-to-smallest face ratio beats Even Angle's at 16", [] {
+    const int s = 16;
+    for (int method = 0; method < 2; method++) {
+      MeshPtr m = primitives::quad_sphere(0.5f, s, method);
+      /* The circle through the centres of the +Z and -Z faces: the vertices in the plane y = 0 (s is even, so a grid line lies there). */
+      std::vector<float> ang;
+      for (const Vec3 &p : m->positions)
+        if (std::fabs(p.y) < 1e-5f) ang.push_back(std::atan2(p.x, p.z));
+      std::sort(ang.begin(), ang.end());
+      CHECK(ang.size() == (size_t)(4 * s));
+      float worst = 0.0f;
+      for (size_t i = 0; i < ang.size(); i++) {
+        const float next = i + 1 < ang.size() ? ang[i + 1] : ang[0] + 2.0f * 3.14159265f;
+        worst = std::max(worst, std::fabs((next - ang[i]) - 2.0f * 3.14159265f / (float)ang.size()));
+      }
+      std::printf("    method %d: worst angle step error on the great circle %.2e rad\n", method, worst);
+      if (method == 1) CHECK(worst < 1e-4f);
+      else CHECK(worst > 1e-3f);  // (Even Area is not evenly spaced in angle: the two methods differ)
+    }
+    auto ratio = [&](int method) {
+      MeshPtr m = primitives::quad_sphere(0.5f, s, method);
+      float lo = 1e30f, hi = 0.0f;
+      for (size_t f = 0; f < m->face_count(); f++) {
+        const uint32_t *v = m->face_verts(f);
+        const float a = 0.5f * length(cross(m->positions[v[2]] - m->positions[v[0]], m->positions[v[3]] - m->positions[v[1]]));
+        lo = std::min(lo, a), hi = std::max(hi, a);
+      }
+      return hi / lo;
+    };
+    const float even_area = ratio(0), even_angle = ratio(1);
+    std::printf("    face area max/min at 16: Even Area %.4f, Even Angle %.4f\n", even_area, even_angle);
+    CHECK(even_area < even_angle);
+  });
+
+  test("round 535: Quad Sphere refuses clean numbers: NaN / infinite radius fall back to 0.5, the count clamps to 1..500 (quad_sphere_segments), 128 subdivisions keep the 6 s^2 count", [] {
+    for (float bad : {std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), std::nanf("")})
+      for (int method : {0, 1}) {
+        MeshPtr m = primitives::quad_sphere(bad, 2, method);
+        bool round = m->face_count() == 24;
+        for (const Vec3 &p : m->positions) round = round && std::fabs(length(p) - 0.5f) < 1e-5f;
+        CHECK(round);
+      }
+    CHECK(primitives::quad_sphere_segments(100000) == 500 && primitives::quad_sphere_segments(501) == 500 && primitives::quad_sphere_segments(0) == 1 &&
+          primitives::quad_sphere_segments(-3) == 1 && primitives::quad_sphere_segments(128) == 128 && primitives::quad_sphere_segments(1) == 1);
+    MeshPtr big = primitives::quad_sphere(0.5f, 128, 0);
+    CHECK(big->face_count() == (size_t)6 * 128 * 128 && big->vert_count() == (size_t)6 * 128 * 128 + 2);
+    MeshPtr r2 = primitives::quad_sphere(2.0f, 3, 1);
+    bool two = true;
+    for (const Vec3 &p : r2->positions) two = two && std::fabs(length(p) - 2.0f) < 1e-4f;
+    CHECK(two && r2->face_count() == 54);
+    MeshPtr tiny = primitives::quad_sphere(1e-6f, 2, 0);
+    CHECK(tiny->face_count() == 24 && std::isfinite(tiny->positions[0].x));
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -11520,4 +11600,5 @@ void run_modeling_tests() {
   tests_round462_review();
   tests_round470();
   tests_round470_share();
+  tests_round535();
 }
