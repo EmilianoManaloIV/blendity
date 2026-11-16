@@ -5,6 +5,8 @@
 #include "../../extern/fast_float/fast_float.h"
 #include "../../extern/ufbx/ufbx.h"
 #include "import_anim.h"
+#include "import_splat.h"       // (round 531: .spz)
+#include "pointcloud_object.h"  // (round 531: an imported cloud's component)
 #include "spring_bones.h"
 
 #include <algorithm>
@@ -18,7 +20,7 @@ namespace bl {
 
 bool model_extension_supported(const std::string &ext) {
   return ext == ".obj" || ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".stl" || ext == ".ply" || ext == ".usda" ||
-         ext == ".pmx" || ext == ".pmd" || ext == ".vrm" || ext == ".bvh" || ext == ".dae";
+         ext == ".pmx" || ext == ".pmd" || ext == ".vrm" || ext == ".bvh" || ext == ".dae" || ext == ".spz";
 }
 
 bool motion_extension_supported(const std::string &ext) { return ext == ".vmd"; }
@@ -31,6 +33,7 @@ bool import_by_format(const std::string &path, ImportResult &out) {
   if (ext == ".glb" || ext == ".gltf" || ext == ".vrm") return import_gltf_file(path, out);
   if (ext == ".stl") return import_stl_file(path, out);
   if (ext == ".ply") return import_ply_file(path, out);
+  if (ext == ".spz") return import_spz_file(path, out);  // (round 531)
   if (ext == ".usda" || ext == ".usd") return import_usda_file(path, out);
   if (ext == ".pmx" || ext == ".pmd") return import_pmx_file(path, out);
   if (ext == ".bvh") return import_bvh_file(path, out);
@@ -708,6 +711,7 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
       mr->shape_weights = n.shape_weights;
       if (mr->materials.empty()) mr->materials.push_back(make_material(n.name, Vec3(0.8f)));
     }
+    if (n.points) g->add<PointCloudObject>()->data = n.points;  // (round 531)
     made[i] = g;
   }
   for (size_t i = 0; i < r.nodes.size(); i++)
