@@ -43,13 +43,16 @@ rasterizer and on the card. A one-million-splat cloud keeps the editor's frames 
       first frame of a new cloud sorting inside the frame once.
     - `gsplat_draw_cpu(Renderer3D-target, ...)`: tile-parallel compositing after the opaque meshes: each pixel
       takes the splats covering it back to front, alpha-blended (over), skipping a splat whose centre depth is
-      behind the mesh depth at that pixel; where a splat's alpha is at least 0.1 it writes its pick id and, at
-      alpha 0.5 or more, its depth (so overlays and later passes are hidden by solid-looking splats as by meshes).
-  - Vulkan path (`gsplat_raster` card side, a call in `gpu_raster.cpp`): the cloud uploaded once per version
-    (positions, covariance, opacity, base colour, SH as floats); the sorted order uploaded per sort; one instanced
-    quad per splat whose vertex shader does the same EWA projection and SH, fragment shader the Gaussian alpha,
-    premultiplied over-blending, depth test against the meshes without depth write; ids and outline as the card's
-    existing id pass draws them (alpha >= 0.1).
+      behind the mesh depth at that pixel; where a splat's alpha is at least 0.1 it writes its pick id. No depth is
+      written (as a Transparent surface): the card's lighting pass has no depth attachment, and the two devices
+      must agree, so overlays drawn later are not hidden by splats (a follow-up if it bothers).
+  - Vulkan path (a pass in `gpu_raster.cpp`): the CPU's projected, ordered splats (`SplatPass::screen()`, one
+    job-parallel pass over the cloud) go to the card each frame as 32 bytes a splat; one instanced quad per splat,
+    the fragment shader the same Gaussian alpha, premultiplied over-blending into the lighting pass, depth-tested
+    against the meshes' depth without writing it; then an ids pass (alpha >= 0.1) like the see-through surfaces',
+    and the card's outline reads splat ids through a small table. Projecting on the CPU keeps the two devices'
+    ellipses identical; moving the projection and SH into a vertex shader (static upload per cloud version) is the
+    follow-up if the 1M-splat upload shows in the timed rows.
   - Call sites: the Scene view gathers each Gaussian Splats object into a `SplatDraw` and draws them after the
     opaque pass, before overlays; selection outline through the existing `outline_ids`; picking through the existing
     id plane. Points clouds draw as round dots (`point_size`) in the same pass.
@@ -100,8 +103,7 @@ rasterizer and on the card. A one-million-splat cloud keeps the editor's frames 
   Jacobian sane at the screen's edge).
 - Huge splats close to the camera: the 1024 px axis cap bounds the work; a tile loop never walks more than the
   screen.
-- Memory: 1M degree-3 splats is ~240 MB of SH on the card; the card side refuses (CPU path draws) past the card's
-  free memory, with the CPU badge's reason.
+- Upload: 1M visible splats are 32 MB a frame to the card; the stress row measures it.
 - Sorting on a worker while the cloud is edited or deleted: the worker holds the cloud's shared pointer, and its
   result is dropped when the cloud's version moved.
 - Mirrored model matrices (negative scale): the covariance is transformed by the full matrix, so a mirror stays right.

@@ -8,6 +8,7 @@
 //   Edit Mode   : Blender's mesh editing (blender/source/blender/editors/mesh)
 #include "../scene/curve.h"
 #include "editor.h"
+#include "scene_splats.h"
 #include "../core/profiling.h"
 
 #include "../core/core.h"
@@ -750,7 +751,9 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
   }
   scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   for (const DrawItem &it : items) scene_r3d_.add(it);
-  if (!items.empty()) scene_r3d_.flush();
+  const bool splats = shading_ != Shading::Wireframe &&
+                      scene_splats_prepare(*scene_, scene_r3d_, rt, v, p, ViewTransform::Standard, 0.0f);  // (round 532)
+  if (!items.empty() || splats) scene_r3d_.flush();
   scene_stats_ = scene_r3d_.stats();
 }
 

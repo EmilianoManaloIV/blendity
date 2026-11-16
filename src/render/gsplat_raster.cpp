@@ -13,6 +13,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <iterator>
 #include <thread>
 
 namespace bl {
@@ -21,6 +22,7 @@ namespace {
 
 std::mutex g_stats_mutex;
 SplatStats g_last_stats;
+std::atomic<uint64_t> g_sort_generation{1};
 
 /* A float's bits made to sort as unsigned integers in the float's order (negatives flipped whole, positives' sign set). */
 inline uint32_t float_flip(float f) {
@@ -36,7 +38,7 @@ bool is_orthographic(const Mat4 &proj) { return std::fabs(proj.m[15] - 1.0f) < 1
 /* ---------------------------------------------------------------- projection */
 
 bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, Vec3 cam_local,
-                        Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out) {
+                        Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out, float dot_px_at_w1) {
   out.visible = false;
   if (i >= pc.position.size() || width <= 0 || height <= 0) return false;
   const bool splat = pc.is_splats();
@@ -56,10 +58,12 @@ bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int wid
 
   if (!splat) {
     /* A Points cloud: a round dot of fixed size (Blender's overlay draws them as points of the theme's vertex size). */
+    const float r = std::max(kPointDotMinRadiusPx, std::min(kSplatMaxAxisPx, dot_px_at_w1 * iw));
+    if (!std::isfinite(r)) return false;
     out.dot = true;
     out.e0x = 1, out.e0y = 0;
-    out.inv0 = out.inv1 = 2.0f / kPointDotRadiusPx;
-    out.rx = out.ry = kPointDotRadiusPx;
+    out.inv0 = out.inv1 = 2.0f / r;
+    out.rx = out.ry = r;
   } else {
     /* EWA (Zwicker et al. 2002, eq. 29 / 31): the 2D covariance J Sigma J^T, J the screen projection's Jacobian at
      * the centre in the cloud's own space - here straight from the whole matrix, so the object's placement (a mirror
@@ -108,12 +112,14 @@ bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int wid
 
   /* The colour along the view: from the camera toward the splat, in the cloud's own space (Blender's eval_radiance). */
   const Vec3 dir = (ortho_dir_local.x != 0.0f || ortho_dir_local.y != 0.0f || ortho_dir_local.z != 0.0f) ? ortho_dir_local : p - cam_local;
-  const Vec3 lin = splat ? splat_color(pc, i, dir) : (i < pc.color.size() ? pc.color[i] : Vec3(1.0f));
+  const Vec3 lin = splat ? gsplat_radiance(pc, i, dir) : (i < pc.color.size() ? pc.color[i] : Vec3(1.0f));
   const uint32_t px = to_display_pixel(lin, vt, exposure);
   out.r = ((px >> 16) & 255) / 255.0f, out.g = ((px >> 8) & 255) / 255.0f, out.b = (px & 255) / 255.0f;
   out.visible = true;
   return true;
 }
+
+Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local) { return splat_color(pc, i, dir_local); }
 
 /* -------------------------------------------------------------------- sorting */
 
@@ -185,7 +191,7 @@ struct SplatSorter::State {
   std::shared_ptr<const std::vector<uint32_t>> done;  // the last finished order
   Mat4 done_mvp;
   uint64_t done_version = 0;
-  const PointCloud *done_cloud = nullptr;
+  uint64_t done_cloud = 0;  // the cloud's uid
   bool running = false;
   Mat4 running_mvp;
   bool hold = false;
@@ -223,7 +229,7 @@ std::shared_ptr<const std::vector<uint32_t>> SplatSorter::order(const SplatDraw 
   const PointCloud *pc = d.cloud.get();
   if (!pc) return nullptr;
   std::unique_lock<std::mutex> lk(s.m);
-  const bool same_cloud = s.done_cloud == pc && s.done_version == pc->version && s.done &&
+  const bool same_cloud = s.done_cloud == pc->uid.v && s.done_version == pc->version && s.done &&
                           s.done->size() == pc->count();
   if (same_cloud && same_matrix(s.done_mvp, mvp)) {
     last_async_ = false;
@@ -239,7 +245,7 @@ std::shared_ptr<const std::vector<uint32_t>> SplatSorter::order(const SplatDraw 
     gsplat_sort_back_to_front(*pc, mvp, *ord);
     last_sort_ms_ = t.ms();
     lk.lock();
-    s.done = ord, s.done_mvp = mvp, s.done_version = pc->version, s.done_cloud = pc;
+    s.done = ord, s.done_mvp = mvp, s.done_version = pc->version, s.done_cloud = pc->uid.v;
     last_async_ = false;
     return ord;
   }
@@ -268,7 +274,7 @@ std::shared_ptr<const std::vector<uint32_t>> SplatSorter::order(const SplatDraw 
       keep->cv.wait(wl, [&] { return !keep->hold; });
       /* Edited while it sorted: the order is for points that moved - dropped, and the next frame asks again. */
       if (cloud->version == version && ord->size() == cloud->count())
-        keep->done = ord, keep->done_mvp = mvp, keep->done_version = version, keep->done_cloud = cloud.get();
+        keep->done = ord, keep->done_mvp = mvp, keep->done_version = version, keep->done_cloud = cloud->uid.v, g_sort_generation++;
       keep->running = false;
       *ms_out = t.ms();
       busy->store(false);
@@ -310,6 +316,11 @@ void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v,
       const Vec4 a = inv_mvp * Vec4(0, 0, 0, 1), b = inv_mvp * Vec4(0, 0, 1, 1);
       ortho_dir = b.xyz() * (1.0f / b.w) - a.xyz() * (1.0f / a.w);
     }
+    /* A Points dot's radius in pixels times w: half the size, scaled by the placement (its mean axis) and the
+     * projection's vertical pixel scale. */
+    const float mscale = std::cbrt(std::fabs(length(d.model.dir(Vec3(1, 0, 0))) * length(d.model.dir(Vec3(0, 1, 0))) *
+                                             length(d.model.dir(Vec3(0, 0, 1)))));
+    const float dot_px = 0.5f * d.point_size * mscale * std::fabs(v.proj.at(1, 1)) * 0.5f * (float)v.height;
     ScopedTimer ts;
     auto ord = sorter(d.key).order(d, mvp, async_sort);
     stats_.ms_sort += ts.ms();
@@ -321,7 +332,7 @@ void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v,
       for (int64_t k = b; k < e; k++) {
         const uint32_t i = (*ord)[(size_t)k];
         SplatScreen &s = proj[(size_t)k];
-        if (gsplat_project_one(pc, i, mvp, v.width, v.height, cam_local, ortho_dir, v.view_transform, v.exposure, s)) s.id = d.id;
+        if (gsplat_project_one(pc, i, mvp, v.width, v.height, cam_local, ortho_dir, v.view_transform, v.exposure, s, dot_px)) s.id = d.id;
       }
     });
     std::vector<SplatScreen> kept;
@@ -384,7 +395,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
   }
   JobSystem::global().parallel_for(tiles, 1, [&](int64_t tb, int64_t te) {
     float rgb[kTile * kTile * 3];
-    float zbuf[kTile * kTile], znew[kTile * kTile];
+    float zbuf[kTile * kTile];
     uint32_t idbuf[kTile * kTile];
     uint8_t touched[kTile * kTile];
     for (int64_t ti = tb; ti < te; ti++) {
@@ -400,7 +411,6 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
           float *o = &rgb[(y * kTile + x) * 3];
           o[0] = ((c >> 16) & 255) / 255.0f, o[1] = ((c >> 8) & 255) / 255.0f, o[2] = (c & 255) / 255.0f;
           zbuf[y * kTile + x] = has_depth ? rt.depth[pi] : 1.0f;
-          znew[y * kTile + x] = zbuf[y * kTile + x];
           idbuf[y * kTile + x] = has_ids ? rt.ids[pi] : 0u;
         }
       for (uint32_t li = first; li < last; li++) {
@@ -414,7 +424,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
             float a;
             if (s.dot) {
               const float dx = px + 0.5f - s.x, dy = py + 0.5f - s.y;
-              a = dx * dx + dy * dy <= kPointDotRadiusPx * kPointDotRadiusPx ? 1.0f : 0.0f;
+              a = dx * dx + dy * dy <= s.rx * s.rx ? 1.0f : 0.0f;
             } else {
               a = gsplat_alpha_at(s, px + 0.5f, py + 0.5f);
             }
@@ -423,7 +433,6 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
             float *o = &rgb[l * 3];
             o[0] += (s.r - o[0]) * a, o[1] += (s.g - o[1]) * a, o[2] += (s.b - o[2]) * a;
             if (a >= kSplatPickAlpha) idbuf[l] = s.id;
-            if (a >= kSplatDepthAlpha && s.z < znew[l]) znew[l] = s.z;
           }
       }
       for (int y = 0; y < th; y++)
@@ -435,7 +444,6 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
           c = (c & 0xFF000000u) | (q(o[0]) << 16) | (q(o[1]) << 8) | q(o[2]);
           /* The linear light under a splat is gone (as under a see-through surface): bloom skips it. */
           if (has_hdr && touched[y * kTile + x]) rt.hdr[pi] = Vec3(-1.0f, 0.0f, 0.0f);
-          if (has_depth) rt.depth[pi] = znew[y * kTile + x];
           if (has_ids) rt.ids[pi] = idbuf[y * kTile + x];
         }
     }
@@ -444,6 +452,8 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
   std::lock_guard<std::mutex> lk(g_stats_mutex);
   g_last_stats.ms_draw = stats_.ms_draw;
 }
+
+uint64_t gsplat_sort_generation() { return g_sort_generation.load(); }
 
 SplatStats gsplat_last_stats() {
   std::lock_guard<std::mutex> lk(g_stats_mutex);

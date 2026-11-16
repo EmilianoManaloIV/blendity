@@ -12,8 +12,9 @@
 //
 // The pass runs after the opaque meshes and before the overlays, on the CPU rasterizer's target (its colour, depth
 // and id planes) or on the card (gpu_raster's splat pass, the same projection in its vertex shader). A splat is hidden
-// where a mesh is nearer than its centre; it writes its pick id where its alpha reaches 0.1 and its depth where it
-// reaches 0.5, so overlays drawn after it are hidden by solid-looking splats as by meshes.
+// where a mesh is nearer than its centre and writes its pick id where its alpha reaches 0.1. Like a Transparent surface
+// it writes no depth (the card's lighting pass has no depth attachment, and both devices must agree): overlays drawn
+// after it are not hidden by it.
 #pragma once
 
 #include "../core/math.h"
@@ -37,6 +38,7 @@ struct SplatDraw {
   uint32_t id = 0;         // the pick id (as DrawItem::id)
   bool selected = false;   // (the caller passes the selected ids to outline_ids as for meshes)
   uint64_t key = 0;        // what the sorter keeps its order by (the object's id); 0 = never kept between frames
+  float point_size = 0.02f;  // a Points cloud's dot size, object units (PointCloudObject::point_size)
 };
 
 /* A splat on screen: its centre, depth and the ellipse in its own axes (Blender's AxisTuple: the eigenvectors of the 2D
@@ -53,7 +55,7 @@ struct SplatScreen {
   float opacity = 0;
   uint32_t id = 0;
   bool visible = false;
-  bool dot = false;         // a Points cloud's point: a hard round dot of kPointDotRadiusPx
+  bool dot = false;         // a Points cloud's point: a hard round dot of radius rx
 };
 
 /* What the projection needs of the frame. */
@@ -70,15 +72,18 @@ constexpr float kSplatMinOpacity = 1.0f / 255.0f;
 constexpr float kSplatMaxAxisPx = 1024.0f;
 constexpr float kSplatMinEigen = 0.001f;
 constexpr float kSplatPickAlpha = 0.1f;
-constexpr float kSplatDepthAlpha = 0.5f;
-/* A Points cloud's dot radius in pixels (Blender's overlay draws them at the theme's vertex size). */
-constexpr float kPointDotRadiusPx = 2.0f;
+/* The smallest dot a Points cloud's point draws as, in pixels (radius): a far cloud stays visible. */
+constexpr float kPointDotMinRadiusPx = 1.0f;
 
 /* One splat to its screen ellipse (EWA): false when culled - behind the near plane, off screen, under kSplatMinOpacity,
  * or non-finite. `mvp` = proj x view x model, `cam_local` the camera in the cloud's own space (its colour's view
- * direction), `ortho_dir_local` that direction when the projection is orthographic (zero otherwise). */
+ * direction), `ortho_dir_local` that direction when the projection is orthographic (zero otherwise). A Points cloud's
+ * point is a round dot of `dot_px_at_w1` / w pixels' radius (its world radius times the projection's pixel scale). */
 bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, Vec3 cam_local,
-                        Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out);
+                        Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out, float dot_px_at_w1 = 0.0f);
+/* A splat's linear colour seen along `dir_local` (from the camera, the cloud's own space): the one place the rasterizer
+ * takes it, so the card, the CPU path tracer and this agree (Pass 27: S3's gsplat::radiance_linear when it lands). */
+Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local);
 
 /* The alpha of a projected splat at pixel centre (px, py) (pixel coordinates, centres at +0.5): 0 outside its
  * billboard. */
@@ -134,7 +139,7 @@ class SplatPass {
   /* Projects every draw and orders it; the screen splats are kept in `screen()` back to front across all clouds. */
   void prepare(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort = true);
   /* Blends the prepared splats into the target after its opaque pass: colour over, depth-tested against the mesh
-   * depth, ids at alpha >= kSplatPickAlpha, depth at alpha >= kSplatDepthAlpha. Tile-parallel. */
+   * depth, ids at alpha >= kSplatPickAlpha; no depth written. Tile-parallel. */
   void draw_cpu(RenderTarget &rt) const;
   const std::vector<SplatScreen> &screen() const { return screen_; }
   const SplatStats &stats() const { return stats_; }
@@ -146,6 +151,10 @@ class SplatPass {
   std::vector<std::pair<uint64_t, std::unique_ptr<SplatSorter>>> sorters_;
   SplatSorter scratch_sorter_;  // draws with key 0
 };
+
+/* Moves each time a worker's sort lands: the views' render hash mixes it, so a view showing an older camera's order
+ * redraws with the new one. */
+uint64_t gsplat_sort_generation();
 
 /* The last frame's stats from any view (the console's `splat stats`). */
 SplatStats gsplat_last_stats();

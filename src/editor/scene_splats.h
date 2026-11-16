@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// The views' Gaussian splats (round 532, task 0512): every Point Cloud object of a scene gathered into the frame's
+// splat pass (render/gsplat_raster.h), which the rasterizer blends in after its opaque pass. One pass is kept per
+// renderer, so each view keeps its own sorted orders between frames.
+#pragma once
+
+#include "../render/gsplat_raster.h"
+
+namespace bl {
+
+class Scene;
+class Renderer3D;
+struct RenderTarget;
+
+/* The scene's point clouds that draw (active, enabled, not empty) as the frame's splat draws. */
+std::vector<SplatDraw> scene_splat_draws(const Scene &scene);
+/* True when the scene has a point cloud that draws (the card refuses such a view until it draws them itself). */
+bool scene_has_splats(const Scene &scene);
+
+/* Projects and orders the scene's splats for `r3d`'s next flush() and hands them to it (set_splats). The pass is
+ * `r3d`'s own; it lives until the renderer is gone. Returns false when the scene has none (nothing is set). `async`
+ * false sorts inside the frame whatever the size (a final render). */
+bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarget &rt, const Mat4 &v, const Mat4 &p,
+                          ViewTransform vt, float exposure, bool async = true);
+
+/* `splat stats`: the last frame's splats - submitted, culled, drawn, the project / sort / draw times. */
+std::string splat_stats_text();
+
+}  // namespace bl

@@ -8,6 +8,7 @@
  * compare the two. */
 #include "editor.h"
 #include "view_keeps.h"
+#include "scene_splats.h"
 #include "../core/view_perf.h"
 #include "../core/profiling.h"
 
@@ -1532,6 +1533,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.gpu_fallbacks++;
     return false;
   }
+  /* Round 532: Gaussian splats are blended by the CPU rasterizer's pass; a view with them draws there for now. */
+  if (scene_has_splats(*scene_)) return gpu_view_refuse(slot, "Gaussian splats (drawn on the CPU)");
   ProfileScope ps{prof_.ms_gpu};
   gpu_calls_++;
   std::string err;
