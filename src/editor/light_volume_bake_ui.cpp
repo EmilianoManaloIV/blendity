@@ -96,7 +96,12 @@ void Editor::bake_volumes_on_worker(BakeJob &j) {
   if (j.volumes.empty()) return;
   ScopedTimer t;
   std::vector<PTObject> objs;
-  for (const BakeObject &o : j.objects) objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+  std::vector<std::vector<Vec4>> colours(j.objects.size());  // (task 0537: a Vertex Color material's colours)
+  for (const BakeObject &o : j.objects) {
+    objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+    pt_object_colors(*o.mesh, *objs.back().mesh, o.materials, colours[objs.size() - 1]);
+    if (!colours[objs.size() - 1].empty()) objs.back().colors = &colours[objs.size() - 1];
+  }
   const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
   PathTracer pt;
   PTSettings ps;
@@ -162,7 +167,12 @@ void Editor::bake_reflection_probes_on_worker(BakeJob &j) {
   ScopedTimer t;
   std::vector<PTObject> objs;
   std::vector<uint64_t> ids;
-  for (const BakeObject &o : j.objects) objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials}), ids.push_back(o.id);
+  std::vector<std::vector<Vec4>> colours(j.objects.size());  // (task 0537)
+  for (const BakeObject &o : j.objects) {
+    objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials}), ids.push_back(o.id);
+    pt_object_colors(*o.mesh, *objs.back().mesh, o.materials, colours[objs.size() - 1]);
+    if (!colours[objs.size() - 1].empty()) objs.back().colors = &colours[objs.size() - 1];
+  }
   std::vector<RenderLight> lights;
   for (const BakeLight &l : j.lights) lights.push_back(l.light);
   PathTracer pt;

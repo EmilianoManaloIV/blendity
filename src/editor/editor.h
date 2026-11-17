@@ -1493,6 +1493,15 @@ class Editor {
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
   VertexBrush &vp_brush_for_test() { return vp_brush_; }  // (task 0525)
   bool vertex_paint_for_test() const { return vertex_paint_; }
+  /* Task 0537: the Scene view's last card frame as it was handed over (instances, the colour buffer, the see-through
+   * corners), copied only while on - so tests pin the packings (toon5.y's sign, SeeCorner's halves). */
+  struct GpuFrameSnapshot {
+    std::vector<gpu::RasterInstance> instances;
+    std::vector<float> vertex_colors;
+    std::vector<gpu::SeeCorner> see_through;
+  };
+  void set_gpu_frame_snapshot_for_test(bool on) { gpu_frame_snapshot_on_ = on; }
+  const GpuFrameSnapshot &gpu_frame_snapshot_for_test() const { return gpu_frame_snapshot_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   void set_background_gpu_open_for_test(bool on) {
     cam_preview_pt_.set_background_gpu_open(on);
@@ -5604,6 +5613,8 @@ class Editor {
   std::vector<Vec3> vp_colors_;
   uint64_t vp_colors_serial_ = 0, vp_colors_version_ = ~0ull;
   std::string colors_dropped_note_;  // (ADR 0152) what the last edit dropped, shown in the Inspector until dismissed
+  bool gpu_frame_snapshot_on_ = false;  // (task 0537: tests only)
+  GpuFrameSnapshot gpu_frame_snapshot_;
   uint64_t colors_dropped_obj_ = 0;
   float vgroup_weight_ = 1.0f;   // what Assign gives
   std::string vgroup_name_edit_;
