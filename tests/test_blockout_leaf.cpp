@@ -5,6 +5,7 @@
 
 #include "../src/scene/blockout.h"
 #include "../src/scene/raycast.h"
+#include "../src/render/canvas.h"
 
 #include <array>
 #include <limits>
@@ -1890,6 +1891,8 @@ static void tests_round515_te_events() {
   });
 }
 
+void tests_round552();
+
 void tests_round515_te() {
   tests_round515_te_undo();
   tests_round515_te_loops();
@@ -1898,5 +1901,69 @@ void tests_round515_te() {
   tests_round515_te_multi();
   tests_round515_te_files();
   tests_round515_te_events();
+  tests_round552();
 }
 // r515te-end
+
+// r552-begin
+/* ===================================================================== */
+/* Round 552 (task 0532): the leaf sync told scenes apart by address      */
+/* ===================================================================== */
+
+/* CI reddened round 515's "opens with the leaf objects made" now and then (#425, #426, #431): after `newscene` and an open,
+ * the opened scene could land where the closed one had been, so the sync kept the closed scene's leaf ids, found the
+ * reopened door (the same saved id) missing a leaf it remembered, and turned its Leaf off as if the user had deleted it.
+ * Here the same place is made on purpose - the scene read into the very Scene object - so the case runs every time. */
+void tests_round552() {
+  test("blockout door leaf (552): a scene opened where the closed one was (the same address) still makes its door's leaf, and the door's Leaf stays on", [] {
+    Editor ed;
+    const R499Scene s = r515_door(ed, kDoorSingle);
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const uint64_t door_id = s.door->id;
+    std::vector<GameObject *> leaves = r515_leaves(*s.door);
+    CHECK(leaves.size() == 1);
+    ed.scene().destroy(leaves);  // (no walk after it: the sync still remembers the leaf, as when a round 499 scene is opened next)
+    const std::string text = save_scene_text(ed.scene());
+    Scene loaded;
+    std::string error;
+    CHECK(load_scene_text(text, loaded, error));
+    const Scene *place = &ed.scene();
+    ed.scene() = std::move(loaded);  // (another scene at the same address - what the allocator did on the CI runners)
+    CHECK(&ed.scene() == place);
+    ed.mark_changed_for_test("test scene read in place");
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r515_settle(ed);
+    GameObject *door = ed.scene().find(door_id);
+    CHECK(door && door->get<BlockoutPiece>() && door->get<BlockoutPiece>()->leaf);
+    if (!door) return;
+    CHECK(r515_leaves(*door).size() == 1);
+  });
+
+  /* The Render view's texture stream (round 447) is dropped when the scene it loads for is gone. It told scenes apart by
+   * address too: a scene opened where the closed one was kept the closed scene's batch, landed its files and published
+   * its failures for the scene opened. */
+  test("textures stream in (552): a scene opened where the closed one was (the same address) drops the batch the closed one started", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    std::vector<std::pair<std::string, bool>> files;
+    for (int i = 0; i < 2; i++) {
+      const std::string tex = fs::join(test_dir(), strprintf("r552_stream_%d.png", i));
+      std::vector<uint32_t> px(1024 * 1024, 0xFF3060A0u + (uint32_t)i);
+      CHECK(write_png(tex, px.data(), 1024, 1024, 1024));
+      files.push_back({tex, true});
+    }
+    const uint64_t streamed = ed.streamed_files_for_test();
+    ed.texture_stream_start_for_test(files);
+    CHECK(ed.texture_streaming_for_test());
+    const Scene *place = &ed.scene();
+    ed.scene() = Scene();  // (another scene at the same address, with nothing in it that wants a texture)
+    CHECK(&ed.scene() == place);
+    ed.step_frame_headless();
+    std::printf("    after one frame: streaming %d, files landed %llu\n", (int)ed.texture_streaming_for_test(), (unsigned long long)(ed.streamed_files_for_test() - streamed));
+    CHECK(!ed.texture_streaming_for_test());
+    CHECK(ed.streamed_files_for_test() == streamed);  // (dropped, not landed: the batch was the closed scene's)
+    for (const auto &f : files) fs::remove_file(f.first);
+  });
+}
+// r552-end

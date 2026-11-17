@@ -2817,10 +2817,14 @@ void Editor::blockout_join_step(const char *label) {
 /* Every walk: the parts of every styled opening in step with it (see blockout_sync_door); a part whose parent is no opening (moved out by hand) is an ordinary object. */
 void Editor::blockout_sync_leaves() {
   if (!scene_) return;
-  if (blockout_leaves_scene_ != scene_.get()) {  // (a load, an undo or a new scene: the ids of the last walk are another scene's)
+  if (blockout_leaves_scene_ != scene_->serial) {  // (a load, an undo or a new scene: the ids of the last walk are another scene's - by its serial, as an address repeats)
     blockout_leaves_seen_.clear();
+<<<<<<< HEAD
     blockout_fixed_seen_.clear();
     blockout_leaves_scene_ = scene_.get();
+=======
+    blockout_leaves_scene_ = scene_->serial;
+>>>>>>> 369355cdd588fc9b9b36f1444d4ddb9a4fb502c2
   }
   /* Play, the Animation window's Preview or Play, the Sequencer's: objects move behind the undo stack, so no leaf's pose is the user's turn. (Not Live Link's clients: a hand turn
    * made while one is connected is a real turn.) */
