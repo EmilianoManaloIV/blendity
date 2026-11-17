@@ -4,6 +4,37 @@
 #include "../src/core/view_perf.h"
 #include <cstring>
 #include <numeric>
+#include <thread>
+
+/* Round 555: a click that is a click of its own. The test clicks one pixel several times; two presses there within 0.35 s are a
+ * double click, which frames the selection - the camera then flew to the moved Cube and the next click, rightly, picked it.
+ * Waiting the double-click time out first keeps each click single (a fast run had passed only because its camera had not
+ * moved far yet). */
+static void r555_single_click(Editor &ed, int x, int y) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  r34_click(ed, x, y);
+}
+
+/* Round 555 (task 0536): until the card has caught up - no mesh left waiting for it (they go up a few a frame) and the Scene
+ * and Game views (the Game view when there is one: r122_views compares both) the same picture two frames running - or 20 s. These tests took a picture or clicked after a fixed number of frames:
+ * enough when the test ran with the machine to itself, not when it was slow (a busy machine, below-normal priority) and
+ * the meshes were still going up - the same test then passed alone and failed in a group run. Returns the frames it took, -1 when it did not settle. */
+static int r555_card_settle(Editor &ed) {
+  std::vector<uint32_t> last;
+  int same = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  for (int f = 1; std::chrono::steady_clock::now() < deadline; f++) {
+    ed.step_frame_headless();
+    std::vector<uint32_t> now = r34_crop(ed, ed.scene_view_rect());
+    const std::vector<uint32_t> game = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));  // (empty without one)
+    now.insert(now.end(), game.begin(), game.end());
+    same =(!last.empty() && now == last) ? same + 1 : 0;
+    last = std::move(now);
+    if (f >= 2 && ed.mesh_queue_for_test() == 0 && !ed.texture_stream_busy_for_test() && same >= 1) return f;  // (textures stream on a worker too)
+  }
+  std::printf("    r555_card_settle: not settled in 20 s (%zu meshes waiting)\n", ed.mesh_queue_for_test());
+  return -1;
+}
 
 /* Round 551 (task 0531): with BLENDITY_GPU_DIFF_DIR set, a card-against-CPU check writes its two pictures and their
  * difference (the worst channel times 32) there, numbered, so a failure on a real card can be looked at. Unset: nothing. */
@@ -188,6 +219,7 @@ static void tests_round122_to_round125() {
     r34_steps(ed, 2);
     if (cube) cube->set_local_position({0.0f, 0.5f, 0.0f});
     r34_steps(ed, 2);
+    r555_card_settle(ed);  // (round 555: the picture once the card has caught up, not after a fixed count of frames)
     std::vector<uint32_t> s = r34_crop(ed, ed.scene_view_rect()), g = r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
     s.insert(s.end(), g.begin(), g.end());
     return s;
@@ -3220,6 +3252,7 @@ static void tests_round224() {
     ed.command("camera 25 20 7 0 0.5 0");
     ed.command("select Main Camera");
     r34_steps(ed, 4);
+    r555_card_settle(ed);  // (round 555: every mesh on the card before a click is judged)
     if (!ed.scene_on_gpu_for_test() || ed.card_views_for_test() == 0) {
       std::printf("    the card didn't present the Scene view here (%s): skipped\n", ed.gpu_view_reason().c_str());
       return;
@@ -3237,14 +3270,14 @@ static void tests_round224() {
     int x = 0, y = 0;
     CHECK(cube && ed.project_to_window(cube->world_position(), x, y));
     if (!cube) return;
-    r34_click(ed, x, y);
+    r555_single_click(ed, x, y);
     r34_steps(ed, 2);
     CHECK(ed.selected_object() == cube);
     /* The Cube moved away: a click where it was picks nothing (the card's planes of the frame before would). */
     cube->set_local_position(cube->local().position + Vec3(40.0f, 0.0f, 0.0f));
     ed.mark_changed_for_test("Move Cube");
     r34_steps(ed, 2);
-    r34_click(ed, x, y);
+    r555_single_click(ed, x, y);
     r34_steps(ed, 2);
     std::printf("    a click where the Cube was: %s\n", ed.selected_object() ? ed.selected_object()->name.c_str() : "nothing");
     CHECK(ed.selected_object() != cube);
@@ -3256,7 +3289,7 @@ static void tests_round224() {
     cube->set_local_position(cube->local().position + Vec3(40.0f, 0.0f, 0.0f));
     ed.mark_changed_for_test("Move Cube");
     r34_steps(ed, 2);
-    r34_click(ed, x, y);
+    r555_single_click(ed, x, y);
     r34_steps(ed, 2);
     CHECK(ed.selected_object() != cube);
     /* Verify mode reads them back every frame. */
@@ -6237,6 +6270,7 @@ static void tests_round508_gpu() {
       r34_steps(ed, 3);
       r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
       r34_steps(ed, 3);
+      r555_card_settle(ed);  // (round 555: 121 meshes go up to the card a few a frame - the view still before the bake starts)
       ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
     };
     std::vector<std::vector<Vec3>> one_frame;
@@ -6247,6 +6281,7 @@ static void tests_round508_gpu() {
       ed.command("bake start");
       for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
       r34_steps(ed, 6);
+      r555_card_settle(ed);  // (round 555: the reference picture settled too)
       for (const Lightmap &p : ed.lighting_data_for_test().pages) one_frame.push_back(p.texels);
       one_frame_pic = r34_crop(ed, ed.scene_view_rect());
     }
@@ -6288,6 +6323,10 @@ static void tests_round508_gpu() {
     CHECK(sent_in_landing == 0);
     CHECK(tray_said == frames_sending);  // (the job tray says what the bake is doing while its pages go up)
     r34_steps(ed, 6);
+    const std::vector<uint32_t> at_six = r34_crop(ed, ed.scene_view_rect());
+    const int settle_frames = r555_card_settle(ed);  // (round 555: the landed picture once the card shows it)
+    std::printf("    after the landing and 6 frames: %d more frame(s) to settle; %zu pixels changed meanwhile\n", settle_frames,
+                r458_differ(at_six, r34_crop(ed, ed.scene_view_rect())));
     CHECK(pages == one_frame.size());
     for (size_t k = 0; k < pages && k < one_frame.size(); k++) {
       const std::vector<Vec3> &t = ed.lighting_data_for_test().pages[k].texels;

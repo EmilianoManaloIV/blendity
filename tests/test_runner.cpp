@@ -141,6 +141,31 @@ void tests_round550() {
   });
 }
 
+/* Round 555 (task 0536): a slice of a group in its order, plus a named test - to find which earlier test leaves state
+ * behind for a later one. The child runs this group's own tests, which do nothing in a child. */
+void tests_round555() {
+  test("tests: BLENDITY_TEST_RANGE=1-1 with BLENDITY_TEST_ALSO naming the third test runs the first and the third, each numbered, in order, and not the second (round 555)", [] {
+    auto set = [](const char *k) {  // (set and not empty: the test before this one clears FILTER with "", which POSIX keeps as "")
+      const char *v = std::getenv(k);
+      return v && *v;
+    };
+    if (in_child() || set("BLENDITY_TEST_FILTER") || set("BLENDITY_TEST_RANGE")) return;
+    set_env("BLENDITY_TEST_CHILD", "1");
+    set_env("BLENDITY_TEST_RANGE", "1-1");
+    set_env("BLENDITY_TEST_ALSO", "--list-groups names every test group");
+    std::string out;
+    const int code = run_self({"--group", "runner"}, out);
+    set_env("BLENDITY_TEST_RANGE", "");
+    set_env("BLENDITY_TEST_ALSO", "");
+    set_env("BLENDITY_TEST_CHILD", "");
+    CHECK(code == 0);
+    const size_t first = out.find("#1 [ ok ] tests: --group nosuch"), third = out.find("#3 [ ok ] tests: --list-groups names every test group");
+    CHECK(first != std::string::npos && third != std::string::npos && first < third);
+    CHECK(!has(out, "#2 ") && !has(out, "tests: --group board,nosuch"));
+    if (first == std::string::npos || third == std::string::npos) std::printf("    the child printed:\n%s\n", out.c_str());
+  });
+}
+
 }  // namespace
 
-void run_runner_tests() { tests_round492(); tests_round550(); }
+void run_runner_tests() { tests_round492(); tests_round550(); tests_round555(); }
