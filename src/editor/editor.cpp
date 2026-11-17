@@ -185,6 +185,7 @@ bool Editor::init(int argc, char **argv) {
   std::string scene_arg = scene_in_args(argc, argv), layout_arg;  // (a double-clicked .scene: task 0076)
   resolve_project_paths(scene_arg);
   load_prefs();
+  brushes_load();  // (round 540: each brush's size, strength and colour, beside the preferences)
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];
@@ -595,6 +596,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
+  brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
   process_events(events);
   upload_bytes_frame_ = 0;
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
@@ -2486,7 +2488,8 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   seq_drag_cancel();
   stable_ = scene_->clone();
   restore_edit_selection(s.edit_sel);
-  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_mh_.forget(), wp_version_++;  // the same objects, restored: keep painting
+  if (vertex_paint_) vp_scene_ = scene_.get(), vp_mh_.forget(), vp_version_++;  // (task 0525: likewise)
   if (paint_) paint_scene_ = scene_.get();  // (task 0245: keep painting)
   if (sculpt_) sculpt_scene_ = scene_.get(), sculpt_cache_mesh_ = nullptr;  // (task 0236: keep sculpting; the grid is rebuilt)
   prune_selection();
@@ -5673,6 +5676,7 @@ void Editor::save_prefs() {
   s += panels_prefs_text();
   s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
+  brushes_save();  // (round 540: beside prefs.txt)
 }
 
 /* points (or curve) add|move|delete|select <object> [index] [x y z]: a Curve's or Lattice's control points (tasks
@@ -5789,6 +5793,7 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const MeshRenderer *mr = g.get<MeshRenderer>();
     carry_shape_keys(mf->mesh, om, mr && !mr->edit_shape.empty());  // (round 406: the open shape's basis follows too)
     carry_custom_normals(mf->mesh, om);
+    carry_colors(mf->mesh, om, g.id);  // (task 0525, ADR 0152)
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
     if (mf->mesh->groups_fit()) return;

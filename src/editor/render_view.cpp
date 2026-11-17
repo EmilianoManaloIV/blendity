@@ -488,7 +488,7 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
 const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, uint64_t *gen) {
   ItemsCache &c = solid_cache_[game];
   *gen = 0;
-  const bool kept_kind = view_perf::on(view_perf::SolidItems) && &s == scene_.get() && !edit_mode_ && !weight_paint_ && !sculpt_;
+  const bool kept_kind = view_perf::on(view_perf::SolidItems) && &s == scene_.get() && !edit_mode_ && !weight_paint_ && !vertex_paint_ && !sculpt_;
   uint64_t base = 0;
   bool hit = false;
   if (kept_kind) {
@@ -2991,6 +2991,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   mix(&edit_obj_, 8);
   const uint64_t wp[4] = {(uint64_t)weight_paint_, wp_obj_, wp_version_, (uint64_t)wp_group_};  // the painted weights (task 0046)
   mix(wp, sizeof(wp));
+  const uint64_t vp[3] = {(uint64_t)vertex_paint_, vp_obj_, vp_version_};  // the painted colours (task 0525)
+  mix(vp, sizeof(vp));
   mix(selection_.data(), selection_.size() * sizeof(uint64_t));
   mix(vert_sel_.data(), vert_sel_.size());
   mix(face_sel_.data(), face_sel_.size());

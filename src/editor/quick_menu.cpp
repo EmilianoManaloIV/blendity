@@ -158,6 +158,15 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"Show All", "sculpt show all", {}},
           {"Show Groups", "sculpt groups toggle", {}}}},
         {"Object Mode", "sculpt off", {}}}},
+      {"vertex paint",  // (task 0525)
+       {{"Draw", "vpbrush draw", {}},
+        {"Blur", "vpbrush blur", {}},
+        {"Average", "vpbrush average", {}},
+        {"Smear", "vpbrush smear", {}},
+        {"Mix", "vpblend mix", {}},
+        {"Multiply", "vpblend multiply", {}},
+        {"Undo", "Undo", {}},
+        {"Stop Painting", "vpaint off", {}}}},
       {"weight paint",
        {{"Add Weight", "wpbrush add", {}},
         {"Subtract", "wpbrush subtract", {}},
@@ -368,6 +377,7 @@ std::string Editor::wheel_mode_at(int x, int y) {
   if (sketch_.active && sketch_in_world()) return "sketch";
   if (sculpt_) return "sculpt";  // (task 0236)
   if (weight_paint_) return "weight paint";
+  if (vertex_paint_) return "vertex paint";  // (task 0525)
   return "object";
 }
 

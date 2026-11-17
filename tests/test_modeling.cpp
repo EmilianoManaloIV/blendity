@@ -11,6 +11,7 @@
 #include "../src/scene/partfield.h"
 
 void run_weight_paint_tests();  // (tests/test_weight_paint.cpp: run at the end of run_modeling_tests)
+void run_vertex_paint_tests();  // (tests/test_vertex_paint.cpp: run after it, task 0525)
 
 static void first_tests() {
   test("math: matrix inverse", [] {
@@ -12541,4 +12542,5 @@ void run_modeling_tests() {
   run_weight_paint_tests();
   tests_round537();
   tests_round535();
+  run_vertex_paint_tests();
 }

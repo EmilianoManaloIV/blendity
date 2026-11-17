@@ -3093,6 +3093,31 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
   }
 }
 
+/* The groups' transfer map from `before` to `m`, kept on the modifier while the two topologies stay (ADR 0024). */
+static const meshops::GroupTransferMap &modifier_map(const Component &c, const Mesh &before, const Mesh &m) {
+  const uint64_t in_key = meshops::topology_key(before), out_key = meshops::topology_key(m);
+  std::shared_ptr<meshops::GroupTransferMap> map = c.group_map;
+  if (!map || map->in_key != in_key || map->out_key != out_key) {
+    map = std::make_shared<meshops::GroupTransferMap>();
+    meshops::group_transfer_map(before, m, *map);
+    map->in_key = in_key, map->out_key = out_key;
+    c.group_map = map;
+  }
+  return *map;
+}
+
+/* Task 0525 (ADR 0152): Point colour layers a modifier lost or left the wrong size come back from the mesh before it,
+ * through the groups' map; Corner layers that no longer match the corners go. */
+static void carry_modifier_colors(const Component &c, const Mesh &before, Mesh &m) {
+  if (!meshops::point_colors_need_carry(before, m, true)) {
+    m.prune_colors();
+    m.dropped_colors.clear();  // (an evaluated mesh: nothing for the editor to report)
+    return;
+  }
+  meshops::apply_color_map(modifier_map(c, before, m), before, m, true);
+  m.dropped_colors.clear();
+}
+
 /* One modifier of a stack (ADR 0024): a deformer limited to a vertex group moves each vertex by its weight; a modifier
  * that changes the vertex count without carrying the groups gets them from the mesh before it, by position. */
 void run_modifier(const Component &c, Mesh &m) {
@@ -3111,14 +3136,25 @@ void run_modifier(const Component &c, Mesh &m) {
     }
     return;
   }
-  if (!c.is_deform_only() && !m.vertex_groups.empty()) {
+  /* Task 0525 (ADR 0152): Point colour layers come along the groups' way, through the same map. */
+  bool point_colors = false;
+  for (const ColorAttribute &ca : m.color_attributes) point_colors = point_colors || (ca.domain == ColorAttribute::Domain::Point && ca.rgba.size() == m.vert_count());
+  if (!c.is_deform_only() && (!m.vertex_groups.empty() || point_colors)) {
     /* What the transfer reads, not a whole copy (no render caches, UVs or flags). */
     Mesh before;
     before.positions = m.positions;
     before.face_offsets = m.face_offsets;
     before.corner_verts = m.corner_verts;
     before.vertex_groups = m.vertex_groups;
+    if (point_colors) {  // (only what the carry reads: the Point layers that fit, and the choices by name)
+      for (const ColorAttribute &ca : m.color_attributes)
+        if (ca.domain == ColorAttribute::Domain::Point && ca.rgba.size() == m.vert_count()) before.color_attributes.push_back(ca);
+      auto name_of = [&](int i) { return i >= 0 && i < (int)m.color_attributes.size() ? m.color_attributes[(size_t)i].name : std::string(); };
+      before.active_color = before.find_color(name_of(m.active_color));
+      before.render_color = before.find_color(name_of(m.render_color));
+    }
     c.modify(m);
+    if (point_colors) carry_modifier_colors(c, before, m);
     /* Mirror, Array and Join copy the groups themselves; a modifier that made a new mesh, or renumbered without
      * them, gets them from the mesh before it, by position, through a map kept while the topology stays. */
     if (m.groups_fit() && m.vertex_groups.size() == before.vertex_groups.size()) return;
@@ -3126,15 +3162,7 @@ void run_modifier(const Component &c, Mesh &m) {
       meshops::transfer_vertex_groups(before, m);
       return;
     }
-    const uint64_t in_key = meshops::topology_key(before), out_key = meshops::topology_key(m);
-    std::shared_ptr<meshops::GroupTransferMap> map = c.group_map;
-    if (!map || map->in_key != in_key || map->out_key != out_key) {
-      map = std::make_shared<meshops::GroupTransferMap>();
-      meshops::group_transfer_map(before, m, *map);
-      map->in_key = in_key, map->out_key = out_key;
-      c.group_map = map;
-    }
-    meshops::apply_group_map(*map, before, m);
+    meshops::apply_group_map(modifier_map(c, before, m), before, m);
     return;
   }
   c.modify(m);
@@ -3323,6 +3351,10 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
       eval_chain_[kind] = meshops::SubdivChain::build(in, chain_sub->levels, chain_sub->smooth, *h);
       if (eval_chain_[kind] && chain_sub->smooth) h->smooth = true;                                   // (as the modifier sets it)
       if (eval_chain_[kind] && !in.vertex_groups.empty()) meshops::transfer_vertex_groups(in, *h);  // (as run_modifier carries them, by position)
+      if (eval_chain_[kind] && !in.color_attributes.empty()) {  // (task 0525: Point colours likewise; Corner ones go)
+        meshops::transfer_point_colors(in, *h, true);
+        h->dropped_colors.clear();
+      }
     }
     if (!eval_chain_[kind]) run(*h, 0, split);
     h->touch();
