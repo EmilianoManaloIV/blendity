@@ -85,12 +85,39 @@ extern int g_fail, g_checks;  // (test_main.cpp)
 #define CHECK_NEAR(a, b, eps) CHECK(std::fabs((double)(a) - (double)(b)) <= (eps))
 
 inline void test(const char *name, const std::function<void()> &fn) {
+  /* An environment variable set to "" counts as unset: the runner's own tests clear one with set_env(k, ""), which removes
+   * it on Windows and leaves it empty on POSIX (round 555). */
+  auto var = [](const char *k) -> const char * {
+    const char *v = std::getenv(k);
+    return v && *v ? v : nullptr;
+  };
   /* BLENDITY_TEST_FILTER=text runs only the tests whose name contains it. */
-  static const char *filter = std::getenv("BLENDITY_TEST_FILTER");
+  static const char *filter = var("BLENDITY_TEST_FILTER");
+  /* Round 555: BLENDITY_TEST_RANGE=lo-hi runs the tests numbered lo to hi (from 1, in the order the run reaches them - the
+   * number counts every test, whatever the filter, so it stays the same), and BLENDITY_TEST_ALSO=text adds the tests whose
+   * name contains it - "the first half of the group, then the one that fails after it" in one run, to find which earlier
+   * test leaves something behind. Each test that runs shows its number on its result line then. */
+  static const char *range = var("BLENDITY_TEST_RANGE");
+  static const char *also = var("BLENDITY_TEST_ALSO");
+  static int lo = 0, hi = 0;
+  static const bool range_ok = [] {
+    if (!range) return true;
+    const bool ok = std::sscanf(range, "%d-%d", &lo, &hi) == 2 && lo >= 1 && hi >= lo;
+    if (!ok) std::printf("BLENDITY_TEST_RANGE=%s is not lo-hi (1 <= lo <= hi): only BLENDITY_TEST_ALSO's tests run\n", range);
+    return ok;
+  }();
+  static int number = 0;
+  number++;
+  if (range) {
+    const bool in_range = range_ok && number >= lo && number <= hi;
+    const bool named = also && std::strstr(name, also);
+    if (!in_range && !named) return;
+  }
   if (filter && !std::strstr(name, filter)) return;
   int before = g_fail;
   ScopedTimer t;
   fn();
+  if (range) std::printf("#%d ", number);  // (on the result line: a test's own lines come before it)
   std::printf("%s %s (%.0f ms)\n", g_fail == before ? "[ ok ]" : "[FAIL]", name, t.ms());
   std::fflush(stdout);  // (a crash in the next test still shows this one)
 }
