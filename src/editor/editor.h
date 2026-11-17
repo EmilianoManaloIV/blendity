@@ -27,6 +27,7 @@
 #include "../render/texture_bake.h"
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
+#include "../render/gsplat_raster.h"  // (round 532: RenderJob::splats)
 #include "../render/lightmapper.h"
 #include "../render/voxel_gi.h"
 #include "../render/probe_volume.h"
@@ -6665,6 +6666,7 @@ class Editor {
    * (render_job_holds_lighting / _gi). The worker publishes its picture, status and stats under `mutex`. ---- */
   struct RenderJob {
     std::vector<DrawItem> items;
+    std::vector<SplatDraw> splats;  // (round 532: the point clouds, their arrays held - drawn by the worker's rasterizer)
     std::vector<std::shared_ptr<const Mesh>> meshes;
     std::vector<std::shared_ptr<std::vector<MaterialPtr>>> material_lists;
     std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> snapped;  // (a filter's vertex snapping: the copies the tracer reads)

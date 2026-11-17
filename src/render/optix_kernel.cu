@@ -15,14 +15,28 @@ __constant__ OptixLaunchParams LP;
 
 /* The closest triangle along the ray within (0, t): its distance, barycentrics, triangle (the mesh's own index) and
  * object (the instance's id), as gpu_kernel.h's ray-query intersect() returns them. */
-static __forceinline__ __device__ bool optix_intersect(vec3 o, vec3 d, float &t, float &u, float &v, uint &prim, uint &obj) {
+static __forceinline__ __device__ bool optix_intersect(vec3 o, vec3 d, float &t, float &u, float &v, uint &prim, uint &obj, uint splat_seed, uint mask) {
   if (LP.handle == 0) return false;  // (a scene with nothing to hit)
-  unsigned int p0 = __float_as_uint(t), p1 = 0, p2 = 0, p3 = 0, p4 = 0xFFFFFFFFu;
-  optixTrace((OptixTraversableHandle)LP.handle, make_float3(o.x, o.y, o.z), make_float3(d.x, d.y, d.z), 0.0f, t, 0.0f, 255,
-             OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0, 1, 0, p0, p1, p2, p3, p4);
+  unsigned int p0 = __float_as_uint(t), p1 = 0, p2 = 0, p3 = 0, p4 = 0xFFFFFFFFu, p5 = splat_seed;  // (p5: the splats' test's seed, round 534)
+  optixTrace((OptixTraversableHandle)LP.handle, make_float3(o.x, o.y, o.z), make_float3(d.x, d.y, d.z), 0.0f, t, 0.0f, mask,
+             OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0, 1, 0, p0, p1, p2, p3, p4, p5);
   if (p4 == 0xFFFFFFFFu) return false;
   t = __uint_as_float(p0), u = __uint_as_float(p1), v = __uint_as_float(p2), prim = p3, obj = p4;
   return true;
+}
+
+/* Round 534: a shadow ray through the splat instances alone (mask 2), any-hit on (p5's marker: this mode):
+ * __intersection__splat reports each splat it crosses with its alpha, __anyhit__splat multiplies p0 by 1 - alpha and
+ * ignores the hit, so traversal meets every splat - each once (the splats' geometry asks for a single any-hit call). */
+constexpr unsigned kSplatPassMode = 0xFFFFFFFFu;
+static __forceinline__ __device__ unsigned optix_splat_count() { return (unsigned)LP.splat_count; }
+static __forceinline__ __device__ float optix_splat_transmittance(vec3 o, vec3 d, float tmax) {
+  if (LP.handle == 0) return 1.0f;
+  unsigned int p0 = __float_as_uint(1.0f), p1 = 0, p2 = 0, p3 = 0, p4 = 0xFFFFFFFFu, p5 = kSplatPassMode;
+  optixTrace((OptixTraversableHandle)LP.handle, make_float3(o.x, o.y, o.z), make_float3(d.x, d.y, d.z), 0.0f, tmax, 0.0f, 2,
+             OPTIX_RAY_FLAG_NONE, 0, 1, 0, p0, p1, p2, p3, p4, p5);
+  const float T = __uint_as_float(p0);
+  return T < 1e-4f ? 0.0f : T;
 }
 
 /* The kernel's buffers and built-ins, named as GLSL names them (the translation keeps the names). */
@@ -39,6 +53,9 @@ static __forceinline__ __device__ bool optix_intersect(vec3 o, vec3 d, float &t,
 #define B_tex8 ((const uint *)LP.tex8)
 #define B_texf ((const vec4 *)LP.texf)
 #define B_texinfo ((const TexInfo *)LP.texinfo)
+#define B_splats ((const Splat *)LP.splats)
+#define B_splat_sh ((const float *)LP.splat_sh)
+#define BL_OPTIX 1  // (the splats' software walk is GPU Compute's alone)
 #define B_PC LP
 #define gl_GlobalInvocationID (uvec3{optixGetLaunchIndex().x, optixGetLaunchIndex().y, 0u})
 
@@ -49,8 +66,32 @@ extern "C" __global__ void __raygen__render() {
   k.run();
 }
 
+/* Round 534: a splat cloud's box - the splat's own test (gsplat_gpu_glsl.h's splat_hit, translated) in the cloud's
+ * space; reported at the density's peak when its stochastic test keeps it. */
+extern "C" __global__ void __intersection__splat() {
+  GlslKernel k;
+  const float3 o = optixGetObjectRayOrigin(), d = optixGetObjectRayDirection();
+  if (optixGetPayload_5() == kSplatPassMode) {  // (a shadow ray: the splat with its alpha, for __anyhit__splat)
+    float t = optixGetRayTmax();
+    const float alpha = k.splat_alpha_in(optixGetInstanceId(), optixGetPrimitiveIndex(), vec3(o.x, o.y, o.z), vec3(d.x, d.y, d.z), optixGetRayTmax(), t);
+    if (alpha > 0.0f) optixReportIntersection(t, 0, __float_as_uint(alpha));
+    return;
+  }
+  k.g_splat_seed = optixGetPayload_5();
+  float t = optixGetRayTmax();
+  if (k.splat_hit_in(optixGetInstanceId(), optixGetPrimitiveIndex(), vec3(o.x, o.y, o.z), vec3(d.x, d.y, d.z), fmaxf(optixGetRayTmin(), 1e-5f), optixGetRayTmax(), t))  // (1e-5: kSplatTmin)
+    optixReportIntersection(t, 0);
+}
+
+extern "C" __global__ void __anyhit__splat() {
+  const float T = __uint_as_float(optixGetPayload_0()) * (1.0f - __uint_as_float(optixGetAttribute_0()));
+  optixSetPayload_0(__float_as_uint(T));
+  if (T < 1e-4f) optixTerminateRay();  // (as the CPU's: this little light counts as none)
+  optixIgnoreIntersection();
+}
+
 extern "C" __global__ void __closesthit__hit() {
-  const float2 bc = optixGetTriangleBarycentrics();
+  const float2 bc = optixIsTriangleHit() ? optixGetTriangleBarycentrics() : make_float2(0.0f, 0.0f);
   optixSetPayload_0(__float_as_uint(optixGetRayTmax()));
   optixSetPayload_1(__float_as_uint(bc.x));
   optixSetPayload_2(__float_as_uint(bc.y));

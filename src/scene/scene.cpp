@@ -9,6 +9,7 @@
 #include "curve.h"
 #include "stroke_object.h"
 #include "blockout_object.h"  // (Blockout's and BlockoutPiece's registration)
+#include "pointcloud_object.h"  // (PointCloud's registration and hash, round 530)
 #include "pose_counts.h"
 
 #include "../core/core.h"
@@ -184,6 +185,8 @@ void register_builtin_components() {
   reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
                           "Mesh Deform modifier (Bind)");
   reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");
+  reg<PointCloudObject>("Mesh", "A cloud of points: plain dots, or Gaussian Splats - soft turned ellipsoids whose colour changes with the view. "
+                        "Create > Point Cloud > Test Splats makes a filled one to try.", "Point Cloud object (Type: Points / Gaussian Splats)");
   reg<Lattice>("Mesh", "A box of points round a mesh: a Lattice modifier moves the mesh with them. Click a point to move it with the gizmo.",
                "Lattice object");
   reg<CurveModifier>("Mesh", "Bends the mesh along a Curve object (rails, pipes, roads, chains).", "Curve modifier");
@@ -2908,6 +2911,11 @@ struct HashReflector : Reflector {
     const void *p = m.get();
     mix(&p, sizeof(p));
     if (m) mix(&m->version, 8);
+  }
+  void point_cloud(const char *, PointCloudPtr &pc) override {  // (round 530: as a mesh, by identity and version)
+    const void *p = pc.get();
+    mix(&p, sizeof(p));
+    if (pc) mix(&pc->version, 8);
   }
   void texture(const char *, TextureRef &t) override {
     mix(t.path.data(), t.path.size());

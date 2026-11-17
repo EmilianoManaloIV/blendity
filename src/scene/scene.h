@@ -40,6 +40,8 @@ struct Transform;
 struct Lattice;
 struct LightProbeGroupComponent;
 struct CurvePath;
+struct PointCloud;  // pointcloud.h (round 530, ADR 0147)
+using PointCloudPtr = std::shared_ptr<PointCloud>;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
 using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
@@ -88,6 +90,9 @@ struct Reflector {
     text(name, path);
   }
   virtual void mesh(const char *name, MeshPtr &m) = 0;
+  /* A point cloud's arrays (round 530, ADR 0147): files write them as a binary datablock, the render hash mixes the
+   * cloud's version; everyone else (the Inspector, `set`, clips) skips them. */
+  virtual void point_cloud(const char *, PointCloudPtr &) {}
   /* Round 329: a colour ramp's stops and a curve's points - text to files, undo, hashing and edits ("pos r g b; ..."
    * and "x y; ..."); the Inspector draws Blender's ColorRamp and RGB Curves widgets. */
   virtual void ramp(const char *name, std::vector<RampStop> &stops) {
@@ -198,7 +203,8 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes, ProbeGroup };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes, ProbeGroup, PointCloud };
+  // PointCloud (round 530): a Point Cloud object's, which the views draw and the path tracers trace
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };

@@ -30,6 +30,7 @@ struct ImportedNode {
   Quat rotation;
   Vec3 scale{1, 1, 1};
   MeshPtr mesh;
+  PointCloudPtr points;  // (round 531: a splat or point file's cloud - the object gets a PointCloud component)
   std::vector<MaterialPtr> materials;
   bool is_bone = false;  // a joint of a skin (task 0047): becomes a Bone, its local transform its rest
   /* The joint's bind pose (task 0056), when the file has one: where it was when the skin was bound, in the import's
