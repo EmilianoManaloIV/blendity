@@ -669,7 +669,14 @@ void run_hci_tests() {
       std::set<std::string> seen;
       bool started = false;
       for (const auto &c : ed.ui_for_test().controls) {
-        if (!c.tab_stop || c.layer != layer || c.r.w <= 0 || !inside(c.r, region)) continue;
+        if (!c.tab_stop || c.layer != layer || c.r.w <= 0) continue;
+        /* (Round 543: the list ends at the first stop the region cuts off, rather than skipping it - Tab walks every stop in
+         * drawing order, so a skipped one in the middle put the list and the walk one apart. A row added to Preferences left
+         * its two-column bottom row half cut on Linux's dialog, and step 34 landed on the cut stop the list had left out.) */
+        if (!inside(c.r, region)) {
+          if (started) break;
+          continue;
+        }
         started = started || std::string(c.kind) == "number" || std::string(c.kind) == "text";
         if (started && seen.insert(rect_str(c.r)).second) out.push_back(c.r);
       }
