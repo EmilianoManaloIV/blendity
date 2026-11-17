@@ -14743,6 +14743,55 @@ static void tests_round542() {
     std::printf("    stale lighting found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - m0));
     CHECK(Editor::render_cache_mismatches_all() == m0);
   });
+  test("Learn (round 542): the lesson's Try-its for the sky's sun - the Directional Light deleted under a Sky world lights by the sky's sun, Sun Lights Scene off adds none, back on at Sun Intensity 2 twice as strong", [] {
+    /* The Try-its as the lesson has them: its "! cmd:" lines after the section's heading, run as the Learn tab runs them. */
+    std::vector<std::string> tries;
+    for (int i = 0; i < lesson_count(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("# The sky's sun lights the scene");
+      if (at == std::string::npos) continue;
+      size_t p = at;
+      while ((p = body.find("! cmd:", p)) != std::string::npos) {
+        const size_t bar = body.find(" | ", p), end = body.find('\n', p);
+        if (bar != std::string::npos && bar < end) tries.push_back(body.substr(p + 6, bar - p - 6));
+        p = end == std::string::npos ? body.size() : end;
+      }
+    }
+    CHECK(tries.size() == 3);
+    if (tries.size() != 3) return;
+    Editor ed;
+    ed.init_headless(800, 600);
+    auto strip = [](std::string s) {
+      while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+      while (!s.empty() && s.back() == ' ') s.pop_back();
+      return s;
+    };
+    auto run = [&](const std::string &line) {
+      for (size_t s = 0; s <= line.size();) {
+        const size_t e = line.find(';', s);
+        const std::string c = strip(line.substr(s, e == std::string::npos ? std::string::npos : e - s));
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        s = e + 1;
+      }
+    };
+    auto suns = [&](float *intensity) {
+      int n = 0;
+      for (const RenderLight &l : ed.make_lighting_for_test().lights)
+        if (l.type == RenderLight::Directional) n++, *intensity = l.intensity;
+      return n;
+    };
+    float i1 = 0.0f, i2 = 0.0f, unused = 0.0f;
+    run(tries[0]);
+    CHECK(ed.scene().find_by_name("Directional Light") == nullptr && ed.scene().environment.mode == 1);
+    CHECK(suns(&i1) == 1 && i1 > 0.0f);  // (the sky's own sun: no lamp is left)
+    run(tries[1]);
+    CHECK(!ed.scene().environment.sun_lights_scene && suns(&unused) == 0);
+    run(tries[2]);
+    CHECK(ed.scene().environment.sun_lights_scene && ed.scene().environment.sun_intensity == 2.0f);
+    CHECK(suns(&i2) == 1 && std::fabs(i2 - 2.0f * i1) < 1e-4f * i1);
+    std::printf("    the sky's sun: intensity %.3f, at Sun Intensity 2: %.3f\n", i1, i2);
+  });
 }
 
 void run_editor_tests() {

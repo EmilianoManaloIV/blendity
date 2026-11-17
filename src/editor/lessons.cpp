@@ -1356,6 +1356,16 @@ Scene light is unbounded but a screen shows 0 to 1. A view transform compresses 
 ? Why render in linear light and tone map at the end? | Light adds linearly. Doing the lighting maths in sRGB values gives wrong falloff and blending; the curve is only for display.
 ! cmd:world sky; shading shaded | Use the physical sky
 ! cmd:world gradient | Back to the gradient
+# The sky's sun lights the scene (Blender 5.3)
+The physical sky has a sun, and since round 542 it lights the scene when no Directional Light does, as Blender 5.3's EEVEE now lights from the Sky texture's sun disc. It is one directional light toward the sky's sun, in the same light list the Scene view and the path tracer take, so both show it alike. Its colour is the sun's light after its way through the air: white at noon, dimmer and redder toward the horizon, gone below it, and dimmer in a hazier sky (Turbidity). World > Sky > Sun Lights Scene turns it off - the look before 5.3, the sky's ambient alone - and Sun Intensity scales it, 1 being the clear noon sun the sky's ambient is made for. A Directional Light in the scene is the sun either way: the sky's own is then not added, so there are never two suns.
+@ blender/source/blender/draw/engines/eevee/shaders/eevee_lightprobe_sphere_bake.bsl.hh  (sun_extraction)
+@ blender/intern/sky/source/sky_multiple_scattering.cpp  (the sun's light through the atmosphere, bundled in extern/sky)
+? You delete the scene's Directional Light while the world is the physical sky. Does the scene go dark? | No: the sky's own sun lights it, toward where the sky draws it. With Sun Lights Scene off, only the sky's ambient light remains.
+? Your scene has a Directional Light and a Sky world, and you turn Sun Lights Scene off. What changes? | Nothing: the Directional Light is the sun, and the sky adds no sun of its own while one is there.
+? Why is the sun redder and weaker near the horizon? | Its light crosses much more air there, and the air scatters blue light away more than red - the same reason sunsets are orange.
+! cmd:select Directional Light; delete; world sky; shading shaded | The physical sky alone: delete the Directional Light (Ctrl+Z brings it back) and the sky's sun lights the scene
+! cmd:set World.SunLightsScene false | Sun Lights Scene off: the look before Blender 5.3, the sky's ambient alone
+! cmd:set World.SunLightsScene true; set World.SunIntensity 2 | The sky's sun back, twice as strong
 )"},
     {"Editing: Develop a Render", "Exposure, white balance, curves and crops without touching the file", R"(
 # Developing a picture
