@@ -14791,6 +14791,9 @@ static void tests_round542() {
     CHECK(ed.scene().environment.sun_lights_scene && ed.scene().environment.sun_intensity == 2.0f);
     CHECK(suns(&i2) == 1 && std::fabs(i2 - 2.0f * i1) < 1e-4f * i1);
     std::printf("    the sky's sun: intensity %.3f, at Sun Intensity 2: %.3f\n", i1, i2);
+  });
+}
+
 /* Round 549 (task 0529): a click or a ray exactly on the edge two triangles of a face share lands on the face. CI's new runners
  * (ubuntu-26.04) put round 513's window test's ray through the far wall's diagonal and it missed both triangles. */
 static void tests_round549() {

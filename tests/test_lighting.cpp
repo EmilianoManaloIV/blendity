@@ -12420,6 +12420,9 @@ static void tests_round542() {
     CHECK(pt.samples() >= 16);
     CHECK(raster > 20.0 && traced > 20.0);
     CHECK(std::fabs(raster - traced) < 0.25 * std::max(raster, traced));
+  });
+}
+
 /* Round 549 (task 0529): on CI's ubuntu-26.04 runners "GI on but adding nothing" was not the plain picture - a realtime lightmap
  * pass published while Sky Occlusion was on still shaded the Game view's objects until the next pass landed (a slow machine is
  * still there when the picture is taken). The views read no published maps while GI adds nothing. */
