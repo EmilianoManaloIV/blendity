@@ -279,7 +279,7 @@ void Editor::texture_stream_land() {
 }
 
 void Editor::texture_stream_poll() {
-  if (tex_stream_ && tex_stream_->scene != scene_.get()) tex_stream_.reset();  // (another scene: cancelled between two files, dropped)
+  if (tex_stream_ && tex_stream_->scene != (scene_ ? scene_->serial : 0)) tex_stream_.reset();  // (another scene: cancelled between two files, dropped)
   if (tex_stream_ && tex_stream_->done.load(std::memory_order_acquire)) texture_stream_land();
   if (upload_waiting_) {  // (the card's budget ran out last frame: the views draw again with the rest)
     upload_waiting_ = false;
@@ -325,7 +325,7 @@ void Editor::texture_stream_start(std::vector<std::pair<std::string, bool>> file
   auto st = std::make_unique<TextureStream>();
   st->files = std::move(files);
   st->loaded.assign(st->files.size(), 0);
-  st->scene = scene_.get();
+  st->scene = scene_ ? scene_->serial : 0;
   for (const auto &f : st->files) st->mtimes.push_back(texture_file_mtime(f.first));
   TextureStream *raw = st.get();
   st->thread = std::thread([raw] { texture_stream_run(*raw); });
