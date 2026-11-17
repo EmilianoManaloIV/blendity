@@ -208,7 +208,7 @@ and `C:/blab/s4-timed-558/out/`):
 | Row | Before (06:31 window) | After | Note |
 |---|---|---|---|
 | 1M splats orbiting, card (557) | 93.7 / 108.1 ms (median / longest) | **6.2 / 6.8 ms** | the card projects them: met |
-| 1M splats orbiting, CPU (557) | 108.4 / 148.7 ms | 86.8 / 91.3 ms | still over 50 ms on the CPU |
+| 1M splats orbiting, CPU (557) | 108.4 / 148.7 ms | 86.8 / 91.3 ms (project 41.0, draw 36.9 ms) | over 50 ms: per-frame EWA and 48 SH terms over the 1M array (mostly memory) and a million blended ellipses (S2); the CPU draws only without a card or when the card refuses a frame; next: SH once a sort, a coarser pass for sub-pixel splats |
 | 100k splats orbiting, card / CPU (557) | 16.0 / 15.7 ms | 7.8 / 15.4 ms | |
 | the card views' first open (557) | 92.5 s | **537 ms** (an empty cache), 156 ms from the cache | met |
 | OptiX kernel compile (558) | 29.9 s inside the 3060 Ti's first build | measured alone: 19.3 s / 19.1 s cold (4070 SUPER / 3060 Ti), 6.6 / 6.8 ms warm; the first 100k OptiX build 148.5 / 132.7 ms | met: a warm-up compiles it on a background thread when OptiX is chosen |
