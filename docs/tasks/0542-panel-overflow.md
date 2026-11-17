@@ -4,7 +4,7 @@
 - **Requirements:** the HCI survey's reach and visibility rules (round 505, ADR 0145)
 - **Decisions:** none needed (the toolkit's existing scroll and focus-reveal, used in two more places)
 - **Model:** main session (the HCI worker)
-- **PR:** (link when opened) - base `main`, the new top of Pass 27's stack (built on #443, merged with the top #447 db75a75f)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/453 - base `main`, the new top of Pass 27's stack (built on #443, merged with the top #447 db75a75f)
 
 ## Goal
 M3's screenshot sweep (verify-544) at 1024 x 768, ui scale 1.5 found four things:
