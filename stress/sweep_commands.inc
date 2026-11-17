@@ -175,6 +175,7 @@ static const SweepCommand kSweepCommands[] = {
   {"skin", "skin bind", ""},
   {"smat", "smat apply MyMetal", ""},
   {"smooth", "smooth", ""},
+  {"snap", "snap bogus", ""},
   {"splat", "splat stats", ""},
   {"spring", "spring find", ""},
   {"stats", "stats", ""},
