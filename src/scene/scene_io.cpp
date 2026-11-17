@@ -255,6 +255,23 @@ static bool g_text_meshes_for_test = false;
 void set_scene_text_meshes_for_test(bool text) { g_text_meshes_for_test = text; }
 bool mesh_saved_binary(const Mesh &m) { return !g_text_meshes_for_test && m.vert_count() + m.corner_count() >= kBinaryMeshFrom; }
 
+/* Colour attributes (ADR 0152, task 0525), as text lines after the mesh's chunk or its other lines: `ca "<name>" p|c`
+ * then r g b a per element, and `cactive <active> <render>`. A layer that doesn't fit its domain isn't written. */
+template <class O> static void write_colors(O &os, const Mesh &m) {
+  int written = 0, active = -1, render = -1;  // (the choices as indices among the layers written)
+  for (size_t i = 0; i < m.color_attributes.size(); i++) {
+    const ColorAttribute &c = m.color_attributes[i];
+    if (!m.color_fits(c)) continue;
+    if ((int)i == m.active_color) active = written;
+    if ((int)i == m.render_color) render = written;
+    os << "ca " << quote(c.name) << (c.domain == ColorAttribute::Domain::Point ? " p" : " c");
+    for (const Vec4 &v : c.rgba) os << ' ' << F{v.x} << ' ' << F{v.y} << ' ' << F{v.z} << ' ' << F{v.w};
+    os << '\n';
+    written++;
+  }
+  if (written) os << "cactive " << active << ' ' << render << '\n';
+}
+
 static void write_mesh_binary(Out &os, size_t id, const Mesh &m) {
   using namespace binmesh;
   /* The sections to write, their byte count first (the header line carries it), then the bytes straight into the text
@@ -323,6 +340,7 @@ static void write_mesh_binary(Out &os, size_t id, const Mesh &m) {
   os.s += '\n';
   if (m.smooth_angle < 180.0f) os << "angle " << F{m.smooth_angle} << '\n';
   if (m.seams_sharp) os << "seamsharp 1\n";
+  write_colors(os, m);  // (task 0525)
   os << "end\n";
 }
 
@@ -867,6 +885,7 @@ std::string save_scene_text(const Scene &scene) {
           os << ' ' << i << ' ' << F{k.delta[i].x} << ' ' << F{k.delta[i].y} << ' ' << F{k.delta[i].z};
       os << '\n';
     }
+    write_colors(os, m);  // (task 0525)
     os << "end\n";
   }
   for (size_t i = 0; i < cloud_order.size(); i++) write_pointcloud_binary(os, i, *cloud_order[i]);
@@ -1405,6 +1424,36 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
           }
           if (cn.size() == m->vert_count()) m->custom_normals = std::move(cn);
         }
+        else if (line.substr(0, 3) == "ca ") {
+          /* A colour attribute (task 0525): its quoted name, p or c, then r g b a per element; NaN to 0. Kept only when
+           * it has exactly one colour per vertex (p) or corner (c) - prune_colors checks once the mesh is read. */
+          ColorAttribute c;
+          size_t at = 3;
+          c.name = unquote_word(line, at);
+          while (at < line.size() && line[at] == ' ') at++;
+          c.domain = at < line.size() && line[at] == 'c' ? ColorAttribute::Domain::Corner : ColorAttribute::Domain::Point;
+          const char *q = line.data() + std::min(at + 1, line.size());
+          const size_t cap = c.domain == ColorAttribute::Domain::Point ? nv : (size_t)-1;
+          for (;;) {
+            float v[4] = {0, 0, 0, 0};
+            int k = 0;
+            for (; k < 4; k++) {
+              const char *q2 = parse_float(q, le, v[k]);
+              if (q2 == q) break;
+              q = q2;
+              if (!finite_bits(v[k])) v[k] = 0.0f;
+            }
+            if (k < 4 || c.rgba.size() >= cap) break;
+            c.rgba.push_back(Vec4(v[0], v[1], v[2], v[3]));
+          }
+          if (!c.name.empty() && m->find_color(c.name) < 0) m->color_attributes.push_back(std::move(c));
+        }
+        else if (line.substr(0, 8) == "cactive ") {
+          const char *q = line.data() + 8;
+          char *e = nullptr;
+          m->active_color = (int)std::strtol(q, &e, 10);
+          if (e && e != q) m->render_color = (int)std::strtol(e, nullptr, 10);
+        }
         else if (line.substr(0, 10) == "seamsharp ") m->seams_sharp = true;
         else if (line.substr(0, 6) == "angle ") {
           parse_float(p + 6, le, m->smooth_angle);
@@ -1420,6 +1469,12 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       if (!m->face_material.empty()) m->face_material.resize(m->face_count(), 0);
       if (!m->face_group.empty()) m->face_group.resize(m->face_count(), 0);  // (task 0238)
       if (!m->sculpt_mask.empty()) m->sculpt_mask.resize(m->vert_count(), 0.0f);
+      if (m->active_color >= (int)m->color_attributes.size() || m->active_color < -1) m->active_color = -1;  // (task 0525)
+      if (m->render_color >= (int)m->color_attributes.size() || m->render_color < -1) m->render_color = -1;
+      for (ColorAttribute &c : m->color_attributes)  // (a file's Corner colours belong to the corners it gave)
+        if (c.domain == ColorAttribute::Domain::Corner) c.corners = m->corner_verts;
+      m->prune_colors();  // (a layer of the wrong size from a damaged file goes)
+      m->dropped_colors.clear();  // (not an edit's doing: nothing for the editor to report)
       m->touch();
       meshes[id] = m;
     }
