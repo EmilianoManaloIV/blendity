@@ -208,7 +208,7 @@ bool any_turned_below(const GameObject &g) {
 const std::vector<Vec3> &Editor::blockout_targets(std::vector<uint64_t> excluded) {
   std::sort(excluded.begin(), excluded.end());
   BlockoutCross &c = blockout_cross_;
-  const void *sc = scene_ ? static_cast<const void *>(&*scene_) : nullptr;
+  const uint64_t sc = scene_ ? scene_->serial : 0;
   /* Not keyed on edit_epoch::structure(): the Move gizmo's own mark_changed bumps it every frame of a drag. The targets are collected again at
    * every press of the mouse (a new drag - the gizmo snaps in its press frame too), after a frame in which nothing asked, and when the scene, its
    * object count or the excluded set differ. Within one drag they are kept: another Blockout moved meanwhile by playback or a script is seen at

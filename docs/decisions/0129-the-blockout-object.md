@@ -216,6 +216,11 @@ work on the spot.
   without a build, and the kernel makes the doorway without the leaf (no swing cut). The decision and its details are
   ADR 0136.
 
+## Amended in round 547 (task 0527): a styled opening's frame and glass are objects too
+- A styled window's frame (with its bars and sill board) and its glass, and a styled door's frame, are child objects of
+  the opening like its leaves, each taking its own modifier stack; the kernel makes only the opening's clear hole (one
+  Subtract piece; a Revolving door keeps its ring and drum). The decision and its details are ADR 0149.
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.

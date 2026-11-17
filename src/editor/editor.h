@@ -996,7 +996,7 @@ class Editor {
     std::thread thread;
     std::atomic<bool> done{false};
     std::atomic<bool> cancel{false};  // (checked per file: a shutdown or a scene switch doesn't wait for the batch)
-    const Scene *scene = nullptr;     // (the scene it was for: another one drops it)
+    uint64_t scene = 0;               // (Scene::serial of the scene it was for: another one drops it - round 552: not its address, which an open can hand back)
     std::vector<std::pair<std::string, bool>> files;
     std::vector<int64_t> mtimes;  // (each file's mtime before its load: a failure holds while the file is as it was)
     std::vector<char> loaded;     // (per file: it decoded; the rest are published as failed)
@@ -2001,6 +2001,7 @@ class Editor {
   void dock_reset_for_test(const std::string &preset) { dock_reset(preset); }
   void load_prefs_for_test() { load_prefs(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
+  void blockout_sync_leaves_for_test() { blockout_sync_leaves(); }  // (round 547: what the part sync costs a walk)
   void boolean_for_test(int op, bool apply, uint64_t kept) { boolean_selected(op, apply, kept); }  // (task 0255)
   void project_open_folder_for_test(const std::string &dir, const std::string &search = "") { project_dir_ = dir; project_search_ = search; project_listed_ = -100; }
   std::vector<std::string> button_labels_for_test() const {
@@ -4254,9 +4255,17 @@ class Editor {
   void blockout_sync_door(GameObject &door);
   void blockout_leaf_made(GameObject &leaf, const BlockoutLeafPlan &plan, const std::string &material, float texture_scale, uint64_t key);  // (mesh, collider, materials, key)
   void blockout_leaf_command(const std::vector<std::string> &t);  // (blockout leaf select)
+  uint64_t pick_part_target(uint64_t hit, int mx, int my);  // (round 547: a click on a Frame or Glass selects its opening, a second click on the same spot the part)
+  struct PickPartSpot {
+    uint64_t part = 0;
+    int x = 0, y = 0;
+  } pick_part_spot_;
+  void blockout_part_command(const std::vector<std::string> &t);  // (round 547: blockout part select [frame|glass|leaf] | opening)
+  void blockout_parts_select(bool to_parts, int kind, const char *command);
   void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
+  std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_fixed_seen_;  // (round 547: the same for an opening's Frame and Glass - kept apart, since one gone is made again and turns nothing off)
   std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_leaves_seen_;  // (door id -> its leaf objects' ids as the last walk left them: one gone with the door still there was deleted by hand)
-  const Scene *blockout_leaves_scene_ = nullptr;  // (the scene those ids are of: another scene - a load, an undo - starts them again; the address can repeat, the ids are checked against the scene too)
+  uint64_t blockout_leaves_scene_ = 0;  // (Scene::serial of the scene those ids are of: another scene - a load, an undo - starts them again. Not its address: a scene opened after `newscene` can land where the closed one was, and its door, of the same saved id, read the closed scene's leaf as deleted by hand - round 552)
   std::vector<uint64_t> blockout_sync_doors_, blockout_sync_strays_;  // (the walk's scratch: not allocated again for a scene whose doors did not change)
   bool blockout_preview_now_ = false, blockout_preview_was_ = false, blockout_preview_ended_ = false;  // (a preview or Play moves objects: leaves only follow; the walk after it ends settles them)
   void blockout_join_step(const char *label);  // (a change the leaf sync makes: the pending step's, or the last kept one amended - never a step of its own after a user's)
@@ -7446,7 +7455,7 @@ class Editor {
   bool blockout_join(GameObject &active, std::vector<GameObject *> others);  // (the others' pieces under the active Blockout, each in its place in the world; one undo step)
   const std::vector<Vec3> &blockout_targets(std::vector<uint64_t> excluded);  // (the other Blockouts' world corners, kept for the length of a drag)
   struct BlockoutCross {
-    const void *scene = nullptr;
+    uint64_t scene = 0;  // (Scene::serial: an address an open hands back would keep another scene's corners - round 552)
     uint64_t structure = 0;
     int frame = -10;
     std::vector<uint64_t> excluded;
@@ -7464,6 +7473,7 @@ class Editor {
   void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
   bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }
   uint64_t streamed_files_for_test() const { return streamed_files_; }
+  void texture_stream_start_for_test(std::vector<std::pair<std::string, bool>> files) { texture_stream_start(std::move(files)); }  // (round 552)
   bool render_job_running_for_test() const { return render_job_ && !render_job_->done.load(); }
   bool bake_job_running_for_test() const { return bake_job_ && !bake_job_->done.load(); }
   bool texbake_running_for_test() const { return texbake_job_ && !texbake_job_->done.load(); }
