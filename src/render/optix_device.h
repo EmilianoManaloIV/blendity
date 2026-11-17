@@ -37,6 +37,20 @@ void optix_failed(int index);
 /* The OptiX render device on the Vulkan device `index`'s card, or null with the reason. */
 std::unique_ptr<Renderer> create_optix_renderer(int index, std::string *error);
 
+/* Round 558 (task 0540): OptiX compiles the kernel's PTX to each card's machine code in optixModuleCreate - 20-30 s
+ * the first time after the kernel changes (OptiX caches the result on disk, keyed by PTX, options, card and driver).
+ * optix_prewarm compiles it for every OptiX card on a background thread at low priority, once a run, so the first
+ * OptiX render finds it cached; an open meanwhile waits for that card's compile instead of compiling again. It
+ * returns at once and does nothing without OptiX. prewarm() calls it when OptiX is the backend, set_backend(2) too. */
+void optix_prewarm();
+/* 0 not started, 1 compiling, 2 done (each card warm, or no OptiX here). */
+int optix_prewarm_state();
+/* The last kernel compile's time on the Vulkan device `index`'s card (the prewarm's or an open's), -1 if none yet. */
+double optix_kernel_ms(int index);
+/* One kernel compile on that card now, with OptiX's disk cache on or off (`use_cache` false: the cold cost), its time
+ * in ms, or -1 with the reason (stress and tests: a measurement). */
+double optix_compile_kernel(int index, bool use_cache, std::string *error);
+
 /* Render Settings > GPU Backend (task 0170): 0 Auto (GPU Compute for now: see above), 1 Vulkan (GPU Compute), 2 OptiX. Process-wide, as the renderer pool is: a change drops the renderers the pool holds for the old choice. */
 void set_backend(int backend);
 int backend();

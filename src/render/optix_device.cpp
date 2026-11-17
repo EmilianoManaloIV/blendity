@@ -20,6 +20,9 @@
 #  include <optix_function_table_definition.h>
 #  include "optix_kernel_ptx.h"  // the committed PTX (src/render/optix, tools/optix_ptx_embed.bat)
 #  include "optix_params.h"
+#  if defined(_WIN32)
+#    include <windows.h>  // (SetThreadPriority: the prewarm's thread, round 558)
+#  endif
 /* The host headers must be the OptiX the PTX was built against (task 0169): another SDK's function table and structs
  * with this PTX would fail at run time, or worse. */
 static_assert(OPTIX_VERSION == BL_OPTIX_PTX_OPTIX_VERSION, "OptiX's host headers aren't the committed PTX's version: use the pinned "
@@ -40,6 +43,7 @@ void set_backend(int b) {
   b = std::max(0, std::min(2, b));
   const int was = g_backend.exchange(b);
   if ((was == 2) != (b == 2)) drop_ready_renderers();  // (the pool held renderers for the old choice; Auto and Vulkan are the same)
+  if (b == 2 && was != 2) optix_prewarm();  // (round 558: OptiX chosen - its kernel compiles now, not at the first render)
 }
 /* BLENDITY_GPU_BACKEND (auto | vulkan | optix) wins over the setting: the tests and the stress run pin GPU Compute so
  * their numbers don't change with the card's driver, and a test asks for OptiX by name. */
@@ -91,6 +95,13 @@ std::unique_ptr<Renderer> create_optix_renderer(int, std::string *error) {
   if (error) *error = "this build has no OptiX";
   return nullptr;
 }
+void optix_prewarm() {}
+int optix_prewarm_state() { return 2; }
+double optix_kernel_ms(int) { return -1.0; }
+double optix_compile_kernel(int, bool, std::string *error) {
+  if (error) *error = "this build has no OptiX";
+  return -1.0;
+}
 
 #else
 
@@ -127,6 +138,41 @@ struct Buf {
   size_t size = 0;
 };
 
+/* The module's compile options, the renderer's and the prewarm's alike (OptiX's cache is keyed by them: a prewarm with
+ * other options would warm nothing). */
+void module_options(OptixModuleCompileOptions &mco, OptixPipelineCompileOptions &pco) {
+  mco = OptixModuleCompileOptions{};
+  mco.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+  mco.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+  mco.maxRegisterCount = 255;  // (fewer spills round optixTrace: 1.5x faster than the default limit on the 4070 SUPER)
+  pco = OptixPipelineCompileOptions{};
+  pco.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
+  pco.numPayloadValues = 6;  // (the sixth: the splats' seed, round 534)
+  pco.numAttributeValues = 2;
+  pco.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+  pco.pipelineLaunchParamsVariableName = "LP";
+  pco.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;  // (custom: the splats, round 534)
+}
+
+/* Round 558: a card's kernel compile, one at a time (the prewarm's and the opens' share the lock), with its last time. */
+struct CardWarm {
+  std::mutex m;                       // held for a compile
+  std::atomic<bool> warm{false};      // compiled once this run
+  std::atomic<double> last_ms{-1.0};  // (read without the lock: a caller never waits on a compile to ask)
+};
+CardWarm &card_warm(int cuda_device) {
+  static CardWarm w[16];
+  return w[std::max(0, std::min(15, cuda_device))];
+}
+/* A compile that took long is said once a card, with why (the user waited for it, or the prewarm did). */
+void note_compile(int cuda_device, const std::string &name, double ms) {
+  CardWarm &w = card_warm(cuda_device);
+  w.last_ms = ms;
+  if (ms > 2000.0 && !w.warm)
+    Log::info("OptiX: the kernel compiled for %s in %.1f s (once after an update: OptiX keeps it cached for later runs)", name.c_str(), ms / 1000.0);
+  w.warm = true;
+}
+
 class OptixRenderer final : public Renderer {
  public:
   ~OptixRenderer() override { destroy(); }
@@ -142,9 +188,12 @@ class OptixRenderer final : public Renderer {
     if (!cu(cuEventCreate(&ev_[0], 0), "cuEventCreate", err) || !cu(cuEventCreate(&ev_[1], 0), "cuEventCreate", err)) return false;
     OptixDeviceContextOptions o{};
     if (!ox(optixDeviceContextCreate(ctx_, &o, &octx_), "optixDeviceContextCreate", err)) return false;
+    /* Round 558: after the card's prewarm (or with it: this waits for its compile, then OptiX's cache answers). */
+    std::lock_guard<std::mutex> lock(card_warm(cuda_device).m);
     ScopedTimer t;
     const bool ok = make_pipeline(err);
     stats_.pipeline_ms = t.ms();
+    if (ok) note_compile(cuda_device, info_.name, stats_.pipeline_ms);
     return ok;
   }
 
@@ -400,17 +449,9 @@ class OptixRenderer final : public Renderer {
   }
 
   bool make_pipeline(std::string *err) {
-    OptixModuleCompileOptions mco{};
-    mco.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-    mco.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-    mco.maxRegisterCount = 255;  // (fewer spills round optixTrace: 1.5x faster than the default limit on the 4070 SUPER)
-    OptixPipelineCompileOptions pco{};
-    pco.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
-    pco.numPayloadValues = 6;  // (the sixth: the splats' seed, round 534)
-    pco.numAttributeValues = 2;
-    pco.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
-    pco.pipelineLaunchParamsVariableName = "LP";
-    pco.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;  // (custom: the splats, round 534)
+    OptixModuleCompileOptions mco;
+    OptixPipelineCompileOptions pco;
+    module_options(mco, pco);
     char log[4096];
     size_t ls = sizeof(log);
     const std::string &ptx = ptx_text();
@@ -518,6 +559,49 @@ const std::vector<std::string> &optix_cards() {
   return cards;
 }
 
+/* Round 558: the prewarm. The calling thread at low priority (the compile is one core's 20-30 s; games and the
+ * editor keep the CPU). */
+static void lower_this_thread() {
+#  if defined(_WIN32)
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#  endif
+}
+static std::atomic<int> g_prewarm{0};
+
+/* One compile of the kernel on CUDA device `c` (its primary context, an OptiX context, optixModuleCreate, all freed
+ * after), OptiX's disk cache on or off; its time in ms, or -1 with the reason. */
+static double compile_on(int c, bool use_cache, std::string *err) {
+  CUdevice dev;
+  CUcontext ctx = nullptr;
+  if (cuDeviceGet(&dev, c) != CUDA_SUCCESS || cuDevicePrimaryCtxRetain(&ctx, dev) != CUDA_SUCCESS) {
+    if (err) *err = "the card's CUDA context didn't open";
+    return -1.0;
+  }
+  cuCtxSetCurrent(ctx);
+  double ms = -1.0;
+  OptixDeviceContextOptions o{};
+  OptixDeviceContext octx = nullptr;
+  if (optixDeviceContextCreate(ctx, &o, &octx) == OPTIX_SUCCESS) {
+    if (!use_cache) optixDeviceContextSetCacheEnabled(octx, 0);
+    OptixModuleCompileOptions mco;
+    OptixPipelineCompileOptions pco;
+    module_options(mco, pco);
+    char log[2048];
+    size_t ls = sizeof(log);
+    OptixModule m = nullptr;
+    const std::string &ptx = ptx_text();
+    ScopedTimer t;
+    const OptixResult r = optixModuleCreate(octx, &mco, &pco, ptx.data(), ptx.size(), log, &ls, &m);
+    if (r == OPTIX_SUCCESS) ms = t.ms();
+    else if (err) *err = std::string("the OptiX module didn't load: ") + log;
+    if (m) optixModuleDestroy(m);
+    optixDeviceContextDestroy(octx);
+  }
+  else if (err) *err = "optixDeviceContextCreate failed";
+  cuDevicePrimaryCtxRelease(dev);
+  return ms;
+}
+
 void optix_list_async() {
   int expected = 0;
   if (!g_listed.compare_exchange_strong(expected, 1)) return;
@@ -538,6 +622,49 @@ int optix_device_of(int index) {
   for (size_t c = 0; c < cuda.size(); c++)
     if (cuda[c] == vk[(size_t)index].name && nth-- == 0) return (int)c;
   return -1;
+}
+
+void optix_prewarm() {
+  int expected = 0;
+  if (!optix_compiled_in() || !g_prewarm.compare_exchange_strong(expected, 1)) return;
+  std::thread([] {
+    lower_this_thread();
+    if (cuda_ready(nullptr) && optix_ready(nullptr)) {
+      const std::vector<std::string> &cards = optix_cards();
+      for (int c = 0; c < (int)cards.size(); c++) {
+        if (cards[(size_t)c].empty()) continue;  // (a card older than the PTX's target)
+        CardWarm &w = card_warm(c);
+        std::lock_guard<std::mutex> lock(w.m);
+        if (w.warm) continue;  // (an open compiled it already)
+        std::string err;
+        const double ms = compile_on(c, true, &err);
+        if (ms >= 0.0) note_compile(c, cards[(size_t)c], ms);
+        else Log::warn("OptiX: warming the kernel for %s failed: %s", cards[(size_t)c].c_str(), err.c_str());
+      }
+    }
+    g_prewarm = 2;
+  }).detach();
+}
+int optix_prewarm_state() { return optix_compiled_in() ? g_prewarm.load() : 2; }
+double optix_kernel_ms(int index) {
+  if (!optix_compiled_in()) return -1.0;
+  const int c = optix_device_of(index);
+  if (c < 0) return -1.0;
+  return card_warm(c).last_ms.load();
+}
+double optix_compile_kernel(int index, bool use_cache, std::string *error) {
+  if (!optix_compiled_in()) {
+    if (error) *error = "OptiX turned off (BLENDITY_NO_OPTIX=1)";
+    return -1.0;
+  }
+  if (!cuda_ready(error) || !optix_ready(error)) return -1.0;
+  const int c = optix_device_of(index);
+  if (c < 0) {
+    if (error) *error = "this card has no OptiX device";
+    return -1.0;
+  }
+  std::lock_guard<std::mutex> lock(card_warm(c).m);
+  return compile_on(c, use_cache, error);
 }
 
 std::unique_ptr<Renderer> create_optix_renderer(int index, std::string *error) {

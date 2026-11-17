@@ -5776,6 +5776,18 @@ static void test_splats_gpu(Report &rep, const Options &o) {
   const Mat4 v = Mat4::look_at({0, 1.5f, -4.0f}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 100.0f);
   const char *user_backend = std::getenv("BLENDITY_GPU_BACKEND");
   const std::string restore = user_backend ? user_backend : "vulkan";
+  /* Round 558 (task 0540): OptiX's kernel compile a card - cold (OptiX's disk cache off: the first render after an
+   * update) and warm (the cache answering: every later open). The first OptiX build below pays the cold one unless
+   * the cache already holds this PTX for the card. */
+  if (gpu::optix_compiled_in()) {
+    rep.table({"card", "OptiX kernel compile, cold ms", "warm ms"});
+    for (const gpu::DeviceInfo &d : gpu::devices()) {
+      if (gpu::optix_device_of(d.index) < 0) continue;
+      std::string err;
+      const double cold = gpu::optix_compile_kernel(d.index, false, &err), warm = gpu::optix_compile_kernel(d.index, true, &err);
+      rep.row({d.name, cold < 0 ? err : f1(cold), warm < 0 ? err : f1(warm)});
+    }
+  }
   rep.table({"splats", "device", "flatten ms", "build ms", "samples / s", "card MB"});
   for (size_t n : {(size_t)100000, (size_t)1000000}) {
     const PointCloudPtr pc = pointcloud_random(PointCloudType::GaussianSplats, n, 3, 5, 1.0f);

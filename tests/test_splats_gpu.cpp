@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <set>
+#include <thread>
 
 namespace {
 
@@ -373,6 +374,90 @@ static void round534_tests() {
   });
 }
 
+/* Round 558 (task 0540): OptiX's kernel compiled before the first render - the cold cost found and warmed. */
+static bool optix_card_here() { return gpu::available() && gpu::optix_compiled_in() && gpu::optix_device_of(0) >= 0; }
+static void wait_for_prewarm(double max_ms) {
+  ScopedTimer t;
+  while (gpu::optix_prewarm_state() == 1 && t.ms() < max_ms) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+static void round558_tests() {
+  test("OptiX warm-up: without OptiX (BLENDITY_NO_OPTIX=1, or a build or machine without it) the kernel's warm-up returns at once and does nothing", [] {
+    const char *before = std::getenv("BLENDITY_NO_OPTIX");
+    const std::string restore = before ? before : "";
+    set_env("BLENDITY_NO_OPTIX", "1");
+    ScopedTimer t;
+    gpu::optix_prewarm();
+    const double ms = t.ms();
+    CHECK(ms < 50.0);
+    CHECK(gpu::optix_prewarm_state() == 2);
+    CHECK(gpu::optix_kernel_ms(0) < 0.0);
+    std::string why;
+    CHECK(gpu::optix_compile_kernel(0, true, &why) < 0.0 && !why.empty());
+    set_env("BLENDITY_NO_OPTIX", restore);
+  });
+
+  test("OptiX warm-up: choosing OptiX in Render Settings starts compiling its kernel off the UI thread at once (the call returns in milliseconds); the first OptiX render after it finds the kernel compiled (skipped without an OptiX card)", [] {
+    if (!optix_card_here()) {
+      std::printf("    (no OptiX card here: skipped)\n");
+      return;
+    }
+    const int was = gpu::backend();
+    gpu::set_backend(0);
+    ScopedTimer t;
+    gpu::set_backend(2);  // (as Render Settings > GPU Backend does)
+    const double call_ms = t.ms();
+    CHECK(call_ms < 100.0);
+    CHECK(gpu::optix_prewarm_state() >= 1);
+    wait_for_prewarm(180000.0);
+    CHECK(gpu::optix_prewarm_state() == 2);
+    const double warm_ms = gpu::optix_kernel_ms(0);
+    std::string err;
+    ScopedTimer topen;
+    std::unique_ptr<gpu::Renderer> r = gpu::create_optix_renderer(0, &err);
+    const double open_ms = topen.ms();
+    CHECK(r != nullptr);
+    if (r) {
+      const double module_ms = r->open_stats().pipeline_ms;
+      std::printf("    set_backend(2) %.1f ms; the warm-up's compile %.0f ms; then the first OptiX open %.0f ms, its kernel %.0f ms\n", call_ms, warm_ms,
+                  open_ms, module_ms);
+      CHECK(module_ms < 2000.0);
+      CHECK(gpu::optix_kernel_ms(0) < 2000.0);
+    }
+    gpu::set_backend(was);
+  });
+
+  test("OptiX warm-up: an OptiX open that comes while the card's kernel compiles waits for that compile instead of starting a second (skipped without an OptiX card)", [] {
+    if (!optix_card_here()) {
+      std::printf("    (no OptiX card here: skipped)\n");
+      return;
+    }
+    wait_for_prewarm(180000.0);
+    /* A cold compile (OptiX's cache off) holds the card's compile for its whole time; the open started during it waits,
+     * then finds the kernel in the cache (warmed above) - its own compile short. */
+    std::atomic<bool> started{false};
+    double cold_ms = -1.0;
+    std::thread th([&] {
+      started = true;
+      cold_ms = gpu::optix_compile_kernel(0, false, nullptr);
+    });
+    while (!started) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // (the compile holds the card by now)
+    ScopedTimer t;
+    std::string err;
+    std::unique_ptr<gpu::Renderer> r = gpu::create_optix_renderer(0, &err);
+    const double open_ms = t.ms();
+    th.join();
+    CHECK(r != nullptr && cold_ms > 0.0);
+    if (!r) return;
+    const double module_ms = r->open_stats().pipeline_ms;
+    std::printf("    a cold compile %.0f ms; the open during it %.0f ms, its own kernel %.0f ms\n", cold_ms, open_ms, module_ms);
+    CHECK(open_ms + 400.0 >= cold_ms);  // (it waited for the compile ...)
+    CHECK(module_ms < 2000.0);          // (... and didn't compile again)
+  });
+}
+
 void run_splats_gpu_tests() {
   round534_tests();
+  round558_tests();
 }

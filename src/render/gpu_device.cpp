@@ -1356,7 +1356,7 @@ bool compile_kernels(bool ray_query, std::string *error) {
 void prewarm(bool open_devices, bool hardware_rt) {
   static std::atomic<bool> started{false};
   if (started.exchange(true) || !available()) return;
-  if (backend() == 2) optix_list_async();  // (task 0170: CUDA's devices listed off the UI thread)
+  if (backend() == 2) optix_list_async(), optix_prewarm();  // (task 0170: CUDA's devices listed off the UI thread; round 558: and OptiX's kernel compiled)
   bool rt = false, sw = false;
   for (const DeviceInfo &d : G().infos) (d.hardware_rt ? rt : sw) = true;
   /* Detached: compile_kernel keeps its results in leaked statics, so quitting
