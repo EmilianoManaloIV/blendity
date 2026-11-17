@@ -37,3 +37,11 @@ reason written in the test. Never a looser bound without a measured reason (CLAU
 
 ## Documentation to update
 - `changelog.d/551-card-cpu-picture-tolerances.md`.
+
+## Outcome (round 551)
+- Product fix: the card's g-buffer albedo plane `R8G8B8A8_UNORM` -> `R16G16B16A16_SFLOAT` (sRGB 8-bit tried first and
+  dropped: coarser in the brights). It reached outside the three tests: "toon at a distance" (test_render, the card's
+  half) lost the pass the old rounding had given it; its bound is held to a 40th with the reason, and task 0534 (round
+  553) fixes the card's cel edge.
+- Bounds from measurement: the normal map (97.5 %), the overlays' horizon band (mean 2.5, 80 %); the Lanczos ball
+  passes unchanged.
