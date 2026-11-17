@@ -4,6 +4,7 @@
 // (blender/source/blender/blenloader/intern/writefile.cc) and
 // blender/source/blender/io/wavefront_obj.
 #include "scene.h"
+#include "pointcloud.h"  // (round 530, ADR 0147: the point clouds' datablocks)
 #include "spring_bones.h"
 #include "unity_scene.h"  // (round 455: Light Probe Groups kept as Engine Components)
 #include "../texture/procedural_texture.h"
@@ -453,9 +454,93 @@ static bool read_mesh_binary(const char *p, size_t bytes, size_t nv, size_t nf, 
   return true;
 }
 
+/* Round 530 (ADR 0147): a point cloud as a datablock beside the meshes - "pointcloud <id> <name> <type> <sh_degree>
+ * <count> bin <bytes>", the bytes, a newline. Always binary (a cloud is big or a test's; its text would be numbers no one
+ * reads). The chunk is the mesh chunk's layout under its own magic: sections of [tag u32][count u64][elements], an
+ * unknown one skipped by its count taken as bytes, then the end mark. */
+namespace binpc {
+using binmesh::tag;
+constexpr uint32_t kMagic = 0x6C637062u;  // "bpcl"
+constexpr uint32_t kEnd = 0x6270636Cu;    // "lcpb"
+constexpr uint32_t kVersion = 1;
+constexpr uint32_t kPos = tag("pos "), kColor = tag("colr"), kOpacity = tag("opac"), kScale = tag("scal"), kRot = tag("rotq"), kSh = tag("shrs");
+static_assert(sizeof(Quat) == 16, "a splat's rotation is four floats in the file");
+}  // namespace binpc
+
+static void write_pointcloud_binary(Out &os, size_t id, const PointCloud &pc) {
+  using namespace binpc;
+  const bool splats = pc.is_splats();
+  auto section_bytes = [](size_t elements, size_t elem_size) { return 12 + elements * elem_size; };
+  size_t bytes = 12 + 4;
+  bytes += section_bytes(pc.position.size(), 12) + section_bytes(pc.color.size(), 12);
+  if (splats) bytes += section_bytes(pc.opacity.size(), 4) + section_bytes(pc.scale.size(), 12) + section_bytes(pc.rotation.size(), 16) + section_bytes(pc.sh_rest.size(), 12);
+  os << "pointcloud " << id << " " << quote(pc.name) << " " << (int)pc.type << " " << pc.sh_degree << " " << pc.count() << " bin " << bytes << "\n";
+  const size_t start = os.s.size();
+  os.s.reserve(start + bytes + 1);
+  binmesh::Writer w{os.s};
+  w.put(kMagic);
+  w.put(kVersion);
+  const size_t count_at = os.s.size();
+  w.put((uint32_t)0);
+  w.section(kPos, pc.position);
+  w.section(kColor, pc.color);
+  if (splats) {
+    w.section(kOpacity, pc.opacity);
+    w.section(kScale, pc.scale);
+    w.section(kRot, pc.rotation);
+    w.section(kSh, pc.sh_rest);
+  }
+  w.put(kEnd);
+  std::memcpy(&os.s[count_at], &w.sections, sizeof(uint32_t));
+  if (os.s.size() - start != bytes) Log::error("Scene: a point cloud chunk's size was counted wrong (%zu written, %zu announced)", os.s.size() - start, bytes);
+  if (!binmesh::little_endian()) Log::warn("Scene: this build writes point cloud chunks in big-endian order; another platform won't read them (ADR 0111)");
+  os.s += '\n';
+}
+
+/* The chunk read into `pc` (its type, degree and count from the header line), then pointcloud_validate: a short array,
+ * a count that doesn't match or an unknown type refuses the file; a NaN centre drops its point. */
+static bool read_pointcloud_binary(const char *p, size_t bytes, size_t n, PointCloud &pc, std::string &error) {
+  using namespace binpc;
+  binmesh::Reader r{p, p + bytes};
+  uint32_t magic = 0, version = 0, sections = 0;
+  if (!r.get(magic) || !r.get(version) || !r.get(sections) || magic != kMagic || version != kVersion) {
+    error = "the point cloud's binary chunk has the wrong magic or version";
+    return false;
+  }
+  for (uint32_t s = 0; s < sections && r.ok; s++) {
+    uint32_t t = 0;
+    uint64_t c = 0;
+    if (!r.get(t) || !r.get(c)) break;
+    switch (t) {
+      case kPos: r.array(pc.position, c); break;
+      case kColor: r.array(pc.color, c); break;
+      case kOpacity: r.array(pc.opacity, c); break;
+      case kScale: r.array(pc.scale, c); break;
+      case kRot: r.array(pc.rotation, c); break;
+      case kSh: r.array(pc.sh_rest, c); break;
+      default: r.skip(c, 1); break;
+    }
+  }
+  uint32_t end = 0;
+  if (!r.ok || !r.get(end) || end != kEnd) {
+    error = "the point cloud's binary chunk ends early";
+    return false;
+  }
+  if (pc.position.size() != n) {
+    error = "the point cloud's binary chunk doesn't match its count";
+    return false;
+  }
+  std::string why;
+  if (pointcloud_validate(pc, &why) < 0) {
+    error = "the point cloud's arrays don't fit: " + why;
+    return false;
+  }
+  return true;
+}
+
 /* The mesh header line's "bin <bytes>" when it has one. */
 static bool binary_chunk_size(std::string_view line, uint64_t &bytes) {
-  if (line.size() < 12 || line.compare(0, 5, "mesh ") != 0) return false;
+  if (line.size() < 12 || (line.compare(0, 5, "mesh ") != 0 && line.compare(0, 11, "pointcloud ") != 0)) return false;  // (round 530: a cloud's line has the same layout)
   const std::vector<std::string> t = tokenize(line);
   if (t.size() < 8 || t[6] != "bin") return false;
   bytes = std::strtoull(t[7].c_str(), nullptr, 10);
@@ -487,6 +572,7 @@ struct WriteReflector : Reflector {
   Out &os;
   const std::unordered_map<const Mesh *, int> &mesh_ids;
   const std::unordered_map<const Material *, int> *mat_ids = nullptr;
+  const std::unordered_map<const PointCloud *, int> *cloud_ids = nullptr;  // (round 530)
   WriteReflector(Out &o, const std::unordered_map<const Mesh *, int> &m,
                  const std::unordered_map<const Material *, int> *mats = nullptr)
       : os(o), mesh_ids(m), mat_ids(mats) {}
@@ -501,6 +587,14 @@ struct WriteReflector : Reflector {
   void mesh(const char *n, MeshPtr &m) override {
     auto it = mesh_ids.find(m.get());
     line(n, std::to_string(it == mesh_ids.end() ? -1 : it->second));
+  }
+  void point_cloud(const char *n, PointCloudPtr &pc) override {
+    int id = -1;
+    if (pc && cloud_ids) {
+      auto it = cloud_ids->find(pc.get());
+      if (it != cloud_ids->end()) id = it->second;
+    }
+    line(n, std::to_string(id));
   }
   void texture(const char *n, TextureRef &t) override { line(n, quote(t.path) + (t.non_color ? " 1" : " 0")); }
   void material_list(const char *n, std::vector<MaterialPtr> &mats) override {
@@ -528,6 +622,7 @@ struct ReadReflector : Reflector {
   std::map<std::string, std::vector<std::string>> values;
   const std::unordered_map<int, MeshPtr> &meshes;
   const std::unordered_map<int, MaterialPtr> *materials = nullptr;
+  const std::unordered_map<int, PointCloudPtr> *clouds = nullptr;  // (round 530)
   explicit ReadReflector(const std::unordered_map<int, MeshPtr> &m, const std::unordered_map<int, MaterialPtr> *mats = nullptr)
       : meshes(m), materials(mats) {}
   const std::vector<std::string> *get(const char *n, size_t count) {
@@ -559,6 +654,12 @@ struct ReadReflector : Reflector {
       auto it = meshes.find(std::atoi((*t)[0].c_str()));
       if (it != meshes.end()) m = it->second;
     }
+  }
+  void point_cloud(const char *n, PointCloudPtr &pc) override {
+    auto *t = get(n, 1);
+    if (!t || !clouds) return;
+    auto it = clouds->find(std::atoi((*t)[0].c_str()));
+    if (it != clouds->end()) pc = it->second;
   }
   void texture(const char *n, TextureRef &tr) override {
     if (auto *t = get(n, 1)) {
@@ -677,6 +778,8 @@ std::string save_scene_text(const Scene &scene) {
   std::vector<const Mesh *> order;
   std::unordered_map<const Material *, int> mat_ids;
   std::vector<MaterialPtr> mat_order;
+  std::unordered_map<const PointCloud *, int> cloud_ids;  // (round 530: shared between objects, as meshes)
+  std::vector<const PointCloud *> cloud_order;
   scene.for_each_ordered([&](GameObject &g, int) {
     for (auto &c : g.components) {
       struct Collect : Reflector {
@@ -689,6 +792,8 @@ std::string save_scene_text(const Scene &scene) {
         void enumeration(const char *, int &, const char *const *, int) override {}
         void text(const char *, std::string &) override {}
         void mesh(const char *, MeshPtr &m) override { if (m) found.push_back(m); }
+        void point_cloud(const char *, PointCloudPtr &pc) override { if (pc) found_clouds.push_back(pc); }
+        std::vector<PointCloudPtr> found_clouds;
         void material_list(const char *, std::vector<MaterialPtr> &mats) override {
           for (auto &m : mats)
             if (m) found_mats.push_back(m);
@@ -705,6 +810,11 @@ std::string save_scene_text(const Scene &scene) {
         if (!mat_ids.count(m.get())) {
           mat_ids[m.get()] = (int)mat_order.size();
           mat_order.push_back(m);
+        }
+      for (auto &pc : col.found_clouds)
+        if (!cloud_ids.count(pc.get())) {
+          cloud_ids[pc.get()] = (int)cloud_order.size();
+          cloud_order.push_back(pc.get());
         }
     }
   });
@@ -778,6 +888,7 @@ std::string save_scene_text(const Scene &scene) {
     write_colors(os, m);  // (task 0525)
     os << "end\n";
   }
+  for (size_t i = 0; i < cloud_order.size(); i++) write_pointcloud_binary(os, i, *cloud_order[i]);
   scene.for_each_ordered([&](GameObject &g, int) {
     os << "object " << g.id << " " << (g.parent ? g.parent->id : 0) << " " << quote(g.name) << " " << (g.active ? 1 : 0)
        << "\n";
@@ -791,6 +902,7 @@ std::string save_scene_text(const Scene &scene) {
       if (c->is_modifier()) os << " " << (c->show_in_editmode ? 1 : 0) << " " << (c->show_in_render ? 1 : 0);  // Blender's header toggles
       os << "\n";
       WriteReflector wr(os, mesh_ids, &mat_ids);
+      wr.cloud_ids = &cloud_ids;
       c->reflect(wr);
       os << "end\n";
     }
@@ -1022,6 +1134,7 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
   }
   Scene fresh;
   std::unordered_map<int, MeshPtr> meshes;
+  std::unordered_map<int, PointCloudPtr> clouds;  // (round 530, ADR 0147)
   std::unordered_map<int, MaterialPtr> materials;
   int lineno = 1;
   GameObject *cur = nullptr;
@@ -1365,6 +1478,32 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       m->touch();
       meshes[id] = m;
     }
+    else if (k == "pointcloud" && t.size() >= 8 && t[6] == "bin") {  // (round 530, ADR 0147)
+      auto pc = std::make_shared<PointCloud>();
+      const int id = std::atoi(t[1].c_str());
+      pc->name = t[2];
+      const int type = std::atoi(t[3].c_str());
+      pc->sh_degree = std::atoi(t[4].c_str());
+      const uint64_t n = std::strtoull(t[5].c_str(), nullptr, 10), bytes = std::strtoull(t[7].c_str(), nullptr, 10);
+      std::string why;
+      if (type < 0 || type > 1) why = "an unknown point cloud type";
+      else if (n > kPointCloudMaxPoints) why = "a point cloud with too many points";
+      else if (bytes > (uint64_t)(is.end - is.p)) why = "the point cloud's binary chunk is longer than the file";
+      if (why.empty()) {
+        pc->type = (PointCloudType)type;
+        if (pc->sh_degree < 0 || pc->sh_degree > kSplatMaxShDegree) why = "a point cloud's SH degree out of range";
+      }
+      if (why.empty()) read_pointcloud_binary(is.p, (size_t)bytes, (size_t)n, *pc, why);
+      if (!why.empty()) {
+        error = strprintf("line %d: %s", lineno, why.c_str());
+        return false;
+      }
+      is.p += (size_t)bytes;
+      if (is.p < is.end && *is.p == '\n') is.p++;
+      lineno++;
+      pc->touch();
+      clouds[id] = pc;
+    }
     else if (k == "object" && t.size() >= 5) {
       uint64_t id = std::strtoull(t[1].c_str(), nullptr, 10), pid = std::strtoull(t[2].c_str(), nullptr, 10);
       auto go = std::make_unique<GameObject>();
@@ -1420,6 +1559,7 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       c->show_in_render = flag(2) < 0 ? c->enabled : flag(2) == 1;  // older files: renders follow the viewport
       comp = cur->add_component(std::move(c));
       rr = std::make_unique<ReadReflector>(meshes, &materials);
+      rr->clouds = &clouds;
     }
     else if (k == "end") {
       cur = nullptr;

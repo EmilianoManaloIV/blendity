@@ -491,6 +491,7 @@ void Editor::bake_start() {
   job->env = env_;
   part(1);
   BakeSettings &s = job->settings;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the splats shine on the lightmaps and shade them)
   s.texels_per_unit = ls.texels_per_unit;
   s.max_size = ls.max_size;
   s.padding = ls.padding;
@@ -627,6 +628,7 @@ void Editor::bake_job_run(BakeJob &j) {
       ps.max_bounces = std::max(0, j.bounces - 1);
       ps.denoise = false;
       ps.use_guiding = false;
+      ps.splats = j.settings.splats;  // (round 533)
       pt.set_settings(ps);
       const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
       pt.build(objs, lights, j.env);
@@ -1271,6 +1273,7 @@ void Editor::preview_step() {
     if (scene_->lighting.lighting_mode == 1) shadowmask_split(lights, false);  // (round 454: logged once, by the bake)
     update_environment();
     BakeSettings s;
+    s.splats = scene_splat_views(*scene_);  // (round 533: as the final bake)
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)
     s.min_chart = 32;  // a small object still gets a few hundred texels, or it looks blocky at a quarter of the resolution
     s.max_size = std::min(ls.max_size, 1024);

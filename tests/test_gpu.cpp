@@ -1998,7 +1998,7 @@ static void tests_round189() {
     uint64_t h = 0xcbf29ce484222325ull;
     bool read = true;  // (what tools/optix_ptx_embed.bat hashes, in its order)
     for (const char *f : {"src/render/optix_kernel.cu", "src/render/optix_params.h", "src/render/optix/glsl.cuh", "src/render/gpu_kernel.h",
-                          "src/render/gpu_glsl.h", "tools/glsl_to_cuda.py"})
+                          "src/render/gpu_glsl.h", "src/render/gsplat_gpu_glsl.h", "tools/glsl_to_cuda.py"})  // (round 534: the splats' GLSL)
       read = read && r189_hash(f, h);
     if (!read) {
       std::printf("    (the sources aren't beside the tests: run from the blendity folder)\n");

@@ -9,6 +9,7 @@
 // stood up, the inverse of Blender's forward -Z / up Y axis conversion.
 #include "import.h"
 #include "import_anim.h"
+#include "import_splat.h"  // (round 531)
 
 #include "../core/core.h"
 #include "../core/json.h"
@@ -430,6 +431,26 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
   /* Meshes: every primitive becomes material slots of one mesh. */
   std::vector<MeshPtr> meshes;
   std::vector<std::vector<MaterialPtr>> mesh_mats;
+  std::vector<PointCloudPtr> mesh_clouds;  // (round 531: each mesh's point cloud, by mesh index; shorter when the last have none)
+  /* Round 531 (review): whether an accessor's elements all lie inside its buffer view and the view inside its buffer -
+   * checked before read_accessor allocates count x components floats. No buffer view (Draco, sparse-only): no. */
+  auto points_accessor_fits = [&](int index) {
+    const Json &a = doc["accessors"][(size_t)std::max(0, index)];
+    if (index < 0 || a.type != Json::Obj || a["bufferView"].integer() < 0) return false;
+    const Json &v = doc["bufferViews"][(size_t)a["bufferView"].integer()];
+    const int bi = v["buffer"].integer();
+    if (v.type != Json::Obj || bi < 0 || bi >= (int)buffers.size()) return false;
+    const std::string type = a["type"].str;
+    const int ct = a["componentType"].integer();
+    const double comps = type == "SCALAR" ? 1 : type == "VEC2" ? 2 : type == "VEC3" ? 3 : type == "VEC4" ? 4 : 0;
+    const double csize = ct == 5126 || ct == 5125 ? 4 : ct == 5123 || ct == 5122 ? 2 : ct == 5121 || ct == 5120 ? 1 : 0;
+    const double count = a["count"].number(-1.0), elem = comps * csize;
+    const double stride = v["byteStride"].number() > 0 ? v["byteStride"].number() : elem;
+    const double view_off = v["byteOffset"].number(), view_len = v["byteLength"].number(-1.0), off = a["byteOffset"].number();
+    if (!(count >= 1.0) || elem <= 0.0 || view_len < 0.0 || view_off < 0.0 || off < 0.0) return false;
+    if (view_off + view_len > (double)buffers[(size_t)bi].size()) return false;
+    return off + (count - 1.0) * stride + elem <= view_len;
+  };
   size_t verts = 0, faces = 0;
   for (const Json &jm : doc["meshes"].arr) {
     auto m = std::make_shared<Mesh>();
@@ -437,6 +458,44 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     std::vector<MaterialPtr> slots;
     bool any_uv = false;
     for (const Json &pr : jm["primitives"].arr) any_uv = any_uv || pr["attributes"]["TEXCOORD_0"].integer() >= 0;
+    /* Round 531: POINTS primitives - KHR_gaussian_splatting's or plain ones - become the mesh's point cloud (the first
+     * such primitive; Blender joins them, which a later round can). An accessor whose count the buffer can't hold is
+     * left out before it is read (its floats would be allocated from the count). */
+    for (const Json &pr : jm["primitives"].arr) {
+      if (pr["mode"].integer(4) != 0) continue;
+      if (mesh_clouds.size() > meshes.size()) {
+        out.notes.push_back("glTF: a mesh with more than one point primitive - only its first is imported");
+        continue;
+      }
+      std::map<std::string, std::vector<float>> attrs;
+      std::map<std::string, int> comps;
+      bool unread = false;
+      for (const auto &kv : pr["attributes"].obj) {
+        /* Only what a cloud reads (review 531: every attribute of a hostile file was allocated at once). */
+        if (kv.first != "POSITION" && kv.first != "COLOR_0" && kv.first.rfind("KHR_gaussian_splatting:", 0) != 0) continue;
+        if (!points_accessor_fits(kv.second.integer())) {
+          unread = true;
+          continue;
+        }
+        int c = 0;
+        std::vector<float> f = read_accessor(kv.second.integer(), c);
+        comps[kv.first] = c;
+        attrs[kv.first] = std::move(f);
+      }
+      if (unread) out.notes.push_back("glTF: a point attribute whose data lies outside its buffer (or is compressed, or sparse) was left out");
+      if (pr["indices"].integer() >= 0) out.notes.push_back("glTF: a point primitive's indices are ignored - every point of its attributes is imported");
+      const bool splats = pr["extensions"]["KHR_gaussian_splatting"].type == Json::Obj;
+      SplatReadReport report;
+      PointCloudPtr cloud = gltf_point_cloud(attrs, comps, splats, report);
+      for (std::string &n : report.notes) out.notes.push_back(std::move(n));
+      if (!cloud) {
+        out.notes.push_back(report.error);
+        continue;
+      }
+      cloud->name = m->name;
+      mesh_clouds.resize(meshes.size() + 1);
+      mesh_clouds.back() = cloud;
+    }
     for (const Json &pr : jm["primitives"].arr) {
       const int mode = pr["mode"].integer(4);
       if (mode != 4 && mode != 5 && mode != 6) continue;  // points and lines have no faces
@@ -577,9 +636,13 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     if (mi >= 0 && mi < (int)meshes.size()) {
       node.mesh = meshes[(size_t)mi];
       node.materials = mesh_mats[(size_t)mi];
+      if ((size_t)mi < mesh_clouds.size() && mesh_clouds[(size_t)mi]) {  // (round 531: a mesh of points only has no mesh of its own)
+        node.points = mesh_clouds[(size_t)mi];
+        if (!node.mesh->face_count()) node.mesh = nullptr, node.materials.clear();
+      }
       /* The morph weights: the node's, else the mesh's defaults (task 0135). */
       const Json &w = n["weights"].size() ? n["weights"] : doc["meshes"][(size_t)mi]["weights"];
-      for (size_t k = 0; k < node.mesh->shape_keys.size() && k < w.size(); k++) node.shape_weights.push_back({node.mesh->shape_keys[k].name, (float)w[k].number()});
+      for (size_t k = 0; node.mesh && k < node.mesh->shape_keys.size() && k < w.size(); k++) node.shape_weights.push_back({node.mesh->shape_keys[k].name, (float)w[k].number()});
     }
     node_index[(size_t)ni] = (int)out.nodes.size();
     out.nodes.push_back(std::move(node));
@@ -650,6 +713,10 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
       node.name = meshes[i]->name;
       node.mesh = meshes[i];
       node.materials = mesh_mats[i];
+      if (i < mesh_clouds.size() && mesh_clouds[i]) {  // (round 531)
+        node.points = mesh_clouds[i];
+        if (!node.mesh->face_count()) node.mesh = nullptr, node.materials.clear();
+      }
       out.nodes.push_back(node);
     }
   }
@@ -750,6 +817,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
     out.error = "PLY: not a PLY file";
     return false;
   }
+  if (ply_is_point_cloud(data)) return import_ply_point_cloud(path, data, out);  // (round 531: splats or points, not a refusal)
   size_t body = data.find('\n', hend);
   body = body == std::string::npos ? data.size() : body + 1;
   /* Task 0209: each property's type as a code, worked out once from its name (it was compared as a string for every

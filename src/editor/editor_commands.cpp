@@ -3,6 +3,7 @@
 // tool is reachable from (task 0177: moved out of editor.cpp as they were).
 #include "../scene/curve.h"
 #include "editor.h"
+#include "scene_splats.h"
 #include "../core/allocator.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
@@ -15,6 +16,7 @@
 #include "../render/gpu_device.h"
 #include "../render/optix_device.h"
 #include "../research/research.h"
+#include "../scene/pointcloud_object.h"  // (round 530: `pointcloud`)
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -27,7 +29,7 @@
 
 namespace bl {
 
-static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "drawproject", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "unity", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "vpaint", "vpbrush", "vpblend", "vpcolor", "vpset", "vpautomask", "vpstroke", "colorattr", "where", "perf", "window", "world", "wpautomask", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr", "blockout"};
+static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "drawproject", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "unity", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "vpaint", "vpbrush", "vpblend", "vpcolor", "vpset", "vpautomask", "vpstroke", "colorattr", "where", "perf", "window", "world", "wpautomask", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr", "blockout", "pointcloud", "splat", "brush"};
 // (The names above: the sketch families dispatched before the chain, then this file's `c == "..."` cases as generated by
 // round 280's patch; regenerate when commands change - nothing checks the list against the dispatcher yet.)
 
@@ -1352,6 +1354,23 @@ void Editor::run_console_command(const std::string &line) {
     blockout_command(t);
     return;
   }
+  if (c == "pointcloud") {  // pointcloud new | random <points|splats> <count> [degree] [seed] [extent] | info | type | degree | size (round 530)
+    bool changed = false;
+    GameObject *made = nullptr;
+    GameObject *sel = active_object();
+    if (sel && !is_selected(sel->id)) sel = nullptr;
+    const std::string answer = pointcloud_command(*scene_, sel, t, &made, changed);
+    if (made && made != sel) select(made->id);
+    if (changed) mark_changed("Point Cloud");
+    if (starts_with(answer, "pointcloud:")) Log::warn("%s", answer.c_str());  // (a refusal or the usage)
+    else Log::info("%s", answer.c_str());
+    return;
+  }
+  if (c == "splat") {  // splat stats: the last frame's Gaussian splats - counts and times (round 532)
+    if (t.size() >= 2 && t[1] == "stats") Log::info("%s", splat_stats_text().c_str());
+    else Log::warn("splat: usage: splat stats");
+    return;
+  }
   if (c == "jobs") {  // jobs | jobs cancel [label] | jobs async on|off: the job tray's list (task 0253; round 437)
     jobs_command(t);
     return;
@@ -1384,6 +1403,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "meshmaps") {  // meshmaps [size] [samples] [keepuvs|layout] | cancel | status (task 0243)
     meshmaps_command(t);
+    return;
+  }
+  if (c == "brush") {  // brush unified|curve|save|load|list (round 540)
+    brush_command(t);
     return;
   }
   if (c == "sculpt") {  // sculpt on|off|brush|size|strength|falloff|carve|front|pressure|dab|stroke (task 0236)
@@ -1464,6 +1487,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("  vpaint on|off, vpbrush draw|blur|average|smear [radius] [strength], vpblend mix|add|subtract|multiply|lighten|darken,");
     Log::info("  vpcolor r g b [a], vpset falloff|mirror|front <value>, vpautomask (as wpautomask), vpstroke x y ... (Vertex Paint)");
     Log::info("  colorattr add <name> [point|corner] | remove|active|render <name> | rename <old> <new> | fill r g b [a] (colour attributes)");
+    Log::info("  brush unified sculpt|weight|paint size|strength|colour on|off, brush curve hardness|spacing on|off [x y ...], brush save|load|list");
   }
   else if (c == "clear") Log::clear();
   else if (c == "create") {
