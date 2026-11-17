@@ -105,6 +105,7 @@ The audits on the joined tree against main (`068207d9`), every Pass 27 round joi
 | `hci_label_audit` (a shortcut in a label the keymap does not produce) | 1 | 4 | 541 (`animation_window.cpp` 1680 "Ctrl+R ... turns each the other way", 1697 "F9 afterwards: Influence"), 536 (`panels.cpp` 3105 "Adjust Last Operation (F9)") |
 | `hci_console_audit --check` | 6 | 6 | none (#420's two and #441's one were reworded before they joined) |
 | `hci_fitts_audit` | - | - | needs a `fitts-*.json` run: not part of this sweep |
+| the same, after rounds 559 / 560 and the publish chain (#455, #449 joined) | consistency 0 / label 1 | consistency 0; label 2 | label: `panels.cpp` 1617 ("Its handles and F9 set the first opening's size", 546 / 547) and 3193 ("Adjust Last Operation (F9)", 536) - F9 by hand, as 559 fixed in the Animation window (Maya's preset: Ctrl+F9) |
 
 The new panels by hand (step 3), headless screenshots of the joined tree's exe at 1024 x 768 and 1366 x 768, `ui scale` 1
 and 1.5, a scratch project (the shots in the round's scratch folder; not committed):
