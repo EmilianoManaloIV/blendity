@@ -47,7 +47,7 @@ notes folder's `pass27-timed/`; printed, never asserted - ADR 0056):
 | splat draw (532), 1280 x 720, orbiting | 100k: 15.7 ms CPU, 16.0 ms card; 1M: 108 ms CPU, 94 ms card - after round 557: 1M 6.2 ms card, 86.8 ms CPU | the card met; the CPU over 50 ms at 1M |
 | splat trace (533 / 534), 256 x 256 | CPU 149 / 107 samples / s (100k / 1M); RTX 4070 SUPER ray queries 1,752 / 1,320 | card faster - met |
 | cold first uses | the card's views 92.5 s to open first -> 537 ms (557, a pipeline cache); OptiX's kernel compile 19 s cold, 6.6 ms warm - its own row since 558 | met; the Vulkan devices' first 100k build in the stress run (13.3 - 16.9 s) is a stress-only cold cost - the editor prewarms each card off the UI thread |
-| editor frames (554, the CPU rasterizer's shared edges) | moving an object 14.7 / 15.3 -> 15.8 / 15.9 ms; toon (GPU) 9.1 -> 11.3 ms, glass solid (GPU) 16.0 -> 19.8 ms | the card rows' rise - R1 |
+| editor frames (554, the CPU rasterizer's shared edges) | moving an object 14.7 / 15.3 -> 15.8 / 15.9 ms; toon (GPU) 9.1 -> 11.3 ms, glass solid (GPU) 16.0 -> 19.8 ms | the before exe predates main's merge, so the card rows' rise is not 554's (R1 reruns) |
 | LoopTools (537), 10k-vertex loops | 1.4 - 9.2 ms an operator, 0 problems | under 100 ms - met |
 | panoramic F12 (538), 2048 x 1024 | every projection 197 - 221 ms; perspective 202 - 207 ms | met |
 | sky sun (542) | 2.80 ms a frame on, 2.92 off | met |
