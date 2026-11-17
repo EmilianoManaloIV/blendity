@@ -25,11 +25,12 @@ read 2.281 / 255 in some runs, 0.203 in others), and round 554's span must be gu
 - Round 554's span: the new checks below pass with the review's wide margin as with the shipped 1e-4 one, so they don't show
   what #448's sculpt strokes tripped on with the wide margin (one orthographic sphere; the strokes' perspective pick path
   and rim pixels aren't covered). Noted in `raster_tile`.
-- Round 554's cost, not yet measured on its own: the hub's timed editor rows read the Scene view's orbit ~0.4-0.5 ms (6-7 %)
-  slower after round 554 - but that "before" exe predates main's merge (c842763d, round 549's GI and ray changes), which the
-  "after" carries, and two card rows (toon, glass in solid shading) were slower too, which a CPU-rasterizer change can't do.
-  So neither the orbit's +6 % nor the card rows can be put on round 554. A clean A/B (the same tree without round 554's
-  raster.cpp) is staged for the next quiet window (`C:/blab/timed-r556-ab.sh`).
+- Round 554's cost, measured on its own: about 0.1 ms on the Scene view's orbit, within the noise. The same tree (#455,
+  main merged) without and with round 554's raster.cpp (this round's speed-up in), the editor rows alternating twice on a
+  quiet machine: orbiting 6.99 / 6.99 ms before, 7.13 / 7.04 after (its 3D 5.09 / 5.10 against 5.15 / 5.17); moving an
+  object 14.58 / 14.40 against 14.39 / 14.40; idle the same. The hub's first rows (orbit ~0.4-0.5 ms, 6-7 %, slower, and
+  two card rows slower) compared a "before" exe that predated main's merge (c842763d, round 549's GI and ray changes) - not
+  round 554.
 
 **Changed (round 554's pixel test)**
 - `tri_covers` tests a pixel inside first, the three edges without a branch between them, and the row's span uses one double
@@ -52,4 +53,4 @@ read 2.281 / 255 in some runs, 0.203 in others), and round 554's span must be gu
 sculpt 446 / editor 3,480; 0 failed, with `BLENDITY_PREFS_DIR` unset. After round 554's speed-up and the shadow test's
 rework: the rasterizer tests (363 Windows, 336 Linux), the sculpt group (466 / 446) and "dynamic subdivision" run alone, 0
 failed. The card (RTX 4070 SUPER): the shadow test, 172 / 171 pixels darkened, core 43, 3 differing, twice; Linux CPU 172.
-Coverage map, command sweep and changelog checks clean. Round 554's own cost waits for the clean A/B (above).
+Coverage map, command sweep and changelog checks clean. Round 554's cost: the clean A/B (above), the hub's timed window.
