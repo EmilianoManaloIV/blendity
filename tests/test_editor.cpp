@@ -457,7 +457,10 @@ static void round28_tests() {
   });
   test("Inspector: a modifier's menu (Apply, Duplicate) acts on a click", [&] {
     Editor ed;
-    ed.init_headless(1600, 900);
+    /* 1000 high, not 900 (round 559): with Linux's wider font the Rigging button and the Vertex Paint toggle take a row
+     * each, and the Array modifier's header then sat 20 px from the window's bottom, under its edge. The menu is what is
+     * tested, not where the Inspector ends. */
+    ed.init_headless(1600, 1000);
     ed.step_frame_headless();
     ed.command("select Cube");
     ed.command("component ArrayModifier");

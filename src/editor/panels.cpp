@@ -764,8 +764,9 @@ struct InspectorReflector : Reflector {
      * room it needs and the box moves after it, rather than the name ending in "...". */
     Recti fr = field_rect(row), lr = label_rect(row);
     const int need = u.font.text_width(n) + u.px(8);
-    if (need > lr.w && fr.w > u.px(24)) {
-      const int shift = std::min(need - lr.w, fr.w - u.px(24));
+    const int keep = std::min(row.h, u.font.line_height()) + u.px(2);  // (the box checkbox draws, and a little room around it)
+    if (need > lr.w && fr.w > keep) {
+      const int shift = std::min(need - lr.w, fr.w - keep);
       lr.w += shift, fr.x += shift, fr.w -= shift;
     }
     if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = fr;  // (task 0251: found by label, as the int field is)
