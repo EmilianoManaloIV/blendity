@@ -1,10 +1,10 @@
 # 0542: Panels and dialogs taller than their room scroll; tick boxes big enough to hit (round 560)
 
-- **Status:** in progress
+- **Status:** done
 - **Requirements:** the HCI survey's reach and visibility rules (round 505, ADR 0145)
 - **Decisions:** none needed (the toolkit's existing scroll and focus-reveal, used in two more places)
 - **Model:** main session (the HCI worker)
-- **PR:** (link when opened) - base `main`, the new top of Pass 27's stack (built on #443's head b73f0624)
+- **PR:** (link when opened) - base `main`, the new top of Pass 27's stack (built on #443, merged with the top #447 db75a75f)
 
 ## Goal
 M3's screenshot sweep (verify-544) at 1024 x 768, ui scale 1.5 found four things:
@@ -21,7 +21,8 @@ M3's screenshot sweep (verify-544) at 1024 x 768, ui scale 1.5 found four things
 ## Scope
 - In:
   - `ui.cpp`: a popup that scrolls draws a scrollbar on its right (the thumb drags, the track pages), and its rows give
-    the bar its strip; Tab onto a stop the dialog cuts off scrolls it into view (the focus reveal); a centred or right-
+    the bar its strip (a drag let go over a row only scrolls); Tab onto a stop the dialog cuts off scrolls it into view (the
+    focus reveal already did: the Tab-walk test is fixed to read stops in the dialog's content); a centred or right-
     aligned label too wide for its room is drawn from the left and ends in "...", like a button's.
   - Tick boxes: the box drawn is at least 16 px at scale 1 (scaled), as the rectangle given allows; `toggle_row`'s label
     moves with it.
