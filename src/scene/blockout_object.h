@@ -390,6 +390,7 @@ struct BlockoutLeafPlan {
   const char *name = "Leaf";
   Vec3 origin;
   float sign = 1.0f;     // Swing: +1 when hinged on the +X jamb (it turns Open x 90 degrees about Y, into +Z); Slide: +1 slides toward +X
+  float yaw = 0.0f;      // round 546: the copy's turn about the opening's up, degrees (an Array turned round, a Mirror Z) - the part stands turned by it
   float travel = 0.0f;   // Slide: how far Open 1 moves it, metres
   std::vector<std::pair<Vec3, Vec3>> boxes;  // the slab(s) in the leaf's own space: low and high corners (the Wings: a post and four vanes)
   BlockoutPartShape shape;  // a Frame's or a Glass's numbers

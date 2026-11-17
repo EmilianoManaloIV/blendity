@@ -2438,7 +2438,7 @@ A Blockout piece can carry modifiers of its own. They run on that piece's shape 
 ? Why is the Boolean modifier off for a piece? | A Boolean reads another object, and a piece's shape is made from its numbers alone; on a Blockout the same cut is a Subtract piece - exact and live.
 )"},
     {"Modifiers on a door or window", "An Array of windows along a wall from one, a Mirror across a facade, a bevelled hole", R"(
-A door or window piece takes modifiers too, in two ways. An Array or a Mirror repeats the whole opening - each copy a hole with its frame, bars and sill board - while every other modifier reshapes the hole itself (a plain opening's, for now: a styled one's hole is several pieces). Width, Head and Sill stay one opening's size.
+A door or window piece takes modifiers too, in two ways. An Array or a Mirror repeats the whole opening - each copy a hole with its frame, glass and a door's leaf - while every other modifier reshapes the hole itself. Width, Head and Sill stay one opening's size.
 
 # Try it
 ! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 4 8 2.6 | 1. A room 4 m by 8 m, in a new Blockout: its first wall is the 8 m one

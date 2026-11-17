@@ -321,7 +321,7 @@ std::string blockout_piece_stack_refusal(const BlockoutPiece &bp) {
 
 /* ---- Round 546: an opening's repeats (ADR 0150) ---- */
 
-bool blockout_opening_takes_shapers(const BlockoutPiece &bp) { return bp.opening == 0 || !bp.is_styled_opening(); }
+bool blockout_opening_takes_shapers(const BlockoutPiece &) { return true; }  // (round 547 made a styled opening's hole one piece: every hole takes them)
 
 bool blockout_opening_repeat(const Component &c) {
   if (const auto *a = dynamic_cast<const ArrayModifier *>(&c)) return a->fit_type != 2;  // (fitted to a curve: refused, as on any piece)
@@ -431,7 +431,12 @@ std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::st
   /* Copies on another copy's hole go (a Mirror of a lone opening lands on itself): the kernel would cut the same hole twice. */
   const float tol = 1e-4f * std::max(1.0f, std::max(bp->width, std::max(bp->head, bp->depth)));
   std::vector<Mat4> kept;
+  size_t tipped = 0;
   for (const Mat4 &m : at) {
+    if (finite_mat(m) && !(normalize(m.column(1)).y > 0.9999f)) {  // (a Mirror Y, a turn about X or Z: the copy would stand on its head or side - its door could not open)
+      tipped++;
+      continue;
+    }
     if (!finite_mat(m)) {
       if (why) *why = "a number of its Array or Mirror is not finite: it is built as one opening";
       return {Mat4::identity()};
@@ -444,6 +449,7 @@ std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::st
       return {Mat4::identity()};
     }
   }
+  if (tipped && why) *why = strprintf("%zu of its copies would not stand upright (a Mirror Y, a turn about X or Z) and are left out", tipped);
   return kept;
 }
 

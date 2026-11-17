@@ -2562,21 +2562,32 @@ void let_go(GameObject &leaf) {
   if (BlockoutLeaf *mark = leaf.get<BlockoutLeaf>()) leaf.remove_component(mark);
 }
 
-/* The places the opening stands at: one, the identity (round 547's stub). Round 546 replaces this with blockout_opening_placements() and applies the placement's rotation / mirror to the parts. */
-std::vector<Mat4> opening_placements(const GameObject &) { return {Mat4::identity()}; }
-
-/* Every part the opening has now: one set for each place it stands at (the copy's index and place in each plan). */
+/* Every part the opening has now: one set for each place it stands at (round 546: its Array and Mirror - blockout_opening_placements), the copy's index, place and turn in
+ * each plan. A mirrored copy is the opening turned over (blockout_opening_frames): its leaf hinges on the other jamb, its slabs mirrored across the leaf's X - the part is
+ * never given a negative scale (ADR 0135). */
 void opening_plans(const GameObject &door, const BlockoutPiece &bp, std::vector<BlockoutLeafPlan> &plans) {
   plans.clear();
   std::vector<BlockoutLeafPlan> one;
   blockout_part_plans(bp, one);
-  const std::vector<Mat4> places = opening_placements(door);
-  for (size_t c = 0; c < places.size(); c++)
+  const std::vector<Mat4> places = blockout_opening_placements(door), frames = blockout_opening_frames(door, Mat4::identity());
+  for (size_t c = 0; c < places.size() && c < frames.size(); c++) {
+    const Mat4 &p = places[c], &f = frames[c];
+    const bool mirrored = dot(cross(p.column(0), p.column(1)), p.column(2)) < 0.0f;
+    const Vec3 x = f.column(0);
+    const float yaw = std::atan2(-x.z, x.x) / kDeg2Rad;
     for (BlockoutLeafPlan plan : one) {
       plan.copy = (int)c;
-      if (c > 0) plan.origin = places[c].point(plan.origin);
+      /* The part's place is the mirror image itself (p, not the turned frame: a hinge 0.44 m right of the middle is 0.44 m left of the
+       * mirrored copy's); it stands turned by the frame's turn, and a mirrored one is hinged and shaped the other way round. */
+      plan.origin = p.point(plan.origin);
+      plan.yaw = std::fabs(yaw) < 1e-4f ? 0.0f : yaw;
+      if (mirrored) {
+        plan.sign = -plan.sign;
+        for (auto &b : plan.boxes) b = {Vec3(-b.second.x, b.first.y, b.first.z), Vec3(-b.first.x, b.second.y, b.second.z)};
+      }
       plans.push_back(std::move(plan));
     }
+  }
 }
 
 /* The parts under `piece` that another opening made. A copy of the whole opening (Ctrl+D, paste) has its parts marked with the original's id: the original still has a part of that kind and index

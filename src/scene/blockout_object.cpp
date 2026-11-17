@@ -1111,6 +1111,8 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
     }
     const size_t first = pieces.size();  // (round 546: an opening's pieces from here on are copied for each of its placements)
     if (bp && bp->enabled && bp->is_styled_opening() && collect_window(*bp, c->id, m, pieces, notes, grid_cell)) {
+      for (size_t i = first; notes && i < pieces.size(); i++)  // (round 546: the reshaping modifiers on the one hole round 547 makes - a Revolving door's drum)
+        if (const int part = window_part(pieces[i].id) & ~kPartDoorFlag; part == kPartHole || part == kPartDrum) blockout_piece_stack_note(*c, pieces[i], i, notes->surface);
       blockout_opening_copies(*c, m, first, pieces, notes ? &notes->surface : nullptr);
       collect(*c, m, pieces, notes, grid_cell);
       continue;
@@ -1807,17 +1809,18 @@ void blockout_part_plans(const BlockoutPiece &bp, std::vector<BlockoutLeafPlan> 
 }
 
 void blockout_leaf_pose(const BlockoutLeafPlan &plan, float open, Vec3 &position, float &yaw_degrees) {
-  position = plan.origin, yaw_degrees = 0.0f;
+  position = plan.origin, yaw_degrees = plan.yaw;  // (round 546: a copy's turn)
   if (plan.kind == BlockoutLeafPlan::Fixed) return;  // (a Frame or a Glass does not move with Open Amount)
-  if (plan.kind == BlockoutLeafPlan::Slide) position.x += plan.sign * open * plan.travel;
-  else yaw_degrees = plan.sign * open * 90.0f;
+  if (plan.kind == BlockoutLeafPlan::Slide) position += Quat::axis_angle(Vec3(0, 1, 0), plan.yaw * kDeg2Rad).rotate(Vec3(plan.sign * open * plan.travel, 0.0f, 0.0f));
+  else yaw_degrees += plan.sign * open * 90.0f;
 }
 
 bool blockout_leaf_open_of(const BlockoutLeafPlan &plan, const Transform &local, float &open) {
   if (plan.kind == BlockoutLeafPlan::Slide || plan.kind == BlockoutLeafPlan::Fixed) return false;
   const Vec3 forward = local.rotation.rotate(Vec3(0.0f, 0.0f, 1.0f)), up = local.rotation.rotate(Vec3(0.0f, 1.0f, 0.0f));
   if (!(up.y > 0.9995f)) return false;  // (tipped over by hand: it is just an object turned)
-  open = plan.sign * std::atan2(forward.x, forward.z) / kHalfPi;
+  const float turned = std::remainder(std::atan2(forward.x, forward.z) - plan.yaw * kDeg2Rad, 2.0f * kPi);  // (round 546: relative to the copy's own turn)
+  open = plan.sign * turned / kHalfPi;
   return finite_bits(open);
 }
 

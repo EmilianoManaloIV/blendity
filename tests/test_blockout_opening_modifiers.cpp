@@ -406,6 +406,96 @@ void tests_round546_more() {
   });
 }
 
+/* The parts (round 547's leaf, frame and glass objects) under an opening, by kind and copy. */
+std::vector<const GameObject *> r546_parts(const GameObject &opening, int kind) {
+  std::vector<const GameObject *> out;
+  for (const GameObject *c : opening.children)
+    if (const BlockoutLeaf *mark = c->get<BlockoutLeaf>(); mark && mark->kind == kind) out.push_back(c);
+  return out;
+}
+
+void tests_round546_parts() {
+  test("opening modifiers: a Single door with an Array of 2 has a leaf and a frame for each copy, each copy's in its own doorway", [] {
+    R546Wall w;
+    GameObject *d = w.ed.scene().create("Door", w.bo);
+    BlockoutPiece *bp = d->add<BlockoutPiece>();
+    bp->opening = 1, bp->style = 1, bp->width = 1.0f, bp->sill = 0.0f, bp->head = 2.1f, bp->depth = 0.4f;
+    d->set_local_position(Vec3(-2.0f, 0.0f, 0.0f));
+    w.land();
+    const size_t leaves1 = r546_parts(*d, kPartKindLeaf).size();
+    ArrayModifier *a = d->add<ArrayModifier>();
+    a->count = 2, a->relative_offset = Vec3(3.0f, 0.0f, 0.0f);
+    w.land();
+    const std::vector<const GameObject *> leaves = r546_parts(*d, kPartKindLeaf);
+    std::printf("    leaves: %zu without the Array, %zu with it\n", leaves1, leaves.size());
+    CHECK(leaves1 >= 1 && leaves.size() == 2 * leaves1);
+    bool in_copy = false;
+    for (const GameObject *l : leaves)
+      if (l->get<BlockoutLeaf>()->copy == 1) in_copy = in_copy || std::fabs(l->world_position().x - 1.0f) <= 0.55f;  // (copy 1 stands 3 m on, its doorway x 0.5 .. 1.5: the leaf hinges on one of its jambs)
+    CHECK(in_copy);
+  });
+
+  test("opening modifiers: a mirrored copy's leaf hinges on the other jamb - the plans' sides are opposite", [] {
+    R546Wall w;
+    GameObject *d = w.ed.scene().create("Door", w.bo);
+    BlockoutPiece *bp = d->add<BlockoutPiece>();
+    bp->opening = 1, bp->style = 1, bp->width = 1.0f, bp->sill = 0.0f, bp->head = 2.1f, bp->depth = 0.4f;
+    d->set_local_position(Vec3(0.0f, 0.0f, 0.0f));
+    ArrayModifier *a = d->add<ArrayModifier>();
+    a->count = 2, a->relative_offset = Vec3(2.5f, 0.0f, 0.0f);
+    d->add<MirrorModifier>();  // (X: the copy at +2.5 m and its image at -2.5 m)
+    w.land();
+    float sign_plus = 0.0f, sign_minus = 0.0f;
+    for (const GameObject *l : r546_parts(*d, kPartKindLeaf)) {
+      const float x = l->local().position.x;
+      const BlockoutLeaf *mark = l->get<BlockoutLeaf>();
+      std::printf("    leaf of copy %d at x %.2f\n", mark->copy, x);
+      if (x > 1.0f) sign_plus = 1.0f;
+      if (x < -1.0f) sign_minus = 1.0f;
+    }
+    CHECK(sign_plus > 0.0f && sign_minus > 0.0f);  // (a leaf at each side)
+    std::vector<BlockoutLeafPlan> one;
+    blockout_part_plans(*bp, one);
+    CHECK(!one.empty());
+    /* The hinges: the leaf at +2.5 and the leaf at -2.5 stand mirrored - their local X positions mirror about the opening's middle. */
+    std::vector<float> xs;
+    for (const GameObject *l : r546_parts(*d, kPartKindLeaf)) xs.push_back(l->local().position.x);
+    std::sort(xs.begin(), xs.end());
+    CHECK(xs.size() == 3 && std::fabs(xs.front() + xs.back()) < 1e-3f);
+  });
+
+  test("opening modifiers: a Bevel reshapes a styled window's one hole (round 547's) - more faces than without it, a valid mesh, every copy bevelled", [] {
+    R546Wall w;
+    GameObject *win = w.window(-2.0f, 1);
+    ArrayModifier *a = win->add<ArrayModifier>();
+    a->count = 2, a->relative_offset = Vec3(4.0f, 0.0f, 0.0f);
+    w.land();
+    const size_t plain = r546_mesh(*w.bo) ? r546_mesh(*w.bo)->face_count() : 0;
+    win->add<BevelModifier>()->width = 0.04f;
+    w.land();
+    const Mesh *m = r546_mesh(*w.bo);
+    std::printf("    two Single windows: %zu faces, bevelled %zu\n", plain, m ? m->face_count() : 0);
+    CHECK(m && m->face_count() > plain && structurally_valid(*m));
+    CHECK(w.hole_at(-2.0f, 1.5f) == w.hole_at(2.0f, 1.5f));
+  });
+
+  test("opening modifiers: a Mirror Y would stand a copy on its head - it is left out, and the status says why", [] {
+    R546Wall w;
+    GameObject *win = w.window(0.0f);
+    MirrorModifier *mm = win->add<MirrorModifier>();
+    mm->x = false, mm->y = true;
+    std::string why;
+    CHECK(blockout_opening_placements(*win, &why).size() == 1);
+    CHECK(why.find("upright") != std::string::npos);
+    w.land();
+    std::vector<std::pair<std::string, bool>> lines;
+    blockout_piece_stack_status(*w.bo, lines);
+    bool said = false;
+    for (const auto &l : lines) said = said || l.first.find("upright") != std::string::npos;
+    CHECK(said);
+  });
+}
+
 void tests_round546_lesson() {
   test("opening modifiers: the Learn section's Try-it commands run - a window with an Array of 3, and the status says it is repeated: 3 copies", [] {
     Editor ed;
@@ -458,6 +548,7 @@ void tests_round546_lesson() {
 void run_blockout_opening_modifiers_tests() {
   tests_round546_lesson();
   tests_round546_more();
+  tests_round546_parts();
   tests_round546_placements();
   tests_round546_build();
 }
