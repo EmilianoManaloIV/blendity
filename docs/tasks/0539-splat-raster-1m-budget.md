@@ -1,6 +1,7 @@
 # 0539: A million splats within the frame budget, and the card's cold first open (round 557)
 
-- **Status:** done, timed rows pending (the hub's timed batch); published as the PR below
+- **Status:** done. Timed (2026-11-17): the 1M orbit 6.2 ms on the card (was 93.7), 86.8 ms on the CPU (named: the CPU
+  misses ADR 0105 at 1M); the card's first open 0.54 s from an empty pipeline cache (was 92.5 s). PRs #446, #450.
 - **Requirements:** Q-06 responsiveness (ADR 0105); the Pass 27 plan's "1M-splat draw within ADR 0105's budgets"
 - **Decisions:** none needed (the card draws what it already draws, from data kept on it; the pipeline cache is the
   path tracer's, task 0160's, used by the rasterizer too)
