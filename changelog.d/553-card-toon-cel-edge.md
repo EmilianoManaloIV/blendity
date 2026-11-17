@@ -4,15 +4,16 @@
 the CPU's (9 antialiased pixels against 17). Make the card's edge the CPU's and put the 20th back (task 0534).
 
 **Found (task 0534)**
-- The card's edge was never narrower. The 20 m pictures, dumped from both renderers, show the sphere's cel edge as the
-  same 9 mid-tone pixels in the same places. The test's mask is every pixel that changes when the sphere moves away, and
+- The card's edge was never narrower. The 20 m pictures, dumped from both renderers, show the sphere's cel edge in the
+  same places on both: 8 mid-tone pixels on the CPU, 7 on the card. The test's mask is every pixel that changes when the sphere moves away, and
   that includes its shadow on the floor at the view's bottom: 8 of the CPU's 17 "between" pixels were its shadow's edge,
-  mid-grey on the CPU where the card's is dark. The 20th never held for the sphere on either renderer (9 of about 270,
-  a 30th); the CPU met it only through its shadow.
+  mid-grey on the CPU where the card's is dark. The 20th never held for the sphere on either renderer (8 of 243 on the
+  CPU, 7 of 242 on the card - a 30th); the CPU met it only through its shadow.
 
 **Changed**
-- The test counts the sphere's own pixels (the largest 4-connected part of the mask), holds both renderers to a 40th
-  (8 edge pixels or fewer fail) and the card's edge within 3 pixels of the CPU's. No product change: a card-side change
+- The test counts the sphere's own pixels (the largest 4-connected part of the mask) and measures the edge against
+  the sphere's height in rows, not its area (an edge's length goes with the diameter; the sphere is 17 rows at 20 m): at least a fifth of the
+  rows (4; measured 6-8), and the card's edge within 3 pixels of the CPU's. No product change: a card-side change
   tried first (the neighbour before where the next pixel is off the object) moved nothing and was reverted.
 - `BLENDITY_GPU_DIFF_DIR` also writes this test's 20 m pictures and masks.
 
