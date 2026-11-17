@@ -118,18 +118,23 @@ Each feature has a lesson (or a section of one) with Try-it lines that run headl
 
 | Round | Feature | Lesson / section | Try-it runs clean | Questions |
 |---|---|---|---|---|
-| 530 / 531 | point clouds, splats, import | added in #420's `5d077641` | TBD (the Learn walk) | TBD |
-| 532 - 534 | splats drawn and traced | TBD | TBD | TBD |
-| 535 | Quad Sphere, origin snapping | TBD | TBD | TBD |
-| 536 | Edit Mode dimensions | TBD (M2: "one step") | TBD | TBD |
-| 537 | LoopTools | "LoopTools: Loops to Circles, Curves and Planes" | yes (a unit test walks it) | 4 |
-| 538 | panoramic cameras | TBD | TBD | TBD |
-| 539 | Weight Paint automasking | "Automasking the weight brush" (a section) | TBD | TBD |
-| 540 | per-brush settings | TBD | TBD | TBD |
-| 541 | animation | TBD | TBD | TBD |
-| 542 | sun disc, ICC | TBD | TBD | TBD |
-| 543 | RT shadows | TBD | TBD | TBD |
-| 545 | Vertex Paint | TBD | TBD | TBD |
+| 530 / 531 | point clouds, splats, import | "Point clouds and Gaussian splats" (a section of "Modifiers vs Components") | yes - 1 step | 2 |
+| 532 - 534 | splats drawn and traced | the same section: **no step of its own** (its one step makes test splats; nothing shows them orbiting or rendered) | - | - |
+| 535 | Quad Sphere, origin snapping | a Try-it line in "Move, Rotate, Scale" | yes - 2 steps (the lesson) | 1 |
+| 536 | Edit Mode dimensions | "Typing a size (Dimensions)" (in "Edit Mode: Modeling Like Blender") | yes - 1 step | 2 |
+| 537 | LoopTools | "LoopTools: Loops to Circles, Curves and Planes" | yes - 5 steps | 4 |
+| 538 | panoramic cameras | "Panoramic Cameras" | yes - 3 steps | 3 |
+| 539 | Weight Paint automasking | "Automasking the weight brush" (in "Modifiers vs Components") | yes - 1 step | 1 |
+| 540 | per-brush settings | "Each brush keeps its own size" (in "Modifiers vs Components") | yes - 1 step | 3 |
+| 541 | animation | "Blender 5.3's animation tools: rotation, world space, poses, scrubbing" (in "Modifiers vs Components") | yes - 2 steps | 4 |
+| 542 | sun disc, ICC | **none** | - | - |
+| 543 | RT shadows | "Shadows traced by the card (round 543)" (in "Rendering on the GPU") | yes - 2 steps | 2 |
+| 545 | Vertex Paint | "Vertex colours and Vertex Paint" (in "Modifiers vs Components") | yes - 1 step | 2 |
+| 547 | a door's and a window's parts | "The frame and the glass are objects" (in "Windows with a style"; steps 6 - 10 of its Try it) | yes - 17 steps (the lesson) | 5 |
+
+The walk is a unit test (`tests/test_editor.cpp`, "learn (Pass 27's write-up): ..."): each feature's section's Try-it
+lines in order in a fresh editor, no warning, at least one question. Gaps: 542 has no section, and 532 - 534's drawing
+and tracing have no step of their own.
 
 ## What the documentation gets
 
