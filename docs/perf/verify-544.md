@@ -149,6 +149,14 @@ The walk is a unit test (`tests/test_editor.cpp`, "learn (Pass 27's write-up): .
 lines in order in a fresh editor, no warning, at least one question. Gap: 532 - 534's drawing
 and tracing have no step of their own.
 
+
+## Known flakes (seen on the joined tree, 2026-11-17)
+
+| Test | Group | Seen | Alone |
+|---|---|---|---|
+| "Budget (round 355): Decimate to Good lands near the limit, ..." (`test_assets.cpp` 6061: the glb's skin and its shape key's name) | assets | once in a group run | 3 of 3, and a whole group run, pass |
+| "round 507 (test engineer): Save As to another file the moment a bake lands writes the lightmaps next to the new file" (`test_lighting.cpp` 12109) | lighting | once in a group run | 5 of 5 pass |
+| "round 508 (test engineer): console commands while a picture reads ..." (`test_editor.cpp` 14643) | editor | once: another session's `out.png` in the shared `%TEMP%\blendity_tests` | 3 of 3 pass; round 550 gives each run its own folder |
 ## What the documentation gets
 
 Through the fold of every `changelog.d/5xx-*.md` (ADR 0123) and this round's own edits:
