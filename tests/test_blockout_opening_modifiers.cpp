@@ -433,6 +433,12 @@ void tests_round546_parts() {
     for (const GameObject *l : leaves)
       if (l->get<BlockoutLeaf>()->copy == 1) in_copy = in_copy || std::fabs(l->world_position().x - 1.0f) <= 0.55f;  // (copy 1 stands 3 m on, its doorway x 0.5 .. 1.5: the leaf hinges on one of its jambs)
     CHECK(in_copy);
+    const std::vector<const GameObject *> frames = r546_parts(*d, kPartKindFrame);
+    CHECK(frames.size() == 2);
+    bool frame_in_copy = false;
+    for (const GameObject *f : frames)
+      if (f->get<BlockoutLeaf>()->copy == 1) frame_in_copy = std::fabs(f->world_position().x - 1.0f) < 1e-3f;  // (a Frame's pivot: the middle of the hole's bottom line)
+    CHECK(frame_in_copy);
   });
 
   test("opening modifiers: a mirrored copy's leaf hinges on the other jamb - the plans' sides are opposite", [] {
@@ -462,6 +468,83 @@ void tests_round546_parts() {
     for (const GameObject *l : r546_parts(*d, kPartKindLeaf)) xs.push_back(l->local().position.x);
     std::sort(xs.begin(), xs.end());
     CHECK(xs.size() == 3 && std::fabs(xs.front() + xs.back()) < 1e-3f);
+    /* Each leaf's slab lies in its own doorway, closed: the mirrored one too (its hinge on the other jamb, its slab mirrored - else it would stand
+     * outside the doorway, in the wall). */
+    for (const GameObject *l : r546_parts(*d, kPartKindLeaf)) {
+      const BlockoutLeaf *mark = l->get<BlockoutLeaf>();
+      const float middle = mark->copy == 0 ? 0.0f : l->local().position.x > 0.0f ? 2.5f : -2.5f;
+      const MeshFilter *mf = l->get<MeshFilter>();
+      AABB b;
+      if (mf && mf->mesh)
+        for (const Vec3 &v : mf->mesh->positions) b.add(l->world_matrix().point(v));
+      std::printf("    copy %d's leaf spans x %.2f .. %.2f (its doorway %.2f .. %.2f)\n", mark->copy, b.min.x, b.max.x, middle - 0.5f, middle + 0.5f);
+      CHECK(mf && mf->mesh && b.min.x > middle - 0.55f && b.max.x < middle + 0.55f);
+    }
+  });
+
+  test("opening modifiers: a window turned round by a radial Array about Y - changing the angle turns copy 1's frame with it, and a door's Open Amount stays as it was", [] {
+    R546Wall w;
+    GameObject *d = w.ed.scene().create("Door", w.bo);
+    BlockoutPiece *bp = d->add<BlockoutPiece>();
+    bp->opening = 1, bp->style = 1, bp->width = 1.0f, bp->sill = 0.0f, bp->head = 2.1f, bp->depth = 0.4f, bp->open_amount = 0.5f;
+    d->set_local_position(Vec3(0.0f, 0.0f, 3.0f));  // (in the air: the turned copies need no wall to stand)
+    ArrayModifier *a = d->add<ArrayModifier>();
+    a->mode = 1, a->count = 2, a->radial_axis = 1, a->radial_angle = 90.0f;
+    w.land();
+    auto frame_yaw = [&](int copy) {
+      for (const GameObject *f : r546_parts(*d, kPartKindFrame))
+        if (f->get<BlockoutLeaf>()->copy == copy) {
+          const Vec3 x = f->local().rotation.rotate(Vec3(1, 0, 0));
+          return std::atan2(-x.z, x.x) / kDeg2Rad;
+        }
+      return 1e9f;
+    };
+    const float before = frame_yaw(1);
+    a->radial_angle = 60.0f;
+    w.land();
+    const float after = frame_yaw(1);
+    std::printf("    copy 1's frame turned %.1f, then %.1f degrees; Open Amount %.3f\n", before, after, bp->open_amount);
+    CHECK(std::fabs(before - 90.0f) < 0.5f);
+    CHECK(std::fabs(after - 60.0f) < 0.5f);  // (its key holds the turn: re-placed when only that changed)
+    CHECK(std::fabs(bp->open_amount - 0.5f) < 1e-4f);  // (the turned copy's leaf is not read as a hand turn)
+  });
+
+  test("opening modifiers: a Bevel put on the first copy's frame is on every copy's frame too - and one put on a copy's by hand gives way to the first's", [] {
+    R546Wall w;
+    GameObject *win = w.window(-2.0f, 1);
+    ArrayModifier *a = win->add<ArrayModifier>();
+    a->count = 3, a->relative_offset = Vec3(2.0f, 0.0f, 0.0f);
+    w.land();
+    GameObject *first = nullptr, *third = nullptr;
+    for (const GameObject *f : r546_parts(*win, kPartKindFrame)) {
+      const int c = f->get<BlockoutLeaf>()->copy;
+      if (c == 0) first = const_cast<GameObject *>(f);
+      if (c == 2) third = const_cast<GameObject *>(f);
+    }
+    CHECK(first && third);
+    if (!first || !third) return;
+    first->add<BevelModifier>()->width = 0.01f;
+    w.land();
+    size_t bevelled = 0;
+    for (const GameObject *f : r546_parts(*win, kPartKindFrame)) bevelled += f->get<BevelModifier>() != nullptr;
+    CHECK(bevelled == 3);
+    third->add<SolidifyModifier>();  // (by hand, on a copy: the copies follow the first)
+    w.land();
+    CHECK(third->get<SolidifyModifier>() == nullptr && third->get<BevelModifier>() != nullptr);
+  });
+
+  test("opening modifiers: a plain window with a Mirror Y keeps its mirrored hole (no parts to stand on their head); a styled one leaves it out", [] {
+    R546Wall w;
+    GameObject *plain = w.window(-2.0f);
+    plain->add<MirrorModifier>()->x = false, plain->get<MirrorModifier>()->y = true;
+    std::string why;
+    CHECK(blockout_opening_placements(*plain, &why).size() == 2);
+    CHECK(why.empty());
+    GameObject *styled = w.window(2.0f, 1);
+    styled->add<MirrorModifier>()->x = false, styled->get<MirrorModifier>()->y = true;
+    why.clear();
+    CHECK(blockout_opening_placements(*styled, &why).size() == 1);
+    CHECK(why.find("upright") != std::string::npos);
   });
 
   test("opening modifiers: a Bevel reshapes a styled window's one hole (round 547's) - more faces than without it, a valid mesh, every copy bevelled", [] {
@@ -479,9 +562,9 @@ void tests_round546_parts() {
     CHECK(w.hole_at(-2.0f, 1.5f) == w.hole_at(2.0f, 1.5f));
   });
 
-  test("opening modifiers: a Mirror Y would stand a copy on its head - it is left out, and the status says why", [] {
+  test("opening modifiers: a Mirror Y would stand a styled copy on its head - it is left out, and the status says why", [] {
     R546Wall w;
-    GameObject *win = w.window(0.0f);
+    GameObject *win = w.window(0.0f, 1);
     MirrorModifier *mm = win->add<MirrorModifier>();
     mm->x = false, mm->y = true;
     std::string why;

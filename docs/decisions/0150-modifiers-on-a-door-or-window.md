@@ -126,11 +126,16 @@ The owner chose "repeat the whole opening"; the copies are generated, never hand
   selects it); `blockout_opening_frames()` gives the Scene view's cut outline (drawn and clicked) for every copy.
 - A mirrored copy is made as its turn: every kernel piece a style makes is symmetric across the opening's local X through its
   middle (checked for each window and door style, the Revolving door's drum and ring included). Round 547's leaf, frame and glass
-  objects per copy must flip the hinge side instead.
+  objects per copy flip the hinge side instead.
 - Copies on another copy's hole are dropped (the hole is symmetric across X and Z through its middle, not across Y). The cap is
   checked before copies are made; past it, and for a number that is not finite, the opening is built once and says why.
-- Until round 547 makes a styled opening's hole one piece, its reshaping modifiers do nothing (the Inspector and the status say
-  so); a plain opening's do. Join's overlap test and the size handles see the first copy only (the spec's "Out").
+- With round 547 merged, every hole takes the reshaping modifiers: a plain opening's box, a styled one's `kPartHole`, a Revolving
+  door's drum cylinder (not its entry box: one evaluation, no seam). Each copy's parts take its place (`opening_plans`): at the
+  placement's own image, turned by the turned copy's yaw (`BlockoutLeafPlan::yaw`, in the pose and in reading a hand-turned leaf's
+  Open Amount; in the part's key only when non-zero, so round 515's saved keys stay), a mirrored copy's leaf hinged on the other
+  jamb with its slabs mirrored. A copy's part takes copy 0's part's stack (decided 1), replacing any put on it by hand.
+- A styled copy that would not stand upright (a Mirror Y, a turn about X or Z) is left out, with the reason: its parts cannot stand
+  on their head. A plain opening's is made. Join's overlap test and the size handles see the first copy only (the spec's "Out").
 
 ## What taking round 547 in needs (its worker's notes)
 - `blockout_opening_cut`: each placement's hole gets its own piece id (the copy index in the id), stable while the

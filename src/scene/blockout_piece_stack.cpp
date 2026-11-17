@@ -321,7 +321,12 @@ std::string blockout_piece_stack_refusal(const BlockoutPiece &bp) {
 
 /* ---- Round 546: an opening's repeats (ADR 0150) ---- */
 
-bool blockout_opening_takes_shapers(const BlockoutPiece &) { return true; }  // (round 547 made a styled opening's hole one piece: every hole takes them)
+uint64_t blockout_modifiers_hash(const GameObject &g) {
+  uint64_t h = kFnvBasis;
+  for (const auto &c : g.components)
+    if (c->is_modifier()) h = (h ^ hash_component(*c) ^ (c->enabled ? 0x9E3779B97F4A7C15ull : 0)) * kFnvPrime;
+  return h;
+}
 
 bool blockout_opening_repeat(const Component &c) {
   if (const auto *a = dynamic_cast<const ArrayModifier *>(&c)) return a->fit_type != 2;  // (fitted to a curve: refused, as on any piece)
@@ -433,7 +438,7 @@ std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::st
   std::vector<Mat4> kept;
   size_t tipped = 0;
   for (const Mat4 &m : at) {
-    if (finite_mat(m) && !(normalize(m.column(1)).y > 0.9999f)) {  // (a Mirror Y, a turn about X or Z: the copy would stand on its head or side - its door could not open)
+    if (bp->is_styled_opening() && finite_mat(m) && !(normalize(m.column(1)).y > 1.0f - 1e-6f)) {  // (a Mirror Y, a turn about X or Z: a styled copy's parts would stand on their head or side - its door could not open; a plain hole may)
       tipped++;
       continue;
     }
@@ -449,7 +454,7 @@ std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::st
       return {Mat4::identity()};
     }
   }
-  if (tipped && why) *why = strprintf("%zu of its copies would not stand upright (a Mirror Y, a turn about X or Z) and are left out", tipped);
+  if (tipped && why) *why = strprintf("%zu of its copies would not stand upright (a Mirror Y, a turn about X or Z) and are left out - its frame and leaf cannot", tipped);
   return kept;
 }
 
@@ -507,7 +512,6 @@ void blockout_piece_stack(const GameObject &piece, std::vector<const Component *
   const BlockoutPiece *bp = piece.get<BlockoutPiece>();
   if (!bp || !blockout_piece_stack_refusal(*bp).empty()) return;
   const bool opening = bp->opening != 0;  // (round 546: an opening's Array and Mirror are its copies, not part of its hole's stack)
-  if (!blockout_opening_takes_shapers(*bp)) return;  // (a styled opening's hole is not one piece yet)
   for (const auto &c : piece.components)
     if (c->is_modifier() && c->enabled && taken(c->type_name()) && instance_refusal(*c).empty() && !(opening && blockout_opening_repeat(*c))) out.push_back(c.get());
 }
@@ -591,15 +595,8 @@ namespace {
 void opening_status(const GameObject &g, std::vector<std::pair<std::string, bool>> &lines) {
   std::string why;
   const size_t copies = blockout_opening_placements(g, &why).size();
+  if (copies > 1) lines.push_back({strprintf("'%s' is repeated by its Array and Mirror: %zu copies", g.name.c_str(), copies), false});
   if (!why.empty()) lines.push_back({"'" + g.name + "': " + why, true});
-  else if (copies > 1) lines.push_back({strprintf("'%s' is repeated by its Array and Mirror: %zu copies", g.name.c_str(), copies), false});
-  const BlockoutPiece *bp = g.get<BlockoutPiece>();
-  if (!bp || blockout_opening_takes_shapers(*bp)) return;
-  for (const auto &c : g.components)
-    if (c->is_modifier() && c->enabled && taken(c->type_name()) && !blockout_opening_repeat(*c)) {
-      lines.push_back({"'" + g.name + "': its " + short_name(c->type_name()) + " does nothing on a styled door or window yet - it reshapes a plain opening's hole", true});
-      break;
-    }
 }
 
 }  // namespace

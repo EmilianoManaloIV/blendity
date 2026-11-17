@@ -62,9 +62,9 @@ std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::st
 /* The copies' frames for what is drawn and picked of them (the Scene view's cut outline): `world` (the opening's world matrix) times
  * each placement, a mirrored one made as its turn - the identity's first. */
 std::vector<Mat4> blockout_opening_frames(const GameObject &opening, const Mat4 &world);
-/* Whether an opening's other modifiers (Bevel ...) reshape its hole: a plain opening's hole is one piece; a styled door's or window's
- * is several until round 547 makes it one (then this is true for every opening). */
-bool blockout_opening_takes_shapers(const BlockoutPiece &bp);
+/* Every modifier component on `g` (on or off), its type and fields, in order, as one number: equal stacks, equal hashes (round 546: a copy's
+ * part follows copy 0's). */
+uint64_t blockout_modifiers_hash(const GameObject &g);
 /* Whether this modifier is one of an opening's repeats (Array, Mirror) rather than one that reshapes its hole. */
 bool blockout_opening_repeat(const Component &c);
 /* A copy's kernel piece id: the opening's piece `id` (its own, or a made part's) with the copy's index (1 .. 255) in bits 55-62 - a

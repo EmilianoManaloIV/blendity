@@ -1112,7 +1112,8 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
     const size_t first = pieces.size();  // (round 546: an opening's pieces from here on are copied for each of its placements)
     if (bp && bp->enabled && bp->is_styled_opening() && collect_window(*bp, c->id, m, pieces, notes, grid_cell)) {
       for (size_t i = first; notes && i < pieces.size(); i++)  // (round 546: the reshaping modifiers on the one hole round 547 makes - a Revolving door's drum)
-        if (const int part = window_part(pieces[i].id) & ~kPartDoorFlag; part == kPartHole || part == kPartDrum) blockout_piece_stack_note(*c, pieces[i], i, notes->surface);
+        if (const int part = window_part(pieces[i].id) & ~kPartDoorFlag; part == kPartHole || (part == kPartDrum && pieces[i].shape == blockout::Shape::Cylinder))
+          blockout_piece_stack_note(*c, pieces[i], i, notes->surface);  // (a Revolving door's drum: the cylinder, not its entry box - one evaluation, no seam between two)
       blockout_opening_copies(*c, m, first, pieces, notes ? &notes->surface : nullptr);
       collect(*c, m, pieces, notes, grid_cell);
       continue;
@@ -2022,6 +2023,7 @@ uint64_t blockout_leaf_key(const BlockoutLeafPlan &plan, float texture_scale, co
   h = fnv1a(plan.name, std::strlen(plan.name), h);
   for (int a = 0; a < 3; a++) h = mix_float(h, plan.origin[a]);
   h = mix_float(mix_float(h, plan.sign), plan.travel);
+  if (plan.yaw != 0.0f) h = mix_float(h, plan.yaw);  // (round 546: a copy turned another way is placed again - only when turned, so the keys round 515 saved stay valid)
   for (const auto &box : plan.boxes)
     for (int a = 0; a < 3; a++) h = mix_float(mix_float(h, box.first[a]), box.second[a]);
   if (plan.kind == BlockoutLeafPlan::Fixed) {  // (a leaf's key is what round 515 wrote: the scenes it saved keep their leaves)

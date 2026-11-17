@@ -60,7 +60,7 @@ opening's size.
    opening leaves one hole (the copy lands on itself and is cut once).
 5. Width, Head and Sill are unchanged by any modifier; the handles drag the first copy's size and every copy follows
    (one evaluation for a shaper change, none for a move).
-6. A copy that falls outside every wall cuts nothing and the status names it; an Array of 300 builds one copy and the
+6. A copy that falls outside every wall cuts nothing and the status names it (deferred: it cuts nothing, but is not named yet - the changelog's Limits); an Array of 300 builds one copy and the
    status says why; an Array fitting a curve is refused as on any piece.
 7. A Bevel above an Array and an Array above a Bevel give the same result (repeats run last), and the Modifiers section
    says so when a repeat sits above a shaper.

@@ -5,7 +5,7 @@ opening itself (this round) and its parts (round 547). Approved: "Array and mirr
 
 **Added**
 - **A door or window takes a modifier stack.** Its Array and Mirror repeat the whole opening: each copy is the opening as its
-  numbers make it - its hole and (with round 547) its frame, glass, sill board and a door's leaf - placed in the opening's own
+  numbers make it - its hole and round 547's frame, glass and a door's leaf, each copy's own objects - placed in the opening's own
   axes (an Array steps in multiples of its size, a Mirror mirrors across its middle; a mirrored copy is made as a turn, never a
   negative scale). The copies are exact, from the numbers - a row of ten windows from one costs what ten placed by hand cost.
   The other modifiers a piece takes (Bevel, Subdivision ...) reshape the hole, as round 514 runs a piece's stack.
@@ -14,16 +14,25 @@ opening itself (this round) and its parts (round 547). Approved: "Array and mirr
 - **The Inspector** says what an opening's modifiers do, warns when a repeat sits above a reshaping one, and says why the
   copies were refused; **the status** (and `blockout info`) says how many copies an opening makes, or why it is built once
   (more than 256 copies, a number that is not finite).
-- A copy's faces belong to the opening: a click on one selects it. Copies share one evaluation of the hole's stack.
+- A copy's faces belong to the opening: a click on one selects it, and the Scene view draws the cut outline of every copy.
+  Copies share one evaluation of the hole's stack.
+- **Each copy's parts** (round 547's objects): a turned copy's stand turned with it; a mirrored copy's leaf hinges on the other
+  jamb; a copy's part takes the modifiers of the first copy's part of its kind - edit those, the copies follow (the Inspector says
+  so on a copy's part). Deleting a leaf turns Leaf off for every copy, as for one.
 - A Learn section "Modifiers on a door or window".
 
 **Changed:** round 514's "no stacks on doors and windows" (ADR 0138) - a modifier already saved on an opening (inert until now)
 works when the scene opens. Rooms, presets and Intersect pieces still take none.
 
-**Limits:** before round 547 lands, a styled window's reshaping modifiers wait for its one-piece hole (the copies are made);
-a copy that falls outside every wall cuts nothing, and the status does not name it yet.
+**Limits:** a styled door's or window's copy that would not stand upright (a Mirror Y, a turn about X or Z) is left out - its
+frame and leaf cannot - and the status says so; a plain opening's is made. A copy that falls outside every wall cuts nothing
+(its parts still stand there) and the status does not name it yet. Join's overlap test and the size handles see the first copy.
 
 **Checked:** CHECKED_546
+
+<!-- README -->
+after:   Draw Piece draws a door or a window onto a wall of a Blockout by dragging a rectangle
+  a door or window takes modifiers: an Array or a Mirror repeats the whole opening, a Bevel rounds its hole (round 546);
 
 <!-- docs/ARCHITECTURE.md -->
 after: | `Editor::blockout_hit`, `blockout_wall_under_mouse`

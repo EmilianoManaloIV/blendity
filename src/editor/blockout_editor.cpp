@@ -2569,10 +2569,11 @@ void opening_plans(const GameObject &door, const BlockoutPiece &bp, std::vector<
   plans.clear();
   std::vector<BlockoutLeafPlan> one;
   blockout_part_plans(bp, one);
-  const std::vector<Mat4> places = blockout_opening_placements(door), frames = blockout_opening_frames(door, Mat4::identity());
-  for (size_t c = 0; c < places.size() && c < frames.size(); c++) {
-    const Mat4 &p = places[c], &f = frames[c];
+  const std::vector<Mat4> places = blockout_opening_placements(door);
+  for (size_t c = 0; c < places.size(); c++) {
+    const Mat4 &p = places[c];
     const bool mirrored = dot(cross(p.column(0), p.column(1)), p.column(2)) < 0.0f;
+    const Mat4 f = mirrored ? p * Mat4::scale(Vec3(-1.0f, 1.0f, 1.0f)) : p;  // (the copy turned: as blockout_opening_frames makes it)
     const Vec3 x = f.column(0);
     const float yaw = std::atan2(-x.z, x.x) / kDeg2Rad;
     for (BlockoutLeafPlan plan : one) {
@@ -2628,6 +2629,23 @@ void claim_leaves(Scene &scene, GameObject &door) {
 void copy_stack(const GameObject &from, GameObject &to) {
   for (const auto &c : from.components)
     if (c->is_modifier()) to.add_component(c->clone());
+}
+
+/* Round 546 (ADR 0150, decided 1): a copy's part has the stack of copy 0's part of its kind and index - an edit is made on copy 0, the opening's own
+ * part, and every copy follows it; a stack put on a copy's part by hand is replaced (the copies are generated, never hand-made). */
+void follow_first_copy(const std::vector<GameObject *> &slot, const std::vector<BlockoutLeafPlan> &plans) {
+  for (size_t i = 0; i < plans.size(); i++) {
+    if (plans[i].copy == 0 || !slot[i]) continue;
+    const GameObject *first = nullptr;
+    for (size_t k = 0; k < plans.size() && !first; k++)
+      if (plans[k].copy == 0 && plans[k].part == plans[i].part && plans[k].index == plans[i].index) first = slot[k];
+    if (!first || blockout_modifiers_hash(*first) == blockout_modifiers_hash(*slot[i])) continue;
+    std::vector<Component *> old;
+    for (const auto &c : slot[i]->components)
+      if (c->is_modifier()) old.push_back(c.get());
+    for (Component *c : old) slot[i]->remove_component(c);
+    copy_stack(*first, *slot[i]);
+  }
 }
 
 /* Whether the renderer still holds what the editor last gave this part, so the editor may change it; a material the user dropped on the part is theirs. `last` is the mark's record: a path; "-" for
@@ -2714,7 +2732,8 @@ void Editor::blockout_sync_door(GameObject &door) {
     scene_->destroy(leaves);
     seen.clear();
     blockout_join_step("Delete Door Leaf");
-    Log::info("Door '%s': a leaf was deleted, so its Leaf is off now (turn it on to make the leaves again)", door.name.c_str());
+    const bool copies = std::any_of(plans.begin(), plans.end(), [](const BlockoutLeafPlan &p) { return p.copy > 0; });
+    Log::info("Door '%s': a leaf was deleted, so its Leaf is off now%s (turn it on to make the leaves again)", door.name.c_str(), copies ? " - for every copy" : "");
     return;
   }
   /* The parts the plans want, by slot; a part the opening made that no plan wants (an index too high, a Glass turned off, an opening that wants none) goes - but a Frame or a Glass whose numbers
@@ -2772,6 +2791,7 @@ void Editor::blockout_sync_door(GameObject &door) {
     mark->open_seen = open;
     fresh[i] = true;
   }
+  follow_first_copy(slot, plans);
   /* Turned by hand: a leaf the door agreed with at the last walk that now stands at another angle writes it to the door's Open Amount (same undo step); the other leaves follow.
    * Not while the turn is still going (a Rotate drag, a held slider): the angle is read when it is let go. A Frame and a Glass do not turn: only the leaves are read. */
   /* The first walk after a preview ended: a leaf the preview left at an angle the door does not say is put back to the door's number, not written back into whatever step comes last. */
@@ -2903,8 +2923,9 @@ void Editor::draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &mark, ui::La
   const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
   const bool window = bp && bp->opening == 2;
   const std::string noun = window ? "window" : "door", What = window ? "Window" : "Door";
-  const std::string text = door ? "Made by " + What + " '" + door->name + "' - its shape follows the " + noun + "'s numbers; its modifiers are yours"
-                                : "Not under a door or window any more - an ordinary object from the next frame";
+  const std::string text = !door ? "Not under a door or window any more - an ordinary object from the next frame"
+                            : mark.copy > 0 ? strprintf("Copy %d of %s '%s' - its modifiers follow the first copy's: edit those", mark.copy, What.c_str(), door->name.c_str())
+                                            : "Made by " + What + " '" + door->name + "' - its shape follows the " + noun + "'s numbers; its modifiers are yours";
   u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, text, u.theme.text_dim);
   const std::string duplicate_key = shortcut_text("edit.duplicate");  // (the keymap's label: it can be rebound)
   const std::string part = mark.kind == kPartKindFrame ? "frame" : mark.kind == kPartKindGlass ? "glass" : "leaf";

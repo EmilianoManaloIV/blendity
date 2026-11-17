@@ -1575,16 +1575,13 @@ static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const Ga
     if (blockout_opening_repeat(*c)) repeats = true;
     else if (repeats && blockout_piece_modifier_refusal(c->type_name()).empty()) repeat_above = true;  // (a reshaping modifier below a repeat: it still runs first)
   }
-  const BlockoutPiece *bp = g.get<BlockoutPiece>();
-  const bool shapes = bp && blockout_opening_takes_shapers(*bp);
+
   row(copies > 1 ? strprintf("Array and Mirror repeat the whole opening: %zu copies. The others reshape its hole.", copies)
                  : std::string("Array and Mirror repeat the whole opening; the others reshape its hole."),
       false,
       "Each copy is the whole door or window - its hole, frame, glass, sill board and a door's leaf - placed in the opening's own axes "
       "(an Array steps along them in multiples of its size, a Mirror mirrors across its middle). Bevel and the others reshape the hole only; "
       "the frame, glass and leaf take modifiers of their own.");
-  if (!shapes) row("Bevel and the others do nothing on a styled door or window yet: they reshape a plain opening's hole.", true,
-                   "A styled opening's hole is made of several pieces; it takes them once its frame and glass are objects of their own.");
   row("Width, Head and Sill are one opening's size, before its modifiers.", false,
       "Its handles and F9 set the first opening's size; the copies follow it.");
   if (repeat_above) row("Array and Mirror run after the others, whatever their order here.", true, "The hole is reshaped first, then repeated.");
