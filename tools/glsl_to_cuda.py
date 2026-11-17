@@ -17,18 +17,22 @@ ROOT, OUT = sys.argv[1], sys.argv[2]
 
 
 def raw_parts(path):
-    """The R"GLSL(...)GLSL" pieces of a header, in order, with kGlslProcedurals' name where the kernel lists it."""
+    """The R"GLSL(...)GLSL" pieces of a header, in order, with kGlslProcedurals' / kGlslSplats' name where the kernel
+    lists it."""
     text = open(path, encoding="utf-8").read()
     parts = []
-    for m in re.finditer(r'R"GLSL\((.*?)\)GLSL"|\bkGlslProcedurals\b(?=,)', text, re.S):
-        parts.append(m.group(1) if m.group(1) is not None else "@PROCEDURALS@")
+    for m in re.finditer(r'R"GLSL\((.*?)\)GLSL"|\b(kGlslProcedurals|kGlslSplats)\b(?=,)', text, re.S):
+        parts.append(m.group(1) if m.group(1) is not None else "@%s@" % m.group(2))
     return parts
 
 
 procedurals = raw_parts(os.path.join(ROOT, "src", "render", "gpu_glsl.h"))
 assert len(procedurals) == 1, "gpu_glsl.h: one GLSL piece expected"
+splats = raw_parts(os.path.join(ROOT, "src", "render", "gsplat_gpu_glsl.h"))  # round 534: the Gaussian splats
+assert len(splats) == 1, "gsplat_gpu_glsl.h: one GLSL piece expected"
 kernel = raw_parts(os.path.join(ROOT, "src", "render", "gpu_kernel.h"))
-src = "".join(procedurals[0] if p == "@PROCEDURALS@" else p for p in kernel)
+pieces = {"@kGlslProcedurals@": procedurals[0], "@kGlslSplats@": splats[0]}
+src = "".join(pieces.get(p, p) for p in kernel)
 
 # --- the lines GLSL needs and CUDA doesn't
 drop = [r"^#version .*$", r"^#extension .*$", r"^layout\(local_size_x.*$", r"^layout\(push_constant\).*$",
@@ -46,7 +50,7 @@ assert not leftover, "a layout this translation doesn't know: %s" % leftover[:2]
 # --- the intersection: OptiX's
 src, n = re.subn(r"^#ifdef USE_RAY_QUERY\nbool intersect\(",
                  "#if 1  // (the OptiX device: optixTrace through the scene's acceleration structures)\n"
-                 "bool intersect(vec3 o, vec3 d, inout Hit h) { return optix_intersect(o, d, h.t, h.u, h.v, h.prim, h.obj); }\n"
+                 "bool intersect(vec3 o, vec3 d, inout Hit h) { return optix_intersect(o, d, h.t, h.u, h.v, h.prim, h.obj, g_splat_seed, g_meshes_only ? 1u : 255u); }\n"
                  "#elif defined(USE_RAY_QUERY)\nbool intersect(", src, flags=re.M)
 assert n == 1, "the intersect() variants"
 
@@ -86,7 +90,8 @@ while True:
 src = "".join(out)
 
 # --- the buffers by their own names (B_<name>): a local may share a buffer's name (GLSL lets it shadow), a macro can't
-BUFFERS = ["accum", "aux", "nodes", "tris", "insts", "verts", "idx", "mats", "lights", "mlights", "mcdf", "tex8", "texf", "texinfo", "tlas_obj"]
+BUFFERS = ["accum", "aux", "nodes", "tris", "insts", "verts", "idx", "mats", "lights", "mlights", "mcdf", "tex8", "texf", "texinfo", "tlas_obj",
+           "splats", "splat_sh"]
 for name in BUFFERS:
     assert not re.search(r"\b(?:int|uint|float|bool|vec[234]|ivec[234]|uvec[234])\s+%s\s*\[" % name, src), "a local array named like the buffer " + name
     src = re.sub(r"\b%s\[" % name, "B_%s[" % name, src)
