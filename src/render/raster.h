@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace bl {
@@ -355,6 +356,7 @@ struct RenderTarget {
   }
 };
 
+class SplatPass;  // gsplat_raster.h (round 532)
 struct Shade8Tri;  // a triangle as the 8-wide shader takes it (raster.cpp, task 0091)
 
 class Renderer3D {
@@ -379,6 +381,12 @@ class Renderer3D {
    * and then shading over most of them cost 2 ms a view on 8 threads). env must live until flush(). */
   void clear_environment(const Mat4 &inv_view_proj, const Environment &env, ViewTransform vt, float exposure);
   void add(const DrawItem &item) { items_.push_back(item); }
+  /* Round 532: Gaussian splats the next flush() blends in after the opaque pass and before the see-through one (null =
+   * none; cleared by flush). The pass must live until flush() returns. */
+  void set_splats(const SplatPass *p) { splats_ = p; }
+  /* The renderer's own splat pass (review 532): it moves with the renderer - the editor swaps each window's renderer
+   * into its views - so each view keeps the sorted orders of its own camera; made on first use. */
+  SplatPass &splat_pass();
   void flush();
 
   /* Overlays drawn after flush() (grid, wireframes, gizmo lines). */
@@ -478,6 +486,8 @@ class Renderer3D {
                   std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const;
 
   uint64_t uses_ = 0;
+  const SplatPass *splats_ = nullptr;  // (round 532)
+  std::shared_ptr<SplatPass> own_splats_;  // (round 532: splat_pass(); shared_ptr - SplatPass is incomplete here)
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
   LightingEnv env_;

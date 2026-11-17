@@ -38,10 +38,15 @@
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
+#include "../src/scene/pointcloud.h"
+#include "../src/render/gsplat_embree.h"
+#include "../src/render/gsplat_gpu.h"
 #include "../src/scene/export.h"
 #include "../src/scene/import.h"
 #include "../src/scene/autophysics.h"
 #include "../src/scene/ragdoll.h"
+#include "../src/scene/pointcloud.h"
+#include "../src/render/gsplat_raster.h"
 #include "../tests/fixtures/synthetic_mmd.h"
 
 #include <algorithm>
@@ -5752,6 +5757,76 @@ static void test_gpu_optix(Report &rep, const Options &o) {
   else rep.note(strprintf("OptiX vs GPU Compute, the slowest card: %.2fx (task 0170's target: 1.4x on the 4070 SUPER, 1.8x on the 3060 Ti).", worst));
 }
 
+/* Round 534 (task 0514): Gaussian splats on the card - a cloud of 100k and 1M splats (SH degree 3) over a floor: the
+ * flatten onto the card's buffers (gsplat_gpu_append), the first build (upload, BLAS / GAS), and samples a second on
+ * each card device, against the CPU path tracer at the same samples. A measurement, never a check (ADR 0056). */
+static void test_splats_gpu(Report &rep, const Options &o) {
+  rep.title("Gaussian splats on the card (round 534)",
+            "256x256, a cloud of N splats of SH degree 3 over a floor, a sun, 4 bounces, 16 samples (8 quick). Flatten: the "
+            "splats onto the card's buffers alone; build: PathTracer::build with the card opening and uploading (BVH / BLAS / "
+            "GAS); samples a second: the best of two runs. The CPU path tracer at the same scene for scale.");
+  const int W = 256, H = 256, spp = o.quick ? 8 : 16;
+  auto floor = primitives::plane(40.0f, 1);
+  MaterialPtr mfl = make_material("floor", {0.7f, 0.7f, 0.7f});
+  std::vector<MaterialPtr> mfloor = {mfl};
+  std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::translate({0, -1.2f, 0}), &mfloor}};
+  RenderLight sun;
+  sun.direction = normalize(Vec3(-0.4f, -1.0f, 0.5f));
+  Environment env;
+  const Mat4 v = Mat4::look_at({0, 1.5f, -4.0f}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 100.0f);
+  const char *user_backend = std::getenv("BLENDITY_GPU_BACKEND");
+  const std::string restore = user_backend ? user_backend : "vulkan";
+  rep.table({"splats", "device", "flatten ms", "build ms", "samples / s", "card MB"});
+  for (size_t n : {(size_t)100000, (size_t)1000000}) {
+    const PointCloudPtr pc = pointcloud_random(PointCloudType::GaussianSplats, n, 3, 5, 1.0f);
+    if (!pc) continue;
+    const SplatCloudView view = splat_view_of(pc, Mat4(), 1);
+    gpu::Scene flat;
+    gpu::SplatAppend st;
+    ScopedTimer tf;
+    gpu::gsplat_gpu_append(flat, view, &st);
+    const double flatten_ms = tf.ms();
+    /* devices: -1 the CPU, then each card with GPU Compute (ray queries), its BVH walk, and OptiX where it has it */
+    struct Dev { int card; int kind; std::string name; };
+    std::vector<Dev> devs = {{-1, 0, "CPU"}};
+    for (const gpu::DeviceInfo &d : gpu::devices()) {
+      if (d.hardware_rt) devs.push_back({d.index, 1, d.name + " - ray queries"});
+      devs.push_back({d.index, 2, d.name + " - BVH walk"});
+      if (gpu::optix_compiled_in() && gpu::optix_device_of(d.index) >= 0) devs.push_back({d.index, 3, d.name + " - OptiX"});
+    }
+    for (const Dev &d : devs) {
+      set_backend_env(d.kind == 3 ? "optix" : "vulkan");
+      PathTracer pt;
+      PTSettings ps;
+      ps.use_cpu = d.card < 0;
+      if (d.card >= 0) ps.gpus = {d.card};
+      ps.gpu_hardware_rt = d.kind != 2;
+      ps.max_bounces = 4;
+      ps.denoise = false;
+      ps.use_guiding = false;
+      ps.merge_interval_ms = 1e9;
+      ps.splats = {view};
+      pt.set_settings(ps);
+      pt.set_camera(v, p, W, H);
+      ScopedTimer tb;
+      pt.build(objs, {sun}, env);
+      pt.render(1e9, 1);
+      const double build_ms = tb.ms();
+      double best = 1e30;
+      for (int run = 0; run < 2; run++) {
+        pt.set_camera(v, p, W, H);
+        ScopedTimer t;
+        pt.render(1e9, spp);
+        best = std::min(best, t.ms());
+      }
+      if (!pt.gpu_error().empty()) rep.note(d.name + ": " + pt.gpu_error());
+      rep.row({strprintf("%zu", n), d.name + " (" + pt.device_summary() + ")", d.card < 0 ? "-" : f1(flatten_ms), f1(build_ms),
+               f1(spp / (best / 1000.0)), d.card < 0 ? "-" : f1(st.bytes / 1048576.0)});
+    }
+  }
+  set_backend_env(restore.c_str());
+}
+
 /* Task 0172 (ADR 0055): what Live Link costs the editor's frame - the link off, on with nobody listening, one and two
  * clients draining as fast as they can, while 1,000 objects move every frame; a 50k-face mesh built for a client
  * (on the worker: the frames meanwhile), its vertices moved every frame (deforms), and a client that leaves mid-send. */
@@ -7413,6 +7488,8 @@ static void test_blender_parity(Report &rep, const Options &o) {
 #include "stress_blockout_join.inc"  // (round 501: test_blockout_join)
 #include "stress_survey.inc"    // (round 504: the performance survey's seven sections)
 #include "stress_blockout_piece_modifiers.inc"  // (round 514: test_blockout_piece_modifiers)
+#include "stress_splat_raster.inc"  // (round 532: test_splat_raster)
+#include "stress_splats.inc"  // (round 531: test_splats - the splat / point cloud readers on damaged files)
 
 int main(int argc, char **argv) {
   install_crash_handler();
@@ -7490,22 +7567,24 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"splats_gpu", test_splats_gpu}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
                {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}, {"posing", test_posing},
                {"lightmap_quality", test_lightmap_quality}, {"blockout", test_blockout}, {"blockout_modifiers", test_blockout_modifiers},
-               {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers},
+               {"blockout_join", test_blockout_join}, {"blockout_piece_modifiers", test_blockout_piece_modifiers}, {"splats", test_splats},
                {"image_edit", test_image_edit}, {"sculpt_paint", test_sculpt_paint}, {"sequencer", test_sequencer}, {"importers", test_importers},
-               {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views}};
+               {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views},
+               {"splat_raster", test_splat_raster}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
     if (std::string(t.name) == "present" && o.only != "present") continue;  // (it opens a window: only when asked for)
     if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
     if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
+    if (std::string(t.name) == "splats_gpu" && o.only != "splats_gpu") continue;  // (round 534: the card, timed - only when asked for)
     if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
     if (std::string(t.name) == "asset_windows" && o.only == "windows") continue;  // (round 504: `--only windows` is the OS-window section alone)
     if ((std::string(t.name) == "operations" || std::string(t.name) == "responsiveness" || std::string(t.name) == "world_like" ||
-         std::string(t.name) == "posing" || std::string(t.name) == "lightmap_quality" || survey_named_only(t.name)) && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
+         std::string(t.name) == "posing" || std::string(t.name) == "lightmap_quality" || std::string(t.name) == "splat_raster" || survey_named_only(t.name)) && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py; round 532: splat_raster)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

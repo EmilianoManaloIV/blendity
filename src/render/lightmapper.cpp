@@ -621,6 +621,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   ps.use_guiding = false;
   ps.light_tree = s_.light_tree;  // (round 464)
   ps.gpus.clear();
+  ps.splats = s_.splats;  // (round 533)
   pt_->set_settings(ps);
   pt_->build(pt_objects_, pt_lights, env);
   pt_->set_bake_mis(s_.sample_emissive, s_.sample_env && pt_->has_env_dist());  // (round 441: the texel samples the emitters and the world)

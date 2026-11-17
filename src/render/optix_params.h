@@ -19,6 +19,9 @@ struct OptixLaunchParams {
   unsigned long long tex8;     // uint (binding 12)
   unsigned long long texf;     // vec4 (binding 13)
   unsigned long long texinfo;  // GTexInfo (binding 14)
-  unsigned long long handle;   // OptixTraversableHandle: the instances over every mesh's triangles
+  unsigned long long splats;   // GSplat (binding 17, round 534)
+  unsigned long long splat_sh; // float (binding 18)
+  unsigned long long splat_count;  // how many (0: no splats, shadow rays skip their pass)
+  unsigned long long handle;   // OptixTraversableHandle: the instances over every mesh's triangles and splat cloud's boxes
   int sample_index, sample_count;
 };
