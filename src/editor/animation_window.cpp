@@ -86,6 +86,27 @@ std::vector<GameObject *> subtree(GameObject *root) {
   return out;
 }
 
+/* Round 541 (review): a path keyed as a quaternion ("RotationQ" tracks) - what Record, Insert Keyframe, Add Property, Set Key and
+ * `anim key` then key for its rotation instead of Euler angles. */
+bool has_quat_track(AnimationClip &clip, const std::string &path) {
+  for (int a = 0; a < 4; a++)
+    if (clip.find(path, "RotationQ", a)) return true;
+  return false;
+}
+
+/* The quaternion keyed at `frame` on all four components, in the hemisphere of the curve there (a key and its negative are one
+ * rotation: the curve must not take the long way between them). */
+void key_quaternion(AnimationClip &clip, const std::string &path, Quat q, float frame) {
+  const float now_q[4] = {q.x, q.y, q.z, q.w};
+  float along = 0.0f;  // (the dot product with what the curve gives there)
+  for (int a = 0; a < 4; a++) {
+    const AnimTrack *t = clip.find(path, "RotationQ", a);
+    along += (t && !t->keys.empty() ? t->sample(frame) : a == 3 ? 1.0f : 0.0f) * now_q[a];
+  }
+  const float sign = along < 0.0f ? -1.0f : 1.0f;
+  for (int a = 0; a < 4; a++) clip.track(path, "RotationQ", a).set_key(frame, sign * now_q[a]);
+}
+
 }  // namespace
 
 /* ---------------------------------------------------------------- what is animated */
@@ -187,7 +208,7 @@ const std::vector<uint32_t> &Editor::anim_other_tracks(const AnimationClip &clip
   if (anim_.other_clip == &clip && anim_.other_layout == clip.layout && anim_.other_count == clip.tracks.size()) return anim_.other_tracks;
   anim_.other_tracks.clear();
   for (size_t i = 0; i < clip.tracks.size(); i++)
-    if (!is_transform_property(clip.tracks[i].property)) anim_.other_tracks.push_back((uint32_t)i);
+    if (!is_transform_property(clip.tracks[i].property) && clip.tracks[i].property != "RotationQ") anim_.other_tracks.push_back((uint32_t)i);  // (round 541: a quaternion is a Transform's, Record keys it with the object)
   anim_.other_clip = &clip, anim_.other_layout = clip.layout, anim_.other_count = clip.tracks.size();
   return anim_.other_tracks;
 }
@@ -365,8 +386,22 @@ bool Editor::anim_record_object(AnimationClip &clip, GameObject &root, GameObjec
   if (!moved || (g.get<Bone>() && ik_drives(*scene_, g))) return false;
   const std::string path = anim_path(root, g);
   bool keyed = false;
-  for (int prop = 0; prop < 3; prop++) keyed = anim_record_vector(clip, path, prop, shown, now, anim_key_frame(&g)) || keyed;  // (round 340: on 2s, the drawn frame)
+  for (int prop = 0; prop < 3; prop++) {
+    const bool quat = prop == 1 && clip.find(path, "RotationQ", 0) != nullptr;  // (round 541: a path keyed as a quaternion is recorded as one)
+    keyed = (quat ? anim_record_quat(clip, path, g, shown, now, anim_key_frame(&g)) : anim_record_vector(clip, path, prop, shown, now, anim_key_frame(&g))) || keyed;  // (round 340: on 2s, the drawn frame)
+  }
   return keyed;
+}
+
+/* Round 541 (ADR 0148): the rotation of a path keyed as "RotationQ" - the four components at the frame, in the hemisphere of
+ * the curve there (a key and its negative are one rotation: the curve must not take the long way between them). */
+bool Editor::anim_record_quat(AnimationClip &clip, const std::string &path, const GameObject &g, const float *shown, const float *now, float frame) {
+  bool changed = false;
+  for (int a = 0; a < 3; a++) changed = changed || differs(shown[3 + a], now[3 + a]);
+  if (!changed) return false;
+  note_clip_edit(clip);
+  key_quaternion(clip, path, g.local().rotation, frame);
+  return true;
 }
 
 /* Record: what changed since it was shown becomes keys at the playhead (a whole frame). Bones IK turns are left to
@@ -514,13 +549,19 @@ void Editor::anim_key_all() {
   if (clip->tracks.empty()) return refuse("Set Key: the clip has no tracks yet - turn Record on and move the object", "anim record on", "Record");
   GameObject *root = anim_root();
   anim_edit_keys("Set Key", [&](AnimationClip &c) {
+    std::vector<std::pair<std::string, GameObject *>> quats;  // (round 541: a RotationQ path keyed whole, after the loop - it may add tracks)
     for (AnimTrack &t : c.tracks) {
       GameObject *g = root ? anim_target(*root, t.path) : nullptr;
       const float frame = anim_key_frame(g);  // (round 340: on 2s, the drawn frame the playhead shows)
+      if (g && t.property == "RotationQ") {
+        if (std::none_of(quats.begin(), quats.end(), [&](const std::pair<std::string, GameObject *> &p) { return p.first == t.path; })) quats.push_back({t.path, g});
+        continue;
+      }
       float v = t.sample(frame);
       if (g) read_anim_value(*g, t.property, t.axis, v);
       t.set_key(frame, v);
     }
+    for (const auto &q : quats) key_quaternion(c, q.first, q.second->local().rotation, anim_key_frame(q.second));
   });
 }
 
@@ -639,6 +680,7 @@ void Editor::anim_add_property(GameObject *g, const std::string &property, int a
   if (!root || !g) return;
   const std::string path = anim_path(*root, *g);
   anim_edit_keys("Add Property", [&](AnimationClip &c) {
+    if (property == "Rotation" && has_quat_track(c, path)) return key_quaternion(c, path, g->local().rotation, anim_.frame);  // (round 541)
     const int interp = anim_value_stepped(*g, property) ? AnimConstant : AnimAuto;  // (a switch, a list, Active: no blend between)
     for (int a = 0; a < axes; a++) {
       float v = 0.0f;
@@ -659,13 +701,48 @@ std::vector<float> Editor::anim_key_frames() {
 }
 
 void Editor::anim_step_key(int dir) {
-  const std::vector<float> fs = anim_key_frames();
+  std::vector<float> fs = anim_key_frames();
+  AnimationClipPtr clip = anim_clip();
+  if (anim_wrap_ && clip) {  // (Wrap Playhead: keys outside the clip's frames are ignored, and the jump goes round the end)
+    const float end = clip->end_frame();
+    fs.erase(std::remove_if(fs.begin(), fs.end(), [&](float f) { return f < 0.0f || f > end; }), fs.end());
+  }
   float to = anim_.frame;
+  bool found = false;
   for (float f : fs) {
     if (dir > 0 && f > anim_.frame + 0.01f) return anim_set_frame(f);
-    if (dir < 0 && f < anim_.frame - 0.01f) to = f;
+    if (dir < 0 && f < anim_.frame - 0.01f) to = f, found = true;
   }
-  if (dir < 0) anim_set_frame(to);
+  if (anim_wrap_ && !found && !fs.empty()) to = dir > 0 ? fs.front() : fs.back();  // (past the last key: the first; before the first: the last)
+  if (dir < 0 || anim_wrap_) anim_set_frame(to);
+}
+
+/* A frame step (round 541): clamps at frame 0, or with Wrap Playhead on goes round inside 0..the clip's end frame. */
+void Editor::anim_step_frame(int delta) {
+  AnimationClipPtr clip = anim_clip();
+  int to = (int)std::lround(anim_.frame) + delta;
+  if (anim_wrap_ && clip) {
+    const int span = std::max(1, (int)std::lround(clip->end_frame())) + 1;
+    to = ((to % span) + span) % span;
+  }
+  anim_set_frame((float)std::max(0, to));
+}
+
+/* The ruler pressed (round 541, as Blender's scrubbing does): playback that runs is paused and remembered, so the playhead follows
+ * the mouse instead of fighting the clock; released (or Esc) it runs again from where it was left. Playback that was not running
+ * is left alone. */
+void Editor::anim_scrub_begin() {
+  if (!anim_.playing) return;
+  anim_.playing = false;
+  anim_.scrub_resume = true;
+}
+
+void Editor::anim_scrub_end() {
+  if (!anim_.scrub_resume) return;
+  anim_.scrub_resume = false;
+  anim_.playing = true;
+  anim_.play_from = anim_.frame;
+  anim_.play_clock = now_seconds();
 }
 
 /* ---------------------------------------------------------------- the window */
@@ -748,6 +825,15 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
     if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
   }
+  group(u.px(44 + 52) + u.px(3) * 2);  // (round 541: the Key menu and Wrap Playhead)
+  {
+    const Recti kb{x, y, u.px(44), bh};
+    if (button(u.px(44), "Key", false, "Blender 5.3's animation tools: convert the selected bones' rotation between Euler and Quaternion, copy and paste motion in world space,\n"
+                                       "copy and paste a pose.", "anim:Key"))
+      u.open_popup(u.id("anim_key_menu"), {kb.x, y + bh, 0, 0});
+    draw_anim_key_menu();
+  }
+  if (button(u.px(52), "Wrap", anim_wrap_, "Wrap Playhead: frame steps (Left / Right) and the key jumps (, and .) go round the clip instead of stopping at its ends.", "anim:Wrap")) anim_wrap_ = !anim_wrap_;
   group(u.px(73 + 75 + 79 + 67));  // (Puppet, Retarget, Dopesheet, Curves)
   {  // (tasks 0281-0284: Puppet Posing's tools in one menu - the toolbar is already wider than most windows)
     const Recti pb{x, y, u.px(70), bh};
@@ -952,6 +1038,7 @@ void Editor::anim_key_property(GameObject *g, const std::string &property, int a
   const float frame = std::round(anim_.frame);
   const int interp = anim_value_stepped(*g, property) ? AnimConstant : AnimAuto;  // (a switch, a list, Active: no blend between)
   anim_edit_keys("Insert Keyframe", [&](AnimationClip &c) {
+    if (property == "Rotation" && has_quat_track(c, path)) return key_quaternion(c, path, g->local().rotation, frame);  // (round 541)
     for (int a = 0; a < std::max(1, axes); a++) {
       float v = 0.0f;
       if (read_anim_value(*g, property, a, v)) c.track(path, property, a).set_key(frame, v, interp);
@@ -964,8 +1051,9 @@ void Editor::anim_unkey_property(GameObject *g, const std::string &property, int
   const std::string path = anim_path(*anim_root(), *g);
   const float frame = std::round(anim_.frame);
   anim_edit_keys("Delete Keyframe", [&](AnimationClip &c) {
-    for (int a = 0; a < std::max(1, axes); a++) {
-      AnimTrack *t = c.find(path, property, a);
+    const bool quat = property == "Rotation" && has_quat_track(c, path);  // (round 541)
+    for (int a = 0; a < (quat ? 4 : std::max(1, axes)); a++) {
+      AnimTrack *t = c.find(path, quat ? "RotationQ" : property, a);
       const int k = t ? t->key_at(frame) : -1;
       if (k < 0) continue;
       t->keys.erase(t->keys.begin() + k);
@@ -976,7 +1064,9 @@ void Editor::anim_unkey_property(GameObject *g, const std::string &property, int
 
 int Editor::anim_property_state(GameObject *g, const std::string &property) {
   if (!anim_keyable(g)) return 0;
-  const auto it = anim_field_cache_.state.find(anim_path(*anim_field_cache_.root, *g) + "|" + property);
+  const std::string path = anim_path(*anim_field_cache_.root, *g);
+  auto it = anim_field_cache_.state.find(path + "|" + property);
+  if (it == anim_field_cache_.state.end() && property == "Rotation") it = anim_field_cache_.state.find(path + "|RotationQ");  // (round 541: keyed as a quaternion)
   return it == anim_field_cache_.state.end() ? 0 : it->second;
 }
 
@@ -1080,11 +1170,11 @@ std::vector<Editor::AnimRow> Editor::anim_rows(const AnimationClip &clip) const 
         continue;
       }
       const std::string key = path + "|" + prop;
-      AnimRow g{ps, (path.empty() ? std::string("(root)") : path) + " : " + prop, true, 1};
+      AnimRow g{ps, (path.empty() ? std::string("(root)") : path) + " : " + anim_property_label(prop), true, 1};  // (round 541: "Rotation (Quaternion)")
       g.key = key, g.open = anim_.expanded.count(key) != 0;
       rows.push_back(g);
       if (!g.open) continue;
-      for (int k : ps) rows.push_back({{k}, "    ." + std::string(1, "xyz"[std::max(0, std::min(2, clip.tracks[(size_t)k].axis))]), false, 2});
+      for (int k : ps) rows.push_back({{k}, "    ." + std::string(1, "xyzw"[std::max(0, std::min(3, clip.tracks[(size_t)k].axis))]), false, 2});
     }
   }
   return rows;
@@ -1439,7 +1529,7 @@ void Editor::draw_animation_window(const Recti &r) {
   draw_anim_toolbar(bar, root);
   AnimationClipPtr clip = anim_clip();
   const Recti body{r.x, bar.bottom(), r.w, r.h - bh};
-  if (!root || !clip) anim_drag_cancel();  // (nothing to drag in; a drag under way is dropped, not committed later)
+  if (!root || !clip) anim_drag_cancel(), anim_scrub_end();  // (nothing to drag in; a drag under way is dropped, not committed later)
   if (!root) {
     u.label({body.x + u.px(10), body.y + u.px(10), body.w, u.row_h()}, "Select an object to animate.", u.theme.text_dim);
     return;
@@ -1481,6 +1571,10 @@ void Editor::draw_animation_window(const Recti &r) {
   if (u.record_buttons) u.button_rects["anim_sheet"] = sheet, u.button_rects["anim_ruler"] = ruler;  // (tests)
   if (anim_.curves) anim_curve_input(*clip, ruler, sheet, end);
   else if (!anim_smooth_brush(sheet, end)) anim_sheet_input(*clip, ruler, sheet, row_h, end);  // (task 0284: the brush first when on)
+  /* Round 541: scrubbing the ruler (either view) pauses playback and release (or Esc) starts it again. */
+  if (anim_.drag == 1 && in.key_pressed[platform::KEY_ESCAPE]) in.key_pressed[platform::KEY_ESCAPE] = false, anim_.drag = 0;
+  if (anim_.drag == 1) anim_scrub_begin();
+  else anim_scrub_end();
   u.popup(u.id("anim_key_ctx"), u.px(220), [this] {
     if (ui_.menu_item("Clamped Auto")) anim_set_tangent(TanAuto);
     if (ui_.menu_item("Free Smooth")) anim_set_tangent(TanFree);
@@ -1506,6 +1600,9 @@ void Editor::draw_animation_window(const Recti &r) {
   if (in.mods == 0 && in.key_pressed[platform::KEY_K]) anim_key_all(), in.key_pressed[platform::KEY_K] = false;
   if (in.mods == 0 && in.key_pressed[platform::KEY_COMMA]) anim_step_key(-1), in.key_pressed[platform::KEY_COMMA] = false;
   if (in.mods == 0 && in.key_pressed[platform::KEY_PERIOD]) anim_step_key(1), in.key_pressed[platform::KEY_PERIOD] = false;
+  /* Round 541: Left / Right over the window step a frame (Blender's arrows); with Wrap Playhead on they go round the clip. */
+  if (in.mods == 0 && in.key_pressed[platform::KEY_LEFT]) anim_step_frame(-1), in.key_pressed[platform::KEY_LEFT] = false;
+  if (in.mods == 0 && in.key_pressed[platform::KEY_RIGHT]) anim_step_frame(1), in.key_pressed[platform::KEY_RIGHT] = false;
 }
 
 /* ---------------------------------------------------------------- console */
@@ -1571,6 +1668,39 @@ void Editor::draw_key_slope_fields() {
 }
 
 /* Puppet Posing's menu (tasks 0281-0284): toggles ticked, actions, Reach as a submenu. */
+/* Round 541 (task 0521): the Key menu - Blender 5.3's Convert Rotation, world-space copy / paste, and the pose tools. */
+void Editor::draw_anim_key_menu() {
+  ui_.popup(ui_.id("anim_key_menu"), ui_.px(320), [this] {
+    auto &u = ui_;
+    u.menu_label("Rotation");
+    const std::string convert = shortcut_text("pose.rotation_convert");
+    if (u.menu_item("Convert to Quaternion", convert.c_str())) anim_rotation_convert(1, false);
+    u.tooltip("The selected bones' Euler rotation keys rewritten as quaternion keys (no gimbal lock, the short way round), the same poses.\n"
+              "Ctrl+R in the Scene view with bones selected turns each the other way.");
+    if (u.menu_item("Convert to Euler")) anim_rotation_convert(2, false);
+    u.tooltip("Quaternion keys back to Euler keys, kept continuous (no 360 degree jump between neighbours).");
+    if (u.menu_item("Convert to Quaternion, a Key Every Frame")) anim_rotation_convert(1, true);
+    if (u.menu_item("Convert to Euler, a Key Every Frame")) anim_rotation_convert(2, true);
+    u.menu_separator();
+    u.menu_label("World Space");
+    if (u.menu_item("Copy World-Space Animation")) anim_world_copy(false, 0.0f, 0.0f);
+    u.tooltip("The selected objects' or bones' world transforms sampled on every frame of the clip.");
+    if (u.menu_item("Paste World-Space Animation")) anim_world_paste(false);
+    u.tooltip("Keys on every frame, on the original frames, so the selection moves as the copied ones did whatever it hangs from. One source goes on\n"
+              "every selected object; otherwise sources and targets pair by name.");
+    if (u.menu_item("Paste World-Space Animation from the Playhead")) anim_world_paste(true);
+    u.menu_separator();
+    u.menu_label("Pose");
+    if (u.menu_item("Copy Pose", shortcut_text("pose.copy").c_str())) pose_copy();
+    if (u.menu_item("Paste Pose", shortcut_text("pose.paste").c_str())) pose_paste_step(1.0f, false, false);
+    u.tooltip("The copied pose on the bones of those names. F9 afterwards: Influence and Flipped.");
+    if (u.menu_item("Paste Pose Flipped", shortcut_text("pose.paste_flipped").c_str())) pose_paste_step(1.0f, true, false);
+    u.tooltip("Onto the bone on the other side (.L / .R, Left / Right), mirrored: Position X and the rotation's Y and Z negated.");
+    if (u.menu_item("Align to Transform Orientation", shortcut_text("pose.align").c_str())) pose_align();
+    u.tooltip("Each selected bone's rotation becomes the transform orientation's axes (Global: the world's; Local: the active one's); position and scale stay.");
+  });
+}
+
 void Editor::draw_puppet_menu() {
   ui_.popup(ui_.id("anim_puppet"), ui_.px(220), [this] {
     auto &u = ui_;
@@ -1676,6 +1806,19 @@ void Editor::anim_command(const std::vector<std::string> &t) {
     return (void)retarget_open_clip(*target);
   }
   if (verb == "frame") return anim_set_frame((float)std::atof(arg(2, "0").c_str()));
+  /* Round 541 (task 0521): step <frames> | wrap on|off | rotation quaternion|euler [bake] | worldcopy [start end] | worldpaste [start]. */
+  if (verb == "step") return anim_step_frame(std::atoi(arg(2, "1").c_str()));
+  if (verb == "wrap") return (void)(anim_wrap_ = on(2));
+  if (verb == "rotation") {
+    const std::string to = to_lower(arg(2, ""));
+    if (to != "quaternion" && to != "euler") return Log::warn("anim rotation quaternion|euler [bake]");
+    return anim_rotation_convert(to == "quaternion" ? 1 : 2, to_lower(arg(3, "")) == "bake");
+  }
+  if (verb == "worldcopy") {
+    if (t.size() == 3 || t.size() > 4) return Log::warn("anim worldcopy [start end]: both frames, or none for the clip's whole range");
+    return anim_world_copy(t.size() == 4, (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
+  }
+  if (verb == "worldpaste") return anim_world_paste(to_lower(arg(2, "")) == "start");
   if (trail_command(t)) return;  // (anim trails on|off | onion off|<n> [step]: task 0282)
   if (zoetrope_command(t)) return;  // (anim zoetrope on|off [step]: task 0283)
   if (anim_motion_command(t)) return;  // (anim smooth | lock: task 0284)
@@ -1690,7 +1833,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
     anim_.playing = true, anim_.play_from = anim_.frame, anim_.play_clock = now_seconds();
     return;
   }
-  if (verb == "stop") return (void)(anim_.playing = false);
+  if (verb == "stop") return (void)(anim_.playing = anim_.scrub_resume = false);  // (a scrub held meanwhile: its release does not start it again)
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if ((verb == "key" || verb == "interp" || verb == "tangent") && root && clip && t.size() >= 6) {
@@ -1700,7 +1843,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
     if (!g || !under) return Log::warn("anim %s: no object '%s' below '%s'", verb.c_str(), t[2].c_str(), root->name.c_str());
     const std::string path = anim_path(*root, *g), prop = t[3];
     if (prop.empty()) return Log::warn("anim %s: which property? (quote one with spaces: \"Material 0.Roughness\")", verb.c_str());
-    const int axis = std::max(0, std::min(2, std::atoi(t[4].c_str())));
+    const int axis = std::max(0, std::min(prop == "RotationQ" ? 3 : 2, std::atoi(t[4].c_str())));  // (round 541: a quaternion's w is axis 3)
     const float frame = (float)std::atof(t[5].c_str());
     if (verb == "tangent") return anim_tangent_command(t, *clip, path, prop, axis, frame);
     if (verb == "interp") {
@@ -1711,13 +1854,16 @@ void Editor::anim_command(const std::vector<std::string> &t) {
       return;
     }
     float v = 0.0f;
+    if (t.size() <= 6 && (prop == "Rotation" || prop == "RotationQ") && has_quat_track(*clip, path))  // (round 541: no value on a path keyed as a quaternion: the whole rotation, in its curve's hemisphere)
+      return anim_edit_keys("Add Key", [&](AnimationClip &c) { key_quaternion(c, path, g->local().rotation, frame); });
     if (t.size() > 6) v = (float)std::atof(t[6].c_str());
     else read_anim_value(*g, prop, axis, v);
     anim_edit_keys("Add Key", [&](AnimationClip &c) { c.track(path, prop, axis).set_key(frame, v); });
     return;
   }
   Log::warn("anim new [name] | key <object|.> <property> <axis> <frame> [value] | interp <object|.> <property> <axis> <frame> "
-            "auto|linear|constant | frame <n> | preview on|off | record on|off | play | stop");
+            "auto|linear|constant | frame <n> | step <n> | wrap on|off | rotation quaternion|euler [bake] | worldcopy [start end] | worldpaste [start] | "
+            "preview on|off | record on|off | play | stop");
 }
 
 }  // namespace bl

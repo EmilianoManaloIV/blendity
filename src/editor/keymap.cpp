@@ -137,6 +137,13 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"anim.prev_key", "Previous Key", "Animation", CTX_GLOBAL},
       {"anim.next_key", "Next Key", "Animation", CTX_GLOBAL},
       {"anim.record", "Record (keys from edits)", "Animation", CTX_GLOBAL},
+      /* Round 541 (task 0521): Blender 5.3's animation tools. In the Scene view with only bones selected (Pose context) the chords are
+       * these; anywhere else they are passed on (Ctrl+R refreshes the assets, Ctrl+V is the Reference Board's). */
+      {"pose.rotation_convert", "Convert Rotation (Euler / Quaternion)", "Animation", CTX_SCENE},
+      {"pose.copy", "Copy Pose", "Animation", CTX_SCENE},
+      {"pose.paste", "Paste Pose", "Animation", CTX_SCENE},
+      {"pose.paste_flipped", "Paste Pose Flipped", "Animation", CTX_SCENE},
+      {"pose.align", "Align to Transform Orientation", "Animation", CTX_SCENE},
       {"seq.add_edit", "Add Edit at the Playhead (the Sequencer)", "Sequencer", CTX_GLOBAL},  // (round 391: Premiere's; Ctrl+K stays the palette)
       {"seq.ripple", "Ripple Delete (the Sequencer)", "Sequencer", CTX_GLOBAL},
       /* Lighting */
@@ -288,6 +295,11 @@ static void common_bindings(Keymap &k) {
   b("seq.ripple", {"Shift+Delete"});
   b("anim.prev_key", {","});
   b("anim.next_key", {"."});
+  b("pose.rotation_convert", {"Ctrl+R"});  // (round 541: Pose context only - see run_action)
+  b("pose.copy", {"Ctrl+C"});
+  b("pose.paste", {"Ctrl+V"});
+  b("pose.paste_flipped", {"Ctrl+Shift+V"});
+  b("pose.align", {});
   b("lighting.update", {"Ctrl+Shift+L"});
   b("object.create_empty", {"Ctrl+Shift+N"});
   b("object.create_empty_child", {"Alt+Shift+N"});
@@ -468,6 +480,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("edit.delete", {"Delete", "Backspace"});
     b("edit.duplicate", {"Ctrl+V"});  // 3ds Max: Clone
     b("mesh.duplicate", {"Ctrl+V"});
+    b("pose.paste", {});  // (round 541: Ctrl+V is Clone here)
     b("object.join", {"Ctrl+J"});
     b("mesh.extrude", {"Shift+E"});
     b("mesh.inset", {"Shift+I"});
@@ -583,6 +596,7 @@ static bool contexts_overlap(int a, int b) {
 static bool intended_pair(const std::string &a, const std::string &b) {
   auto is = [&](const char *x, const char *y) { return (a == x && b == y) || (a == y && b == x); };
   return is("edit.duplicate", "mesh.duplicate") || is("assets.refresh", "mesh.loop_cut") || is("edit.select_all", "edit.select_none") ||
+         is("pose.rotation_convert", "assets.refresh") || is("pose.rotation_convert", "mesh.loop_cut") ||  // (round 541: Ctrl+R in Pose context; passed on otherwise)
          is("points.toggle_closed", "mesh.knife");  // (a curve's points outside Edit Mode; the knife in it)
 }
 
@@ -968,6 +982,17 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "window.history") dock_open(WindowKind::History);
   else if (id == "ui.focus_window") focus_window_step(in.shift() ? -1 : 1);
   else if (id == "ui.menu_bar") focus_menu_bar();
+  else if (id == "pose.rotation_convert" || id == "pose.copy" || id == "pose.paste" || id == "pose.paste_flipped" || id == "pose.align") {
+    /* Round 541 (task 0521): Pose context only - the Scene view with only bones selected; anywhere else the chord is passed on (Ctrl+R
+     * refreshes the assets, the Animation window's Ctrl+C / Ctrl+V copy keys, the Reference Board's Ctrl+V pastes). The palette
+     * and the Wheel name the action on purpose: any selection then. */
+    if (!action_asked_for_ && (!scene_hovered_ || !pose_context())) return false;  // (the pointer over the Scene view: not over the Animation window, whose Ctrl+C / Ctrl+V copy keys, nor any other)
+    if (id == "pose.rotation_convert") anim_rotation_convert(0, false);
+    else if (id == "pose.copy") pose_copy();
+    else if (id == "pose.paste") pose_paste_step(1.0f, false, false);
+    else if (id == "pose.paste_flipped") pose_paste_step(1.0f, true, false);
+    else pose_align();
+  }
   else if (id.rfind("anim.", 0) == 0 && anim_shortcuts_stand_down()) return false;  // (task 0258: the Hierarchy's and the UV editor's own arrows, a flown view)
   else if (id == "anim.key") anim_key_all();
   else if (id == "anim.play") anim_toggle_play();
