@@ -2445,8 +2445,31 @@ static void tests_round212() {
     holes = 0;
     for (uint32_t p : ed.framebuffer().pixels) holes += (p >> 24) == 0;
     diff(system, ed.framebuffer().pixels, mean, within2);
-    std::printf("    back on the system: %zu transparent pixels; against the first frame: mean %.3f\n", holes, mean);
-    CHECK(holes == 0 && mean < 0.05);
+    /* Round 550: the views alone. The whole frame also holds the status bar's and the Profiler's numbers, which change from
+     * frame to frame with the machine's load - 3,600 pixels, all below the views, took the mean from 0.045 alone to 0.057 in
+     * a group run - so the views' own pixels are compared; what the check is for (the views' pictures back on the system as
+     * they were) is all there. */
+    double vmean = 0, vwithin2 = 0;
+    {
+      std::vector<uint32_t> va, vb;
+      const int W = ed.framebuffer().width;
+      for (WindowKind k : {WindowKind::Scene, WindowKind::Game}) {
+        const Recti r = k == WindowKind::Scene ? ed.scene_view_rect() : ed.window_rect_for_test(k);
+        for (int y = std::max(0, r.y); y < r.y + r.h; y++)
+          for (int x = std::max(0, r.x); x < std::min(W, r.x + r.w); x++) {
+            const size_t i = (size_t)y * (size_t)W + (size_t)x;
+            if (i < system.size() && i < ed.framebuffer().pixels.size()) va.push_back(system[i]), vb.push_back(ed.framebuffer().pixels[i]);
+          }
+      }
+      diff(va, vb, vmean, vwithin2);
+    }
+    std::printf("    back on the system: %zu transparent pixels; against the first frame: mean %.3f (the views alone: %.3f, %.2f %% within 2)\n",
+                holes, mean, vmean, vwithin2 * 100);
+    /* The bound (round 550): the whole-frame 0.05 was the views' own small differences (a level or two at edges) averaged
+     * over a frame about half of which is panels - 0.05 there is about 0.11 on the views alone, which measured 0.095 with
+     * 99.5 % of their pixels within 2 on the development machine's card. 0.15 and 99 % within 2 keep that strength without the
+     * panels' text in the count; a view not redrawn or drawn from a stale picture differs far more than that. */
+    CHECK(holes == 0 && vmean < 0.15 && vwithin2 >= 0.99);
   });
 }
 
