@@ -12942,15 +12942,21 @@ static MeshPtr r554_tri(Vec3 a, Vec3 b, Vec3 c) {
   return m;
 }
 /* The ids buffer of these triangles drawn together (each its own id, 1..n), double-sided, unlit. */
-static std::vector<uint32_t> r554_draw(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, Renderer3D *keep = nullptr) {
+/* (`keep`: the renderer, for project() afterwards - with `img` and `rt`, the target it drew into, kept alive by the caller:
+ * the renderer points at them. Review of round 554: they were this function's locals, and project() read a dead frame -
+ * AddressSanitizer's stack-use-after-return.) */
+static std::vector<uint32_t> r554_draw(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, Renderer3D *keep = nullptr,
+                                       Image *img_out = nullptr, RenderTarget *rt_out = nullptr) {
   CfScene sc;
   for (size_t i = 0; i < tris.size(); i++) {
     sc.add(r554_tri(tris[i][0], tris[i][1], tris[i][2]), Mat4::identity(), (uint32_t)i + 1, cf_unlit({0.8f, 0.8f, 0.8f}));
     sc.items.back().double_sided = true;
   }
   sc.seal();
-  Image img;
-  RenderTarget rt;
+  Image img_local;
+  RenderTarget rt_local;
+  Image &img = img_out ? *img_out : img_local;
+  RenderTarget &rt = rt_out ? *rt_out : rt_local;
   cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF204060u, keep);
   return rt.ids;
 }
@@ -12961,7 +12967,9 @@ static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float p
 static void r554_check(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, const std::vector<Vec3> &outline,
                        size_t &gaps, size_t &doubles) {
   Renderer3D r3d;
-  const std::vector<uint32_t> all = r554_draw(view, tris, &r3d);
+  Image img;
+  RenderTarget rt;
+  const std::vector<uint32_t> all = r554_draw(view, tris, &r3d, &img, &rt);
   std::vector<Vec2> poly;
   for (const Vec3 &w : outline) {
     Vec2 sp;
