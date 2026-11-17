@@ -202,6 +202,19 @@ row (ADR 0056): printed, never asserted.
 | 13 | RT shadows (543) | M2's `rt_shadows_row.py`, SideRail's Scene view on the card, 2 runs: still 4.3 ms off / 5.0 on; orbiting 7.1 / 7.5; a cube moved every frame 6.1 / 9.4 ms (the top level rebuilt every frame, ~0.1 ms recorded). M2 reads its own rows | within the frame - met |
 | 551 | Half-float albedo (551) | 4K Scene view, a million triangles, 300 frames, alternating: before (R8G8B8A8_UNORM, `C:\blwt544b`) 730.8 / 727.5 / 655.7 ms, after 674.4 / 701.3 / 686.5 ms (2.37 vs 2.29 ms a frame). SideRail's views on the card (`r551_views.py`, `bench_world`'s windowed check; R1's `--no-pipeline` command skipped the views): Scene view before 5.86 / 5.94, after 5.57 / 5.39 ms; Scene + Game before 7.10 / 6.83, after 7.02 / 6.66 ms | within 5 % of before - met (no measurable cost) |
 
+**The follow-ups' window** (the hub's, 2026-11-17 13:28 - 13:37, the rounds' own exes; reports in `C:/blab/timed-1117b/`
+and `C:/blab/s4-timed-558/out/`):
+
+| Row | Before (06:31 window) | After | Note |
+|---|---|---|---|
+| 1M splats orbiting, card (557) | 93.7 / 108.1 ms (median / longest) | **6.2 / 6.8 ms** | the card projects them: met |
+| 1M splats orbiting, CPU (557) | 108.4 / 148.7 ms | 86.8 / 91.3 ms | still over 50 ms on the CPU |
+| 100k splats orbiting, card / CPU (557) | 16.0 / 15.7 ms | 7.8 / 15.4 ms | |
+| the card views' first open (557) | 92.5 s | **537 ms** (an empty cache), 156 ms from the cache | met |
+| OptiX kernel compile (558) | 29.9 s inside the 3060 Ti's first build | measured alone: 19.3 s / 19.1 s cold (4070 SUPER / 3060 Ti), 6.6 / 6.8 ms warm; OptiX build at 100k 149 / 133 ms | the cold compile is now its own row |
+| splat trace at 100k, ray queries and BVH walk (558's run) | 4070 SUPER ray queries: build 304 ms, 1,752 samples / s | **build 16.6 s, 188 samples / s**; BVH walk builds 16.9 s / 13.3 s | the cold compile seems to land on the first row of each path now - the 1M rows are as before (1,323 samples / s); for S4 |
+| editor frames before / after (554, the CPU rasterizer's shared edges; two runs each) | moving an object 14.7 / 15.3 ms | 15.8 / 15.9 ms | CPU rows +3 - 7 %; two card rows rose in both runs: toon (GPU) 9.1 -> 11.3 / 11.5 ms, glass in solid shading (GPU) 15.7 / 16.3 -> 19.6 / 19.9 ms - for R1 |
+
 Not in this window (the hub's list for it): rows 6 (Quad Sphere, snapping), 7 (Edit Mode dimensions), 9 (Weight Paint),
 10 (per-brush settings), 11 (animation), 14 (Vertex Paint) - their rounds' own untimed stress rows stand; the splat
 section's 1M import row is a follow-up.
