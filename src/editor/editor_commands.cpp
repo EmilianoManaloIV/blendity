@@ -151,6 +151,7 @@ bool Editor::round367_command(const std::string &c, const std::vector<std::strin
   if (c == "save") return save_scene_to(line_rest(line, 1)), true;
   if (c == "open") return open_scene_cmd(line_rest(line, 1)), true;
   if (c == "snap") return snap_command(t), true;  // (round 535: here, the long chain in run_console_command is at the compiler's nesting limit)
+  if (c == "camera" && field == "panoramic") return camera_panoramic_command(t), true;  // (round 538; `camera <yaw> <pitch> <distance>` is the chain's)
   if (c == "rotate" || c == "scale") return transform_command(c == "scale" ? "scale" : "rotation", std::vector<std::string>(t.begin() + 1, t.end())), true;
   if (c != "set" || field.rfind("transform.", 0) != 0) return false;
   transform_command(field.substr(10), std::vector<std::string>(t.begin() + 2, t.end()));

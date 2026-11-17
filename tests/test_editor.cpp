@@ -3,6 +3,7 @@
 #include "../src/scene/raycast.h"
 #include "../src/scene/stroke_object.h"
 #include "test_common.h"
+#include "test_panoramic.h"
 #include "../src/core/view_perf.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
@@ -16173,6 +16174,384 @@ static void tests_round535() {
   });
 }
 
+/* ---- Round 538 (task 0518), the test engineer's: panoramic cameras - the Inspector by real events, save and reload, the console ---- */
+namespace {
+
+bool r538e_has(Editor &ed, const char *key) {
+  Recti r;
+  return ed.button_rect_for_test(key, r);
+}
+
+/* A dropdown in the Inspector (found by the option it shows now) opened and one of its items clicked. */
+bool r538e_pick(Editor &ed, const char *shown, const char *item) {
+  ed.record_buttons_for_test(true);
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  Recti c;
+  for (const ui::Context::ControlRec &k : ed.ui_for_test().controls)
+    if (std::string(k.kind) == "combo" && k.label == shown && k.r.w > 0) {
+      c = k.r;
+      break;
+    }
+  if (c.w <= 0) return false;
+  r535_click(ed, c.x + c.w / 2, c.y + c.h / 2);
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  Recti it;
+  if (!ed.button_rect_for_test(std::string("menu:") + item, it)) return false;
+  r535_click(ed, it.x + it.w / 2, it.y + it.h / 2);
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  return true;
+}
+
+bool r538e_combo_shows(Editor &ed, const char *shown) {
+  for (const ui::Context::ControlRec &k : ed.ui_for_test().controls)
+    if (std::string(k.kind) == "combo" && k.label == shown && k.r.w > 0) return true;
+  return false;
+}
+
+Camera *r538e_camera(Editor &ed) {
+  GameObject *g = ed.scene().find_by_name("Main Camera");
+  return g ? g->get<Camera>() : nullptr;
+}
+
+/* A 1600x1000 editor with the Main Camera selected and the Inspector showing it. */
+void r538e_open(Editor &ed) {
+  ed.init_headless(1600, 1000);
+  ed.record_buttons_for_test(true);
+  ed.step_frame_headless();
+  ed.command("select Main Camera");
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+}
+
+std::string r538e_without_panoramic(const std::string &text) {
+  std::istringstream is(text);
+  std::string out;
+  for (std::string line; std::getline(is, line);) {
+    size_t i = 0;
+    while (i < line.size() && line[i] == ' ') i++;
+    const std::string t = line.substr(i);
+    static const char *const drop[] = {"Panoramic_Type", "Latitude_", "Longitude_", "Fisheye_", "Height_Min", "Height_Max"};
+    bool skip = false;
+    for (const char *d : drop) skip = skip || t.rfind(d, 0) == 0;
+    if (!skip) out += line + "\n";
+  }
+  return out;
+}
+
+std::vector<std::string> r538e_log_since(size_t at) {
+  std::vector<LogEntry> said;
+  Log::fetch(at, said);
+  std::vector<std::string> out;
+  for (const LogEntry &e : said) out.push_back(e.text);
+  return out;
+}
+}  // namespace
+
+static void tests_round538() {
+  test("round 538: Camera > Projection set to Panoramic in the Inspector shows Panorama Type and Equirectangular's Latitude and Longitude rows only; each other type shows only its own rows; Perspective takes them all away", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    CHECK(cam && cam->panoramic_type == 0 && !cam->orthographic);
+    if (!cam) return;
+    CHECK(r538e_combo_shows(ed, "Perspective"));
+    CHECK(!r538e_combo_shows(ed, "Equirectangular") && !r538e_has(ed, "field:Latitude Min"));
+    CHECK(r538e_has(ed, "field:Field Of View"));
+    CHECK(r538e_pick(ed, "Perspective", "Panoramic"));
+    CHECK(cam->panoramic_type == 1);  // (Equirectangular first, as Blender's default)
+    CHECK(r538e_combo_shows(ed, "Panoramic") && r538e_combo_shows(ed, "Equirectangular"));
+    for (const char *f : {"field:Latitude Min", "field:Latitude Max", "field:Longitude Min", "field:Longitude Max"}) CHECK(r538e_has(ed, f));
+    for (const char *f : {"field:Fisheye Field Of View", "field:Fisheye Lens (mm)", "field:Height Min", "field:Height Max", "field:Field Of View"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Equirectangular", "Fisheye Equidistant"));
+    CHECK(cam->panoramic_type == 2);
+    CHECK(r538e_has(ed, "field:Fisheye Field Of View"));
+    for (const char *f : {"field:Latitude Min", "field:Longitude Min", "field:Fisheye Lens (mm)", "field:Height Min"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Fisheye Equidistant", "Fisheye Equisolid"));
+    CHECK(cam->panoramic_type == 3);
+    CHECK(r538e_has(ed, "field:Fisheye Field Of View") && r538e_has(ed, "field:Fisheye Lens (mm)"));
+    for (const char *f : {"field:Latitude Min", "field:Longitude Min", "field:Height Min"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Fisheye Equisolid", "Central Cylindrical"));
+    CHECK(cam->panoramic_type == 4);
+    for (const char *f : {"field:Height Min", "field:Height Max", "field:Longitude Min", "field:Longitude Max"}) CHECK(r538e_has(ed, f));
+    for (const char *f : {"field:Latitude Min", "field:Fisheye Field Of View", "field:Fisheye Lens (mm)"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Central Cylindrical", "Mirror Ball"));
+    CHECK(cam->panoramic_type == 5);
+    for (const char *f : {"field:Latitude Min", "field:Longitude Min", "field:Fisheye Field Of View", "field:Fisheye Lens (mm)", "field:Height Min"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Panoramic", "Perspective"));
+    CHECK(cam->panoramic_type == 0 && !cam->orthographic);
+    CHECK(!r538e_combo_shows(ed, "Mirror Ball") && r538e_has(ed, "field:Field Of View"));
+    CHECK(r538e_pick(ed, "Perspective", "Orthographic"));
+    CHECK(cam->orthographic && cam->panoramic_type == 0);  // (Orthographic stays Unity's bool)
+    CHECK(r538e_pick(ed, "Orthographic", "Panoramic"));
+    CHECK(cam->panoramic_type == 1 && !cam->orthographic);  // (panoramic and orthographic don't both stay on)
+  });
+
+  test("round 538: typing the Panorama numbers into the Inspector's fields sets them, and undo puts the last one back", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    CHECK(r538e_pick(ed, "Perspective", "Panoramic"));
+    CHECK(r535_type(ed, "field:Latitude Min", "-30"));
+    CHECK(r535_type(ed, "field:Latitude Max", "45"));
+    CHECK(r535_type(ed, "field:Longitude Min", "-90"));
+    CHECK(r535_type(ed, "field:Longitude Max", "90"));
+    CHECK_NEAR(cam->latitude_min, -30.0, 1e-3);
+    CHECK_NEAR(cam->latitude_max, 45.0, 1e-3);
+    CHECK_NEAR(cam->longitude_min, -90.0, 1e-3);
+    CHECK_NEAR(cam->longitude_max, 90.0, 1e-3);
+    CHECK(r538e_pick(ed, "Equirectangular", "Fisheye Equisolid"));
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "220"));
+    CHECK(r535_type(ed, "field:Fisheye Lens (mm)", "14"));
+    CHECK_NEAR(cam->fisheye_fov, 220.0, 1e-3);
+    CHECK_NEAR(cam->fisheye_lens, 14.0, 1e-3);
+    CHECK(r538e_pick(ed, "Fisheye Equisolid", "Central Cylindrical"));
+    CHECK(r535_type(ed, "field:Height Min", "-0.5"));
+    CHECK(r535_type(ed, "field:Height Max", "2"));
+    CHECK_NEAR(cam->cylinder_min, -0.5, 1e-3);
+    CHECK_NEAR(cam->cylinder_max, 2.0, 1e-3);
+    ed.command("undo");
+    ed.step_frame_headless();
+    cam = r538e_camera(ed);  // (an undo restores the scene: the old component pointer is gone)
+    CHECK(cam && std::fabs(cam->cylinder_max - 1.0f) < 1e-3f);  // (the last typed number is back to its default)
+  });
+
+  test("round 538: bad numbers typed into the Inspector (latitude min above max, a field of view of 0 and 400, nan, inf, 1/0) are clamped or refused: the fields stay finite and in range and the editor keeps drawing", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    CHECK(r538e_pick(ed, "Perspective", "Panoramic"));
+    CHECK(r535_type(ed, "field:Latitude Min", "80"));
+    CHECK(r535_type(ed, "field:Latitude Max", "-20"));  // (min above max: allowed to be typed; the picture copes)
+    CHECK(r535_type(ed, "field:Longitude Min", "5000"));
+    CHECK(cam->longitude_min >= -360.0f && cam->longitude_min <= 360.0f);
+    CHECK(r535_type(ed, "field:Latitude Min", "nan"));
+    CHECK(std::isfinite(cam->latitude_min) && cam->latitude_min >= -90.0f && cam->latitude_min <= 90.0f);
+    CHECK(r535_type(ed, "field:Latitude Max", "1/0"));
+    CHECK(std::isfinite(cam->latitude_max) && cam->latitude_max >= -90.0f && cam->latitude_max <= 90.0f);
+    CHECK(r538e_pick(ed, "Equirectangular", "Fisheye Equisolid"));
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "0"));
+    CHECK(cam->fisheye_fov >= 1.0f && cam->fisheye_fov <= 360.0f);
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "400"));
+    CHECK(cam->fisheye_fov >= 1.0f && cam->fisheye_fov <= 360.0f);
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "inf"));
+    CHECK(std::isfinite(cam->fisheye_fov) && cam->fisheye_fov >= 1.0f && cam->fisheye_fov <= 360.0f);
+    CHECK(r535_type(ed, "field:Fisheye Lens (mm)", "0"));
+    CHECK(std::isfinite(cam->fisheye_lens) && cam->fisheye_lens > 0.0f);
+    CHECK(r538e_pick(ed, "Fisheye Equisolid", "Central Cylindrical"));
+    CHECK(r535_type(ed, "field:Height Min", "99999"));
+    CHECK(std::isfinite(cam->cylinder_min) && cam->cylinder_min <= 100.0f);
+    for (int i = 0; i < 6; i++) ed.step_frame_headless();  // (every view draws the camera again)
+    ed.command("select Main Camera");
+    ed.command("camera panoramic mirror ball");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(cam->panoramic_type == 5);
+  });
+
+  test("round 538: a scene saved with a panoramic camera loads it with the type and every number as they were", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    cam->panoramic_type = 3;
+    cam->latitude_min = -30, cam->latitude_max = 45, cam->longitude_min = -90, cam->longitude_max = 120;
+    cam->fisheye_fov = 220, cam->fisheye_lens = 14, cam->cylinder_min = -0.5f, cam->cylinder_max = 2.0f;
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Panoramic_Type 3") != std::string::npos);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    GameObject *g = back.find_by_name("Main Camera");
+    const Camera *c = g ? g->get<Camera>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    CHECK(c->panoramic_type == 3 && !c->orthographic);
+    CHECK_NEAR(c->latitude_min, -30.0, 1e-4);
+    CHECK_NEAR(c->latitude_max, 45.0, 1e-4);
+    CHECK_NEAR(c->longitude_min, -90.0, 1e-4);
+    CHECK_NEAR(c->longitude_max, 120.0, 1e-4);
+    CHECK_NEAR(c->fisheye_fov, 220.0, 1e-4);
+    CHECK_NEAR(c->fisheye_lens, 14.0, 1e-4);
+    CHECK_NEAR(c->cylinder_min, -0.5, 1e-4);
+    CHECK_NEAR(c->cylinder_max, 2.0, 1e-4);
+    /* Saved with its panoramic setting off, with Orthographic on: it comes back Orthographic, not panoramic. */
+    cam->panoramic_type = 0;
+    cam->orthographic = true;
+    Scene back2;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back2, err));
+    const Camera *c2 = back2.find_by_name("Main Camera") ? back2.find_by_name("Main Camera")->get<Camera>() : nullptr;
+    CHECK(c2 && c2->panoramic_type == 0 && c2->orthographic);
+    /* Each type survives the file. */
+    cam->orthographic = false;
+    for (int type = 1; type <= 5; type++) {
+      cam->panoramic_type = type;
+      Scene again;
+      CHECK(load_scene_text(save_scene_text(ed.scene()), again, err));
+      GameObject *ag = again.find_by_name("Main Camera");
+      CHECK(ag && ag->get<Camera>() && ag->get<Camera>()->panoramic_type == type);
+    }
+  });
+
+  test("round 538: a scene saved before panoramic cameras (no Panoramic Type, Latitude, Longitude, Fisheye or Height lines) loads its camera as perspective, field of view and all", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    cam->fov = 47.0f;
+    cam->panoramic_type = 2;  // (so the saved text has the lines to strip)
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Panoramic_Type 2") != std::string::npos);
+    const std::string old = r538e_without_panoramic(text);
+    CHECK(old.find("Panoramic") == std::string::npos && old.find("Fisheye") == std::string::npos);
+    CHECK(old.find("Orthographic") != std::string::npos);  // (the lines that were there before stay)
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(old, back, err));
+    GameObject *g = back.find_by_name("Main Camera");
+    const Camera *c = g ? g->get<Camera>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    CHECK(c->panoramic_type == 0 && !c->orthographic);
+    CHECK_NEAR(c->fov, 47.0, 1e-4);
+    const Mat4 want = Mat4::perspective(47.0f * kDeg2Rad, 1.5f, c->near_clip, c->far_clip), got = c->projection(1.5f);
+    float worst = 0;
+    for (int i = 0; i < 16; i++) worst = std::max(worst, std::fabs(want.m[i] - got.m[i]));
+    CHECK(worst < 1e-4f);  // (a perspective projection)
+    CHECK_NEAR(c->latitude_min, -90.0, 1e-4);   // (Blender's defaults where the file says nothing)
+    CHECK_NEAR(c->longitude_max, 180.0, 1e-4);
+    CHECK_NEAR(c->fisheye_fov, 180.0, 1e-4);
+    CHECK_NEAR(c->fisheye_lens, 10.5, 1e-4);
+    CHECK_NEAR(c->cylinder_max, 1.0, 1e-4);
+  });
+
+  test("round 538: `camera panoramic equirectangular` makes the selected camera Equirectangular, each other name picks its type, `off` puts it back, and the Inspector follows", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    const struct { const char *cmd; int type; } steps[] = {
+        {"camera panoramic equirectangular", 1}, {"camera panoramic fisheye equidistant", 2}, {"camera panoramic fisheye equisolid", 3},
+        {"camera panoramic central cylindrical", 4}, {"camera panoramic mirror ball", 5}, {"camera panoramic Equirectangular", 1},
+        {"camera panoramic cylindrical", 4}, {"camera panoramic off", 0}};
+    for (const auto &s : steps) {
+      ed.command(s.cmd);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      if (cam->panoramic_type != s.type) std::printf("    '%s' left panoramic_type %d, wanted %d\n", s.cmd, cam->panoramic_type, s.type);
+      CHECK(cam->panoramic_type == s.type);
+      CHECK(r538e_combo_shows(ed, s.type ? "Panoramic" : "Perspective"));
+    }
+    ed.command("camera panoramic equirectangular");
+    ed.step_frame_headless();
+    CHECK(cam->panoramic_type == 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    cam = r538e_camera(ed);  // (undo restores the scene: the old pointer is gone)
+    CHECK(cam && cam->panoramic_type == 0);  // (one step, back to what it was)
+    ed.command("redo");
+    ed.step_frame_headless();
+    cam = r538e_camera(ed);
+    CHECK(cam && cam->panoramic_type == 1);
+  });
+
+  test("round 538: `camera panoramic` refuses with a warning when no camera is selected, for a name it doesn't know, and for no name, and changes nothing", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    ed.command("camera panoramic mirror ball");
+    CHECK(cam->panoramic_type == 5);
+    const size_t objects = ed.scene().object_count();
+    std::vector<LogEntry> sink;
+    size_t at = Log::fetch(0, sink);
+    ed.command("select Cube");
+    ed.command("camera panoramic equirectangular");
+    ed.step_frame_headless();
+    const std::vector<std::string> said = r538e_log_since(at);
+    bool refused = false;
+    for (const std::string &s : said) refused = refused || s.find("camera") != std::string::npos;
+    CHECK(refused);  // (it says something: a silent no-op is no refusal)
+    CHECK(cam->panoramic_type == 5);  // (the unselected camera was left alone)
+    CHECK(ed.scene().object_count() == objects);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && !cube->get<Camera>());
+    ed.command("select Main Camera");
+    for (const char *bad : {"camera panoramic banana", "camera panoramic 99", "camera panoramic equirectangular fisheye"}) {
+      ed.command(bad);
+      ed.step_frame_headless();
+      if (cam->panoramic_type != 5) std::printf("    '%s' changed panoramic_type to %d\n", bad, cam->panoramic_type);
+      CHECK(cam->panoramic_type == 5);
+    }
+    ed.command("camera panoramic");  // (no name at all: whatever it does, the type stays one of the six)
+    CHECK(cam->panoramic_type >= 0 && cam->panoramic_type <= 5);
+    /* The orbit command that shares the word keeps working. */
+    ed.command("camera 25 20 7 1 2 3");
+    ed.step_frame_headless();
+    CHECK(length(ed.scene_view_pivot_for_test() - Vec3(1, 2, 3)) < 1e-3f);
+  });
+
+  test("round 538: `camera panoramic` acts on the selected camera, not on the other camera in the scene", [] {
+    Editor ed;
+    r538e_open(ed);
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    CHECK(second && second->get<Camera>());
+    if (!second) return;
+    ed.command("camera panoramic fisheye equidistant");
+    CHECK(second->get<Camera>()->panoramic_type == 2);
+    CHECK(r538e_camera(ed)->panoramic_type == 0);  // (the Main Camera wasn't selected)
+  });
+
+  test("round 538: the Learn lesson 'Panoramic Cameras' has its three questions and a Try-it whose commands add a panoramic camera, turn it into a fisheye and turn it off", [] {
+    int found = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Panoramic Cameras") found = i;
+    CHECK(found >= 0);
+    if (found < 0) return;
+    const std::string body = lesson(found).body;
+    size_t questions = 0;
+    std::vector<std::string> cmds;
+    std::istringstream is(body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      cmds.push_back(line.substr(6, line.find(" | ") - 6));
+    }
+    CHECK(questions >= 2 && cmds.size() == 3);
+    if (cmds.size() != 3) return;
+    Editor ed;
+    ed.init_headless(900, 600);
+    auto run = [&](const std::string &all) {  // (as the Learn tab runs them: ';'-separated console commands)
+      size_t a = 0;
+      while (a <= all.size()) {
+        const size_t e = all.find(';', a);
+        std::string c = all.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+    };
+    run(cmds[0]);
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 1);
+    run(cmds[1]);
+    CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 2);
+    run(cmds[2]);
+    CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 0);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -16286,5 +16665,6 @@ void run_editor_tests() {
   tests_round537();
   tests_round542();
   tests_round535();
+  tests_round538();
   coverage_tests();
 }

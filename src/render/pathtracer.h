@@ -23,6 +23,7 @@
 #include "gpu_device.h"
 #include "gsplat_embree.h"
 #include "light_tree.h"
+#include "panoramic.h"
 #include "shading.h"
 
 #include <atomic>
@@ -57,6 +58,7 @@ struct PTLens {
   float focus_distance = 10.0f;  // along the view direction
   int blades = 0;                // 0 round, 3+ polygonal
   float rotation = 0.0f;         // radians
+  PanoramicParams pano;          // round 538: type > 0 - a panoramic camera: the primary rays come from panoramic.h (no thin lens, CPU only)
 };
 
 struct PTSettings {
