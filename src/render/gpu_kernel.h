@@ -196,6 +196,7 @@ struct SurfacePoint {
   vec3 position, normal, geo_normal, local_position, local_normal;
   vec2 uv;
   vec4 tangent;
+  vec4 vc;  // task 0537: the mesh's vertex colour here (the vertices' spare lanes: p.w, n.w, uv.zw; 1 where none)
   bool has_tangent;
   vec3 bmin, bmax;
 };
@@ -221,6 +222,7 @@ int surface_at(uint obj, uint prim, float u, float v, out SurfacePoint sp) {
   sp.normal = normalize((ins.normal_mat * vec4(sp.local_normal, 0.0)).xyz);
   sp.geo_normal = normalize((ins.normal_mat * vec4(cross(b.p.xyz - a.p.xyz, c.p.xyz - a.p.xyz), 0.0)).xyz);
   sp.uv = ins.info.z != 0u ? a.uv.xy * w + b.uv.xy * u + c.uv.xy * v : vec2(0.0);
+  sp.vc = vec4(a.p.w, a.n.w, a.uv.z, a.uv.w) * w + vec4(b.p.w, b.n.w, b.uv.z, b.uv.w) * u + vec4(c.p.w, c.n.w, c.uv.z, c.uv.w) * v;
   sp.has_tangent = ins.info.w != 0u;
   sp.tangent = vec4(0.0);
   if (sp.has_tangent) {
@@ -299,6 +301,10 @@ Sample evaluate_plain(Material m, SurfacePoint sp, bool force_box) {
     vec4 c = msample(m, m.tex0.x, uv, box, bw, bp);
     s.albedo *= c.xyz;
     s.alpha *= c.w;
+  }
+  if ((m.flags.w & 8192) != 0) {  // task 0537: a Vertex Color material (evaluate_surface: after the base map, capped at 1)
+    s.albedo *= clamp(sp.vc.xyz, 0.0, 1.0);
+    s.alpha *= clamp(sp.vc.w, 0.0, 1.0);
   }
   if (m.tex0.y >= 0) s.metallic *= msample(m, m.tex0.y, uv, box, bw, bp).x;
   if (m.tex0.z >= 0) s.roughness *= msample(m, m.tex0.z, uv, box, bw, bp).x;

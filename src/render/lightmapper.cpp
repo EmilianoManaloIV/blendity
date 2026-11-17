@@ -610,7 +610,13 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   /* 4. The scene the rays see: the static objects, the Baked and Mixed lights, the world. */
   pt_ = std::make_unique<PathTracer>();
   pt_objects_.clear();
-  for (const BakeObject &o : objects_) pt_objects_.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+  pt_colors_.assign(objects_.size(), {});  // (task 0537: sized first - the objects point into it)
+  for (const BakeObject &o : objects_) {
+    pt_objects_.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+    std::vector<Vec4> &c = pt_colors_[pt_objects_.size() - 1];
+    pt_object_colors(*o.mesh, *pt_objects_.back().mesh, o.materials, c);
+    if (!c.empty()) pt_objects_.back().colors = &c;
+  }
   const std::vector<RenderLight> pt_lights = bounce_lights(lights_);  // (round 452: at their Indirect Multipliers)
   PTSettings ps;
   /* The gather's own hit is the first bounce (its direct light comes by next-event estimation): the
@@ -1194,6 +1200,7 @@ bool Lightmapper::step(double budget_ms) {
 void Lightmapper::cancel() {
   active_ = false;
   pt_.reset();  // a cancelled bake keeps nothing
+  std::vector<std::vector<Vec4>>().swap(pt_colors_);  // (task 0537)
   texels_.clear();
   texels_.shrink_to_fit();
   values_.clear();
@@ -1811,6 +1818,7 @@ LightingData Lightmapper::take_result() {
   if (pt_) gpu_cards_ = pt_->gpu_gather_cards();  // (round 487: the path tracer holds the cards' counts)
   if (pt_ && !gpu_cards_.empty()) Log::info("Generate Lighting: the gather's time: %s", pt_->gpu_gather_times().c_str());
   pt_.reset();
+  std::vector<std::vector<Vec4>>().swap(pt_colors_);  // (task 0537)
   texels_.clear();
   values_.clear();
   gather_.clear(), gather_.shrink_to_fit();
