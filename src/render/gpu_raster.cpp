@@ -4793,7 +4793,10 @@ class VulkanRaster final : public Raster {
   }
   bool make_render_passes(std::string *err) {
     rp_shadow_ = make_pass({}, true, false);
-    rp_gbuf_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
+    /* Round 551 (task 0531): the albedo plane is sRGB-encoded (R8G8B8A8_SRGB: the card encodes on write, decodes on read; the
+     * metallic in alpha stays linear). Linear 8-bit lost the dark colours - one step is 0.0039 of light, a third of a dark
+     * albedo's - and the CPU keeps the albedo in float: 8 bits on sRGB's curve hold an sRGB texture's own bytes exactly. */
+    rp_gbuf_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
                           VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT},
                          true, false);
     rp_light_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, true);
@@ -5279,7 +5282,7 @@ class VulkanRaster final : public Raster {
       for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
       const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
-                      make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
+                      make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_SRGB, att, VK_IMAGE_ASPECT_COLOR_BIT) &&  // (round 551: see rp_gbuf_)
                       make_image(sl.geo, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.emit, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.ids, w, h, VK_FORMAT_R32_UINT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
