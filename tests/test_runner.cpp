@@ -116,6 +116,31 @@ void tests_round492() {
   });
 }
 
+/* Round 550 (task 0530): a run without BLENDITY_TEST_DIR gets a scratch folder of its own; old runs' folders go. */
+void tests_round550() {
+  test("a test run without BLENDITY_TEST_DIR works in a folder of its own, run-<stamp>-<n> under the shared one, and removes run folders begun more than a day ago - another run's files never reach its scratch project (round 550)", [] {
+    const std::string base = fs::join(test_dir(), "r550_runs");
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(base), ec);
+    fs::make_dirs(base);
+    const unsigned long long now = test_run_stamp();
+    const double tick_s = (double)std::chrono::system_clock::period::num / (double)std::chrono::system_clock::period::den;
+    const unsigned long long two_days = (unsigned long long)(48.0 * 3600.0 / tick_s), an_hour = (unsigned long long)(3600.0 / tick_s);
+    const std::string old_run = test_run_dir(base, now - two_days, 1), new_run = test_run_dir(base, now - an_hour, 2), other = fs::join(base, "keep-me");
+    for (const std::string &d : {old_run, new_run, other}) fs::make_dirs(fs::join(d, "Assets/Materials"));
+    prune_test_runs(base, 24.0 * 3600.0, now);
+    CHECK(!fs::exists(old_run));  // (begun two days ago: gone, whatever its folder's time says)
+    CHECK(fs::exists(new_run) && fs::exists(other));  // (begun an hour ago; not a run folder at all)
+    /* Two runs begun on the same tick get different folders. */
+    CHECK(test_run_dir(base, now, 1) != test_run_dir(base, now, 2));
+    CHECK(fs::filename(test_run_dir(base, now, 7)).rfind("run-", 0) == 0);
+    /* This run's own folder: BLENDITY_TEST_DIR when set (run_suites.py, these runs), a run- folder when not. */
+    const char *own = std::getenv("BLENDITY_TEST_DIR");
+    CHECK((own && *own) ? test_dir() == std::string(own) : fs::filename(test_dir()).rfind("run-", 0) == 0);
+    std::filesystem::remove_all(std::filesystem::u8path(base), ec);
+  });
+}
+
 }  // namespace
 
-void run_runner_tests() { tests_round492(); }
+void run_runner_tests() { tests_round492(); tests_round550(); }
