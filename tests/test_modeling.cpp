@@ -11552,6 +11552,9 @@ static void tests_round535() {
     CHECK(two && r2->face_count() == 54);
     MeshPtr tiny = primitives::quad_sphere(1e-6f, 2, 0);
     CHECK(tiny->face_count() == 24 && std::isfinite(tiny->positions[0].x));
+  });
+}
+
 /* Round 549 (task 0529): the curved stress section's shapes drawn on a cylinder's faces, then turned - its very steps (imprint, turn
  * the new face's corners about its middle, repair_rings, which zips the ring again: by angle, or by two bridges). On CI's
  * ubuntu-26.04 runners one of them crashed: the bridges were sorted by lengths worked out again at every comparison, no

@@ -15670,6 +15670,9 @@ static void tests_round538() {
     CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 2);
     run(cmds[2]);
     CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 0);
+  });
+}
+
 /* Round 549 (task 0529): a click or a ray exactly on the edge two triangles of a face share lands on the face. CI's new runners
  * (ubuntu-26.04) put round 513's window test's ray through the far wall's diagonal and it missed both triangles. */
 static void tests_round549() {
