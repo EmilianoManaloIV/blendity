@@ -1,6 +1,6 @@
 # 0538: The card's contact-shadow edge at a distance, as the CPU's
 
-- **Status:** in progress (the hub's round 556, Pass 27)
+- **Status:** done (round 556)
 - **Requirements:** found by round 553 (task 0534)
 - **Decisions:** none expected
 - **Model:** main session (Opus)
@@ -36,3 +36,12 @@ runner (`tests/test_main.cpp`) now points `BLENDITY_PREFS_DIR` at the run's own 
 `set_env("BLENDITY_PREFS_DIR", "")` means that folder (before, an empty path: a prefs.txt in the working folder). Built on
 round 550 (#433), which gives each run its own folder. Test: an editor in a run reads its preferences from the run's
 folder, never the user's.
+
+## Outcome (round 556)
+- The contact-shadow difference was not a shadow: the sphere's shadow on the floor at 20 m is the same pixels on the CPU and
+  the card; round 553's extra "edge" pixels were the grid's X axis line over the floor. The test measures the shadow with
+  the grid off and pins CPU = card within 2 pixels. No shadow code changed.
+- The prefs isolation fix and its test (above).
+- Added at the hub's request: round 554's span guarded - no pixel covered outside the triangles' union, and a dense sphere's
+  depth on its surface. Both pass with the shipped and with the review's wide margin, so #448's sculpt failures with the wide
+  margin were not coverage or depth (likely the frame's cost; not proven).

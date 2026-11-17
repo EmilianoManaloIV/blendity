@@ -13044,7 +13044,7 @@ static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float p
  * pixel centre more than 0.01 pixel inside the union - `outline`, a convex polygon in world space, projected by the
  * renderer itself - is covered (none missed). */
 static void r554_check(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, const std::vector<Vec3> &outline,
-                       size_t &gaps, size_t &doubles) {
+                       size_t &gaps, size_t &doubles, size_t *outside = nullptr) {
   Renderer3D r3d;
   Image img;
   RenderTarget rt;
@@ -13067,6 +13067,14 @@ static void r554_check(const R554View &view, const std::vector<std::array<Vec3, 
   for (int y = 0; y < view.H; y++)
     for (int x = 0; x < view.W; x++)
       if (r554_inside_convex(poly, x + 0.5f, y + 0.5f) > 0.01f && all[(size_t)y * view.W + x] == 0) gaps++;
+  /* Round 556: and none covered whose centre is outside the union by more than 0.01 pixel (a wider span once let a
+   * triangle take pixels past its edge - see the dense sphere's test). */
+  if (outside) {
+    *outside = 0;
+    for (int y = 0; y < view.H; y++)
+      for (int x = 0; x < view.W; x++)
+        if (r554_inside_convex(poly, x + 0.5f, y + 0.5f) < -0.01f && all[(size_t)y * view.W + x] != 0) (*outside)++;
+  }
 }
 /* How far (pixels) a point is inside a convex polygon given in screen positions, either winding (negative: outside). */
 static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float py) {
@@ -13101,9 +13109,9 @@ static void tests_round554() {
           sq.push_back({cx + r * std::cos(a), cy + r * std::sin(a)});
         }
         const Vec3 A = view.at(sq[0].x, sq[0].y), B = view.at(sq[1].x, sq[1].y), C = view.at(sq[2].x, sq[2].y), D = view.at(sq[3].x, sq[3].y);
-        size_t gaps = 0, doubles = 0;
-        r554_check(view, {{A, B, C}, {A, C, D}}, {A, B, C, D}, gaps, doubles);
-        worst_gaps = std::max(worst_gaps, gaps), worst_doubles = std::max(worst_doubles, doubles), cases++;
+        size_t gaps = 0, doubles = 0, outside = 0;
+        r554_check(view, {{A, B, C}, {A, C, D}}, {A, B, C, D}, gaps, doubles, &outside);
+        worst_gaps = std::max(worst_gaps, gaps), worst_doubles = std::max(worst_doubles, doubles + outside), cases++;
         if (gaps || doubles) std::printf("    turned %.0f, offset %.2f: %zu missed, %zu twice\n", turn, off, gaps, doubles);
       }
     std::printf("    %zu squares: at worst %zu pixels missed, %zu covered twice\n", cases, worst_gaps, worst_doubles);
@@ -13117,11 +13125,57 @@ static void tests_round554() {
     for (float tilt : {0.0f, 1e-5f, -1e-5f}) {
       const Vec3 L = view.at(10.1f, 32.5f), R = view.at(50.3f, 32.5f - tilt);
       const Vec3 top = view.at(30.2f, 12.25f), bottom = view.at(30.2f, 52.75f);
-      size_t gaps = 0, doubles = 0;
-      r554_check(view, {{L, R, top}, {R, L, bottom}}, {L, top, R, bottom}, gaps, doubles);
-      std::printf("    the horizontal split, tilted %g: %zu missed, %zu twice\n", tilt, gaps, doubles);
-      CHECK(gaps == 0 && doubles == 0);
+      size_t gaps = 0, doubles = 0, outside = 0;
+      r554_check(view, {{L, R, top}, {R, L, bottom}}, {L, top, R, bottom}, gaps, doubles, &outside);
+      std::printf("    the horizontal split, tilted %g: %zu missed, %zu twice, %zu outside\n", tilt, gaps, doubles, outside);
+      CHECK(gaps == 0 && doubles == 0 && outside == 0);
     }
+  });
+  test("rasterizer (round 556): a dense sphere covers no pixel outside its outline and every pixel it covers has its surface's depth - no triangle takes a pixel past its edge with an extrapolated depth", [] {
+    /* Round 554's span, widened by its rounding band over |A| (and even by one pixel), made two sculpt strokes find no
+     * surface under the mouse on #448's CI though every pixel there kept the sphere's id. This test (and round 554's
+     * "outside" counts) guard that a span wider than needed still draws only the triangles' pixels at their depths: a sphere
+     * of 20 pixels' radius, orthographic (one world unit a pixel), 48 x 24 segments - each covered pixel's depth against the
+     * sphere's front surface there, within the facets' chord error, and no pixel covered off its disc. Measured on Windows:
+     * it passes with the shipped 1e-4 pixel margin and with the review's wide one alike (1,264 pixels, worst 0.124) - so the
+     * sculpt strokes' trouble was not coverage or depth (see raster_tile's note). */
+    const R554View view;
+    const float radius = 20.0f;
+    CfScene sc;
+    const float centre_z = 15.0f;  // (in front of the camera at z = -10: its front at z = -5)
+    sc.add(primitives::uv_sphere(radius, 48, 24), Mat4::translate({0.0f, 0.0f, centre_z}), 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+    sc.seal();
+    Image img;
+    RenderTarget rt;
+    cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc);
+    /* The camera at z = -10 looking down +z, near 0.1, far 100: a world z gives the depth (z + 10 - 0.1) / 99.9. */
+    /* (A facet lies behind the sphere by its sag, 0.04 here, times the surface's slope - at most 1.33 within 0.8 of the
+     * radius, where the depth is checked: at the rim the surface turns edge-on and its depth changes without bound. A
+     * depth carried a pixel past a triangle's edge is off by up to the slope, a pixel and more.) */
+    const float chord = 0.3f;
+    size_t covered = 0, outside = 0, off_depth = 0;
+    float worst = 0.0f;
+    for (int y = 0; y < view.H; y++)
+      for (int x = 0; x < view.W; x++) {
+        const size_t i = (size_t)y * view.W + x;
+        if (rt.ids[i] == 0) continue;
+        covered++;
+        const float wx = x + 0.5f - view.W * 0.5f, wy = view.H * 0.5f - (y + 0.5f), r2 = wx * wx + wy * wy;
+        if (r2 > (radius + 0.01f) * (radius + 0.01f)) {
+          outside++;
+          continue;
+        }
+        if (r2 > 0.64f * radius * radius) continue;  // (the depth checked within 0.8 of the radius)
+        const float surface = centre_z - std::sqrt(std::max(0.0f, radius * radius - r2));  // (the front: nearest the camera)
+        const float world_z = rt.depth_at(x, y) * 99.9f + 0.1f - 10.0f;
+        const float err = world_z - surface;  // (a facet is behind the sphere, never in front of it)
+        worst = std::max(worst, std::fabs(err));
+        if (err < -0.02f || err > chord) off_depth++;
+      }
+    std::printf("    %zu pixels covered; %zu outside the disc, %zu off the surface's depth (worst %.3f, the facets' chord %.3f)\n", covered,
+                outside, off_depth, worst, chord);
+    CHECK(covered > 1000);
+    CHECK(outside == 0 && off_depth == 0);
   });
   test("rasterizer (round 554, review): a see-through quad's two triangles blend their shared diagonal once - its pixels the same colour as the rest of the quad", [] {
     const R554View view;
