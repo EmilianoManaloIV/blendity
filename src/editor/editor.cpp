@@ -2483,7 +2483,8 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   seq_drag_cancel();
   stable_ = scene_->clone();
   restore_edit_selection(s.edit_sel);
-  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_mh_.forget(), wp_version_++;  // the same objects, restored: keep painting
+  if (vertex_paint_) vp_scene_ = scene_.get(), vp_mh_.forget(), vp_version_++;  // (task 0525: likewise)
   if (paint_) paint_scene_ = scene_.get();  // (task 0245: keep painting)
   if (sculpt_) sculpt_scene_ = scene_.get(), sculpt_cache_mesh_ = nullptr;  // (task 0236: keep sculpting; the grid is rebuilt)
   prune_selection();
@@ -5787,6 +5788,7 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const MeshRenderer *mr = g.get<MeshRenderer>();
     carry_shape_keys(mf->mesh, om, mr && !mr->edit_shape.empty());  // (round 406: the open shape's basis follows too)
     carry_custom_normals(mf->mesh, om);
+    carry_colors(mf->mesh, om, g.id);  // (task 0525, ADR 0152)
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
     if (mf->mesh->groups_fit()) return;

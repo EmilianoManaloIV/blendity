@@ -35,6 +35,19 @@ struct ShapeKey {
   std::vector<Vec3> delta;  // one per vertex
 };
 
+/* A colour attribute (ADR 0152, task 0525; Blender's colour attributes, Unity's Mesh.colors): a named layer of linear
+ * RGBA, one per vertex (Point) or one per face corner (Corner, so a seam can change colour sharply). A layer that no
+ * longer matches the mesh is dropped, never read (Mesh::color_fits): a Point layer by its size; a Corner layer also by
+ * `corners`, the corner list it belongs to - an operator that rebuilt the corners (even to the same count) didn't carry
+ * it, so its colours would land on the wrong corners. */
+struct ColorAttribute {
+  enum class Domain : uint8_t { Point, Corner };
+  std::string name = "Color";
+  Domain domain = Domain::Point;
+  std::vector<Vec4> rgba;
+  std::vector<uint32_t> corners;  // (Corner only) the mesh's corner_verts these colours were made for
+};
+
 struct MeshRenderer;
 /* Round 406: the mesh as it would be with its open shape edit folded - the basis as the positions, the edited key's
  * delta what the positions hold over it; the mesh itself when no shape is open. Exporters and Live Link read this, so
@@ -246,6 +259,32 @@ struct Mesh : MeshCaches {
    * corner_normals works out (smooth, flat, sharp edges); saved with the mesh, carried through edits by position
    * like shape keys. */
   std::vector<Vec3> custom_normals;
+  /* --- colour attributes (ADR 0152, task 0525) ---
+   * Point layers travel as vertex_groups do (copy_vertex_weights, remove_loose_verts, Mirror / Array / Join, and by
+   * position through meshops::transfer_vertex_groups); Corner layers as uvs do. normalize() drops a layer of the wrong
+   * size. active_color is the painted layer, render_color the shown and exported one; -1: none. */
+  std::vector<ColorAttribute> color_attributes;
+  int active_color = -1, render_color = -1;
+  /* The layers prune_colors (or Join / Separate) dropped since the editor last looked, as "'name' (per vertex|corner)":
+   * the editor reports them, so an edit never loses paint silently. Never saved. */
+  std::vector<std::string> dropped_colors;
+  bool color_fits(const ColorAttribute &c) const {
+    if (c.domain == ColorAttribute::Domain::Point) return c.rgba.size() == positions.size();
+    return c.rgba.size() == corner_verts.size() && c.corners == corner_verts;
+  }
+  /* A new layer of `domain`, every element `fill`, belonging to the mesh as it is (ADR 0152). */
+  ColorAttribute make_color(const std::string &name, ColorAttribute::Domain domain, Vec4 fill) const;
+  int find_color(const std::string &name) const;
+  /* The layer to render or export, when it fits (nullptr: none). */
+  const ColorAttribute *render_colors() const;
+  /* Drops layers that no longer fit their domain (Corner ones only, unless points_too) and keeps active / render in
+   * range. */
+  void prune_colors(bool points_too = true);
+  /* After a vertex renumbering (`remap`: old -> new, UINT32_MAX gone; `new_count` vertices left; corner_verts already
+   * remapped): Point colours that fitted follow, Corner ones keep their corners (ADR 0152). */
+  void remap_color_vertices(const std::vector<uint32_t> &remap, size_t new_count);
+  /* Face f's corner layers (the UVs and Corner colours that fit) reversed, as its corners are when its winding flips. */
+  void reverse_corner_layers(size_t f);
   int find_shape(const std::string &name) const;
   int find_group(const std::string &group) const;
   bool groups_fit() const;               // every group has one weight per vertex
@@ -547,6 +586,18 @@ bool shape_keys_fit(const Mesh &m);
 void transfer_shape_keys(const Mesh &from, Mesh &to);
 /* Custom normals (task 0149) from `from` onto `to`, by position on from's surface (as shape keys are). */
 void transfer_custom_normals(const Mesh &from, Mesh &to);
+/* Colour attributes (ADR 0152, task 0525). Point layers go where vertex groups go: a Point layer of `to` the wrong size
+ * (and, with restore_missing, one `to` lost altogether - a modifier that built a new mesh) is made again from from's
+ * layer of that name through the groups' transfer map (by index when the topology is the same, interpolated by
+ * position otherwise). Then layers that still don't fit go (prune_colors), their names added to to.dropped_colors. */
+bool point_colors_need_carry(const Mesh &from, const Mesh &to, bool restore_missing);
+void apply_color_map(const GroupTransferMap &map, const Mesh &from, Mesh &to, bool restore_missing);
+void transfer_point_colors(const Mesh &from, Mesh &to, bool restore_missing);
+/* An operator that built `to` anew from `from` (Voxel Remesh, Quad Remesh): Point layers come back by position; the
+ * layers that can't (Corner ones) are named in to.dropped_colors for the editor to report. */
+void carry_colors_rebuilt(const Mesh &from, Mesh &to);
+/* Names of from's layers that aren't Point layers fitting it, as dropped_colors entries (Decimate, Remesh). */
+void note_unkept_colors(const Mesh &from, Mesh &to);
 /* Uniform Laplacian smoothing (blender/source/blender/modifiers/intern/MOD_smooth.cc). */
 void smooth_laplacian(Mesh &m, float factor, int iterations, const std::vector<uint8_t> *vert_mask = nullptr);
 /* Moves vertices along their normals by random amounts (for stress tests / noise). */

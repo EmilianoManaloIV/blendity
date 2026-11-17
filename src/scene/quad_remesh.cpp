@@ -213,6 +213,7 @@ bool quad_remesh_impl(const Mesh &in, const QuadRemeshParams &p, Mesh &out, Quad
   const float longest = std::max(ext.x, std::max(ext.y, ext.z));
   carry_mask_by_position(in, out, 1.5f * longest / std::sqrt((float)std::max<size_t>(1, field.F_compact.size())));
   if (!in.vertex_groups.empty()) transfer_vertex_groups(in, out);
+  carry_colors_rebuilt(in, out);  // (task 0525: Point colours by position, as the groups; Corner ones reported)
   out.touch();
   if (stats) {
     stats->verts_in = in.vert_count(), stats->faces_in = in.face_count(), stats->verts_out = out.vert_count(), stats->faces_out = out.face_count();
