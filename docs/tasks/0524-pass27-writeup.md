@@ -1,6 +1,6 @@
 # 0524: Pass 27's verify and write-up - Blender 5.3's features, measured and documented (round 544)
 
-- **Status:** in progress - the frame, the plans and the joined tree (#420, #421, #422); numbers wait for the timed window
+- **Status:** done - the joined tree, the timed window, the HCI sweep, the Learn walk and the fold; 557, 558, 559, 560 and 561 publish on it (their fragments fold with the next write-up)
 - **Requirements:** Q-performance (ADR 0105's budgets), the usability requirements the HCI sweep measures (ADR 0085),
   R-02 (modeling), R-rendering
 - **Decisions:** none expected (a measurement and documentation round; ADR 0056: a measurement is a stress row; ADR 0123:
