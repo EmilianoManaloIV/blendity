@@ -1,10 +1,9 @@
 # 0518: Panoramic cameras in the rasterizer (round 538)
 
-- **Status:** in review (Pass 27's plan, approved by the user 2026-11-15)
+- **Status:** done (approved with Pass 27's plan, 2026-11-15)
 - **Requirements:** rendering, cameras
-- **Decisions:** none needed beyond this spec (a camera setting and a renderer-independent resample; the same
-  approach as EEVEE 5.3, recorded here). If the reviewer judges the cube-face approach an architectural choice,
-  an ADR is written before the PR.
+- **Decisions:** ADR 0153 (the reviewer judged the cube faces above the renderers and the Camera fields
+  architectural).
 - **Model:** implementer (Sonnet)
 - **PR:** (link when opened)
 

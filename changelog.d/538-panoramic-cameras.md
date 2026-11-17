@@ -33,8 +33,9 @@ sensor; Projection writes the stored fields only when the user changes it; each 
 **Known cost (for round 544's timed row):** each face is a whole `render_deferred` (gather, shadow map and lighting repeated per face):
 an Equirectangular view is six of them, a 1920x960 one at 960-pixel faces.
 
-**Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux); stress
-`editor` CHECKS_STRESS.
+**Checked:** the round's groups with Blender's libraries on Windows: `render` 40,238, `editor` 3,488, `splats` 378,
+`splats_raster` 109, `splats_trace` 3,996 checks, none failed; Linux (dependency-free) CHECKS_L; the whole suite is CI's
+(ADR 0134). No geometry changes, so no stress section. `tools/test_coverage_map.py --check` clean.
 
 <!-- README -->
 after: modifier stack (Array, Bevel, Boolean, Mirror, Subdivision, Lattice, Curve, Mesh Deform...), curves and lattices

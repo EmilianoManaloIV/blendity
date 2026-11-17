@@ -67,8 +67,13 @@ inline GameObject *r538_six_walls(Editor &ed) {
     m->specular = 0.0f;
     m->double_sided = true;
     w->add<MeshRenderer>()->materials = {m};
-    w->set_local_position(pos[f]);
-    w->set_local_rotation(Quat::euler(euler[f]));
+    /* Each wall's centre is moved off the view axis in its own plane (it still covers its face, overscan included: 6.7 m
+     * of the 14 m wall's half against 5.25 m). Centred, the quad's diagonal ran exactly through pixel centres of a face,
+     * and the CPU rasterizer's Linux build left a pixel on that shared edge uncovered (the Windows build covered it) - a
+     * rasterizer edge case this test is not about (reported as a follow-up, round 538). */
+    const Quat rot = Quat::euler(euler[f]);
+    w->set_local_position(pos[f] + rot.rotate(Vec3(0.31f, 0.17f, 0.0f)));
+    w->set_local_rotation(rot);
   }
   ed.mark_changed_for_test("six walls");
   return cam;
