@@ -51,9 +51,11 @@ the reason. The cost is measured cold and warm on each card.
   - The tests and the stress run use OptiX caches of their own (`OPTIX_CACHE_PATH` under the system's temp folder,
     unless set): they never read or write the user's `%LOCALAPPDATA%\NVIDIA\OptixCache`, and a run after the first
     finds the kernel compiled (P1 found that the user's warm cache was all that made the next test pass).
-  - "GPU opening: turning the Camera Preview to Rendered ..." gave the card 20 s to open. A cold OptiX compile takes
-    31 s (60-107 s under load), so the process ended mid-compile and nothing was cached: every run stayed cold. The
-    test now keeps waiting while the card's kernel compiles (`optix_compiling`), up to 4 minutes.
+  - "GPU opening: turning the Camera Preview to Rendered ..." gave the card 20 s to open. It opens GPU Compute (the
+    suite pins Vulkan), whose path-tracer pipeline compiles cold in the driver for a kernel's new SPIR-V when the
+    test's pipeline-cache folder is empty (P1, round 545b2): past 20 s under load, the process ended mid-compile,
+    nothing was cached and every run stayed cold. The test now keeps waiting while a card is still opening
+    (`renderers_opening`, which counts OptiX's warm-up too), up to 4 minutes.
 - Out:
   - Making the compile itself faster (fewer inlined functions, a split module): measured here, left as a
     follow-up if the cold time is still too long.

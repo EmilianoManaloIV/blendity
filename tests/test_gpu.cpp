@@ -59,9 +59,10 @@ static void round59_tests() {
     bool saw_cpu = false, saw_gpu = false;
     int frames = 0;
     ScopedTimer total;
-    /* Round 558: 20 s for the card to open, and longer while OptiX's kernel compiles for it (20-30 s, 60-100 s under
-     * load, once a PTX and card when its cache is cold): that is the card opening, not a stall. Four minutes at most. */
-    while ((total.ms() < 20000.0 || (gpu::optix_compiling(0) && total.ms() < 240000.0)) && !saw_gpu) {
+    /* Round 558: 20 s for the card to open, and longer while it is still opening - a kernel the driver has never seen
+     * compiles cold (P1, round 545b2: the path tracer's pipeline for new SPIR-V with no pipeline cache yet, past 20 s
+     * under load; OptiX's PTX, 31-107 s): that is the card opening, not a stall. Four minutes at most. */
+    while ((total.ms() < 20000.0 || (gpu::renderers_opening() && total.ms() < 240000.0)) && !saw_gpu) {
       ScopedTimer f;
       ed.step_frame_headless();
       worst = std::max(worst, f.ms());
