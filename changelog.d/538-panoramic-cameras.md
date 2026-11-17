@@ -34,7 +34,7 @@ sensor; Projection writes the stored fields only when the user changes it; each 
 an Equirectangular view is six of them, a 1920x960 one at 960-pixel faces.
 
 **Checked:** the round's groups with Blender's libraries on Windows: `render` 40,238, `editor` 3,488, `splats` 378,
-`splats_raster` 109, `splats_trace` 3,996 checks, none failed; Linux (dependency-free) CHECKS_L; the whole suite is CI's
+`splats_raster` 109, `splats_trace` 3,996 checks, none failed; Linux (dependency-free, before the last two merges) `render` 40,156, `editor` 3,468, `modeling` 5,486, none failed; the whole suite is CI's
 (ADR 0134). No geometry changes, so no stress section. `tools/test_coverage_map.py --check` clean.
 
 <!-- README -->
