@@ -19,4 +19,4 @@ the CPU's (9 antialiased pixels against 17). Make the card's edge the CPU's and 
 
 **Follow-up:** round 556 (task 0538), the card's contact-shadow edge on the floor at 20 m, darker and harder than the CPU's.
 
-**Checked:** on the card (RTX 4070 SUPER), on #442's head: toon at a distance passes on both renderers (the sphere 17 rows at 20 m, its edge 8 pixels on the CPU, 6 on the card); the `gpu` group 1,155 checks with only round 508's Generate Lighting failing (a slow-machine flake round 555 fixes; it passes alone). Linux: render and gpu, CHECKS_L.
+**Checked:** on the card (RTX 4070 SUPER), on #442's head: toon at a distance passes on both renderers (the sphere 17 rows at 20 m, its edge 8 pixels on the CPU, 6 on the card); the `gpu` group 1,155 checks with only round 508's Generate Lighting failing (a slow-machine flake round 555 fixes; it passes alone). Linux (dependency-free): render and gpu, 40,285 checks, 0 failed.
