@@ -1865,6 +1865,8 @@ class Editor {
   Vec2 sketch_ruler_for_test(int i) const { return sketch_.ruler[i]; }
   float sketch_ellipse_rx_for_test() const { return sketch_.ell_rx; }
   bool last_op_valid_for_test() { return last_op_valid(); }
+  Recti last_op_rect_for_test() const { return last_op_rect_; }    // (round 560: the F9 panels where they drew)
+  Recti obj_last_rect_for_test() const { return obj_last_rect_; }
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
@@ -6257,6 +6259,14 @@ class Editor {
   void obj_last_rerun();
   void blockout_last_rerun();  // (round 479: a Blockout piece just made)
   void draw_obj_last_panel(const Recti &view);
+  /* Round 560 (task 0542): where an Adjust Last panel goes - the view's bottom left, never above the view's top - and
+   * whether its rows scroll (they do when they are taller than the room left under the header: the caller runs them in a
+   * begin_scroll on `body`). */
+  struct AdjustPanelPlace {
+    Recti r, body;
+    bool scrolls = false;
+  };
+  AdjustPanelPlace adjust_panel_place(const Recti &view, int w, int head_h, int body_h);
   /* Plasticity's construction lines while drawing: X / Y / Z lay a guide along that axis (local
    * or global, as Snap Axes says) through the last point or the point under the mouse; Ctrl+click
    * on an edge lays one along the edge. A polyline point on a guide may leave the drawing plane. */

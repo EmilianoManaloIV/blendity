@@ -3217,8 +3217,9 @@ void Editor::draw_last_op_panel(const Recti &view) {
   int fields = L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
                L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" || L.op == "solve_mesh" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
-  int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
-  Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
+  const int body_h = rows * (rh + u.px(2)) + (rows ? pad : 0);
+  const AdjustPanelPlace place = adjust_panel_place(view, w, rh + u.px(6), body_h);  // (round 560: inside the view; tall rows scroll)
+  Recti r = place.r;
   last_op_rect_ = r;
   u.frame(r, (u.theme.popup & 0x00FFFFFFu) | (235u << 24), u.theme.border, u.px(4));
   Recti hr{r.x + pad, r.y + u.px(3), r.w - pad * 2, rh};
@@ -3241,7 +3242,9 @@ void Editor::draw_last_op_panel(const Recti &view) {
   u.tooltip("Adjust Last Operation (Blender: F9). Changing a value re-runs the operator\non the mesh as it was before it, as one undo step.");
   if (!last_op_open_) return;
   u.push_id("last_op");
-  int y = hr.bottom() + u.px(3);
+  const int off = place.scrolls ? u.begin_scroll(u.id("scroll_" + L.op), place.body, body_h) : 0;  // (each operator opens at its first row)
+  if (place.scrolls) r.w -= u.px(10);  // (the rows leave the scrollbar its strip)
+  int y = hr.bottom() + u.px(3) - off;
   const int lw = r.w * 2 / 5;
   bool changed = false;
   auto row = [&](const char *label) {
@@ -3377,6 +3380,7 @@ void Editor::draw_last_op_panel(const Recti &view) {
   static const char *orients[] = {"Global", "Local"};
   changed |= u.combo(u.id("orient"), row("Orientation"), L.orientation, orients, 2);
   if (!L.message.empty()) u.label({r.x + pad, y, r.w - pad * 2, rh}, L.message, u.theme.warning);
+  if (place.scrolls) u.end_scroll();
   u.pop_id();
   if (changed) {
     run_last_op(false);

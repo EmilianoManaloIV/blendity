@@ -183,6 +183,7 @@ class Context {
     bool tab_stop = false;
     std::string label;
     Recti clip;  // (the canvas clip it was drawn under: a control scrolled out of its panel is not on the screen)
+    Recti mark;  // (round 560: a tick box's box as drawn - r is what a click reaches)
   };
   std::vector<ControlRec> controls;
   Recti edit_rect_for_test() const { return edit_id_ ? edit_rect_ : Recti{}; }  // (the field being edited, as last drawn: a frame behind in the frame a click starts the edit)
@@ -267,6 +268,7 @@ class Context {
   std::unordered_map<std::string, std::string> menu_shortcuts;  // (tests: the shortcut drawn beside a menu row, by its label; task 0254)
   bool icon_button(const Recti &r, Icon icon, bool selected = false, const char *tip = nullptr);
   bool checkbox(const Recti &r, bool &v);
+  int checkbox_side(const Recti &r) const;  // (round 560: the box a tick box draws in r)
   bool toggle_row(const Recti &r, const std::string &label, bool &v);
   /* Text field; returns true when the value changed. committed set on Enter/blur. */
   bool text_field(Id i, const Recti &r, std::string &s, bool *committed = nullptr, const char *placeholder = nullptr);
@@ -334,6 +336,7 @@ class Context {
   bool any_popup_open() const { return !popups_.empty(); }
   size_t popup_count() const { return popups_.size(); }
   Recti top_popup_rect() const { return popups_.empty() ? Recti{} : popups_.back().rect; }  // (where the last one drew)
+  int top_popup_scroll() const { return popups_.empty() ? 0 : popups_.back().scroll; }  // (round 560: tests read a stop where the dialog scrolled it)
   Recti combo_rect(Id i) const {  // where a combo was last drawn (for tests)
     auto it = combo_rects_.find(i);
     return it == combo_rects_.end() ? Recti{0, 0, 0, 0} : it->second;
@@ -456,6 +459,10 @@ class Context {
   void focus_resolve_walk();
   void focus_reveal(const Recti &r);
   void focus_ring(const Recti &r);
+  Recti popup_scrollbar_thumb(const Recti &r, int content_h, int scroll_max, int scroll) const;  // (round 560)
+  void popup_scrollbar_drag(size_t k, const Recti &r, int content_h, int scroll_max);
+  void popup_scrollbar_draw(Id popup, const Recti &r, int content_h, int scroll_max, int scroll);
+  bool popup_bar_drag_ = false;  // (round 560: a popup's scrollbar is being dragged)
   bool in_list_popup() const { return current_layer_ > 0 && current_layer_ <= (int)popups_.size() && popups_[(size_t)current_layer_ - 1].list; }
   Id stop_id(Id base);
   void menu_escape();
