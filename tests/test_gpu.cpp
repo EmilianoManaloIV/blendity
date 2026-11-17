@@ -6737,6 +6737,9 @@ static void tests_round543_gpu() {
                 (unsigned long long)a.tlas_builds, (unsigned long long)b.tlas_builds);
     CHECK(b.blas_builds == a.blas_builds && b.tlas_builds == a.tlas_builds);
     CHECK(s.g->can_trace_shadows());  // (skipping is not a failure)
+  });
+}
+
 /* ================================================================ round 545b2 (task 0537): a material's Vertex Color on the card.
  * Reuses round 545b1's scene (a 2 x 2 pad, its left half red, its right half blue, a Point layer on a white material). */
 namespace {
