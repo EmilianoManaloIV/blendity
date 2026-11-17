@@ -208,7 +208,7 @@ static const SweepCommand kSweepCommands[] = {
   {"uvxf", "uvxf fit", ""},
   {"vgroup", "vgroup add A", ""},
   {"viewport", "viewport status", ""},
-  {"views", "views follow on", ""},
+  {"views", "views rtshadows", ""},
   {"viewscale", "viewscale 50", ""},
   {"viewshape", "viewshape remove 1", ""},
   {"visemes", "visemes", ""},
