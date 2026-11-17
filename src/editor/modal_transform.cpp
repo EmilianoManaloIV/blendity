@@ -287,7 +287,7 @@ bool Editor::transform_update(const Recti &view) {
   const int keys[3] = {platform::KEY_X, platform::KEY_Y, platform::KEY_Z};
   for (int a = 0; a < 3; a++)
     if (in.key_pressed[keys[a]]) {
-      const bool plane = in.shift();
+      const bool plane = (in.chord_mods(keys[a]) & platform::MOD_SHIFT) != 0;  // (round 548: Shift as the axis key went down)
       if (t.axis == a && t.plane == plane) {
         if (!t.local) t.local = true;
         else {

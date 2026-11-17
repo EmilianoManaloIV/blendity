@@ -86,6 +86,7 @@ bool Editor::obj_last_valid() const {
   if (obj_last_.kind.empty() || playing_ || obj_last_.serial != undo_serial_ || pending_change_) return false;
   const GameObject *g = scene_->find(obj_last_.obj);
   if (obj_last_.kind == "blockout") return g && g->get<BlockoutPiece>() && blockout_of_piece(*g);  // (a piece has no mesh to compare: the step's serial says it is still the newest)
+  if (obj_last_.kind == "pose") return g != nullptr;  // (round 541: Paste Pose - a pose has no mesh either)
   const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf || !mf->mesh || mf->mesh.get() != obj_last_.result || mf->mesh->version != obj_last_.result_version) return false;  // (undone, replaced, edited since)
   return obj_last_.kind != "draw" || (edit_mode_ && edit_obj_ == g->id);  // (a Draw shape is adjusted in the Edit Mode it was drawn in)
@@ -114,6 +115,7 @@ void Editor::obj_last_rerun() {
   ObjLastOp &o = obj_last_;
   GameObject *g = scene_->find(o.obj);
   if (o.kind == "blockout") return blockout_last_rerun();
+  if (o.kind == "pose") return pose_last_rerun();  // (round 541)
   MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf) return;
   if (o.kind == "primitive") {
@@ -154,6 +156,30 @@ void Editor::obj_last_rerun() {
     draw_segments_ = keep_segments, draw_sides_ = keep_sides, draw_fillet_ = keep_fillet;  // (the tool's own settings stay as they were)
     return amend_last_step();
   }
+}
+
+/* ---- Round 541 (task 0521): Paste Pose's F9 - Influence and Flipped, re-run from the pose before the paste ---- */
+
+void Editor::record_pose_last(std::vector<std::pair<uint64_t, Transform>> before, std::vector<PoseClipBone> clip, float influence, bool flipped, bool selected_only) {
+  if (before.empty()) return;
+  ObjLastOp o;
+  o.kind = "pose", o.what = "Paste Pose", o.obj = before.front().first;
+  o.a = influence, o.flag = flipped, o.m = selected_only ? 1 : 0;
+  o.pose_before = std::move(before), o.pose_clip = std::move(clip);
+  o.serial = obj_last_serial_now();
+  obj_last_ = std::move(o);
+  obj_last_open_ = true;
+}
+
+/* The bones back as they were, the paste made again with the panel's numbers; Record keys the new pose over the old. */
+void Editor::pose_last_rerun() {
+  ObjLastOp &o = obj_last_;
+  for (const auto &[id, t] : o.pose_before)
+    if (GameObject *b = scene_->find(id)) b->set_local(t);
+  pose_paste(o.pose_clip, o.a, o.flag, o.m != 0);
+  edit_epoch::bump();
+  anim_record_changes();
+  amend_last_step();
 }
 
 /* A Blockout piece just made, from the panel's numbers: every one is absolute and the floor's middle is the one recorded when the piece was made,
@@ -340,6 +366,11 @@ void Editor::draw_obj_last_panel(const Recti &view) {
       }
       else rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2, kOperations});  // (0 Add, 1 Subtract, 2 Intersect: words, round 496)
     }
+  }
+  else if (o.kind == "pose") {  // (round 541: Influence is soft 0-1 as Blender's factor; the field takes more)
+    title = o.what;
+    rows.push_back({"Influence", &o.a, nullptr, nullptr, 0.01f, -10.0f, 10.0f, 0, 0});
+    rows.push_back({"Flipped", nullptr, nullptr, &o.flag, 0, 0, 0, 0, 0});
   }
   else {
     title = "Draw " + o.what;

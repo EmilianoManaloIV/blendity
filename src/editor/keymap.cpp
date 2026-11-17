@@ -137,6 +137,13 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"anim.prev_key", "Previous Key", "Animation", CTX_GLOBAL},
       {"anim.next_key", "Next Key", "Animation", CTX_GLOBAL},
       {"anim.record", "Record (keys from edits)", "Animation", CTX_GLOBAL},
+      /* Round 541 (task 0521): Blender 5.3's animation tools. In the Scene view with only bones selected (Pose context) the chords are
+       * these; anywhere else they are passed on (Ctrl+R refreshes the assets, Ctrl+V is the Reference Board's). */
+      {"pose.rotation_convert", "Convert Rotation (Euler / Quaternion)", "Animation", CTX_SCENE},
+      {"pose.copy", "Copy Pose", "Animation", CTX_SCENE},
+      {"pose.paste", "Paste Pose", "Animation", CTX_SCENE},
+      {"pose.paste_flipped", "Paste Pose Flipped", "Animation", CTX_SCENE},
+      {"pose.align", "Align to Transform Orientation", "Animation", CTX_SCENE},
       {"seq.add_edit", "Add Edit at the Playhead (the Sequencer)", "Sequencer", CTX_GLOBAL},  // (round 391: Premiere's; Ctrl+K stays the palette)
       {"seq.ripple", "Ripple Delete (the Sequencer)", "Sequencer", CTX_GLOBAL},
       /* Lighting */
@@ -288,6 +295,11 @@ static void common_bindings(Keymap &k) {
   b("seq.ripple", {"Shift+Delete"});
   b("anim.prev_key", {","});
   b("anim.next_key", {"."});
+  b("pose.rotation_convert", {"Ctrl+R"});  // (round 541: Pose context only - see run_action)
+  b("pose.copy", {"Ctrl+C"});
+  b("pose.paste", {"Ctrl+V"});
+  b("pose.paste_flipped", {"Ctrl+Shift+V"});
+  b("pose.align", {});
   b("lighting.update", {"Ctrl+Shift+L"});
   b("object.create_empty", {"Ctrl+Shift+N"});
   b("object.create_empty_child", {"Alt+Shift+N"});
@@ -468,6 +480,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("edit.delete", {"Delete", "Backspace"});
     b("edit.duplicate", {"Ctrl+V"});  // 3ds Max: Clone
     b("mesh.duplicate", {"Ctrl+V"});
+    b("pose.paste", {});  // (round 541: Ctrl+V is Clone here)
     b("object.join", {"Ctrl+J"});
     b("mesh.extrude", {"Shift+E"});
     b("mesh.inset", {"Shift+I"});
@@ -583,6 +596,7 @@ static bool contexts_overlap(int a, int b) {
 static bool intended_pair(const std::string &a, const std::string &b) {
   auto is = [&](const char *x, const char *y) { return (a == x && b == y) || (a == y && b == x); };
   return is("edit.duplicate", "mesh.duplicate") || is("assets.refresh", "mesh.loop_cut") || is("edit.select_all", "edit.select_none") ||
+         is("pose.rotation_convert", "assets.refresh") || is("pose.rotation_convert", "mesh.loop_cut") ||  // (round 541: Ctrl+R in Pose context; passed on otherwise)
          is("points.toggle_closed", "mesh.knife");  // (a curve's points outside Edit Mode; the knife in it)
 }
 
@@ -614,9 +628,8 @@ bool Editor::action_pressed(const std::string &id) const {
   const auto it = keymap_.find(id);
   if (it == keymap_.end()) return false;
   const auto &in = ui_.in;
-  const int mods = (in.ctrl() ? platform::MOD_CTRL : 0) | (in.shift() ? platform::MOD_SHIFT : 0) | (in.alt() ? platform::MOD_ALT : 0);
   for (const KeyChord &c : it->second)
-    if (c.key > 0 && c.key < platform::KEY_COUNT && in.key_pressed[c.key] && c.mods == mods) return true;
+    if (c.key > 0 && c.key < platform::KEY_COUNT && in.key_pressed[c.key] && c.mods == in.chord_mods(c.key)) return true;  // (round 548: the chord as its key went down)
   return false;
 }
 
@@ -826,7 +839,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "menu.wheel" && (drag_ == Drag::Fly || in.down[1] || (playing_ && !paused_ && focused_ == WindowKind::Game)))
     return false;  // (flying, or a game taking Space)
   else if (id == "menu.wheel" && qm_.open) qm_.open = false;
-  else if (id == "menu.wheel" && pad_takes_space() && !in.shift()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
+  else if (id == "menu.wheel" && pad_takes_space() && !((action_mods_ >= 0 ? action_mods_ : in.mods) & platform::MOD_SHIFT)) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel; round 548: Shift as Space went down)
   else if (id == "menu.wheel") quick_menu_open(in.mx, in.my, false);  // (task 0230)
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
@@ -966,8 +979,21 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "window.render") dock_open(WindowKind::Render);
   else if (id == "window.learn") dock_open(WindowKind::Learn);
   else if (id == "window.history") dock_open(WindowKind::History);
-  else if (id == "ui.focus_window") focus_window_step(in.shift() ? -1 : 1);
+  else if (id == "ui.focus_window") focus_window_step(((action_mods_ >= 0 ? action_mods_ : in.mods) & platform::MOD_SHIFT) ? -1 : 1);  // (round 548: Shift as F6 went down)
   else if (id == "ui.menu_bar") focus_menu_bar();
+  else if (id == "pose.rotation_convert" || id == "pose.copy" || id == "pose.paste" || id == "pose.paste_flipped" || id == "pose.align") {
+    /* Round 541 (task 0521): Pose context only - the Scene view with only bones selected; anywhere else the chord is passed on (Ctrl+R
+     * refreshes the assets, the Animation window's Ctrl+C / Ctrl+V copy keys, the Reference Board's Ctrl+V pastes). The palette
+     * and the Wheel name the action on purpose: any selection then. */
+    /* (Align has no chord of its own - it is only ever named - so the guard is for the chords alone.) */
+    const bool chord_guard = id != "pose.align" && !action_asked_for_;
+    if (chord_guard && (!scene_hovered_ || !pose_context())) return false;  // (the pointer over the Scene view: not over the Animation window, whose Ctrl+C / Ctrl+V copy keys, nor any other)
+    if (id == "pose.rotation_convert") anim_rotation_convert(0, false);
+    else if (id == "pose.copy") pose_copy();
+    else if (id == "pose.paste") pose_paste_step(1.0f, false, false);
+    else if (id == "pose.paste_flipped") pose_paste_step(1.0f, true, false);
+    else pose_align();
+  }
   else if (id.rfind("anim.", 0) == 0 && anim_shortcuts_stand_down()) return false;  // (task 0258: the Hierarchy's and the UV editor's own arrows, a flown view)
   else if (id == "anim.key") anim_key_all();
   else if (id == "anim.play") anim_toggle_play();
@@ -993,10 +1019,6 @@ void Editor::handle_shortcuts() {
   if (ui_.wants_keyboard() || dialog_ != Dialog::None || tool_running) return;  // a running operator (or a gizmo drag's typed number) takes the keys
   if (qm_.open) return;  // (the Wheel's keys: 1-8, letters, Esc - task 0230)
   if (!capturing_binding_.empty()) return;  // Preferences is waiting for a key to bind
-  int mods = 0;
-  if (in.ctrl()) mods |= platform::MOD_CTRL;
-  if (in.shift()) mods |= platform::MOD_SHIFT;
-  if (in.alt()) mods |= platform::MOD_ALT;
   const bool scene_ctx = focused_ == WindowKind::Scene || focused_ == WindowKind::Hierarchy || scene_hovered_;
   const bool scene_ok = scene_ctx && drag_ != Drag::Fly && !in.down[1];
   const bool draw_ok = pad_takes_space();  // (the pointer over the Draw tab's pad, drawn just now)
@@ -1013,7 +1035,7 @@ void Editor::handle_shortcuts() {
   };
   for (int key = 1; key < platform::KEY_COUNT; key++) {
     if (!in.key_pressed[key] || key == platform::KEY_SHIFT || key == platform::KEY_CTRL || key == platform::KEY_ALT) continue;
-    const KeyChord pressed{key, mods};
+    const KeyChord pressed{key, in.chord_mods(key)};  // (round 548: the modifiers as this key went down - Shift let go in the same frame was read as a bare R, the Scale tool)
     bool done = false;
     /* Edit Mode's keys on a curve's or lattice's points, outside Edit Mode (task 0054): Extrude, Loop Cut, Merge at
      * Center and Delete act on the points when the active curve or lattice shows them. */
@@ -1035,7 +1057,10 @@ void Editor::handle_shortcuts() {
         auto it = keymap_.find(a.id);
         if (it == keymap_.end()) continue;
         if (std::find(it->second.begin(), it->second.end(), pressed) == it->second.end()) continue;
-        if (run_action(a.id)) {
+        action_mods_ = pressed.mods;  // (round 548: the actions read their Shift from the chord, not the frame's last event)
+        const bool ran = run_action(a.id);
+        action_mods_ = -1;
+        if (ran) {
           done = true;
           break;
         }
