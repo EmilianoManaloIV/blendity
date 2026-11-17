@@ -1224,7 +1224,7 @@ void Editor::draw_menubar(const Recti &r) {
         if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats");
         if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats");
       });
-      u.tooltip("An empty point cloud: plain dots, or Gaussian Splats (soft turned ellipsoids whose colour changes with the view).\n"
+      u.tooltip("An empty point cloud: plain dots, or Gaussian Splats (soft turned ellipsoids whose color changes with the view).\n"
                 "Test Splats makes one already filled: 10,000 random splats to look at. Blender 5.3: Add > Point Cloud.");
     }
     if (shows(FocusRig)) {

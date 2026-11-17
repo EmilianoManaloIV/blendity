@@ -4059,11 +4059,11 @@ void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   const bool painting = vertex_paint_ && vp_obj_ == g->id;
   if (u.record_buttons) u.button_rects["vp:Toggle"] = toggle;
   if (u.button(toggle, painting ? "Exit Vertex Paint" : "Vertex Paint", painting, Icon::Vertex)) set_vertex_paint(!painting);
-  u.tooltip("Paint the mesh's colour attribute with a brush (Blender: Vertex Paint mode). Games read it as the vertex colours.");
+  u.tooltip("Paint the mesh's color attribute with a brush (Blender: Vertex Paint mode). Games read it as the vertex colors.");
   if (!colors_dropped_note_.empty() && colors_dropped_obj_ == g->id) {  // (ADR 0152: paint is never lost silently)
     Recti note = lay.row(u.row_h() + u.px(2));
     const int okw = u.px(40);
-    u.label({note.x + u.px(4), note.y, note.w - okw - u.px(12), note.h}, "A colour layer was dropped by the last edit (Undo brings it back)", u.theme.warning);
+    u.label({note.x + u.px(4), note.y, note.w - okw - u.px(12), note.h}, "A color layer was dropped by the last edit (Undo brings it back)", u.theme.warning);
     u.tooltip(colors_dropped_note_);
     if (u.record_buttons) u.button_rects["vp:DroppedOK"] = {note.x + note.w - okw - u.px(4), note.y, okw, note.h};
     if (u.button({note.x + note.w - okw - u.px(4), note.y, okw, note.h}, "OK")) colors_dropped_note_.clear();
@@ -4078,7 +4078,7 @@ void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
     const int was = active;
     br.enumeration("Layer", active, names.data(), (int)names.size());
     const bool point = m.color_attributes[(size_t)was].domain == ColorAttribute::Domain::Point;
-    br.help(point ? "One colour per vertex (Blender: Point)." : "One colour per face corner, so a seam can change colour (Blender: Face Corner).");
+    br.help(point ? "One color per vertex (Blender: Point)." : "One color per face corner, so a seam can change color (Blender: Face Corner).");
     if (active != was) {
       /* The name directly (it may hold spaces); the command copies the mesh, so `m` is not read after it. */
       const std::string name = m.color_attributes[(size_t)active].name;
@@ -4087,7 +4087,7 @@ void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
     }
   }
   br.enumeration("Brush", vp_brush_.tool, kVertexPaintTools, 4);
-  br.help("Draw paints the colour (Ctrl: the inverse, or Add and Subtract swapped), Blur evens out with the neighbours, Average with the whole brush, Smear drags colour along the stroke.");
+  br.help("Draw paints the color (Ctrl: the inverse, or Add and Subtract swapped), Blur evens out with the neighbours, Average with the whole brush, Smear drags color along the stroke.");
   if (vp_brush_.tool == 0) br.enumeration("Blend", vp_brush_.blend, kVertexPaintBlends, 6);
   br.color("Color", vp_brush_.color);
   br.field("Alpha", vp_brush_.alpha, 0.01f, 0.0f, 1.0f);
@@ -4102,9 +4102,9 @@ void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   int k = 1;
   while (m.find_color(strprintf("Color.%03d", k)) >= 0) k++;
   if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "New Point Layer")) command(strprintf("colorattr add Color.%03d point", k));
-  u.tooltip("A new white layer, one colour per vertex.");
+  u.tooltip("A new white layer, one color per vertex.");
   if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "New Corner Layer")) command(strprintf("colorattr add Color.%03d corner", k));
-  u.tooltip("A new white layer, one colour per face corner (sharp colour changes across edges).");
+  u.tooltip("A new white layer, one color per face corner (sharp color changes across edges).");
 }
 
 }  // namespace bl
@@ -4677,9 +4677,9 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);
   br.field("Unified Size", paint_bank_.unified_size);
   br.field("Unified Opacity", paint_bank_.unified_strength);
-  br.field("Unified Colour", paint_bank_.unified_color);
+  br.field("Unified Color", paint_bank_.unified_color);
   brush_banks_sync();  // (a switch just ticked takes effect in this frame)
-  br.help("Size, Opacity and the colour are kept for each of Paint, Smudge and Blend; Unified shares one value between them.");
+  br.help("Size, Opacity and the color are kept for each of Paint, Smudge and Blend; Unified shares one value between them.");
   br.field("Flow", paint_brush_.flow, 0.01f, 0.0f, 1.0f);
   br.field("Spacing", paint_brush_.spacing, 0.01f, 0.05f, 2.0f);
   br.help("Dabs this many radii apart along the stroke.");

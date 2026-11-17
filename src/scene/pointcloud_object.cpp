@@ -16,7 +16,7 @@ void PointCloudObject::reflect(Reflector &r) {
   int type = data ? (int)data->type : 0;
   const int type_before = type;
   r.enumeration("Type", type, kTypes, 2);
-  r.help("Points: a dot per point, Point Size across. Gaussian Splats: each point a soft, turned ellipsoid whose colour changes with the "
+  r.help("Points: a dot per point, Point Size across. Gaussian Splats: each point a soft, turned ellipsoid whose color changes with the "
          "view (spherical harmonics). Blender 5.3: Point Cloud > Type.");
   if (type != type_before && type >= 0 && type <= 1) {
     if (!data) data = std::make_shared<PointCloud>();
@@ -32,7 +32,7 @@ void PointCloudObject::reflect(Reflector &r) {
     int degree = data ? data->sh_degree : 0;
     const int degree_before = degree;
     r.field("SH Degree", degree, 0, kSplatMaxShDegree);
-    r.help("How far the splats' colour changes with the view: 0 the base colour alone, up to 3 (15 more coefficients a splat). Lowering it "
+    r.help("How far the splats' color changes with the view: 0 the base color alone, up to 3 (15 more coefficients a splat). Lowering it "
            "drops the higher bands; raising it adds zero ones.");
     if (degree != degree_before && data && data->is_splats()) {
       pointcloud_make_mutable(data)->set_sh_degree(degree);

@@ -1676,8 +1676,9 @@ void Editor::draw_anim_key_menu() {
     u.menu_label("Rotation");
     const std::string convert = shortcut_text("pose.rotation_convert");
     if (u.menu_item("Convert to Quaternion", convert.c_str())) anim_rotation_convert(1, false);
-    u.tooltip("The selected bones' Euler rotation keys rewritten as quaternion keys (no gimbal lock, the short way round), the same poses.\n"
-              "Ctrl+R in the Scene view with bones selected turns each the other way.");
+    /* (Round 559: the chord comes from the keymap, so a preset that moves it, or none, is told the truth.) */
+    const std::string convert_tip = convert.empty() ? std::string() : "\n" + convert + " in the Scene view with bones selected turns each the other way.";
+    u.tooltip("The selected bones' Euler rotation keys rewritten as quaternion keys (no gimbal lock, the short way round), the same poses." + convert_tip);
     if (u.menu_item("Convert to Euler")) anim_rotation_convert(2, false);
     u.tooltip("Quaternion keys back to Euler keys, kept continuous (no 360 degree jump between neighbours).");
     if (u.menu_item("Convert to Quaternion, a Key Every Frame")) anim_rotation_convert(1, true);
@@ -1694,7 +1695,8 @@ void Editor::draw_anim_key_menu() {
     u.menu_label("Pose");
     if (u.menu_item("Copy Pose", shortcut_text("pose.copy").c_str())) pose_copy();
     if (u.menu_item("Paste Pose", shortcut_text("pose.paste").c_str())) pose_paste_step(1.0f, false, false);
-    u.tooltip("The copied pose on the bones of those names. F9 afterwards: Influence and Flipped.");
+    const std::string adjust = shortcut_text("edit.adjust_last");  // (F9; Ctrl+F9 in Maya's preset, whose F9 is Vertex mode)
+    u.tooltip("The copied pose on the bones of those names." + (adjust.empty() ? std::string() : " " + adjust + " afterwards: Influence and Flipped."));
     if (u.menu_item("Paste Pose Flipped", shortcut_text("pose.paste_flipped").c_str())) pose_paste_step(1.0f, true, false);
     u.tooltip("Onto the bone on the other side (.L / .R, Left / Right), mirrored: Position X and the rotation's Y and Z negated.");
     if (u.menu_item("Align to Transform Orientation", shortcut_text("pose.align").c_str())) pose_align();
