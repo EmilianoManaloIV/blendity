@@ -42,7 +42,11 @@ shader evaluates a splat six times (once per corner) and converts its colour per
 splat) is the next step if the timed rows show it. An edit that changes a cloud every frame (a slider drag) sends the
 whole cloud again every frame.
 
-**Checked:** CHECKS_LIBS
+**Checked:** Windows with Blender's libraries, `splats_raster` (175), `gpu` (1,153) and `editor` (3,481 checks), none failed;
+Linux (WSL, with the libraries) `splats_raster` and `editor` before the review's fixes, 3,584 checks, none failed (after
+them: on CI); the full suite on CI. The card against the CPU on the small splat scene through Standard, Filmic and ACES:
+whole-picture means 0.27 / 255, a Points cloud 0.000. The timed rows (1M orbit, the card's open) wait for the hub's timed
+batch.
 
 <!-- docs/ARCHITECTURE.md -->
 after: | `SplatPass`, `SplatSorter`, `gsplat_project_one()`
@@ -55,8 +59,8 @@ append:
 
 | Row | Before (round 544's window) | After |
 |---|---|---|
-| Orbit, 1M splats, card, median frame | 93.7 ms | TBD |
-| Orbit, 1M splats, CPU, median frame | 108.4 ms | TBD |
-| CPU project, 1M | 40.5 ms | TBD |
-| CPU draw, 1M | 45.1 ms | TBD |
-| Card first open, empty pipeline cache / written | 92.5 s / - | TBD |
+| Orbit, 1M splats, card, median frame | 93.7 ms | measured in the timed batch |
+| Orbit, 1M splats, CPU, median frame | 108.4 ms | measured in the timed batch |
+| CPU project, 1M | 40.5 ms | measured in the timed batch |
+| CPU draw, 1M | 45.1 ms | measured in the timed batch |
+| Card first open, empty pipeline cache / written | 92.5 s / - | measured in the timed batch |
