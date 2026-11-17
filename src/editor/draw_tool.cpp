@@ -907,10 +907,11 @@ bool Editor::draw_update(const Recti &view) {
     return true;
   }
   /* X / Y / Z: a guide along that axis (Plasticity's construction lines). */
-  if (!in.ctrl() && !in.alt() && !u.wants_keyboard() && scene_hovered_) {
+  if (!u.wants_keyboard() && scene_hovered_) {
     const int keys[3] = {platform::KEY_X, platform::KEY_Y, platform::KEY_Z};
     for (int a = 0; a < 3; a++) {
       if (!in.key_pressed[keys[a]]) continue;
+      if (in.chord_mods(keys[a]) & (platform::MOD_CTRL | platform::MOD_ALT)) continue;  // (round 548: that key's chord - a quick Ctrl+Z is Undo, not a Z guide)
       in.key_pressed[keys[a]] = false;  // not a shortcut as well
       draw_axis_guide(view, a);
     }
