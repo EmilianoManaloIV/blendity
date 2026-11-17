@@ -1,6 +1,6 @@
 # 0527: Modifiers on a door's and a window's parts - the leaf, the frame, the glass (round 547, Pass 27)
 
-- **Status:** in review (round 547, implemented 2026-11-16; approved 2026-11-15 by the owner, through the hub: "Yes, just option A. for the modifiers"); B, C and D are
+- **Status:** done (round 547, implemented 2026-11-16, checked 2026-11-17; approved 2026-11-15 by the owner, through the hub: "Yes, just option A. for the modifiers"); B, C and D are
   the recommended defaults (the owner did not weigh them and may change them)
 - **Requirements:** R-02 (modeling), U-01, C-02, R-09 (export to engines)
 - **Decisions:** ADR 0149 (new: a styled opening's frame and glass are objects, like its leaf); amends ADR 0129 and
