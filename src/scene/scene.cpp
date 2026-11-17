@@ -864,21 +864,25 @@ void Camera::reflect(Reflector &r) {
   r.help("Unity's FOV Axis, kept for Unity: which way its Inspector shows the field of view. The Field Of View here is the vertical angle,\n"
          "as Unity stores it, whichever axis is chosen.");
   if (r.serializing()) r.field("Unity Clear Flags", unity_clear_flags, 0, 4), r.field("Background Alpha", background_alpha, 0.01f, 0.0f, 1.0f);  // (saved with the scene, not shown - re-check 401)
-  r.field("Orthographic", orthographic);
+  reflect_projection(r);
+  const bool pano = panoramic_type > 0;
   if (orthographic || all) r.field("Size", ortho_size, 0.05f, 0.01f, 1000.0f);
-  if (!orthographic || all) {
+  if ((!orthographic && !pano) || all) {
     r.field("Physical Camera", physical);
     r.help("Set the view from a real lens and sensor: focal length, sensor size and lens shift.\n"
            "Unity: Physical Camera. Blender: Lens Unit = Millimeters.");
   }
-  if ((!orthographic && !physical) || all) {
+  if ((!orthographic && !physical && !pano) || all) {
     r.field("Field Of View", fov, 0.2f, 1.0f, 179.0f);
     r.help("Vertical field of view in degrees (FoCG ch. 8.5).");
   }
-  if ((!orthographic && physical) || all) {
+  const bool lens_ui = (!orthographic && physical && !pano) || all;
+  if (lens_ui) {
     r.field("Focal Length (mm)", focal_length, 0.5f, 1.0f, 5000.0f);
     r.help("Longer lenses see less of the scene (zoom in) and blur the background more.\n"
            "The field of view follows from this and the sensor size.");
+  }
+  if (lens_ui || panoramic_type == 3) {  // (Fisheye Equisolid takes the sensor alone: it has its own Fisheye Lens and no shift)
     r.enumeration("Sensor", sensor_preset, kSensorPresets, kSensorPresetCount);
     r.help("Sensor (film gate) size. Smaller sensors crop the image (a longer effective focal length).");
     if (sensor_preset > 0 && sensor_preset < kSensorPresetCount) {
@@ -893,6 +897,8 @@ void Camera::reflect(Reflector &r) {
     r.enumeration("Sensor Fit", sensor_fit, fit, 3);
     r.help("Which image side the sensor spans. Auto: the sensor width covers the larger side (Blender).\n"
            "Unity calls this Gate Fit.");
+  }
+  if (lens_ui) {
     r.field("Lens Shift X", shift_x, 0.005f, -2.0f, 2.0f);
     r.field("Lens Shift Y", shift_y, 0.005f, -2.0f, 2.0f);
     r.help("Moves the image without tilting the camera (architectural shots keep verticals straight).\n"
@@ -940,6 +946,62 @@ void Camera::reflect(Reflector &r) {
   /* Composition guides (task 0033): drawn over the views, so not part of the render hash. Keep this the last call:
    * anything a render reads goes above it. */
   if (!r.hashing()) reflect_guides(r);
+}
+
+/* Projection (round 538): Perspective / Orthographic / Panoramic in the Inspector, over the two fields a scene keeps
+ * (Orthographic stays Unity's bool; Panoramic Type 0 is off). Saved and set by name through those two. */
+void Camera::reflect_projection(Reflector &r) {
+  static const char *kinds[] = {"Perspective", "Orthographic", "Panoramic"};
+  static const char *types[] = {"Equirectangular", "Fisheye Equidistant", "Fisheye Equisolid", "Central Cylindrical", "Mirror Ball"};
+  const bool all = r.all_fields();
+  if (r.serializing() || all) {
+    r.field("Orthographic", orthographic);
+    r.field("Panoramic Type", panoramic_type, 0, 5);
+  }
+  else {
+    int projection = panoramic_type > 0 ? 2 : orthographic ? 1 : 0;
+    const int shown = projection;
+    r.enumeration("Projection", projection, kinds, 3);
+    r.help("Perspective: the usual lens. Orthographic: no perspective (Size is half the height seen).\n"
+           "Panoramic: a view all around (Blender: Camera > Lens > Type = Panoramic; the Game view, the Camera Preview,\n"
+           "renders and the path tracer show it; depth of field and camera filters are skipped).");
+    if (projection != shown) {  // (only when the user changed it: drawing the Inspector writes nothing)
+      orthographic = projection == 1;
+      panoramic_type = projection == 2 ? 1 : 0;
+    }
+  }
+  if (panoramic_type <= 0 && !all) return;
+  if (!all) {
+    int t = std::max(0, std::min(4, panoramic_type - 1));
+    r.enumeration("Panorama Type", t, types, 5);
+    r.help("How the 360 degree view is laid onto the image (Blender: Camera > Lens > Panorama Type):\n"
+           "Equirectangular (a world map), Fisheye Equidistant / Equisolid (a circle), Central Cylindrical, Mirror Ball.");
+    panoramic_type = t + 1;
+  }
+  const int t = panoramic_type;
+  if (t == 1 || all) {
+    r.field("Latitude Min", latitude_min, 0.5f, -90.0f, 90.0f);
+    r.field("Latitude Max", latitude_max, 0.5f, -90.0f, 90.0f);
+    r.help("The vertical range shown, degrees (Blender: Latitude Min / Max). -90 to 90 is everything from straight down to straight up.");
+  }
+  if (t == 1 || t == 4 || all) {
+    r.field("Longitude Min", longitude_min, 0.5f, -360.0f, 360.0f);
+    r.field("Longitude Max", longitude_max, 0.5f, -360.0f, 360.0f);
+    r.help("The horizontal range shown, degrees (Blender: Longitude Min / Max). -180 to 180 is all the way around.");
+  }
+  if (t == 2 || t == 3 || all) {
+    r.field("Fisheye Field Of View", fisheye_fov, 0.5f, 1.0f, 360.0f);
+    r.help("The angle the circle spans, degrees (Blender: Field of View). 180 puts the horizon on the circle's edge.");
+  }
+  if (t == 3 || all) {
+    r.field("Fisheye Lens (mm)", fisheye_lens, 0.1f, 0.1f, 1000.0f);
+    r.help("The lens's focal length with the sensor width (Physical Camera) fixes the size of the circle (Blender: Fisheye Lens).");
+  }
+  if (t == 4 || all) {
+    r.field("Height Min", cylinder_min, 0.01f, -100.0f, 100.0f);
+    r.field("Height Max", cylinder_max, 0.01f, -100.0f, 100.0f);
+    r.help("The vertical range of the cylinder's wall, in its radius (Blender: Height Min / Max).");
+  }
 }
 
 void Camera::reflect_guides(Reflector &r) {
@@ -3088,6 +3150,31 @@ void GameObject::evaluated_keys(uint64_t out[3]) const {
   }
 }
 
+/* The groups' transfer map from `before` to `m`, kept on the modifier while the two topologies stay (ADR 0024). */
+static const meshops::GroupTransferMap &modifier_map(const Component &c, const Mesh &before, const Mesh &m) {
+  const uint64_t in_key = meshops::topology_key(before), out_key = meshops::topology_key(m);
+  std::shared_ptr<meshops::GroupTransferMap> map = c.group_map;
+  if (!map || map->in_key != in_key || map->out_key != out_key) {
+    map = std::make_shared<meshops::GroupTransferMap>();
+    meshops::group_transfer_map(before, m, *map);
+    map->in_key = in_key, map->out_key = out_key;
+    c.group_map = map;
+  }
+  return *map;
+}
+
+/* Task 0525 (ADR 0152): Point colour layers a modifier lost or left the wrong size come back from the mesh before it,
+ * through the groups' map; Corner layers that no longer match the corners go. */
+static void carry_modifier_colors(const Component &c, const Mesh &before, Mesh &m) {
+  if (!meshops::point_colors_need_carry(before, m, true)) {
+    m.prune_colors();
+    m.dropped_colors.clear();  // (an evaluated mesh: nothing for the editor to report)
+    return;
+  }
+  meshops::apply_color_map(modifier_map(c, before, m), before, m, true);
+  m.dropped_colors.clear();
+}
+
 /* One modifier of a stack (ADR 0024): a deformer limited to a vertex group moves each vertex by its weight; a modifier
  * that changes the vertex count without carrying the groups gets them from the mesh before it, by position. */
 void run_modifier(const Component &c, Mesh &m) {
@@ -3106,14 +3193,25 @@ void run_modifier(const Component &c, Mesh &m) {
     }
     return;
   }
-  if (!c.is_deform_only() && !m.vertex_groups.empty()) {
+  /* Task 0525 (ADR 0152): Point colour layers come along the groups' way, through the same map. */
+  bool point_colors = false;
+  for (const ColorAttribute &ca : m.color_attributes) point_colors = point_colors || (ca.domain == ColorAttribute::Domain::Point && ca.rgba.size() == m.vert_count());
+  if (!c.is_deform_only() && (!m.vertex_groups.empty() || point_colors)) {
     /* What the transfer reads, not a whole copy (no render caches, UVs or flags). */
     Mesh before;
     before.positions = m.positions;
     before.face_offsets = m.face_offsets;
     before.corner_verts = m.corner_verts;
     before.vertex_groups = m.vertex_groups;
+    if (point_colors) {  // (only what the carry reads: the Point layers that fit, and the choices by name)
+      for (const ColorAttribute &ca : m.color_attributes)
+        if (ca.domain == ColorAttribute::Domain::Point && ca.rgba.size() == m.vert_count()) before.color_attributes.push_back(ca);
+      auto name_of = [&](int i) { return i >= 0 && i < (int)m.color_attributes.size() ? m.color_attributes[(size_t)i].name : std::string(); };
+      before.active_color = before.find_color(name_of(m.active_color));
+      before.render_color = before.find_color(name_of(m.render_color));
+    }
     c.modify(m);
+    if (point_colors) carry_modifier_colors(c, before, m);
     /* Mirror, Array and Join copy the groups themselves; a modifier that made a new mesh, or renumbered without
      * them, gets them from the mesh before it, by position, through a map kept while the topology stays. */
     if (m.groups_fit() && m.vertex_groups.size() == before.vertex_groups.size()) return;
@@ -3121,15 +3219,7 @@ void run_modifier(const Component &c, Mesh &m) {
       meshops::transfer_vertex_groups(before, m);
       return;
     }
-    const uint64_t in_key = meshops::topology_key(before), out_key = meshops::topology_key(m);
-    std::shared_ptr<meshops::GroupTransferMap> map = c.group_map;
-    if (!map || map->in_key != in_key || map->out_key != out_key) {
-      map = std::make_shared<meshops::GroupTransferMap>();
-      meshops::group_transfer_map(before, m, *map);
-      map->in_key = in_key, map->out_key = out_key;
-      c.group_map = map;
-    }
-    meshops::apply_group_map(*map, before, m);
+    meshops::apply_group_map(modifier_map(c, before, m), before, m);
     return;
   }
   c.modify(m);
@@ -3318,6 +3408,10 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
       eval_chain_[kind] = meshops::SubdivChain::build(in, chain_sub->levels, chain_sub->smooth, *h);
       if (eval_chain_[kind] && chain_sub->smooth) h->smooth = true;                                   // (as the modifier sets it)
       if (eval_chain_[kind] && !in.vertex_groups.empty()) meshops::transfer_vertex_groups(in, *h);  // (as run_modifier carries them, by position)
+      if (eval_chain_[kind] && !in.color_attributes.empty()) {  // (task 0525: Point colours likewise; Corner ones go)
+        meshops::transfer_point_colors(in, *h, true);
+        h->dropped_colors.clear();
+      }
     }
     if (!eval_chain_[kind]) run(*h, 0, split);
     h->touch();
@@ -3866,6 +3960,7 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
   if (kind == "Cube") mesh = primitives::cube();
   else if (kind == "Sphere") mesh = primitives::uv_sphere();
   else if (kind == "Icosphere") mesh = primitives::ico_sphere();
+  else if (kind == "Quad Sphere") mesh = primitives::quad_sphere();  // (round 535)
   else if (kind == "Cylinder") mesh = primitives::cylinder();
   else if (kind == "Capsule") mesh = primitives::capsule();  // (round 367)
   else if (kind == "Cone") mesh = primitives::cone();

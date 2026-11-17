@@ -35,6 +35,9 @@ void Mesh::clear() {
   loose_edges.clear();
   sculpt_mask.clear();  // (task 0238)
   face_group.clear();
+  color_attributes.clear();  // (task 0525)
+  dropped_colors.clear();
+  active_color = render_color = -1;
   touch();
 }
 
@@ -92,6 +95,119 @@ void Mesh::sync_attributes() {
    * wrong size has renumbered what they belong to, so they go rather than land on the wrong faces or vertices. */
   if (face_group.size() != face_count()) face_group.clear();
   if (sculpt_mask.size() != positions.size()) sculpt_mask.clear();
+  /* ADR 0152: a Corner colour layer of the wrong size goes, by the same rule. A Point layer stays for now: the editor's
+   * and the modifier stack's carry by position mend it after the operator, as they do the vertex groups. */
+  prune_colors(false);
+}
+
+/* ---- colour attributes (ADR 0152, task 0525) ---- */
+
+void Mesh::remap_color_vertices(const std::vector<uint32_t> &remap, size_t new_count) {
+  for (ColorAttribute &c : color_attributes) {
+    if (c.domain == ColorAttribute::Domain::Corner) {  // the corner list it matched before matches the remapped one
+      if (c.corners.size() != corner_verts.size()) continue;
+      for (uint32_t &v : c.corners) v = v < remap.size() ? remap[v] : UINT32_MAX;
+      continue;
+    }
+    if (c.rgba.size() != remap.size()) {
+      /* A layer an operator left the wrong size before this renumbering: its values no longer belong to any numbering.
+       * Emptied, so it can't fit the new count by chance (and land on the wrong vertices); the editor's carry by
+       * position restores it from the mesh before (review of round 545). */
+      if (!c.rgba.empty()) c.rgba.clear();
+      continue;
+    }
+    std::vector<Vec4> d(new_count, Vec4(1, 1, 1, 1));
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX && remap[i] < new_count) d[remap[i]] = c.rgba[i];
+    c.rgba = std::move(d);
+  }
+}
+
+ColorAttribute Mesh::make_color(const std::string &name, ColorAttribute::Domain domain, Vec4 fill) const {
+  ColorAttribute c;
+  c.name = name;
+  c.domain = domain;
+  const bool point = domain == ColorAttribute::Domain::Point;
+  c.rgba.assign(point ? vert_count() : corner_count(), fill);
+  if (!point) c.corners = corner_verts;
+  return c;
+}
+
+int Mesh::find_color(const std::string &name) const {
+  for (size_t i = 0; i < color_attributes.size(); i++)
+    if (color_attributes[i].name == name) return (int)i;
+  return -1;
+}
+
+const ColorAttribute *Mesh::render_colors() const {
+  if (render_color < 0 || render_color >= (int)color_attributes.size()) return nullptr;
+  const ColorAttribute &c = color_attributes[(size_t)render_color];
+  return color_fits(c) ? &c : nullptr;
+}
+
+bool render_vertex_colors_into(const Mesh &m, const RenderMesh &rm, std::vector<Vec4> &out) {
+  out.clear();
+  const ColorAttribute *c = m.render_colors();
+  if (!c) return false;
+  const bool corner = c->domain == ColorAttribute::Domain::Corner;
+  const size_t nv = rm.positions.size();
+  out.assign(nv, Vec4(0, 0, 0, 0));
+  std::vector<float> n(nv, 0.0f);
+  /* Each triangle corner names its render vertex and its mesh corner: the colour goes where the render vertex is, each
+   * mesh corner once (a quad's corner sits in one or two of its triangles: counted per triangle, a seam's mean would
+   * lean with the triangulation). */
+  std::vector<uint8_t> seen(m.corner_verts.size(), 0);
+  for (size_t k = 0; k < rm.indices.size() && k < rm.tri_corner.size(); k++) {
+    const uint32_t v = rm.indices[k], cn = rm.tri_corner[k];
+    if (v >= nv || cn >= m.corner_verts.size() || seen[cn]) continue;
+    seen[cn] = 1;
+    const size_t e = corner ? cn : m.corner_verts[cn];
+    if (e >= c->rgba.size()) continue;
+    Vec4 col = c->rgba[e];
+    if (!finite_bits(col.x) || !finite_bits(col.y) || !finite_bits(col.z) || !finite_bits(col.w)) col = Vec4(1, 1, 1, 1);
+    out[v] = out[v] + col;
+    n[v] += 1.0f;
+  }
+  for (size_t v = 0; v < nv; v++) out[v] = n[v] > 0.0f ? out[v] * (1.0f / n[v]) : Vec4(1, 1, 1, 1);
+  return true;
+}
+
+const std::vector<Vec4> *Mesh::render_vertex_colors(const RenderMesh &rm) const {
+  const uint64_t build = rm.build_serial ? rm.build_serial : rm.serial;
+  ColourCache &cc = colour_cache_[&rm == &cache_[1] ? 1 : 0];  // (the variant's own slot)
+  if (cc.build == build && build != 0 && cc.version == version && cc.layer == render_color && cc.rgba.size() == rm.positions.size())
+    return cc.rgba.empty() ? nullptr : &cc.rgba;
+  if (!render_vertex_colors_into(*this, rm, cc.rgba)) std::vector<Vec4>().swap(cc.rgba);
+  cc.build = build, cc.version = version, cc.layer = render_color;
+  return cc.rgba.empty() ? nullptr : &cc.rgba;
+}
+
+/* A layer that no longer fits has had its elements renumbered by an operator that didn't carry it: it goes whole
+ * rather than colour the wrong vertices or corners. The active and render choices follow the layers that stay. */
+void Mesh::prune_colors(bool points_too) {
+  if (color_attributes.empty()) {
+    active_color = render_color = -1;
+    return;
+  }
+  std::vector<int> remap(color_attributes.size(), -1);
+  std::vector<ColorAttribute> kept;
+  for (size_t i = 0; i < color_attributes.size(); i++) {
+    const bool point = color_attributes[i].domain == ColorAttribute::Domain::Point;
+    if (!color_fits(color_attributes[i]) && (points_too || !point)) {
+      dropped_colors.push_back("'" + color_attributes[i].name + (point ? "' (per vertex)" : "' (per corner)"));
+      continue;
+    }
+    remap[i] = (int)kept.size();
+    kept.push_back(std::move(color_attributes[i]));
+  }
+  auto follow = [&](int i) { return i >= 0 && i < (int)remap.size() ? remap[(size_t)i] : -1; };
+  const int a = follow(active_color), r = follow(render_color);
+  color_attributes = std::move(kept);
+  /* A choice whose layer went falls back to the first left; "none" (-1) stays none - a render layer chosen away isn't
+   * chosen back by a tidy-up (the review of round 545's tests: an export then wrote colours the user had turned off). */
+  const int fallback = color_attributes.empty() ? -1 : 0;
+  active_color = a >= 0 ? a : active_color < 0 ? -1 : fallback;
+  render_color = r >= 0 ? r : render_color < 0 ? -1 : fallback;
 }
 
 int Mesh::find_group(const std::string &group) const {
@@ -114,6 +230,11 @@ bool Mesh::keys_fit() const {
 
 void Mesh::copy_vertex_weights(uint32_t from) {
   for (VertexGroup &g : vertex_groups) g.weights.push_back(from < g.weights.size() ? g.weights[from] : 0.0f);
+  /* Point colours ride along (ADR 0152): the new vertex takes its source's colour. A layer already the wrong size is
+   * left for prune_colors to drop. */
+  for (ColorAttribute &c : color_attributes)
+    if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() + 1 == positions.size())
+      c.rgba.push_back(from < c.rgba.size() ? c.rgba[from] : Vec4(1, 1, 1, 1));
 }
 
 int Mesh::material_count() const {
@@ -172,7 +293,18 @@ void Mesh::set_face_smooth(size_t f, bool on) {
 /* Reverses a face's winding together with its corner attributes. */
 static void reverse_face(Mesh &m, size_t f) {
   std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
-  if (m.has_uvs()) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+  m.reverse_corner_layers(f);
+}
+
+void Mesh::reverse_corner_layers(size_t f) {
+  if (f + 1 >= face_offsets.size()) return;
+  const uint32_t a = face_offsets[f], b = face_offsets[f + 1];
+  if (has_uvs()) std::reverse(uvs.begin() + a, uvs.begin() + b);
+  for (ColorAttribute &c : color_attributes) {  // (ADR 0152: Corner colours turn with their corners)
+    if (c.domain != ColorAttribute::Domain::Corner || c.rgba.size() != corner_verts.size() || c.corners.size() != corner_verts.size()) continue;
+    std::reverse(c.rgba.begin() + a, c.rgba.begin() + b);
+    std::reverse(c.corners.begin() + a, c.corners.begin() + b);
+  }
 }
 
 Vec3 Mesh::face_normal(size_t f) const {
@@ -454,6 +586,7 @@ size_t Mesh::edge_count() const {
 size_t Mesh::memory_bytes() const {
   size_t b = positions.capacity() * sizeof(Vec3) + face_offsets.capacity() * 4 + corner_verts.capacity() * 4 + edit_basis.capacity() * sizeof(Vec3);
   b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8 + sculpt_mask.capacity() * 4 + face_group.capacity() * 4;
+  for (const ColorAttribute &c : color_attributes) b += c.rgba.capacity() * sizeof(Vec4) + c.corners.capacity() * 4;  // (task 0525)
   for (const RenderMesh &c : cache_)
     b += c.positions.capacity() * sizeof(Vec3) * 2 + c.uvs.capacity() * sizeof(Vec2) + c.tangents.capacity() * sizeof(Vec4) +
          c.indices.capacity() * 4 + c.tri_face.capacity() * 6 + c.tri_corner.capacity() * 4;
@@ -1875,6 +2008,103 @@ MeshPtr ico_sphere(float r, int subdivisions) {
   return m;
 }
 
+/* Quad Sphere (round 535): a cube of `segments` quads along each edge pushed onto a sphere, all quads. Ported from
+ * Blender's bmo_create_quadsphere_exec (blender/source/blender/bmesh/operators/bmo_primitive.cc, Blender Authors,
+ * GPL-2.0-or-later): the same vertex order (Z layers: full bottom and top grids, rings between), the same face
+ * layout, the two mappings (method 0 Even Area, 1 Even Angle) and the cube UV layout. Blender is Z-up, so its Z
+ * becomes our Y (a rotation, so the winding stays). The vertex and face tables below are our own write-up. */
+int quad_sphere_segments(int requested) { return std::max(1, std::min(requested, 500)); }  // (Blender's own limit is 500 too)
+
+MeshPtr quad_sphere(float r, int segments, int method) {
+  auto m = std::make_shared<Mesh>();
+  m->name = "Quad Sphere";
+  if (!std::isfinite(r) || r <= 0.0f) r = 0.5f;
+  const int seg = quad_sphere_segments(segments);
+  const int seg_vert = seg + 1;
+  const int layer_full = seg_vert * seg_vert, layer_ring = seg * 4;
+
+  /* Where a cube vertex goes on the sphere: a face axis maps to itself, the other two through a warp that depends
+   * only on the axis (the angle is 0.8687 rad with 1 / tan(angle) as the scale for Even Area, pi/4 for Even Angle). */
+  const float angle = method == 1 ? kPi * 0.25f : 0.8687f;
+  const float angle_scale = method == 1 ? 1.0f : 0.845878184f;
+  auto cube_co = [seg](int i) { return float(i * 2 - seg) / float(seg); };
+  std::vector<float> warp(seg_vert);
+  for (int i = 0; i <= seg; i++) warp[i] = (i == 0 || i == seg) ? cube_co(i) : std::tan(cube_co(i) * angle) * angle_scale;
+
+  /* The vertex index of a grid point (each axis in [0, seg], one of them at an extreme). */
+  auto vert_index = [&](int x, int y, int z) -> uint32_t {
+    if (z == 0) return (uint32_t)(y * seg_vert + x);
+    if (z == seg) return (uint32_t)(layer_full + layer_ring * (seg - 1) + y * seg_vert + x);
+    int ring;
+    if (y == 0) ring = x;
+    else if (x == seg) ring = seg + y;
+    else if (y == seg) ring = seg * 3 - x;
+    else ring = seg * 4 - y;
+    return (uint32_t)(layer_full + layer_ring * (z - 1) + ring);
+  };
+  auto add_vertex = [&](int x, int y, int z) {
+    const int g[3] = {x, y, z};
+    const int face_axis = (x == 0 || x == seg) ? 0 : ((y == 0 || y == seg) ? 1 : 2);
+    float c[3];
+    for (int a = 0; a < 3; a++) c[a] = a == face_axis ? cube_co(g[a]) : warp[g[a]];
+    const Vec3 d = normalize(Vec3(c[0], c[1], c[2])) * r;
+    m->add_vert({d.x, d.z, -d.y});  // Blender's Z up to our Y up
+  };
+  for (int z = 0; z <= seg; z++) {
+    if (z == 0 || z == seg) {
+      for (int y = 0; y <= seg; y++)
+        for (int x = 0; x <= seg; x++) add_vertex(x, y, z);
+      continue;
+    }
+    for (int x = 0; x <= seg; x++) add_vertex(x, 0, z);
+    for (int y = 1; y <= seg; y++) add_vertex(seg, y, z);
+    for (int x = seg - 1; x >= 0; x--) add_vertex(x, seg, z);
+    for (int y = seg - 1; y >= 1; y--) add_vertex(0, y, z);
+  }
+
+  /* The six cube faces as corner indices (bit 2 = x, bit 1 = y, bit 0 = z) and the lower left of each in the UV
+   * layout, each face a quarter-wide square. */
+  static const int kCubeFaces[6][4] = {{0, 1, 3, 2}, {2, 3, 7, 6}, {6, 7, 5, 4}, {4, 5, 1, 0}, {2, 6, 4, 0}, {7, 3, 1, 5}};
+  static const float kFaceUv[6][2] = {{0.375f, 0.0f}, {0.375f, 0.25f}, {0.375f, 0.5f}, {0.375f, 0.75f}, {0.125f, 0.5f}, {0.625f, 0.5f}};
+  auto corner = [](int cube_vert, int out[3]) {
+    out[0] = (cube_vert >> 2) & 1;
+    out[1] = (cube_vert >> 1) & 1;
+    out[2] = cube_vert & 1;
+  };
+  const float uv_step = 0.25f / float(seg);
+  std::vector<Vec2> uvs;
+  for (int f = 0; f < 6; f++) {
+    int c0[3], c1[3], c3[3], su[3], sv[3];
+    corner(kCubeFaces[f][0], c0);
+    corner(kCubeFaces[f][1], c1);
+    corner(kCubeFaces[f][3], c3);
+    for (int a = 0; a < 3; a++) su[a] = c1[a] - c0[a], sv[a] = c3[a] - c0[a];
+    for (int v = 0; v < seg; v++) {
+      for (int u = 0; u < seg; u++) {
+        int g[3];
+        for (int a = 0; a < 3; a++) g[a] = c0[a] * seg + su[a] * u + sv[a] * v;
+        auto at = [&](int du, int dv) { return vert_index(g[0] + su[0] * du + sv[0] * dv, g[1] + su[1] * du + sv[1] * dv, g[2] + su[2] * du + sv[2] * dv); };
+        const float u0 = kFaceUv[f][0] + uv_step * float(u), u1 = kFaceUv[f][0] + uv_step * float(u + 1);
+        const float v0 = kFaceUv[f][1] + uv_step * float(v), v1 = kFaceUv[f][1] + uv_step * float(v + 1);
+        uint32_t q[4] = {at(0, 0), at(1, 0), at(1, 1), at(0, 1)};
+        Vec2 t[4] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
+        /* Quads on two of the four corners swap their diagonal, so a triangulated sphere is rounder. */
+        if ((((u * 2) + 1) < seg) != (((v * 2) + 1) < seg)) {
+          std::rotate(q, q + 1, q + 4);
+          std::rotate(t, t + 1, t + 4);
+        }
+        m->add_face({q[0], q[1], q[2], q[3]});
+        uvs.insert(uvs.end(), t, t + 4);
+      }
+    }
+  }
+  m->uvs = std::move(uvs);
+  orient_outward(*m);  // (the UVs are set first: a flipped face takes its UVs along)
+  m->smooth = true;
+  m->touch();
+  return m;
+}
+
 MeshPtr capsule(float r, float height, int segments, int rings) {
   auto m = std::make_shared<Mesh>();
   m->name = "Capsule";
@@ -2264,6 +2494,7 @@ std::vector<uint32_t> remove_loose_verts(Mesh &m) {
       if (remap[i] != UINT32_MAX) w[remap[i]] = g.weights[i];
     g.weights = std::move(w);
   }
+  m.remap_color_vertices(remap, np.size());  // (ADR 0152)
   for (ShapeKey &k : m.shape_keys) {  // (round 358: keys that fitted follow the remap too)
     if (k.delta.size() != remap.size()) continue;
     std::vector<Vec3> d(np.size(), Vec3(0.0f));

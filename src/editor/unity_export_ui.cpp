@@ -115,6 +115,7 @@ void Editor::ExportJob::finish(const std::string &failure) {
 std::map<std::string, std::vector<UnityEdit>> Editor::unity_edits(const std::string &folder_rel, int &nested, int &copies) {
   std::map<std::string, std::vector<UnityEdit>> out;
   std::set<std::string> seen;
+  std::string panoramic_first;
   scene_->for_each([&](GameObject &g) {
     const UnityOrigin *o = g.get<UnityOrigin>();
     if (!o || o->file.rfind(folder_rel + "/", 0) != 0) return;
@@ -127,7 +128,10 @@ std::map<std::string, std::vector<UnityEdit>> Editor::unity_edits(const std::str
     out[o->file].push_back(go);
     if (tr.file_id) out[o->file].push_back(tr);
     unity_component_edits(g, go.file_id, out[o->file]);  // (round 401: its camera's and light's fields)
+    const Camera *pc = g.get<Camera>();
+    if (pc && pc->panoramic_type && panoramic_first.empty()) panoramic_first = g.name;
   });
+  if (!panoramic_first.empty()) Log::info("Export: a panoramic camera ('%s') is written to Unity as a perspective one", panoramic_first.c_str());  // (round 538: once an export)
   /* Round 401: the scene's world settings into the .unity it came from. */
   if (!scene_->unity.file.empty() && scene_->unity.file.rfind(folder_rel + "/", 0) == 0) out[scene_->unity.file].push_back(unity_world_edit(scene_->environment, scene_->unity));
   /* Round 454 (ADR 0118): the Lighting Mode into the settings the import read it from - a LightingSettings document in the
@@ -265,7 +269,7 @@ void unity_component_edits(const GameObject &g, int64_t game_object, std::vector
     const bool skybox_kept = c->clear_flags == 0 && (c->unity_clear_flags == 3 || c->unity_clear_flags == 4);
     e.fields = {{"m_ClearFlags", c->clear_flags == 1 ? "2" : skybox_kept ? std::to_string(c->unity_clear_flags) : "1"}, {"m_BackGroundColor", unity_yaml_color(c->background, c->background_alpha)}, {"m_HDR", c->hdr ? "1" : "0"},
                 {"m_FOVAxisMode", c->fov_axis == 1 ? "1" : "0"}, {"field of view", unity_yaml_num(c->fov)}, {"near clip plane", unity_yaml_num(c->near_clip)},
-                {"far clip plane", unity_yaml_num(c->far_clip)}, {"orthographic", c->orthographic ? "1" : "0"}, {"orthographic size", unity_yaml_num(c->ortho_size)},
+                {"far clip plane", unity_yaml_num(c->far_clip)}, {"orthographic", c->orthographic && !c->panoramic_type ? "1" : "0"}, {"orthographic size", unity_yaml_num(c->ortho_size)},
                 {"m_Enabled", c->enabled ? "1" : "0"}};
     if (c->physical) e.fields.push_back({"m_FocalLength", unity_yaml_num(c->focal_length)});
     out.push_back(e);

@@ -6,6 +6,7 @@
 // stroke so the views follow the dabs.
 #include "editor.h"
 #include "../core/core.h"
+#include "../core/ramp.h"
 #include "../render/display.h"
 #include "../texture/paint_layer.h"
 #include "../texture/surface.h"
@@ -297,12 +298,13 @@ bool Editor::paint_begin_stroke_images() {
  * small round stamps placed by the stroke's seed, each with its own weight, so a stroke leaves streaks. */
 float Editor::paint_stamp(Vec2 local) const {
   const PaintBrush &br = paint_brush_;
+  const float hard = paint_dab_hardness_ >= 0.0f ? paint_dab_hardness_ : br.hardness;  // (round 540: through the pressure curve inside a dab)
   if (br.tip == 1 && paint_dir_known_) {
     const float l = length(paint_dab_dir_);
     const Vec2 d = l > 1e-6f ? paint_dab_dir_ / l : Vec2(1.0f, 0.0f);
     const float along = local.x * d.x + local.y * d.y, across = -local.x * d.y + local.y * d.x;
     const float ratio = std::max(0.05f, std::min(1.0f, br.tip_ratio));
-    return paint_falloff(std::sqrt(along * along + (across / ratio) * (across / ratio)), br.hardness);
+    return paint_falloff(std::sqrt(along * along + (across / ratio) * (across / ratio)), hard);
   }
   if (br.tip == 2) {
     const int n = std::max(1, std::min(64, br.bristles));
@@ -317,11 +319,11 @@ float Editor::paint_stamp(Vec2 local) const {
         c = Vec2(std::cos(a) * rr, std::sin(a) * rr), w = 0.4f + 0.6f * paint_rand(paint_stroke_seed_, (uint32_t)i * 3u + 2u);
       }
       const float t = length(local - c) / r;
-      if (t < 1.0f) sum += w * paint_falloff(t, std::max(br.hardness, 0.3f));
+      if (t < 1.0f) sum += w * paint_falloff(t, std::max(hard, 0.3f));
     }
     return std::min(1.0f, sum);
   }
-  return paint_falloff(length(local), br.hardness);
+  return paint_falloff(length(local), hard);
 }
 
 /* The grain's luminance at a texel (the image tiled in texel space, `grain_scale` texels an image pixel); 1 without. */
@@ -353,7 +355,11 @@ Vec3 Editor::paint_dab_colour() const {
 }
 
 /* Before a dab's texels: the dab's colour decided, the pickup reset. */
-void Editor::paint_dab_begin(float) {
+void Editor::paint_dab_begin(float pressure) {
+  paint_dab_hardness_ = paint_brush_.hardness;
+  if (paint_brush_.hardness_pressure) paint_dab_hardness_ *= curve_eval(paint_brush_.hardness_curve, std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f);
+  paint_dab_hardness_ = std::max(0.0f, std::min(1.0f, paint_dab_hardness_));
+  paint_last_dab_hardness_ = paint_dab_hardness_;
   paint_dab_color_ = paint_dab_colour();
   paint_pick_sum_ = Vec3(), paint_pick_n_ = 0.0f;
   paint_dab_centroid_ = Vec2(), paint_centroid_n_ = 0.0f;
@@ -362,6 +368,7 @@ void Editor::paint_dab_begin(float) {
 /* After a dab's texels: the brush picks up the mean colour it painted over (by the wet amount) and the drag's direction in
  * texel space is read from the dab's centroid against the last one (the Flat tip's turn, Smudge's pull). */
 void Editor::paint_dab_finish() {
+  paint_dab_hardness_ = -1.0f;  // (the stamp reads the field again outside a dab)
   const float wet = std::max(0.0f, std::min(1.0f, paint_brush_.wet));
   if (wet > 0.0f && paint_pick_n_ > 0.0f) {
     const Vec3 mean = paint_pick_sum_ / paint_pick_n_;
@@ -428,7 +435,7 @@ void Editor::paint_stroke_to(const Recti &view, float x, float y, bool first) {
     paint_last_px_ = to;
     return;
   }
-  const float step = std::max(1.0f, paint_brush_.radius * ui_.scale * std::max(0.05f, paint_brush_.spacing));
+  const float step = std::max(1.0f, paint_brush_.radius * ui_.scale * paint_spacing_now(pen));  // (round 540: the pen presses the spacing through its curve)
   const Vec2 d = to - paint_last_px_;
   const float len = length(d);
   if (len < step) return;
@@ -743,6 +750,7 @@ void Editor::paint_world_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float r
  * the tiles the dilation reaches join the step), the tiles' after taken, one undo step holding the tiles, the layer's
  * stamp bumped so the surface re-evaluates on its worker. */
 void Editor::paint_end_stroke() {
+  paint_dab_hardness_ = -1.0f;  // (whatever way the last dab ended, the stamp reads the field again)
   if (!paint_stroking_) return;
   paint_stroking_ = false, paint_2d_stroking_ = false;
   if (!paint_dabbed_ || !paint_images_ || !paint_delta_ || paint_delta_->tiles.empty()) {
@@ -892,6 +900,7 @@ bool Editor::paint_fill(const std::string &what, float x, float y) {
   for (size_t t = 0; t < rm.tri_count(); t++)
     if (take[t]) paint_triangle(rm, mesh, t, W, Vec2(), 0.0f, 1.0f, true), n++;
   paint_filling_ = false;
+  paint_dab_hardness_ = -1.0f;  // (a fill began a dab and finishes none: the stamp reads the field again)
   paint_dabbed_ = n > 0;
   paint_last_fill_ = (int)n;
   paint_end_stroke();
@@ -1041,7 +1050,7 @@ void Editor::paint_canvas_update(const Recti &pane, int tiles) {
   }
   const PaintImages *im = paint_images_.get();
   const float texels = im ? (float)std::max(im->w, im->h) : 1024.0f;
-  const float step = std::max(1.0f, paint_brush_.radius * std::max(0.05f, paint_brush_.spacing)) / texels;  // (in UV units)
+  const float step = std::max(1.0f, paint_brush_.radius * paint_spacing_now(pressure)) / texels;  // (in UV units)
   Vec2 d = uv - paint_2d_last_;
   if (std::fabs(d.x) > 0.5f) d.x -= std::copysign(1.0f, d.x);  // (the shortest way across the tile's wrap)
   if (std::fabs(d.y) > 0.5f) d.y -= std::copysign(1.0f, d.y);
@@ -1246,6 +1255,7 @@ void Editor::paint_command(const std::vector<std::string> &t) {
     else if (w == "blend") b.mode = 2;
     else if (w == "paint") b.mode = 0;
     else Log::warn("paint brush round|flat|bristle (the tip) | paint|smudge|blend (what a dab does)");
+    brush_banks_sync();  // (round 540: Smudge and Blend have their own size, opacity and colour)
   }
   else if (v == "tip") {  // paint tip ratio <r> | bristles <n>
     if (arg(2, "") == "ratio") b.tip_ratio = std::max(0.05f, std::min(1.0f, num(3, 0.3f)));

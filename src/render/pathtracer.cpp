@@ -871,6 +871,7 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
   lens_ = lens;
   if (!(lens_.radius > 0.0f) || !std::isfinite(lens_.radius)) lens_.radius = 0.0f;
   lens_.focus_distance = std::max(1e-4f, lens_.focus_distance);
+  if (lens_.pano.type > 0) lens_.pano.sanitize(), lens_.radius = 0.0f;  // (round 538: no depth of field on a panorama)
   if (width != w_ || height != h_) {
     w_ = width;
     h_ = height;
@@ -988,6 +989,8 @@ const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, 
     sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
     sp.has_tangent = true;
   }
+  if (ob.colors && ob.colors->size() == rm.positions.size())  // (task 0533: read only by a Vertex Color material)
+    sp.vertex_color = (*ob.colors)[tri[0]] * w + (*ob.colors)[tri[1]] * u + (*ob.colors)[tri[2]] * v;
   int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
   const Material *mat = default_material().get();
   if (ob.materials && !ob.materials->empty()) {
@@ -1420,7 +1423,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (id_out) *id_out = h.object + 1;
     }
     if (bounce == 0 && camera_path && env_.fog) {  // (task 0248: the fog's share of the pixel is the ramp's colour; the surface's path carries the rest)
-      const float f = env_.fog_amount((since_scatter + h.t) * std::max(0.0f, dot(ray.dir, cam_fwd_)));  // (from the camera, through the see-through passes; round 401: the view depth)
+      const float f = env_.fog_amount((since_scatter + h.t) * (lens_.pano.type > 0 ? 1.0f : std::max(0.0f, dot(ray.dir, cam_fwd_))));  // (from the camera, through the see-through passes; round 401: the view depth; round 538: a panorama has no view axis - the distance itself)
       if (f > 0.0f) {
         L += beta * (env_.fog_color + (env_.fog_far - env_.fog_color) * f) * f;
         beta = beta * (1.0f - f);
@@ -1787,6 +1790,12 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
           Vec4 a = inv_vp_ * Vec4(nx, ny, 0.0f, 1.0f), b = inv_vp_ * Vec4(nx, ny, 1.0f, 1.0f);
           Vec3 pa = a.xyz() / a.w, pb = b.xyz() / b.w;
           Ray r{pa, normalize(pb - pa)};
+          bool outside = false;  // (round 538: a panoramic camera's ray from panoramic.h; where it shows nothing the pixel is black)
+          if (lens_.pano.type > 0) {
+            Vec3 pd;
+            if (panoramic_ray(lens_.pano, (x + jx) / w_, (y + jy) / h_, cam_right_, cam_up_, cam_fwd_, pd)) r = Ray{cam_pos_, pd};
+            else outside = true;
+          }
           if (lens_.radius > 0.0f) {
             /* Thin lens: start on the aperture, aim at where the pinhole ray
              * crosses the focus plane (Cycles: camera_sample_perspective). */
@@ -1803,7 +1812,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) guide->segments.Clear();
 #endif
-          Vec3 c = trace(r, rng, &alb, &nrm, &dep, &hit_id, local, guide.get());
+          Vec3 c = outside ? Vec3(0.0f) : trace(r, rng, &alb, &nrm, &dep, &hit_id, local, guide.get());
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) {
             /* The path's segments become radiance samples for training. */
@@ -2908,6 +2917,7 @@ void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint
   /* The key: this build, the camera and the size. */
   uint64_t key = kFnvBasis ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
   key = fnv1a(inv_vp_.m, sizeof(inv_vp_.m), key);
+  key = fnv1a(&lens_.pano, sizeof(lens_.pano), key);  // (round 538)
   if (key != centre_key_ || centre_dist_.size() != n) {
     centre_dist_.assign(n, 1e6f);
     centre_ids_.assign(n, 0u);
@@ -2919,6 +2929,11 @@ void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint
           if (a.w == 0.0f || bb.w == 0.0f) continue;
           const Vec3 pa = a.xyz() / a.w, pb = bb.xyz() / bb.w;
           Ray r{pa, normalize(pb - pa)};
+          if (lens_.pano.type > 0) {  // (round 538)
+            Vec3 pd;
+            if (!panoramic_ray(lens_.pano, (x + 0.5f) / w_, (y + 0.5f) / h_, cam_right_, cam_up_, cam_fwd_, pd)) continue;
+            r = Ray{cam_pos_, pd};
+          }
           float travelled = 0.0f;
           for (int step = 0; step < 64; step++) {
             Hit h;
@@ -3537,6 +3552,15 @@ std::string PathTracer::device_summary() const {
 }
 
 int PathTracer::render(double budget_ms, int max_samples) {
+  if (lens_.pano.type > 0 && (!gpus_.empty() || gpu_starting_)) {  // (round 538: the cards' kernel has no panoramic rays: the CPU traces it, open cards set aside)
+    gpu_note_ = "a panoramic camera: traced on the CPU (the GPU kernel has no panoramic rays yet)";
+    stop_all_workers();
+    for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
+    gpus_.clear();
+    gpu_starting_ = false;
+    gpu_pending_.clear();
+    Log::info("Path tracer: %s", gpu_note_.c_str());
+  }
   camera_media_ = has_volume_ ? media_at(cam_pos_) : Media{};  // (round 331: after build() and set_camera(), whichever came last)
   /* A material edited between calls resolves its textures here, not in the tracing threads. */
   for (const PTObject &o : objects_)

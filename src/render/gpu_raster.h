@@ -177,6 +177,7 @@ struct RasterLight {
   float width = 1.0f, height = 1.0f;
   bool disk = false;
   int bake_mode = 0;  // task 0197: RenderLight's (2 Baked: in the lightmaps and baked probes, skipped where they light)
+  bool shadows = true;  // round 543: RenderLight's - whether it casts traced shadows (RasterFrame::rt_shadows)
 };
 
 /* Task 0195: a see-through triangle's corner: the mesh's vertex (local), its instance, whether its face is highlighted. */
@@ -189,6 +190,12 @@ struct SeeCorner {
   float t[4];
 };
 static_assert(sizeof(SeeCorner) == 64, "SeeCorner: the shaders' layout");
+
+/* Round 543: the traced shadows' work so far (tests and the timed rows read it). */
+struct RtShadowStats {
+  uint64_t blas_builds = 0, tlas_builds = 0;
+  double last_build_ms = 0;  // the last frame's recording of its builds, on the host
+};
 
 /* Round 532 (task 0512): a Gaussian splat the CPU already projected (gsplat_raster.h's SplatScreen), 32 bytes. x, y are
  * the centre in pixels, y counted down from the top as the picture's rows are; z the depth 0..1. The ellipse: the first
@@ -212,6 +219,9 @@ struct RasterFrame {
   float sun_view_proj[16];    // the shadow map's (ShadowMap::view_proj)
   int shadow_size = 2048;     // 0: no shadow map
   int shadow_light = 0;       // which light casts it
+  /* Round 543 (task 0523, ADR 0151): shadows traced through ray queries (Raster::can_trace_shadows) for every light with
+   * `shadows` among the first 32, in place of the map - the lighting pass and its linear-light copy. */
+  bool rt_shadows = false;
   float shadow_bias = 0.002f;
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
@@ -417,6 +427,10 @@ class Raster {
   virtual bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out,
                             std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
+  /* Round 543: the views' shadows can be traced on this device (ray queries opened, their structures ready). */
+  virtual bool can_trace_shadows() const { return false; }
+  virtual RtShadowStats rt_shadow_stats() const { return {}; }
+  virtual void fail_rt_shadows_for_test() {}  // (the next traced frame's build fails: the map from then on)
 };
 
 /* Round 450: BLENDITY_VIEW_OFF=sh,lv,mask (any of them, comma-separated) compiles the views' shaders without round

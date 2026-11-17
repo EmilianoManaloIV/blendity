@@ -216,5 +216,69 @@ void transfer_vertex_groups(const Mesh &from, Mesh &to) {
   apply_group_map(map, from, to);
 }
 
+/* ---- colour attributes (ADR 0152, task 0525): Point layers through the groups' map ---- */
+
+static bool point_layer_fits(const Mesh &m, const ColorAttribute &c) {
+  return c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m.vert_count();
+}
+
+bool point_colors_need_carry(const Mesh &from, const Mesh &to, bool restore_missing) {
+  for (const ColorAttribute &c : from.color_attributes) {
+    if (!point_layer_fits(from, c)) continue;
+    const int i = to.find_color(c.name);
+    if (i < 0 ? restore_missing : !point_layer_fits(to, to.color_attributes[(size_t)i]) && to.color_attributes[(size_t)i].domain == c.domain) return true;
+  }
+  return false;
+}
+
+void apply_color_map(const GroupTransferMap &map, const Mesh &from, Mesh &to, bool restore_missing) {
+  const size_t nv = to.vert_count();
+  const std::string active = from.active_color >= 0 && from.active_color < (int)from.color_attributes.size() ? from.color_attributes[(size_t)from.active_color].name : "";
+  const std::string render = from.render_color >= 0 && from.render_color < (int)from.color_attributes.size() ? from.color_attributes[(size_t)from.render_color].name : "";
+  for (const ColorAttribute &c : from.color_attributes) {
+    if (!point_layer_fits(from, c)) continue;
+    int i = to.find_color(c.name);
+    if (i >= 0 && to.color_attributes[(size_t)i].domain != c.domain) continue;  // another kind now
+    if (i >= 0 && point_layer_fits(to, to.color_attributes[(size_t)i])) continue;  // carried by the operator
+    if (i < 0 && !restore_missing) continue;
+    ColorAttribute out;
+    out.name = c.name;
+    out.rgba.assign(nv, Vec4(1, 1, 1, 1));
+    for (size_t v = 0; v < nv && v * 3 + 2 < map.src.size(); v++) {
+      const uint32_t *s = &map.src[v * 3];
+      if (s[0] >= c.rgba.size() || s[1] >= c.rgba.size() || s[2] >= c.rgba.size()) continue;
+      const Vec3 b = map.bary[v];
+      out.rgba[v] = c.rgba[s[0]] * b.x + c.rgba[s[1]] * b.y + c.rgba[s[2]] * b.z;
+    }
+    if (i >= 0) to.color_attributes[(size_t)i] = std::move(out);
+    else to.color_attributes.push_back(std::move(out));
+  }
+  /* A mesh that lost its layers lost its choices with them: the same names as before. */
+  if (to.active_color < 0 || to.active_color >= (int)to.color_attributes.size()) to.active_color = to.find_color(active);
+  if (to.render_color < 0 || to.render_color >= (int)to.color_attributes.size()) to.render_color = to.find_color(render);
+  to.prune_colors();
+}
+
+void note_unkept_colors(const Mesh &from, Mesh &to) {
+  for (const ColorAttribute &c : from.color_attributes)
+    if (!point_layer_fits(from, c)) to.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+}
+
+void carry_colors_rebuilt(const Mesh &from, Mesh &to) {
+  if (from.color_attributes.empty()) return;
+  transfer_point_colors(from, to, true);
+  note_unkept_colors(from, to);
+}
+
+void transfer_point_colors(const Mesh &from, Mesh &to, bool restore_missing) {
+  if (point_colors_need_carry(from, to, restore_missing)) {
+    GroupTransferMap map;
+    group_transfer_map(from, to, map);
+    apply_color_map(map, from, to, restore_missing);
+    return;
+  }
+  to.prune_colors();
+}
+
 }  // namespace meshops
 }  // namespace bl

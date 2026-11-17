@@ -158,10 +158,19 @@ const std::vector<std::pair<const char *, std::vector<DefaultSlice>>> &default_s
           {"Show All", "sculpt show all", {}},
           {"Show Groups", "sculpt groups toggle", {}}}},
         {"Object Mode", "sculpt off", {}}}},
+      {"vertex paint",  // (task 0525)
+       {{"Draw", "vpbrush draw", {}},
+        {"Blur", "vpbrush blur", {}},
+        {"Average", "vpbrush average", {}},
+        {"Smear", "vpbrush smear", {}},
+        {"Mix", "vpblend mix", {}},
+        {"Multiply", "vpblend multiply", {}},
+        {"Undo", "Undo", {}},
+        {"Stop Painting", "vpaint off", {}}}},
       {"weight paint",
-       {{"Add", "wpbrush add", {}},
+       {{"Add Weight", "wpbrush add", {}},
         {"Subtract", "wpbrush subtract", {}},
-        {"Draw", "wpbrush draw", {}},
+        {"Set Weight", "wpbrush set", {}},
         {"Blur", "wpbrush blur", {}},
         {"Mirror X", "wpmirror on", {}},
         {"No Mirror", "wpmirror off", {}},
@@ -368,6 +377,7 @@ std::string Editor::wheel_mode_at(int x, int y) {
   if (sketch_.active && sketch_in_world()) return "sketch";
   if (sculpt_) return "sculpt";  // (task 0236)
   if (weight_paint_) return "weight paint";
+  if (vertex_paint_) return "vertex paint";  // (task 0525)
   return "object";
 }
 
@@ -510,7 +520,7 @@ bool Editor::wheel_keys() {
   }
   for (int k = 0; k < kMaxSlices; k++) {
     if (!in.key_pressed[KEY_1 + k]) continue;
-    wheel_run(k, in.shift());
+    wheel_run(k, (in.chord_mods(KEY_1 + k) & MOD_SHIFT) != 0);  // (round 548: Shift as the number went down - keep it open)
     return true;
   }
   if (in.key_pressed[KEY_BACKSPACE] && !qm_.typed.empty()) {
@@ -527,7 +537,10 @@ bool Editor::wheel_keys() {
   int only = -1, matches = 0;
   for (int i = 0; i < n; i++)
     if (to_lower(ring[(size_t)i].label).compare(0, qm_.typed.size(), qm_.typed) == 0) only = i, matches++;
-  if (matches == 1) wheel_run(only, in.shift());
+  bool shift = in.shift();  // (round 548: Shift as the letter's key went down, when one was pressed)
+  for (int k = KEY_A; k <= KEY_Z; k++)
+    if (in.key_pressed[k]) shift = (in.chord_mods(k) & MOD_SHIFT) != 0;
+  if (matches == 1) wheel_run(only, shift);
   else if (matches == 0) qm_.typed.clear();
   return true;
 }

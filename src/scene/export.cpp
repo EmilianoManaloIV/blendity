@@ -391,6 +391,26 @@ void prepare_shape_keys(const Mesh &src, const ExportItem &it, const Mat4 &bake,
  * pack margin at that size), so a bake at up to that resolution doesn't bleed between charts. */
 constexpr int kLightmapRes = 1024, kLightmapPadding = 4;
 
+/* Task 0525: Corner colour layers as Point ones, each vertex the mean of its corners - before an operator that rebuilds
+ * the corners (the export's Triangulate), so the colours are kept softened rather than dropped. */
+static void corner_colors_to_points(Mesh &m) {
+  for (ColorAttribute &c : m.color_attributes) {
+    if (c.domain != ColorAttribute::Domain::Corner || !m.color_fits(c)) continue;
+    std::vector<Vec4> sum(m.vert_count(), Vec4(0, 0, 0, 0));
+    std::vector<int> n(m.vert_count(), 0);
+    for (size_t k = 0; k < m.corner_verts.size(); k++) {
+      const uint32_t v = m.corner_verts[k];
+      if (v >= sum.size()) continue;
+      sum[v] = sum[v] + c.rgba[k];
+      n[v]++;
+    }
+    for (size_t v = 0; v < sum.size(); v++) sum[v] = n[v] ? sum[v] * (1.0f / (float)n[v]) : Vec4(1, 1, 1, 1);
+    c.domain = ColorAttribute::Domain::Point;
+    c.rgba = std::move(sum);
+    c.corners.clear();
+  }
+}
+
 std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const ExportOptions &o, int up) {
   std::vector<Prepared> out;
   for (const ExportItem &it : items) {
@@ -416,8 +436,13 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     m.seams = src.seams;
     m.seams_sharp = src.seams_sharp;
     m.custom_normals = src.custom_normals;  // (task 0149: written as they are)
+    m.color_attributes = src.color_attributes;  // (task 0525: the render layer is written as COLOR_0 / PLY colours)
+    m.active_color = src.active_color, m.render_color = src.render_color;
     m.sync_attributes();
-    if (o.triangulate) meshops::triangulate(m);
+    if (o.triangulate) {
+      corner_colors_to_points(m);  // (Triangulate rebuilds the corners, which a Corner layer can't follow: averaged per vertex)
+      meshops::triangulate(m);
+    }
     /* Keep Transforms (round 375, glTF, unskinned): the vertices mirrored into the file's space in the object's own,
      * its world (S W S, the translation scaled - the object's own scale kept) on the node; else, and for a world glTF
      * can't hold on a node (sheared, mirrored, not finite: review 375), the world baked into them. */
@@ -435,10 +460,9 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
       }
     }
     /* Mirroring flips handedness: reverse every polygon so it still faces out. */
-    const bool uv = m.has_uvs();
     for (size_t f = 0; f < m.face_count(); f++) {
       std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
-      if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+      m.reverse_corner_layers(f);  // (the UVs, and Corner colours - task 0525)
     }
     /* A negative-scale (mirrored) object reverses its winding once more (on a node, glTF's reader does it). */
     const Mat4 &w = bake;
@@ -447,7 +471,7 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     if (det < 0)
       for (size_t f = 0; f < m.face_count(); f++) {
         std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
-        if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+        m.reverse_corner_layers(f);
       }
     /* (Round 417: an STL writes each triangle's own normal - the split normals, a third of its export, aren't needed.) */
     if (o.format != (int)ExportFormat::STL) p.normals = split_normals(m);
@@ -490,6 +514,7 @@ const MaterialPtr &slot_material(const Prepared &p, int slot) {
 struct SplitKey {
   uint32_t v;
   float n[3], t[2], t2[2];  // (t2: round 353's lightmap UVs)
+  float c[4];                // (task 0525: the render colour layer's, per vertex or per corner)
   bool operator==(const SplitKey &o) const { return std::memcmp(this, &o, sizeof(SplitKey)) == 0; }
 };
 struct SplitKeyHash {
@@ -498,9 +523,17 @@ struct SplitKeyHash {
   }
 };
 
+/* A colour as a file may hold it (task 0525): NaN or infinite channels as 0. */
+static Vec4 finite_colour(Vec4 c) {
+  auto f = [](float v) { return finite_bits(v) ? v : 0.0f; };
+  return Vec4(f(c.x), f(c.y), f(c.z), f(c.w));
+}
+
 struct SplitVerts {
   std::vector<Vec3> pos, nrm;
   std::vector<Vec2> uv, uv2;
+  std::vector<Vec4> col;   // (task 0525) the render colour layer, when the mesh has one
+  const ColorAttribute *ca = nullptr;  // that layer, looked up once (a Corner layer's check walks every corner)
   std::vector<float> vid;  // each vertex's index in the mesh, when `ids` (glTF's _VERT, task 0172)
   std::vector<uint32_t> src;  // each vertex's index in the mesh (task 0268: its joints and weights)
   bool ids = false;
@@ -519,6 +552,9 @@ struct SplitVerts {
     }
     const bool second = p.uv2.size() == p.mesh.corner_verts.size();
     if (second) k.t2[0] = p.uv2[corner].x, k.t2[1] = p.uv2[corner].y;
+    Vec4 colour(1, 1, 1, 1);
+    if (ca) colour = finite_colour(ca->domain == ColorAttribute::Domain::Point ? ca->rgba[k.v] : ca->rgba[corner]);
+    if (ca) k.c[0] = colour.x, k.c[1] = colour.y, k.c[2] = colour.z, k.c[3] = colour.w;
     auto it = index.find(k);
     if (it != index.end()) return it->second;
     const uint32_t id = (uint32_t)pos.size();
@@ -526,6 +562,7 @@ struct SplitVerts {
     if (normals) nrm.push_back(p.normals[corner]);
     if (uvs) uv.push_back(p.mesh.uvs[corner]);
     if (second) uv2.push_back(p.uv2[corner]);
+    if (ca) col.push_back(colour);
     if (ids) vid.push_back((float)k.v);
     src.push_back(k.v);
     index.emplace(k, id);
@@ -1520,13 +1557,26 @@ std::string export_stl(const std::vector<ExportItem> &items, const ExportOptions
 /* Round 417: the split vertices found through each mesh vertex's own chain of splits (a bitwise compare of the normal
  * and UV; no hashing of 40-byte keys), the faces in flat lists, the bytes reserved and appended at once (a 50k sphere's
  * export was 40 ms for Blender's 7). */
+/* A PLY colour byte (task 0525): sRGB for red, green and blue, as Blender's exporter writes; alpha stays linear. */
+static uint8_t ply_colour_byte(float v, int channel) {
+  if (!finite_bits(v)) v = 0.0f;
+  v = std::max(0.0f, std::min(v, 1.0f));
+  if (channel < 3) v = linear_to_srgb(v);
+  return (uint8_t)std::lround(std::max(0.0f, std::min(v, 1.0f)) * 255.0f);
+}
+
 std::string export_ply(const std::vector<ExportItem> &items, const ExportOptions &o) {
   std::vector<Prepared> prepared = prepare(items, o, o.up_axis);
   /* PLY holds one mesh: everything merged, split where normals or UVs differ. */
   bool uvs = o.uvs;
   for (const Prepared &p : prepared) uvs = uvs && p.mesh.has_uvs();
-  struct PlyVert { float v[8]; };  // x y z [nx ny nz] [s t]: the properties' order
-  const int stride = 3 + (o.normals ? 3 : 0) + (uvs ? 2 : 0);
+  /* Task 0525: colours when every mesh has a render colour layer (PLY's one vertex list can't hold them for some), as
+   * Blender writes them - red green blue alpha bytes, sRGB. They're kept as floats here (the split compares them). */
+  bool cols = !prepared.empty();
+  for (const Prepared &p : prepared) cols = cols && p.mesh.render_colors();
+  struct PlyVert { float v[12]; };  // x y z [nx ny nz] [s t] [r g b a]: the properties' order
+  const int floats = 3 + (o.normals ? 3 : 0) + (uvs ? 2 : 0);
+  const int stride = floats + (cols ? 4 : 0);
   std::vector<PlyVert> verts;
   std::vector<uint8_t> face_n;
   std::vector<uint32_t> face_v;
@@ -1538,6 +1588,7 @@ std::string export_ply(const std::vector<ExportItem> &items, const ExportOptions
     const Mesh &m = p.mesh;
     SplitChains chains(sizeof(float) * (size_t)stride, m.vert_count());  // objects never share vertices
     auto value_of = [&](uint32_t k) -> const void * { return verts[k].v; };
+    const ColorAttribute *pca = cols ? m.render_colors() : nullptr;  // (task 0525: once per mesh)
     auto add = [&](uint32_t corner) -> uint32_t {
       const uint32_t v = m.corner_verts[corner];
       PlyVert pv{};
@@ -1545,6 +1596,10 @@ std::string export_ply(const std::vector<ExportItem> &items, const ExportOptions
       pv.v[n++] = m.positions[v].x, pv.v[n++] = m.positions[v].y, pv.v[n++] = m.positions[v].z;
       if (o.normals) pv.v[n++] = p.normals[corner].x, pv.v[n++] = p.normals[corner].y, pv.v[n++] = p.normals[corner].z;
       if (uvs) pv.v[n++] = m.uvs[corner].x, pv.v[n++] = m.uvs[corner].y;
+      if (pca) {
+        const Vec4 c = finite_colour(pca->domain == ColorAttribute::Domain::Point ? pca->rgba[v] : pca->rgba[corner]);
+        pv.v[n++] = c.x, pv.v[n++] = c.y, pv.v[n++] = c.z, pv.v[n++] = c.w;
+      }
       const uint32_t found = chains.find(v, pv.v, value_of);
       if (found != UINT32_MAX) return found;
       const uint32_t id = (uint32_t)verts.size();
@@ -1570,14 +1625,16 @@ std::string export_ply(const std::vector<ExportItem> &items, const ExportOptions
   s += "element vertex " + std::to_string(verts.size()) + "\nproperty float x\nproperty float y\nproperty float z\n";
   if (o.normals) s += "property float nx\nproperty float ny\nproperty float nz\n";
   if (uvs) s += "property float s\nproperty float t\n";
+  if (cols) s += "property uchar red\nproperty uchar green\nproperty uchar blue\nproperty uchar alpha\n";
   s += "element face " + std::to_string(face_n.size()) + "\nproperty list uchar uint vertex_indices\nend_header\n";
   if (o.ascii) {
     s.reserve(s.size() + verts.size() * (size_t)stride * 12 + face_v.size() * 8 + face_n.size() * 4);
     for (const PlyVert &pv : verts) {
-      for (int k = 0; k < stride; k++) {
+      for (int k = 0; k < floats; k++) {
         if (k) s += ' ';
         append_num(s, pv.v[k]);
       }
+      for (int k = floats; k < stride; k++) s += ' ', append_uint(s, ply_colour_byte(pv.v[k], k - floats));
       s += '\n';
     }
     size_t at = 0;
@@ -1589,12 +1646,17 @@ std::string export_ply(const std::vector<ExportItem> &items, const ExportOptions
     return s;
   }
   const size_t head = s.size();
-  s.resize(head + verts.size() * (size_t)stride * 4 + face_n.size() + face_v.size() * 4);
+  const size_t rec = (size_t)floats * 4 + (cols ? 4 : 0);  // a vertex's bytes: its floats, then its colour bytes
+  s.resize(head + verts.size() * rec + face_n.size() + face_v.size() * 4);
   char *q = &s[head];
   JobSystem::global().parallel_for((int64_t)verts.size(), 8192, [&](int64_t a, int64_t b) {
-    for (int64_t i = a; i < b; i++) std::memcpy(q + (size_t)i * (size_t)stride * 4, verts[(size_t)i].v, (size_t)stride * 4);
+    for (int64_t i = a; i < b; i++) {
+      char *at = q + (size_t)i * rec;
+      std::memcpy(at, verts[(size_t)i].v, (size_t)floats * 4);
+      for (int k = floats; k < stride; k++) at[(size_t)floats * 4 + (size_t)(k - floats)] = (char)ply_colour_byte(verts[(size_t)i].v[k], k - floats);
+    }
   });
-  q += verts.size() * (size_t)stride * 4;
+  q += verts.size() * rec;
   size_t at = 0;
   for (uint8_t n : face_n) {
     *q++ = (char)n;
@@ -1871,6 +1933,7 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     for (int slot = 0; slot < slots; slot++) {
       SplitVerts sv;
       sv.ids = o.vertex_ids;
+      sv.ca = m.render_colors();  // (task 0525)
       std::vector<uint32_t> idx;
       for (size_t f = 0; f < m.face_count(); f++) {
         if (m.material_of(f) != slot) continue;
@@ -1894,6 +1957,11 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         const int view = add_view(t.data(), t.size() * sizeof(Vec2), 34962);
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
         attrs += strprintf(",\"TEXCOORD_%d\":%zu", uv ? 1 : 0, accessors.size() - 1);
+      }
+      if (!sv.col.empty() && sv.col.size() == sv.pos.size()) {  // (task 0525) glTF's vertex colour: linear RGBA floats
+        const int view = add_view(sv.col.data(), sv.col.size() * sizeof(Vec4), 34962);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC4\"}", view, sv.col.size()));
+        attrs += strprintf(",\"COLOR_0\":%zu", accessors.size() - 1);
       }
       const bool skinned = o.skins && p.skin && p.skin->vjoints.size() == m.positions.size() && p.skin->vweights.size() == m.positions.size();
       if (skinned) {  // (task 0268) each vertex's four joints and weights, from its mesh vertex

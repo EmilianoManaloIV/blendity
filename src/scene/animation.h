@@ -28,7 +28,8 @@ struct AnimKey {
 };
 
 /* One number of one object: its path below the animated root ("" the root itself, "Hips/Spine" a bone), the property
- * ("Position", "Rotation" (Euler degrees), "Scale", or "Component.Field") and the axis (0..2 for a vector or colour). */
+ * ("Position", "Rotation" (Euler degrees), "RotationQ" (a quaternion, axes 0..3 = x y z w: round 541, ADR 0148), "Scale",
+ * or "Component.Field") and the axis (0..2 for a vector or colour). */
 struct AnimTrack {
   std::string path, property;
   int axis = 0;
@@ -158,6 +159,40 @@ bool camera_rig(const GameObject &g);
 /* The Euler angles (degrees, Unity's order) for q nearest `near`: each angle by whole turns, and the second solution
  * (180 - x, y + 180, z + 180). A chain of keys converted this way never wraps (tasks 0137, 0139). */
 Vec3 euler_near(Quat q, Vec3 near);
+
+/* ---- Round 541 (task 0521, ADR 0148): quaternion rotation tracks, and Blender 5.3's world-space copy / paste */
+
+/* A property as the dopesheet names it ("RotationQ" is "Rotation (Quaternion)"). */
+std::string anim_property_label(const std::string &property);
+
+/* Convert Rotation (Blender's anim_convert.cc): the rotation tracks of each path in `paths` rewritten in the other form -
+ * Euler "Rotation" to quaternion "RotationQ" (`to_quaternion`) or back. The frames are the union of the source tracks' key
+ * frames, or with `bake` every whole frame between the first and the last key; quaternions stay in one hemisphere key to key,
+ * Euler keys continuous; a missing source axis is the object's current value (`root` finds it; null: identity). The source
+ * tracks are removed. Returns how many paths were converted (a path with no source tracks has none to convert). */
+int convert_rotation_tracks(AnimationClip &clip, GameObject *root, const std::vector<std::string> &paths, bool to_quaternion, bool bake);
+
+/* The world matrices of some objects over a range of whole frames (Blender's "Copy Global Transform"): per source its name
+ * and one matrix a frame, first..last inclusive. */
+struct WorldSource {
+  std::string name;
+  std::vector<Mat4> world;
+};
+struct WorldCopy {
+  int first = 0, last = -1;
+  std::vector<WorldSource> sources;
+  bool empty() const { return sources.empty(); }
+};
+/* Samples `objects` over first..last: the clip's Position / Rotation / Scale tracks at each frame onto `root`'s branch (put
+ * back after). False and `why` for nothing to copy: no object, a range under two frames or not finite, a clip with no
+ * keys. Two objects of one name: the second is skipped (a warning). */
+bool copy_world_space(const AnimationClip &clip, GameObject &root, const std::vector<GameObject *> &objects, float first, float last, WorldCopy &out, std::string &why);
+/* Pastes `copy` onto `targets` as keys on every frame from `at` (Offset Start: the playhead; None: copy.first): pairs 1 to 1 or
+ * 1 to many whatever the names, else by name (no pair at all is refused); parents before children; each target's world matrix
+ * made local to its parent at that frame, keyed in its rotation form ("RotationQ" when its path has it, else "Rotation");
+ * keys in the range are replaced, the rest stay; a curve the paste made and left flat keeps one key (a track the target had is never touched). Returns the targets keyed;
+ * 0 and `why` when refused (nothing changes then). */
+int paste_world_space(AnimationClip &clip, GameObject &root, const WorldCopy &copy, const std::vector<GameObject *> &targets, float at, std::string &why);
 /* Keys a straight line already gives (within `tolerance` of the line between their neighbours) dropped: a clip baked a
  * frame at a time keeps only the frames that matter (Unity's importer does the same). The first and last stay. */
 void reduce_keys(std::vector<AnimKey> &keys, float tolerance);

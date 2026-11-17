@@ -185,6 +185,7 @@ bool Editor::init(int argc, char **argv) {
   std::string scene_arg = scene_in_args(argc, argv), layout_arg;  // (a double-clicked .scene: task 0076)
   resolve_project_paths(scene_arg);
   load_prefs();
+  brushes_load();  // (round 540: each brush's size, strength and colour, beside the preferences)
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];
@@ -515,6 +516,11 @@ void Editor::process_events(std::vector<Event> &events) {
         if (e.key > 0 && e.key < KEY_COUNT) {
           in.key_down[e.key] = true;
           in.key_pressed[e.key] = true;
+          int km = e.mods;  // (round 548: the chord is this press's, whatever the frame's later events)
+          if (in.key_down[KEY_SHIFT]) km |= MOD_SHIFT;  // (some platforms omit the modifiers on key events)
+          if (in.key_down[KEY_CTRL]) km |= MOD_CTRL;
+          if (in.key_down[KEY_ALT]) km |= MOD_ALT;
+          in.key_mods[e.key] = km;
         }
         in.mods = e.mods;
         break;
@@ -590,6 +596,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
+  brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
   process_events(events);
   upload_bytes_frame_ = 0;
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
@@ -1157,7 +1164,7 @@ void Editor::draw_menubar(const Recti &r) {
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
     /* Task 0267: in every layout - the walkthrough's first step (add a cube) failed in the other layouts. */
     u.submenu("3D Object", u.px(170), [this] {
-        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+        for (const char *k : {"Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
     u.submenu("Blockout", u.px(190), [this] { blockout_menu_items(false); });  // (round 477)
@@ -2481,7 +2488,8 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
   seq_drag_cancel();
   stable_ = scene_->clone();
   restore_edit_selection(s.edit_sel);
-  if (weight_paint_) wp_scene_ = scene_.get(), wp_cache_mesh_ = nullptr, wp_version_++;  // the same objects, restored: keep painting
+  if (weight_paint_) wp_scene_ = scene_.get(), wp_mh_.forget(), wp_version_++;  // the same objects, restored: keep painting
+  if (vertex_paint_) vp_scene_ = scene_.get(), vp_mh_.forget(), vp_version_++;  // (task 0525: likewise)
   if (paint_) paint_scene_ = scene_.get();  // (task 0245: keep painting)
   if (sculpt_) sculpt_scene_ = scene_.get(), sculpt_cache_mesh_ = nullptr;  // (task 0236: keep sculpting; the grid is rebuilt)
   prune_selection();
@@ -3819,6 +3827,7 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     const double n = std::max(1, frames);
     std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system", sum / n, frames,
                 (double)views / n, gpu_view_reason_.empty() ? "" : "; on the CPU: ", gpu_view_reason_.c_str());
+    print_rt_shadow_stats();  // (round 543: what the traced shadows built over these frames)
     /* Task 0203: where the frame went (the Profiler's parts, a frame's mean): what makes a row slow. The parts nest: the
      * overlays, gathering, hashing and the Scene view's own GPU path are inside the Scene view; the GPU path counts every
      * view's; the UI is the rest of the panels. */
@@ -4309,7 +4318,7 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 
 /* The kind as create knows it, matched without case ("sphere", "point light"); "" when there's none. */
 std::string Editor::known_create_kind(const std::string &kind) {
-  static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
+  static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
                                        "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice",
                                        "Blockout", "Point Cloud", "Gaussian Splats", "Test Splats"};
   for (const char *k : kKinds)
@@ -4476,7 +4485,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   if (kind == "Blockout") return create_blockout("");  // (round 477, ADR 0129)
   if (starts_with(kind, "Blockout Piece:")) return create_blockout_piece(kind.substr(std::string("Blockout Piece:").size()));
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
-    Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
+    Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Quad Sphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
               "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>, Blockout, "
               "Blockout Piece: [Subtract|Intersect] Box|Cylinder|Sphere|Wedge|Stairs|Arch|Outline|Mesh, Room Box|Cylinder|Wedge|Outline, Door, Window", kind.c_str());
     return nullptr;
@@ -5543,6 +5552,7 @@ void Editor::load_prefs() {
     else if (k == "other_views_follow") other_views_follow_ = v == "1";
     else if (k == "cpu_fallback_noticed") cpu_fallback_noticed_ = v == "1";
     else if (k == "simpler_while_moving") simpler_while_moving_ = v == "1";
+    else if (k == "rt_shadows") rt_shadows_ = v == "1";  // (round 543)
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
     else if (k == "workspace") workspace_ = v;
@@ -5654,6 +5664,7 @@ void Editor::save_prefs() {
   s += livelink_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
                  other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
+  s += strprintf("rt_shadows=%d\n", rt_shadows_ ? 1 : 0);  // (round 543)
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("import_preview=%d\nimport_shading=%d\n", import_preview_pref_ ? 1 : 0, import_shading_pref_);  // (task 0152)
@@ -5668,6 +5679,7 @@ void Editor::save_prefs() {
   s += panels_prefs_text();
   s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
+  brushes_save();  // (round 540: beside prefs.txt)
 }
 
 /* points (or curve) add|move|delete|select <object> [index] [x y z]: a Curve's or Lattice's control points (tasks
@@ -5784,6 +5796,7 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const MeshRenderer *mr = g.get<MeshRenderer>();
     carry_shape_keys(mf->mesh, om, mr && !mr->edit_shape.empty());  // (round 406: the open shape's basis follows too)
     carry_custom_normals(mf->mesh, om);
+    carry_colors(mf->mesh, om, g.id);  // (task 0525, ADR 0152)
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
     if (mf->mesh->groups_fit()) return;

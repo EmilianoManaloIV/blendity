@@ -59,7 +59,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty")) create_object("Empty", child);
     u.submenu("3D Object", u.px(170), [this, child] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
     u.submenu("Blockout", u.px(190), [this, child] { blockout_menu_items(child); });  // (round 477)
@@ -614,7 +614,8 @@ struct InspectorReflector : Reflector {
     const std::string prop = anim_prefix + n;
     const int state = keyable ? ed.anim_property_state(anim_obj, prop) : 0;
     if (state) draw_key_marker(label, state == 2);
-    if (keyable && u.hovered(label) && u.in.key_pressed[platform::KEY_I] && u.in.mods == 0 && !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
+    if (keyable && u.hovered(label) && u.in.chord(platform::KEY_I, 0) &&  // (round 548: I's own chord)
+         !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
       u.in.key_pressed[platform::KEY_I] = false;
       ed.anim_key_property(anim_obj, prop, axes);
     }
@@ -2014,9 +2015,12 @@ void Editor::draw_inspector(const Recti &r) {
           Recti wrow = lay.row(u.row_h() + u.px(2));
           const size_t ng = mf->mesh->vertex_groups.size();
           const std::string label = ng ? strprintf("Vertex Groups (%zu), Weight Paint: Rigging...", ng) : std::string("Vertex Groups, Weight Paint: Rigging...");
-          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
+          /* Task 0525: Vertex Paint shares the row (the Inspector grows only while painting). */
+          const int vpw = std::min(u.px(120), (wrow.w - u.px(12)) / 3);
+          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - vpw - u.px(12), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
             dock_open(WindowKind::Rigging);
           u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
+          draw_vertex_paint_controls(g, mf, lay, {wrow.x + wrow.w - vpw - u.px(4), wrow.y, vpw, wrow.h});
         }
         Recti row = lay.row(u.row_h() + u.px(2));
         const bool edit_hit = u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex);
@@ -3648,6 +3652,18 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
             "it shows the window too; the little it doesn't draw yet (realtime GI's per-pixel light, a retro filter's snapped vertices,\n"
             "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. " + key("render.image") + " renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
+  /* Round 543 (task 0523): shadows traced on the card, as Blender 5.3's Workbench - greyed out where the card can't. */
+  if (rt_shadows_available()) {
+    bool on = rt_shadows_;
+    if (u.toggle_row(row(u.row_h()), "Ray-Traced Shadows", on)) set_rt_shadows(on);
+    u.tooltip("On: the views drawn on the graphics card trace each pixel's shadows with its ray tracing (Vulkan ray queries) in place\n"
+              "of the sun's shadow map - exact at any distance, and every light with Shadows on casts them (the map has the sun\n"
+              "alone). Hard-edged; see-through surfaces keep the map. Off (the default): the shadow map.");
+  } else {
+    text(std::string("Ray-Traced Shadows: ") + (rt_shadows_ ? "on, " : "off, ") + "not available here", u.theme.text_dim);
+    u.tooltip(gpu_view_ ? "This graphics card has no ray tracing (Vulkan ray queries): the views use the shadow map."
+                        : "The views draw on the CPU: ray-traced shadows need a graphics card with ray tracing (Vulkan ray queries).");
+  }
   /* Task 0199: each window - its views' device and who shows it. */
   /* (While a secondary window draws, its state is the members' and its entry holds the main window's, swapped.) */
   auto label = [&](int id) { return id == 0 ? std::string("Main window: ") : strprintf("Window %d: ", id); };
@@ -3969,6 +3985,37 @@ bool Editor::draw_reflected(const std::function<void(Reflector &)> &fields, ui::
   return ir.changed;
 }
 
+/* The automasking options (task 0519, Blender 5.3; shared by Weight and Vertex Paint since task 0525): they hold parts
+ * of the mesh back from the brush, and multiply. */
+static void reflect_automask(Reflector &br, PaintAutomaskFields &a) {
+  if (br.group("Automasking", false)) {
+    br.field("Topology", a.am_topology);
+    br.help("Only the connected piece the stroke starts on.");
+    br.field("Mesh Boundary", a.am_boundary);
+    br.help("Keeps the brush off the mesh's open edges, fading in over Propagation Steps edges.");
+    if (a.am_boundary) br.field("Propagation Steps", a.am_boundary_steps, 1, 20);
+    br.enumeration("Cavity", a.am_cavity, kWeightCavityModes, 3);
+    br.help("Cavity paints the hollows more than the ridges; Inverted the ridges more than the hollows.");
+    if (a.am_cavity != 0) {
+      br.field("Cavity Factor", a.am_cavity_factor, 0.01f, 0.0f, 5.0f);
+      br.field("Cavity Blur", a.am_cavity_blur, 0, 25);
+    }
+    br.field("View Normal", a.am_view_normal);
+    br.help("Only the faces turned towards you, up to Limit degrees.");
+    if (a.am_view_normal) {
+      br.field("View Limit", a.am_view_limit, 1.0f, 0.0f, 180.0f);
+      br.field("View Falloff", a.am_view_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+    br.field("Area Normal", a.am_area_normal);
+    br.help("Only the faces turned the way the surface faced where the stroke began.");
+    if (a.am_area_normal) {
+      br.field("Area Limit", a.am_area_limit, 1.0f, 0.0f, 180.0f);
+      br.field("Area Falloff", a.am_area_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+  }
+  br.group_end();
+}
+
 /* Weight Paint's toggle and, while painting `g`, the brush (task 0046; in the Rigging window since task 0052). */
 void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay) {
   auto &u = ui_;
@@ -3981,13 +4028,18 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (!painting) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
-  br.help("Add raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+  brush_banks_sync();  // (round 540: the Radius and Strength below are this brush's)
+  br.help("Add Weight raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Set Weight moves towards Weight (Ctrl: towards 1 - Weight), Blur evens out with the neighbours.");
   br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", wp_bank_.unified_size);
+  br.field("Unified Strength", wp_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
   br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
   br.field("Front Faces Only", wp_brush_.front_only);
+  reflect_automask(br, wp_brush_);
   br.field("Clean Below", wp_clean_below_, 0.005f, 0.0f, 1.0f);  // (task 0287: Clean's threshold)
   const int hw = (lay.area.w - u.px(16)) / 2;
   Recti brow = lay.row(u.row_h() + u.px(2));
@@ -3997,6 +4049,62 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (u.record_buttons) u.button_rects["wp:Clean"] = cb;
   if (u.button(cb, "Clean")) weight_paint_command({"wpclean", strprintf("%g", wp_clean_below_)});
   u.tooltip(strprintf("Weights at or under %g (Clean Below) become 0 (Blender: Clean).", wp_clean_below_));
+}
+
+/* Vertex Paint's toggle and, while painting `g`, the layer and the brush (task 0525, ADR 0152; in the Inspector's
+ * MeshFilter, under the Rigging row). */
+void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay, Recti toggle) {
+  auto &u = ui_;
+  if (!g || !mf || !mf->mesh) return;
+  const bool painting = vertex_paint_ && vp_obj_ == g->id;
+  if (u.record_buttons) u.button_rects["vp:Toggle"] = toggle;
+  if (u.button(toggle, painting ? "Exit Vertex Paint" : "Vertex Paint", painting, Icon::Vertex)) set_vertex_paint(!painting);
+  u.tooltip("Paint the mesh's colour attribute with a brush (Blender: Vertex Paint mode). Games read it as the vertex colours.");
+  if (!colors_dropped_note_.empty() && colors_dropped_obj_ == g->id) {  // (ADR 0152: paint is never lost silently)
+    Recti note = lay.row(u.row_h() + u.px(2));
+    const int okw = u.px(40);
+    u.label({note.x + u.px(4), note.y, note.w - okw - u.px(12), note.h}, "A colour layer was dropped by the last edit (Undo brings it back)", u.theme.warning);
+    u.tooltip(colors_dropped_note_);
+    if (u.record_buttons) u.button_rects["vp:DroppedOK"] = {note.x + note.w - okw - u.px(4), note.y, okw, note.h};
+    if (u.button({note.x + note.w - okw - u.px(4), note.y, okw, note.h}, "OK")) colors_dropped_note_.clear();
+  }
+  if (!painting) return;
+  const Mesh &m = *mf->mesh;
+  std::vector<const char *> names;
+  for (const ColorAttribute &c : m.color_attributes) names.push_back(c.name.c_str());
+  InspectorReflector br(*this, u, lay);
+  if (!names.empty()) {
+    int active = std::max(0, std::min(m.active_color, (int)names.size() - 1));
+    const int was = active;
+    br.enumeration("Layer", active, names.data(), (int)names.size());
+    const bool point = m.color_attributes[(size_t)was].domain == ColorAttribute::Domain::Point;
+    br.help(point ? "One colour per vertex (Blender: Point)." : "One colour per face corner, so a seam can change colour (Blender: Face Corner).");
+    if (active != was) {
+      /* The name directly (it may hold spaces); the command copies the mesh, so `m` is not read after it. */
+      const std::string name = m.color_attributes[(size_t)active].name;
+      color_attribute_command({"colorattr", "active", name});
+      return;
+    }
+  }
+  br.enumeration("Brush", vp_brush_.tool, kVertexPaintTools, 4);
+  br.help("Draw paints the colour (Ctrl: the inverse, or Add and Subtract swapped), Blur evens out with the neighbours, Average with the whole brush, Smear drags colour along the stroke.");
+  if (vp_brush_.tool == 0) br.enumeration("Blend", vp_brush_.blend, kVertexPaintBlends, 6);
+  br.color("Color", vp_brush_.color);
+  br.field("Alpha", vp_brush_.alpha, 0.01f, 0.0f, 1.0f);
+  br.field("Radius", vp_brush_.radius, 1.0f, 1.0f, 500.0f);
+  br.field("Strength", vp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.enumeration("Falloff", vp_brush_.falloff, kWeightFalloffs, 6);
+  br.field("Mirror X", vp_brush_.mirror_x);
+  br.field("Front Faces Only", vp_brush_.front_only);
+  reflect_automask(br, vp_brush_);
+  const int hw = (lay.area.w - u.px(16)) / 2;
+  Recti brow = lay.row(u.row_h() + u.px(2));
+  int k = 1;
+  while (m.find_color(strprintf("Color.%03d", k)) >= 0) k++;
+  if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "New Point Layer")) command(strprintf("colorattr add Color.%03d point", k));
+  u.tooltip("A new white layer, one colour per vertex.");
+  if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "New Corner Layer")) command(strprintf("colorattr add Color.%03d corner", k));
+  u.tooltip("A new white layer, one colour per face corner (sharp colour changes across edges).");
 }
 
 }  // namespace bl
@@ -4517,6 +4625,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   if (paint_brush_.tip == 2) br.field("Bristles", paint_brush_.bristles, 1, 64);
   static const char *modes[] = {"Paint", "Smudge", "Blend"};
   br.enumeration("Mode", paint_brush_.mode, modes, 3);
+  brush_banks_sync();  // (round 540: Size, Opacity and the colour are this mode's)
   br.field("Wet", paint_brush_.wet, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Hue", paint_brush_.jitter_h, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Saturation", paint_brush_.jitter_s, 0.01f, 0.0f, 1.0f);
@@ -4566,9 +4675,20 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Size", paint_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Hardness", paint_brush_.hardness, 0.01f, 0.0f, 1.0f);
   br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", paint_bank_.unified_size);
+  br.field("Unified Opacity", paint_bank_.unified_strength);
+  br.field("Unified Colour", paint_bank_.unified_color);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size, Opacity and the colour are kept for each of Paint, Smudge and Blend; Unified shares one value between them.");
   br.field("Flow", paint_brush_.flow, 0.01f, 0.0f, 1.0f);
   br.field("Spacing", paint_brush_.spacing, 0.01f, 0.05f, 2.0f);
   br.help("Dabs this many radii apart along the stroke.");
+  br.field("Hardness Pressure", paint_brush_.hardness_pressure);
+  if (paint_brush_.hardness_pressure) br.curve("Hardness Curve", paint_brush_.hardness_curve);
+  br.field("Spacing Pressure", paint_brush_.spacing_pressure);
+  if (paint_brush_.spacing_pressure) br.curve("Spacing Curve", paint_brush_.spacing_curve);
+  br.help("A pen's pressure (through the Pressure Curve below) scales the hardness by Hardness Curve and the spacing by 1.5 minus Spacing Curve: "
+          "a firm press packs the dabs closer.");
   br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
   static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
   br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
@@ -4663,11 +4783,16 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 11);
+  brush_banks_sync();  // (round 540: the Size and Strength below are this brush's)
   br.help("Draw raises along the normal (Alt carves), Smooth evens the surface, Grab pulls what is under the first dab with the drag; Clay Buildup lays flat layers, Inflate swells along each vertex's normal, "
           "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag; "
           "Mask paints a mask no brush gets through (Ctrl with any brush does the same; Ctrl+Alt takes it away).");
   br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", sculpt_bank_.unified_size);
+  br.field("Unified Strength", sculpt_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size and Strength are kept for each brush; Unified shares one value between all of Sculpt's brushes.");
   br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
   br.field("Carve", sculpt_brush_.carve);
   br.field("Front Faces Only", sculpt_brush_.front_only);
