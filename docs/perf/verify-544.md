@@ -130,4 +130,23 @@ Through the fold of every `changelog.d/5xx-*.md` (ADR 0123) and this round's own
 
 ## Results
 
-TBD (the timed window).
+The hub's batched timed window, 2026-11-17 06:31 - 06:38 (and the round 551 views' rerun at 06:41), on the joined tree's
+exe (`96b8cbc4`, built 05:44) at normal priority on a quiet machine: `pass27-timed-window.sh` (the notes folder), its logs and
+reports in `pass27-timed/`. Windows 11, 32 threads, an RTX 4070 SUPER (the views) and an RTX 3060 Ti. Every row is a stress
+row (ADR 0056): printed, never asserted.
+
+| # | Row | Result | Budget |
+|---|---|---|---|
+| 1 | Splat import (531) | `splats`: PLY binary degree 3, 100k splats (24.8 MB) 38.8 ms = 2.58 M splats / s; PLY ASCII 729 ms (0.14 M / s); SPZ v3 gzip 36.2 ms (2.76 M / s); PLY points 7.0 ms (14.3 M / s). 16,500 damaged-file cases, 0 problems. The section reads 100k only: **1M was not measured** (at 2.6 M / s a 1M binary PLY is ~0.4 s, an estimate) | 1M under 2 s - met by estimate, not measured |
+| 2 | Splat draw and sort (532) | `splat_raster`, 1280 x 720: 100k sort 1.5 / project 3.5 / draw 10.6 ms; 1M sort 7.1 (on a worker, 0.05 ms wait) / project 40.5 / draw 45.1 ms. Scene view orbiting, median / longest frame: 100k CPU 15.7 / 20.0, card 16.0 / 18.3; **1M CPU 108.4 / 148.7, card 93.7 / 108.1**. The first open of the card's views in the section: **92.5 s** (a cold first use; the second 162 ms) | 100k within a frame - met; **1M: a miss (over 50 ms, ADR 0105)** - the card path is barely faster than the CPU, its draw is the projection and blend; the 92 s first open is a cold first-use cost to name |
+| 3 | Splat trace, CPU (533) | `splats_gpu` CPU (Embree), 256 x 256, 4 bounces: 100k BVH 28.7 ms, 149 samples / s; 1M 82.0 ms, 107 samples / s | reported |
+| 4 | Splat trace, card (534) | RTX 4070 SUPER ray queries: 100k build 304 ms, 1,752 samples / s; 1M 445 ms, 1,320 / s (OptiX 999 / 824, BVH walk 433 / 268). RTX 3060 Ti ray queries 991 / 703. Card upload 29 MB (100k) / 287 MB (1M). **The 3060 Ti's OptiX build at 100k: 29,857 ms** (its 1M build 323 ms: the first OptiX use on that card, a cold module compile) | card faster than the CPU - met, 8.8x - 12x with ray queries on the 4070 SUPER |
+| 5 | LoopTools (537) | `looptools`, 10,000-vertex ring / chain: Relax 8.6 / 5.3, Space 4.8 / 4.1, To Circle 2.8 / 3.9, Flatten 2.5 / 2.4, Curve 1.4 / 1.4 ms (Curve moves nothing on a lone loop: no crossing rows); Flatten on 100 x 100 9.2 ms; 0 problems | under 100 ms - met |
+| 8 | Panoramic render (538) | F12 rasterized at 2048 x 1024, the world-like bench scene (222k tris), 3 runs: perspective 202 / 206 / 207 ms; equirectangular 197 - 204; fisheye equidistant 200 - 206; fisheye equisolid 197 - 218; central cylindrical 201 - 213; mirror ball 206 - 221 ms | against perspective - met: every projection within 7 % of it |
+| 12 | Sun disc (542) | `--windowed-check` 300 frames, the sky's sun lighting the scene on / off, 3 runs alternating, the card's mean frame: on 3.07 / 2.44 / 2.89 (2.80) ms, off 2.65 / 3.05 / 3.06 (2.92) ms | on within 10 % of off - met (no measurable cost) |
+| 13 | RT shadows (543) | M2's `rt_shadows_row.py`, SideRail's Scene view on the card, 2 runs: still 4.3 ms off / 5.0 on; orbiting 7.1 / 7.5; a cube moved every frame 6.1 / 9.4 ms (the top level rebuilt every frame, ~0.1 ms recorded). M2 reads its own rows | within the frame - met |
+| 551 | Half-float albedo (551) | 4K Scene view, a million triangles, 300 frames, alternating: before (R8G8B8A8_UNORM, `C:\blwt544b`) 730.8 / 727.5 / 655.7 ms, after 674.4 / 701.3 / 686.5 ms (2.37 vs 2.29 ms a frame). SideRail's views on the card (`r551_views.py`, `bench_world`'s windowed check; R1's `--no-pipeline` command skipped the views): Scene view before 5.86 / 5.94, after 5.57 / 5.39 ms; Scene + Game before 7.10 / 6.83, after 7.02 / 6.66 ms | within 5 % of before - met (no measurable cost) |
+
+Not in this window (the hub's list for it): rows 6 (Quad Sphere, snapping), 7 (Edit Mode dimensions), 9 (Weight Paint),
+10 (per-brush settings), 11 (animation), 14 (Vertex Paint) - their rounds' own untimed stress rows stand; the splat
+section's 1M import row is a follow-up.
