@@ -3747,6 +3747,15 @@ class Editor {
   }
   bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
   bool other_views_follow_ = false;
+  /* Round 543 (task 0523): Preferences > Ray-Traced Shadows - the card's views trace their shadows (ray queries) in place of
+   * the sun's map, every light casting; off by default, and only where the card can (Raster::can_trace_shadows). */
+  bool rt_shadows_ = false;
+  bool rt_shadows_available() const;
+  void set_rt_shadows(bool on);  // saved; the views drawn again
+  void print_rt_shadow_stats() const;  // (the windowed check's line)
+ public:
+  bool rt_shadows_for_test() const { return rt_shadows_; }
+ private:
   bool cpu_fallback_noticed_ = false;  // task 0199: Auto's fall back to the CPU said once (kept in the preferences)
   void views_command(const std::string &what, const std::string &value);
   bool hold_other_views() const { return !other_views_follow_ && scene_moving() && !(playing_ && !paused_); }

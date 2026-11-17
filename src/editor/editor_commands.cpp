@@ -253,6 +253,11 @@ struct SetFieldReflector : Reflector {
  * views simpler on|off (task 0104): the CPU views' shadows cheaper while you move, exact when you stop. No value: the
  * other way round; anything but "on" is off. */
 void Editor::views_command(const std::string &what, const std::string &value) {
+  if (what == "rtshadows") {  // views rtshadows on|off (round 543): the card's views trace their shadows (kept even where the card can't: it applies on one that can)
+    set_rt_shadows(value.empty() ? !rt_shadows_ : value == "on");
+    Log::info("Ray-traced shadows: %s%s", rt_shadows_ ? "on" : "off", rt_shadows_ && !rt_shadows_available() ? " (this card can't trace them: the views use the shadow map)" : "");
+    return;
+  }
   if (what == "simpler") {  // views simpler on|off (task 0104): the CPU views' shadows cheaper while you interact, exact when you stop
     simpler_while_moving_ = value.empty() ? !simpler_while_moving_ : value == "on";
     save_prefs();
@@ -260,7 +265,7 @@ void Editor::views_command(const std::string &what, const std::string &value) {
     return;
   }
   if (what != "follow") {
-    Log::warn("views follow|simpler on|off");
+    Log::warn("views follow|simpler|rtshadows on|off");
     return;
   }
   other_views_follow_ = value.empty() ? !other_views_follow_ : value == "on";
