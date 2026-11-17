@@ -4,7 +4,7 @@
 - **Requirements:** the suite's reliability (CLAUDE.md: tests run in a scratch project; ADR 0056)
 - **Decisions:** none needed
 - **Model:** main session (the HCI worker)
-- **PR:** (link when opened) - base `main`, its own
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/433 (base `main`, its own)
 
 ## Goal
 "assets: Ctrl and Shift click select several materials, Delete asks once..." (`tests/test_animation.cpp`) failed on the
