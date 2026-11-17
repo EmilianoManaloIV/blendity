@@ -56,6 +56,9 @@ audit 1 -> 4 (541, 536) - round 559. The new panels at 1024 / 1366 x 768, scale 
 view (every F9 panel's placement - round 560), Preferences' rows out of reach at 1024 x 1.5 (no scroll bar - 560),
 elided labels on the point cloud Type, Vertex Paint, Weight Paint's brush rows and the Panorama Type (559).
 
+**Known flakes** (each once in a group run, passing alone; `docs/perf/verify-544.md`): round 355's "Decimate to Good"
+(assets) and round 507's "Save As ... the moment a bake lands" (lighting).
+
 **Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux).
 
 <!-- docs/PERFORMANCE.md -->
