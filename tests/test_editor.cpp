@@ -16669,6 +16669,7 @@ static void tests_round544() {
                                 {"539", "Automasking the weight brush"},
                                 {"540", "Each brush keeps its own size"},
                                 {"541", "Blender 5.3's animation tools: rotation, world space, poses, scrubbing"},
+                                {"542", "The sky's sun lights the scene (Blender 5.3)"},
                                 {"543", "Shadows traced by the card (round 543)"},
                                 {"545", "Vertex colours and Vertex Paint"},
                                 {"547", "Windows with a style"}};  // (547's "# The frame and the glass are objects" is text; its steps 6-10 are this lesson's Try it)
