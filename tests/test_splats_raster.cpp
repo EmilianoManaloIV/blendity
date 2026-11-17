@@ -928,6 +928,8 @@ static void splat_raster_round557_cache_tests() {
     const std::string user = norm(fs::join(fs::join(fs::home_dir(), ".blendity"), "cache"));
     const std::string own = dir ? norm(dir) : std::string();
     CHECK(own != user);
+    /* (557b: a build's own - another worktree's test run never shares it) */
+    CHECK(own.find("blendity_test_cache_") != std::string::npos);
     if (!gpu::available() || gpu::devices().empty()) {
       std::printf("    no Vulkan GPU: the file's path not checked\n");
       return;

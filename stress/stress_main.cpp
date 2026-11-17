@@ -7549,7 +7549,8 @@ int main(int argc, char **argv) {
 #endif
     }
     if (!std::getenv("BLENDITY_CACHE_DIR")) {  // (round 557: the cards' caches never the user's - as the tests')
-      const std::string cache = fs::join(fs::temp_dir(), "blendity_test_cache");
+      const std::string cache =
+          fs::join(fs::temp_dir(), strprintf("blendity_test_cache_%016llx", (unsigned long long)std::hash<std::string>{}(fs::executable_dir())));  // (557b: per build)
 #ifdef _WIN32
       _putenv_s("BLENDITY_CACHE_DIR", cache.c_str());
 #else
