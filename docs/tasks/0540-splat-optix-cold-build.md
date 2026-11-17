@@ -47,7 +47,13 @@ the reason. The cost is measured cold and warm on each card.
   - `gpu::prewarm` (`gpu_device.cpp`) calls `optix_prewarm()` when the backend is OptiX. `gpu::set_backend(2)`
     calls it too.
   - Stress `splats_gpu`: a row a card for OptiX's kernel compile, cold (OptiX's cache off for that context,
-    `OPTIX_CACHE_MAXSIZE=0`) and warm.
+    `optixDeviceContextSetCacheEnabled`) and warm.
+  - The tests and the stress run use OptiX caches of their own (`OPTIX_CACHE_PATH` under the system's temp folder,
+    unless set): they never read or write the user's `%LOCALAPPDATA%\NVIDIA\OptixCache`, and a run after the first
+    finds the kernel compiled (P1 found that the user's warm cache was all that made the next test pass).
+  - "GPU opening: turning the Camera Preview to Rendered ..." gave the card 20 s to open. A cold OptiX compile takes
+    31 s (60-107 s under load), so the process ended mid-compile and nothing was cached: every run stayed cold. The
+    test now keeps waiting while the card's kernel compiles (`optix_compiling`), up to 4 minutes.
 - Out:
   - Making the compile itself faster (fewer inlined functions, a split module): measured here, left as a
     follow-up if the cold time is still too long.

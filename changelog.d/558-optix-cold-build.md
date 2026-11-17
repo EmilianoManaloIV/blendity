@@ -19,6 +19,10 @@ change (round 534 changed it). The 4070 SUPER had compiled this PTX in round 534
 - An OptiX open during it waits for that card's compile, then finds the kernel in the cache (one compile, not
   two). A compile over 2 s is said once in the log, with why.
 - `blendity_stress --only splats_gpu` measures OptiX's kernel compile per card, cold (cache off) and warm.
+- The tests and the stress run keep OptiX's cache in a folder of their own (`OPTIX_CACHE_PATH` under the temp folder,
+  unless set), never the user's, kept between runs. "GPU opening: turning the Camera Preview to Rendered" waits
+  while the card's kernel compiles, instead of 20 s: a cold compile is 31-107 s, and the process used to end
+  mid-compile, so nothing was cached and every run stayed cold (P1's find).
 - Quitting, or a headless run ending, while it compiles leaves at once (as with a GPU still opening): the statics
   the thread reads are never freed.
 

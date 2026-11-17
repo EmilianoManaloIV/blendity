@@ -7507,6 +7507,16 @@ static void test_blender_parity(Report &rep, const Options &o) {
 
 int main(int argc, char **argv) {
   install_crash_handler();
+  /* Round 558: OptiX's kernel cache of the stress run's own (never the user's), kept between runs - as the tests'. */
+  if (!std::getenv("OPTIX_CACHE_PATH")) {
+    const std::string optix_cache = fs::join(temp_dir(), "blendity_stress_optix_cache");
+    fs::make_dirs(optix_cache);
+#if defined(_WIN32)
+    _putenv_s("OPTIX_CACHE_PATH", optix_cache.c_str());
+#else
+    setenv("OPTIX_CACHE_PATH", optix_cache.c_str(), 1);
+#endif
+  }
   Options o;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
