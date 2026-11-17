@@ -10249,6 +10249,7 @@ static void tests_round184() {
   });
 
   test("toon at a distance: a two-tone sphere seen from 20 m carries no more high-frequency energy inside it than its 2 m picture downsampled (its cel edge is one antialiased pixel, not a sparkle), on the CPU and on the card", [&] {
+    long cpu_edge = -1;  // (round 553: the CPU's edge pixels at 20 m, which the card's are held to)
     for (int device : {1, 2}) {
       if (device == 2 && !gpu::available()) continue;
       Editor ed;
@@ -10272,10 +10273,59 @@ static void tests_round184() {
       /* The edge is there: with softness 0 the sphere at 2 m is the two tones (a few edge pixels aside), and at 20 m
        * the band edge is one antialiased pixel - mid tones between the two, which a hard edge never gives. */
       const R184 near = r184_view(ed, ball, 2.0f, device), far = r184_view(ed, ball, 20.0f, device);
+      if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {  // (round 553: the 20 m picture and its object mask, to look at)
+        fs::make_dirs(dir);
+        std::vector<uint32_t> m(far.mask.size());
+        for (size_t i = 0; i < m.size(); i++) m[i] = far.mask[i] ? 0xFFFFFFFFu : 0xFF000000u;
+        const std::string base = fs::join(dir, device == 2 ? "toon20_card" : "toon20_cpu");
+        write_png(base + ".png", far.px.data(), far.rect.w, far.rect.h, far.rect.w);
+        write_png(base + "_mask.png", m.data(), far.rect.w, far.rect.h, far.rect.w);
+      }
+      /* Round 553 (task 0534): the sphere's own pixels - the largest 4-connected part of the mask. Moving the sphere away
+       * also changes its shadow on the floor, at the view's bottom, and those pixels counted as the sphere's: at 20 m they
+       * were 8 of the CPU's 17 "between" pixels (its shadow's edge mid-grey where the card's is dark), so the CPU's count
+       * looked twice the card's while the sphere's own edge was 8 pixels on the CPU and 7 on the card. */
+      auto sphere_only = [](const R184 &r) {
+        const int W = r.rect.w, H = W > 0 ? (int)(r.mask.size() / (size_t)W) : 0;
+        std::vector<int> comp(r.mask.size(), -1);
+        int best = -1;
+        size_t best_n = 0;
+        for (size_t start = 0; start < r.mask.size(); start++) {
+          if (!r.mask[start] || comp[start] >= 0) continue;
+          const int id = (int)start;
+          std::vector<size_t> stack = {start};
+          comp[start] = id;
+          size_t n = 0;
+          while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            n++;
+            const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
+            const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
+            for (int k = 0; k < 4; k++) {
+              if (nx[k] < 0 || ny[k] < 0 || nx[k] >= W || ny[k] >= H) continue;
+              const size_t j = (size_t)ny[k] * W + nx[k];
+              if (r.mask[j] && comp[j] < 0) comp[j] = id, stack.push_back(j);
+            }
+          }
+          if (n > best_n) best_n = n, best = id;
+        }
+        std::vector<uint8_t> keep(r.mask.size(), 0);
+        for (size_t i = 0; i < keep.size(); i++) keep[i] = comp[i] == best && best >= 0;
+        return keep;
+      };
+      int rows = 0;  // (the sphere's height in pixel rows, set by `tones` for the picture it last measured)
       auto tones = [&](const R184 &r, size_t &lit_n, size_t &shade_n, size_t &mid_n) {
+        const std::vector<uint8_t> own = sphere_only(r);
         std::vector<float> l;
+        int top = 1 << 30, bottom = -1;
         for (size_t i = 0; i < r.px.size(); i++)
-          if (r.mask[i]) l.push_back(luma(r.px[i]));
+          if (own[i]) {
+            l.push_back(luma(r.px[i]));
+            const int y = r.rect.w > 0 ? (int)(i / (size_t)r.rect.w) : 0;
+            top = std::min(top, y), bottom = std::max(bottom, y);
+          }
+        rows = bottom >= top ? bottom - top + 1 : 0;
         std::sort(l.begin(), l.end());
         const float lo = l[l.size() / 10], hi = l[l.size() * 9 / 10];  // (the shade tone and the lit tone: the deciles)
         const float margin = (hi - lo) * 0.25f;  // (a tone is the lit or the shade one within a quarter of their contrast; the middle half is "between")
@@ -10289,16 +10339,20 @@ static void tests_round184() {
       };
       size_t ln2, sn2, mn2, lnf, snf, mnf;
       const float contrast2 = tones(near, ln2, sn2, mn2), contrastf = tones(far, lnf, snf, mnf);
+      const int far_rows = rows;
       std::printf("    %s: at 2 m the tones %.0f apart, %zu lit / %zu shade / %zu between of %zu; at 20 m %.0f apart, %zu / %zu / %zu of %zu\n", device == 2 ? "the card" : "the CPU",
                   contrast2, ln2, sn2, mn2, ln2 + sn2 + mn2, contrastf, lnf, snf, mnf, lnf + snf + mnf);
-      /* (A clear step between the tones; at 20 m a one-pixel edge over a 27-pixel sphere is a twentieth of it or more.)
-       * Round 551 (task 0531): the card held to a 40th until round 553. Its g-buffer albedo was 8-bit linear, and that
-       * rounding gave the card 16 edge pixels of 285 at 20 m; with the albedo in half floats the card's two contrasts
-       * match the CPU's exactly (the tones 23 apart at 2 m, 26 at 20 m) and its edge has 9 of 285 against the CPU's 17 of
-       * 296 - the card's cel edge is antialiased narrower than the CPU's, as it always was. A 40th holds down to 7 edge
-       * pixels (measured 9); round 553 (task 0534) fixes the card's edge and puts the 20th back. */
-      const size_t edge_share = device == 2 ? 40 : 20;
-      CHECK(contrast2 > 15.0f && mnf > 0 && mnf * edge_share >= lnf + snf);
+      /* A clear step between the tones; at 20 m the band edge antialiased - mid tones along it, a run of them across the
+       * sphere's height (a hard edge leaves none, or a stray one or two). Round 553 (task 0534): counted on the sphere's own
+       * pixels (above), and against its height in rows, not its area - an edge's length goes with the diameter. The old
+       * "a 20th of the area" never held for the sphere on either renderer: the CPU met it only through its shadow's edge
+       * (8 of its 17), and round 551's "the card's edge narrower" was that. Measured on an RTX 4070 SUPER: the sphere 243
+       * pixels and 17 rows on the CPU, 242 on the card; its edge 8 pixels on the CPU, 6-7 on the card; held to a fifth of
+       * the rows (4 here). And the card's edge as the CPU's, within 3. */
+      std::printf("    the sphere at 20 m: %d rows, %zu edge pixels\n", far_rows, mnf);
+      CHECK(contrast2 > 15.0f && mnf > 0 && (int)mnf * 5 >= far_rows);
+      if (device == 1) cpu_edge = (long)mnf;
+      else if (cpu_edge >= 0) CHECK(std::labs((long)mnf - cpu_edge) <= 3);
       ed.viewport_device_for_test(1);
     }
   });

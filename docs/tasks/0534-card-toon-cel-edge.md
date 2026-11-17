@@ -1,6 +1,6 @@
 # 0534: The card's toon cel edge antialiased as the CPU's
 
-- **Status:** draft (the hub's round 553, Pass 27; follows round 551)
+- **Status:** done (round 553)
 - **Requirements:** tests/test_render.cpp "toon at a distance" (round 184's check, the card's half held by round 551)
 - **Decisions:** none expected
 - **Model:** main session (Opus)
@@ -27,3 +27,12 @@ sphere. Make the card's edge width the CPU's and put the 20th back.
 
 ## Tests and checks to run
 - `toon at a distance` and `--group gpu` in a CARD window; the full suite on Windows (libraries) and Linux.
+
+## Outcome (round 553)
+The card's cel edge was the CPU's all along: the 20 m pictures show the sphere's edge in the same places on both,
+8 mid-tone pixels on the CPU and 6-7 on the card (the sphere 243 and 242 pixels, 17 rows). The test's mask took in the
+sphere's shadow on the floor, whose edge is mid-grey on the CPU and dark on the card - the source of most of the CPU's
+17 "between" pixels (the counts don't simply add: the shadow's pixels also move the deciles the tones are cut at). The
+test now counts the sphere's own pixels (largest connected part of the mask) and holds the edge to a fifth of the
+sphere's rows (4 of 17), the card within 3 pixels of the CPU. A 20th of the area never held for the sphere on either
+renderer (8 of 243). No product change. The shadow-edge difference is round 556 (task 0538).
