@@ -19,6 +19,7 @@ static void gpu_diff_dump(const char *tag, const std::vector<uint32_t> &cpu, con
     const uint32_t v = (uint32_t)std::min(255, m * 32);
     d[i] = 0xFF000000u | v << 16 | v << 8 | v;
   }
+  fs::make_dirs(dir);
   const std::string base = fs::join(dir, strprintf("%s_%02d", tag, k));
   write_png(base + "_cpu.png", cpu.data(), w, h, w);
   write_png(base + "_gpu.png", gpu.data(), w, h, w);
@@ -911,8 +912,8 @@ static void tests_round126_to_round127() {
                   r.within3 * 100);
       CHECK(r.gpu_views > 0 && r.fallbacks == 0);
       CHECK(r.pixels > 3000);
-      /* Round 551 (task 0531): the normal map's sphere at 97.5 %, not 99 %. Measured on an RTX 4070 SUPER: 98.1 % within 3,
-       * mean 0.51; of its pixels more than 3 apart (1,536) about 1,400 lie in one patch of the sphere's underside facing
+      /* Round 551 (task 0531): the normal map's sphere at 97.5 %, not 99 %. Measured on an RTX 4070 SUPER with the albedo
+       * in half floats: 97.98 % within 3, mean 0.32; most of its pixels more than 3 apart lie in one patch of the underside facing
        * away from the sun, where the CPU's picture has a streaky stipple (shadow-map-like, along the bumps) that the
        * card's has not - the CPU's look there, a follow-up, not the card's error. Everywhere else the 99 % holds. */
       const bool normal_map = std::strcmp(c.name, "a normal map") == 0;
@@ -2259,9 +2260,10 @@ static void tests_round211() {
     /* Round 551 (task 0531): the horizon apart. The grid's white lines lie on the floor and are depth-tested against it
      * with a bias of 1e-5 (draw_grid); toward the horizon the floor's depth changes by more than that from one pixel to
      * the next, so whether a line's pixel passes is decided at the knife's edge on both renderers, and the card's depth
-     * and the CPU's round differently there. Measured on an RTX 4070 SUPER: 245 of the 292 line pixels more than 3 apart
-     * (where the pictures under them agree) lie in the 8 rows at the horizon, the card's line the weaker in 280 of the
-     * 292; the band's lines mean 1.96, 86.9 % within 3, the others mean 0.77, 99.7 %. The horizon is found as the row
+     * and the CPU's round differently there - the floor's far edge, near the horizon. Measured on an RTX 4070 SUPER: of
+     * the line pixels more than 3 apart where the pictures under them agree, 245 of 292 lie in the 8 rows at the horizon,
+     * the card's line the weaker in 280; over all line pixels (what the checks take) the band's mean 1.97, 86.85 % within
+     * 3, the others' mean 0.78, 99.67 %. The horizon is found as the row
      * with the most grid-line pixels (neutral: the overlay adds the same to each channel - the coloured axes don't count);
      * its band is 6 rows each side. Outside it the 99 % holds; inside it the bound is the measurement with headroom. */
     const int W = ed.scene_view_rect().w, H = W > 0 ? (int)(cpu.size() / (size_t)W) : 0;

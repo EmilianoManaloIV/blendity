@@ -1703,6 +1703,8 @@ void Renderer3D::shade_deferred() {
     Vec2 lm_uv[3];
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
+    bool has_vc = false;  // (task 0533) the corners' vertex colours, for a Vertex Color material
+    Vec4 vc[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
     bool footprint = false;  // (task 0164) the footprint is read: a live texture, a Box / Generated mapping, a procedural
     /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
@@ -1784,6 +1786,9 @@ void Renderer3D::shade_deferred() {
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
+    T.has_vc = T.mat->vertex_color && it.material_colors && it.material_colors->size() == rm.positions.size();
+    if (T.has_vc)
+      for (int k = 0; k < 3; k++) T.vc[k] = (*it.material_colors)[tri[k]];
     T.has_rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_rt)
       for (int k = 0; k < 3; k++) T.rt_uv[k] = (*it.rt_uv)[(size_t)st.prim * 3 + k];
@@ -1986,6 +1991,7 @@ void Renderer3D::shade_deferred() {
           sp.world_footprint = std::max(length(wp(bx) - sp.position), length(wp(by) - sp.position));
           if (!finite_bits(sp.footprint) || !finite_bits(sp.world_footprint)) sp.footprint = sp.world_footprint = 0.0f, sp.live_textures = false;
         }
+        if (T.has_vc) sp.vertex_color = T.vc[0] * B.x + T.vc[1] * B.y + T.vc[2] * B.z;  // (task 0533, perspective-correct)
         if (T.has_lm) {
           const Vec2 lm_uv = T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z;
           sp.lightmap = it.lightmap->sample(lm_uv);
@@ -2492,6 +2498,10 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           if (!rm.uvs.empty()) {
             const Vec3 U = opt_.affine_uv ? t.c[0] * w0 + t.c[1] * w1 + t.c[2] * w2 : B;  // affine: screen-linear
             sp.uv = rm.uvs[tri[0]] * U.x + rm.uvs[tri[1]] * U.y + rm.uvs[tri[2]] * U.z;
+          }
+          if (mat.vertex_color && it.material_colors && it.material_colors->size() == rm.positions.size()) {  // (task 0533)
+            const std::vector<Vec4> &vc = *it.material_colors;
+            sp.vertex_color = vc[tri[0]] * B.x + vc[tri[1]] * B.y + vc[tri[2]] * B.z;
           }
           if (opt_.tex.active()) sp.tex = &opt_.tex;
           if (!rm.tangents.empty()) {

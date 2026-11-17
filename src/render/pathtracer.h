@@ -23,6 +23,7 @@
 #include "gpu_device.h"
 #include "gsplat_embree.h"
 #include "light_tree.h"
+#include "panoramic.h"
 #include "shading.h"
 
 #include <atomic>
@@ -49,6 +50,7 @@ struct PTObject {
   uint32_t id = 0;  // the object's id, for the first-hit id plane (camera filters outline by it)
   bool flattened = false;  // (round 334: Camera Flatten - placed by model, shaded by shade_model, the true placement)
   Mat4 shade_model;
+  const std::vector<Vec4> *colors = nullptr;  // (task 0533) the render colour layer per render vertex (DrawItem::material_colors)
 };
 
 /* A thin lens for depth of field (Cycles: kernel/camera/camera.h). */
@@ -57,6 +59,7 @@ struct PTLens {
   float focus_distance = 10.0f;  // along the view direction
   int blades = 0;                // 0 round, 3+ polygonal
   float rotation = 0.0f;         // radians
+  PanoramicParams pano;          // round 538: type > 0 - a panoramic camera: the primary rays come from panoramic.h (no thin lens, CPU only)
 };
 
 struct PTSettings {

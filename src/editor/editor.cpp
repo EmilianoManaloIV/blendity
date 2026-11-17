@@ -1164,7 +1164,7 @@ void Editor::draw_menubar(const Recti &r) {
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
     /* Task 0267: in every layout - the walkthrough's first step (add a cube) failed in the other layouts. */
     u.submenu("3D Object", u.px(170), [this] {
-        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+        for (const char *k : {"Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
     u.submenu("Blockout", u.px(190), [this] { blockout_menu_items(false); });  // (round 477)
@@ -4318,7 +4318,7 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 
 /* The kind as create knows it, matched without case ("sphere", "point light"); "" when there's none. */
 std::string Editor::known_create_kind(const std::string &kind) {
-  static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
+  static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
                                        "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice",
                                        "Blockout", "Point Cloud", "Gaussian Splats", "Test Splats"};
   for (const char *k : kKinds)
@@ -4485,7 +4485,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   if (kind == "Blockout") return create_blockout("");  // (round 477, ADR 0129)
   if (starts_with(kind, "Blockout Piece:")) return create_blockout_piece(kind.substr(std::string("Blockout Piece:").size()));
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
-    Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
+    Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Quad Sphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
               "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>, Blockout, "
               "Blockout Piece: [Subtract|Intersect] Box|Cylinder|Sphere|Wedge|Stairs|Arch|Outline|Mesh, Room Box|Cylinder|Wedge|Outline, Door, Window", kind.c_str());
     return nullptr;

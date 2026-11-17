@@ -1296,6 +1296,7 @@ class Editor {
   bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
   bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
   bool open_scene_for_test(const std::string &p) { return open_scene(p); }
+  std::string draw_hint_label_for_test() const { return draw_hint_label_; }
   std::string redo_label_for_test() const { return redo_.empty() ? std::string() : redo_.back().label; }
   std::vector<std::string> palette_guide_steps_for_test(const std::string &layout);
   float edit_brush_radius_for_test() const { return edit_brush_radius(); }
@@ -2514,6 +2515,9 @@ class Editor {
    * rt for overlays. */
   void render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                      const Camera *cam, float aspect, bool game = true, bool scene_lights = true, bool animate = false);
+  /* Round 538 (src/editor/panoramic_view.cpp): a panoramic camera's picture, from the cube faces it needs. */
+  void render_panoramic(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, Vec3 eye, const GameObject *owner, const Camera *cam, bool game, bool scene_lights);
+  std::map<const void *, PanoramicState> pano_;  // (one face target a view - its Renderer3D names it: the Game view and the Camera Preview no longer share and reallocate one)
   /* The enabled filter components on a camera's GameObject, in order. */
   const FilterStack &camera_filters(const GameObject *owner);
   struct FilterCacheEntry {
@@ -3913,6 +3917,7 @@ class Editor {
   void transform_command(const std::string &what, const std::vector<std::string> &v);
   void log_all_commands();
   bool round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line);
+  void camera_panoramic_command(const std::vector<std::string> &t);  // (round 538: `camera panoramic <type|off>`, panoramic_view.cpp)
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
@@ -4258,6 +4263,20 @@ class Editor {
   Vec3 rest_on_surface(GameObject *g, Vec3 p, Vec3 n, const Quat &start_rot, bool align, Quat &rot);
   void drop_objects_on_surface(const std::vector<GameObject *> &objs, int mx, int my);
   bool nearest_vertex_on_screen(const Recti &view, int mx, int my, float radius, bool selected_only, bool skip_selected, Vec3 &out);
+  /* Snap to Object Origins (round 535; origin_snap.cpp). Off by default; the console's `snap origins`, Tools > Snapping. */
+  bool snap_origins_ = false;
+  /* The active object whose origin projects nearest the mouse within `radius` px; skip_moving leaves out the selection and
+   * what is under it, selected_only keeps only the selection (the V drag's anchor); `accept`, when given, turns an origin away
+   * (the drawing tools': off the drawing plane, or hidden behind a face). */
+  bool nearest_origin_on_screen(const Recti &view, int mx, int my, float radius, bool skip_moving, Vec3 &out, bool selected_only = false,
+                                const std::function<bool(GameObject &, const Vec3 &)> &accept = {});
+  /* With the setting on, an origin nearer the mouse than `target` (found) takes its place; `anchor` looks at the selection's origins. */
+  void prefer_origin_target(const Recti &view, int mx, int my, float radius, bool anchor, bool skip_moving, bool &found, Vec3 &target);
+  /* Modal G + Ctrl: the pivot onto an origin under the mouse (within 16 px), kept to the axis or plane lock; false when none. */
+  bool modal_origin_snap(const Recti &view, const Vec3 &lock_axis, Vec3 &move);
+  void snap_command(const std::vector<std::string> &t);  /* `snap origins [on|off]` */
+  std::string draw_hint_label_;  // the drawing tools' last snap label drawn at the mouse (round 535's tests)
+  bool origin_visible(GameObject &owner, Vec3 origin);  // nothing between the eye and the origin (its own solid only counts while edited)
   void toggle_pilot_camera();
   void update_pilot_camera();
   void align_camera_to_view();
@@ -6274,6 +6293,8 @@ class Editor {
     bool on_space_plane = false;  // in open space, on the drawing plane
   };
   DrawHit draw_hit(const Recti &view, int mx, int my);
+  /* A drawing tool's point on an origin (within 10 px, in the drawing plane; round 535): fills `h` and returns true. */
+  bool draw_origin_hit(const Recti &view, int mx, int my, DrawHit &h);
   void draw_begin(int shape);
   bool draw_update(const Recti &view);
   void draw_preview(const Recti &view);
@@ -6803,6 +6824,8 @@ class Editor {
     int w = 0, h = 0, aa = 1;
     bool preview = false, transparent = false, traced = false, denoise = false;
     float far_distance = 1000.0f, play_time = 0.0f;
+    PanoramicParams pano;  // (round 538: a panoramic camera's rasterized render - type 0 otherwise; drawn from cube faces at w x h)
+    float near_clip = 0.3f;
     /* The rasterizer's. */
     RasterOptions opt;
     int clear_mode = 0;  // 0 the world, 1 a solid colour

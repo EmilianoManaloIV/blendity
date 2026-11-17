@@ -273,12 +273,16 @@ void Editor::draw_tools_window(const Recti &r) {
   }
   if (section("Snapping", FocusSnap)) {
     Recti row = lay.row();
-    u.label(row, "Move gizmo: hold V for vertex snapping, Ctrl+Shift to drop onto surfaces.", u.theme.text_dim);
+    u.label(row, "Move gizmo: hold V for vertex snapping, Ctrl+Shift to drop onto surfaces. Snap to Object Origins adds origins to V, Ctrl+G and drawing.", u.theme.text_dim);
     row = lay.row(u.row_h() + u.px(2));
     if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, surface_align_ ? "Surface Snap: Align to Normal (on)" : "Surface Snap: Align to Normal (off)",
                  surface_align_))
       surface_align_ = !surface_align_;
     u.tooltip("When an object is dropped onto a surface (Ctrl+Shift while moving), also turn its up axis to the surface's normal.");
+    row = lay.row(u.row_h() + u.px(2));
+    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, snap_origins_ ? "Snap to Object Origins (on)" : "Snap to Object Origins (off)", snap_origins_))
+      snap_origins_ = !snap_origins_;
+    u.tooltip("Other objects' origins are snap targets: the Move gizmo with V held, a modal G with Ctrl, and the drawing tools' points.");
   }
   content_h = lay.y + off - r.y + u.px(20);
   u.end_scroll();
