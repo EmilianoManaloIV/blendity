@@ -112,8 +112,10 @@ size_t AnimTrack::set_key(float frame, float value, int interp, bool keep_interp
 std::string AnimTrack::label() const {
   static const char *kAxes[] = {"x", "y", "z", "w"};
   const std::string who = path.empty() ? "(root)" : path.substr(path.rfind('/') == std::string::npos ? 0 : path.rfind('/') + 1);
-  return who + " : " + property + "." + kAxes[std::max(0, std::min(3, axis))];
+  return who + " : " + anim_property_label(property) + "." + kAxes[std::max(0, std::min(3, axis))];
 }
+
+std::string anim_property_label(const std::string &property) { return property == "RotationQ" ? "Rotation (Quaternion)" : property; }
 
 float AnimationClip::end_frame() const {
   float e = length;
@@ -207,8 +209,8 @@ AnimTrack *read_track(const std::string &line, AnimationClip &c) {
   }
   if (f.size() < 3 || f[1].empty() || f[2].empty()) return nullptr;
   AnimTrack t;
-  t.axis = std::max(0, std::min(2, std::atoi(f[1].c_str())));
   t.property = f[2];
+  t.axis = std::max(0, std::min(t.property == "RotationQ" ? 3 : 2, std::atoi(f[1].c_str())));  // (round 541: a quaternion's w is axis 3)
   t.path = f.size() > 3 ? f[3] : std::string();
   c.tracks.push_back(std::move(t));
   return &c.tracks.back();
@@ -603,8 +605,22 @@ bool anim_value_stepped(GameObject &g, const std::string &property) {
   return component_value(g, property, 0, false, v, &stepped) && stepped;
 }
 
+/* Round 541: a quaternion's component by axis (x y z w). */
+static float &quat_component(Quat &q, int axis) {
+  switch (std::max(0, std::min(3, axis))) {
+    case 0: return q.x;
+    case 1: return q.y;
+    case 2: return q.z;
+    default: return q.w;
+  }
+}
+
 bool read_anim_value(GameObject &g, const std::string &property, int axis, float &out) {
   const Transform &t = g.local();
+  if (property == "RotationQ") {
+    Quat q = t.rotation;
+    return out = quat_component(q, axis), true;
+  }
   const int a = std::max(0, std::min(2, axis));
   if (property == "Position") return out = t.position[a], true;
   if (property == "Rotation") return out = t.euler_hint[a], true;
@@ -618,6 +634,14 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
   if (!std::isfinite(value)) return false;
   Transform t = g.local();
   const int a = std::max(0, std::min(2, axis));
+  if (property == "RotationQ") {
+    /* One component at a time (a sequence writes the four in turn): kept as written until w, then the whole quaternion is
+     * made unit and the Euler hint follows. apply_clip does not come this way - it samples all four first. */
+    quat_component(t.rotation, axis) = value;
+    if (axis >= 3) t.rotation = normalize(t.rotation), t.euler_hint = euler_near(t.rotation, t.euler_hint);
+    g.set_local(t);
+    return true;
+  }
   if (property == "Position") t.position[a] = value;
   else if (property == "Scale") t.scale[a] = value;
   else if (property == "Rotation") {
@@ -666,7 +690,7 @@ std::mutex &binding_mutex() {
   return m;
 }
 
-enum class BindKind : uint8_t { Position, Rotation, Scale, Other, BlendShape };
+enum class BindKind : uint8_t { Position, Rotation, Scale, Other, BlendShape, Quat };  // (Quat: "RotationQ", round 541)
 
 }  // namespace
 
@@ -746,9 +770,10 @@ std::shared_ptr<const ClipBindings> bind_clip(const AnimationClip &clip, GameObj
     TrackBinding b;
     b.g = it->second;
     b.track = (uint32_t)i;
-    b.axis = (uint8_t)std::max(0, std::min(2, t.axis));
-    if (b.g && is_transform_property(t.property)) {
-      b.kind = t.property == "Position" ? BindKind::Position : t.property == "Scale" ? BindKind::Scale : BindKind::Rotation;
+    const bool quat = t.property == "RotationQ";
+    b.axis = (uint8_t)std::max(0, std::min(quat ? 3 : 2, t.axis));
+    if (b.g && (is_transform_property(t.property) || quat)) {
+      b.kind = t.property == "Position" ? BindKind::Position : t.property == "Scale" ? BindKind::Scale : quat ? BindKind::Quat : BindKind::Rotation;
       auto s = slot_of.find(b.g);
       if (s == slot_of.end()) s = slot_of.emplace(b.g, (uint32_t)out->slots.size()).first, out->slots.push_back(b.g);
       b.slot = s->second;
@@ -850,6 +875,8 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
   const ClipBindings &bound = *set;
   std::vector<Transform> poses(bound.slots.size());
   std::vector<char> posed(bound.slots.size(), 0);
+  std::vector<Quat> quats;      // (round 541: "RotationQ" samples by slot, made on the first one)
+  std::vector<char> quat_set;
   std::vector<GameObject *> weighted;  // (IKs whose Weight the clip sets)
   for (const TrackBinding &b : bound.tracks) {
     const AnimTrack &t = clip.tracks[b.track];
@@ -866,13 +893,22 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
     }
     Transform &p = poses[b.slot];
     if (!posed[b.slot]) p = g->local(), posed[b.slot] = 1;
-    if (b.kind == BindKind::Position) p.position[b.axis] = v;
+    if (b.kind == BindKind::Quat) {  // (round 541: the four components of a path gathered, then made one rotation below)
+      if (quat_set.empty()) quats.assign(poses.size(), Quat()), quat_set.assign(poses.size(), 0);
+      if (!quat_set[b.slot]) quats[b.slot] = p.rotation, quat_set[b.slot] = 1;  // (an axis with no track keeps the rotation's own)
+      quat_component(quats[b.slot], b.axis) = v;
+    }
+    else if (b.kind == BindKind::Position) p.position[b.axis] = v;
     else if (b.kind == BindKind::Scale) p.scale[b.axis] = v;
     else p.euler_hint[b.axis] = v;
   }
   for (size_t i = 0; i < poses.size(); i++) {
     if (!posed[i]) continue;
-    poses[i].rotation = Quat::euler(poses[i].euler_hint);
+    if (!quat_set.empty() && quat_set[i]) {  // (a path with "RotationQ" takes it over "Rotation": normalized as Unity does; a zero sample leaves the rotation)
+      const Quat q = quats[i];
+      if (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w > 1e-20f) poses[i].rotation = normalize(q), poses[i].euler_hint = euler_near(poses[i].rotation, poses[i].euler_hint);
+    }
+    else poses[i].rotation = Quat::euler(poses[i].euler_hint);
     bound.slots[i]->set_local(poses[i]);
   }
   if (!weighted.empty()) {
@@ -882,6 +918,289 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
     rest_unkeyed_fk(weighted, keyed);
   }
   bindings_applied(structure_before);
+}
+
+/* ---------------------------------------------------------------- converting rotation (round 541, ADR 0148) */
+
+namespace {
+
+float quat_dot(Quat a, Quat b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+Quat quat_negated(Quat q) { return {-q.x, -q.y, -q.z, -q.w}; }
+
+/* The frames a conversion keys: the union of the source tracks' key frames, and with `bake` every whole frame between the
+ * first and the last of them as well (Blender's anim_convert.cc keys the union; Bake is its "every frame"). */
+std::vector<float> conversion_frames(const std::vector<AnimTrack> &src, bool bake) {
+  std::vector<float> fs;
+  for (const AnimTrack &t : src)
+    for (const AnimKey &k : t.keys) fs.push_back(k.frame);
+  if (fs.empty()) return fs;
+  std::sort(fs.begin(), fs.end());
+  if (bake) {
+    const int lo = (int)std::ceil(fs.front() - 0.01f), hi = (int)std::floor(fs.back() + 0.01f);
+    for (int f = lo; f <= hi && f - lo < 100000; f++) fs.push_back((float)f);
+    std::sort(fs.begin(), fs.end());
+  }
+  fs.erase(std::unique(fs.begin(), fs.end(), [](float a, float b) { return std::fabs(a - b) < 0.01f; }), fs.end());
+  return fs;
+}
+
+/* A new key's interpolation: the source key on that frame (the first track that has one), else the key before it. */
+int conversion_interp(const std::vector<AnimTrack> &src, float frame) {
+  for (const AnimTrack &t : src)
+    if (const int k = t.key_at(frame); k >= 0) return t.keys[(size_t)k].interp;
+  int interp = AnimAuto;
+  float best = -1e30f;
+  for (const AnimTrack &t : src)
+    for (const AnimKey &k : t.keys)
+      if (k.frame < frame && k.frame > best) best = k.frame, interp = k.interp;
+  return interp;
+}
+
+/* One path's rotation tracks in the other form. False when it has no keys in the source form (nothing to convert). */
+bool convert_path(AnimationClip &clip, GameObject *obj, const std::string &path, bool to_quaternion, bool bake) {
+  const char *from = to_quaternion ? "Rotation" : "RotationQ", *to = to_quaternion ? "RotationQ" : "Rotation";
+  const int n_from = to_quaternion ? 3 : 4, n_to = to_quaternion ? 4 : 3;
+  std::vector<AnimTrack> src((size_t)n_from);
+  bool any = false;
+  for (int a = 0; a < n_from; a++) {
+    const AnimTrack *t = clip.find(path, from, a);
+    if (t && !t->keys.empty()) src[(size_t)a] = *t, any = true;
+  }
+  if (!any) return false;
+  const Vec3 cur_euler = obj ? obj->local().euler_hint : Vec3(0.0f);
+  const Quat cur_quat = obj ? obj->local().rotation : Quat();
+  std::vector<AnimTrack> out((size_t)n_to);
+  Quat prev_q;
+  bool have_prev = false;
+  Vec3 prev_e(0.0f);  // (the first key near no turn at all: the object's own angles may be wound from wherever the playhead was)
+  for (const float f : conversion_frames(src, bake)) {
+    AnimKey k;
+    k.frame = f, k.interp = conversion_interp(src, f);
+    if (to_quaternion) {
+      Vec3 e = cur_euler;  // (an axis with no track: the object's own, as Blender fills channels from the property)
+      for (int a = 0; a < 3; a++)
+        if (!src[(size_t)a].keys.empty()) e[a] = src[(size_t)a].sample(f);
+      Quat q = normalize(Quat::euler(e));
+      if (have_prev && quat_dot(q, prev_q) < 0.0f) q = quat_negated(q);  // (one hemisphere: the curve does not flip between keys)
+      prev_q = q, have_prev = true;
+      for (int a = 0; a < 4; a++) k.value = quat_component(q, a), out[(size_t)a].keys.push_back(k);
+      continue;
+    }
+    Quat q = cur_quat;
+    for (int a = 0; a < 4; a++)
+      if (!src[(size_t)a].keys.empty()) quat_component(q, a) = src[(size_t)a].sample(f);
+    const Vec3 e = euler_near(normalize(q), prev_e);  // (the turn nearest the key before: no 360 degree jump)
+    prev_e = e;
+    for (int a = 0; a < 3; a++) k.value = e[a], out[(size_t)a].keys.push_back(k);
+  }
+  size_t at = clip.tracks.size();
+  for (size_t i = clip.tracks.size(); i-- > 0;) {  // (the source tracks, and any of the new form the path already had, go)
+    const AnimTrack &t = clip.tracks[i];
+    if (t.path != path || (t.property != from && t.property != to)) continue;
+    clip.tracks.erase(clip.tracks.begin() + (std::ptrdiff_t)i);
+    at = i;  // (the new tracks take the place of the first one removed)
+  }
+  for (int a = 0; a < n_to; a++) {
+    AnimTrack t;
+    t.path = path, t.property = to, t.axis = a, t.keys = std::move(out[(size_t)a].keys);
+    clip.tracks.insert(clip.tracks.begin() + (std::ptrdiff_t)(at + (size_t)a), std::move(t));
+  }
+  clip.touch();
+  return true;
+}
+
+}  // namespace
+
+int convert_rotation_tracks(AnimationClip &clip, GameObject *root, const std::vector<std::string> &paths, bool to_quaternion, bool bake) {
+  int done = 0;
+  std::unordered_set<std::string> seen;
+  for (const std::string &path : paths) {
+    if (!seen.insert(path).second) continue;
+    GameObject *obj = root ? anim_target(*root, path) : nullptr;
+    done += convert_path(clip, obj, path, to_quaternion, bake);
+  }
+  return done;
+}
+
+/* ---------------------------------------------------------------- world-space copy / paste (round 541) */
+
+namespace {
+
+void collect_branch(GameObject &g, std::vector<GameObject *> &out) {
+  out.push_back(&g);
+  for (GameObject *c : g.children) collect_branch(*c, out);
+}
+
+/* The clip's Position, Rotation, RotationQ and Scale tracks alone: sampled frame by frame it moves bones and objects and
+ * nothing else (a blend shape, Active or a material field would stay as the last frame left it). */
+AnimationClip transform_tracks_of(const AnimationClip &src) {
+  AnimationClip c;
+  c.name = src.name, c.frame_rate = src.frame_rate, c.length = src.length, c.loop = src.loop;
+  for (const AnimTrack &t : src.tracks)
+    if (is_transform_property(t.property) || t.property == "RotationQ") c.tracks.push_back(t);
+  return c;
+}
+
+/* The local transforms of a branch, put back when it goes out of scope: sampling a clip frame by frame leaves no trace. */
+struct BranchPose {
+  std::vector<std::pair<GameObject *, Transform>> saved;
+  explicit BranchPose(GameObject &root) {
+    std::vector<GameObject *> all;
+    collect_branch(root, all);
+    for (GameObject *g : all) saved.push_back({g, g->local()});
+  }
+  ~BranchPose() {
+    for (auto &[g, t] : saved) g->set_local(t);
+  }
+};
+
+int depth_of(const GameObject *g) {
+  int d = 0;
+  for (; g && g->parent; g = g->parent) d++;
+  return d;
+}
+
+void clear_keys_between(AnimTrack &t, float lo, float hi) {
+  t.keys.erase(std::remove_if(t.keys.begin(), t.keys.end(), [&](const AnimKey &k) { return k.frame >= lo - 0.01f && k.frame <= hi + 0.01f; }), t.keys.end());
+}
+
+bool track_is_flat(const AnimTrack &t) {
+  if (t.keys.empty()) return false;
+  for (const AnimKey &k : t.keys)
+    if (std::fabs(k.value - t.keys[0].value) > 1e-6f) return false;
+  return true;
+}
+
+/* What a paste computed for one target, a transform a frame. */
+struct PastedTarget {
+  GameObject *target = nullptr;
+  size_t source = 0;
+  std::vector<Transform> local;
+  std::vector<Vec3> euler;  // (continuous from the target's own rotation)
+  std::vector<Quat> quat;   // (one hemisphere)
+  std::vector<std::pair<std::string, int>> created;  // (the tracks the paste made: property, axis)
+};
+
+/* A target's keys written in the range (those there replaced), in its rotation form. */
+void write_pasted_keys(AnimationClip &clip, GameObject &root, PastedTarget &p, int first_frame) {
+  const std::string path = anim_path(root, *p.target);
+  const int count = (int)p.local.size();
+  const float lo = (float)first_frame, hi = (float)(first_frame + count - 1);
+  bool quat_form = false;
+  for (int a = 0; a < 4; a++) quat_form = quat_form || clip.find(path, "RotationQ", a) != nullptr;
+  auto key = [&](const char *property, int axis, auto value_at) {
+    if (!clip.find(path, property, axis)) p.created.push_back({property, axis});
+    AnimTrack &t = clip.track(path, property, axis);
+    clear_keys_between(t, lo, hi);
+    for (int i = 0; i < count; i++) {
+      AnimKey k;
+      k.frame = (float)(first_frame + i), k.value = value_at(i);
+      t.put_key(k);
+    }
+  };
+  for (int a = 0; a < 3; a++) {
+    key("Position", a, [&](int i) { return p.local[(size_t)i].position[a]; });
+    key("Scale", a, [&](int i) { return p.local[(size_t)i].scale[a]; });
+    if (!quat_form) key("Rotation", a, [&](int i) { return p.euler[(size_t)i][a]; });
+  }
+  if (quat_form)
+    for (int a = 0; a < 4; a++) key("RotationQ", a, [&](int i) { Quat q = p.quat[(size_t)i]; return quat_component(q, a); });
+}
+
+/* A curve the paste made (the target had no track of it) and left flat holds one key instead of one a frame (Blender's
+ * created_on_paste: it would not make a curve of a value that never changes). The key stays a track - not a value written on
+ * the object - so the value survives Preview putting the pose back. A track the target already had is never touched. */
+void collapse_flat_created(AnimationClip &clip, const std::string &path, const PastedTarget &p) {
+  for (const auto &made : p.created) {
+    AnimTrack *t = clip.find(path, made.first, made.second);
+    if (!t || !track_is_flat(*t)) continue;
+    t->keys.resize(1);
+  }
+  clip.touch();
+}
+
+}  // namespace
+
+bool copy_world_space(const AnimationClip &clip, GameObject &root, const std::vector<GameObject *> &objects, float first, float last, WorldCopy &out, std::string &why) {
+  out = WorldCopy();
+  if (objects.empty()) return why = "nothing is selected to copy", false;
+  if (!std::isfinite(first) || !std::isfinite(last)) return why = "the frame range is not a number", false;
+  const int a = (int)std::lround(std::max(0.0f, first)), b = (int)std::lround(last);
+  if (b <= a) return why = "the frame range needs at least two frames", false;
+  if (b - a > 100000) return why = "the frame range is over 100000 frames", false;
+  bool keyed = false;
+  for (const AnimTrack &t : clip.tracks) keyed = keyed || !t.keys.empty();
+  if (!keyed) return why = "the clip has no keys to sample", false;
+  std::vector<GameObject *> used;
+  std::unordered_set<std::string> names;
+  for (GameObject *g : objects) {
+    if (!names.insert(g->name).second) {  // (Blender skips a second of one name: a paste pairs by name)
+      Log::warn("Copy World-Space Animation: '%s' appears twice; the second is skipped", g->name.c_str());
+      continue;
+    }
+    used.push_back(g);
+    out.sources.push_back({g->name, {}});
+  }
+  const AnimationClip sampled = transform_tracks_of(clip);
+  {
+    BranchPose keep(root);
+    for (int f = a; f <= b; f++) {
+      apply_clip(sampled, root, (float)f);
+      for (size_t i = 0; i < used.size(); i++) out.sources[i].world.push_back(used[i]->world_matrix());
+    }
+  }
+  out.first = a, out.last = b;
+  return true;
+}
+
+int paste_world_space(AnimationClip &clip, GameObject &root, const WorldCopy &copy, const std::vector<GameObject *> &targets, float at, std::string &why) {
+  if (copy.empty() || copy.last <= copy.first) return why = "nothing copied yet: Copy World-Space Animation first", 0;
+  if (targets.empty()) return why = "nothing is selected to paste onto", 0;
+  if (!std::isfinite(at)) return why = "the paste frame is not a number", 0;
+  for (GameObject *g : targets) {
+    bool under = false;
+    for (const GameObject *x = g; x && !under; x = x->parent) under = x == &root;
+    if (!under) return why = "'" + g->name + "' is outside the animated root '" + root.name + "'", 0;
+  }
+  std::vector<PastedTarget> pasted;  // (one source for every target, or each target's by name)
+  for (GameObject *g : targets) {
+    size_t s = copy.sources.size();
+    if (copy.sources.size() == 1) s = 0;
+    else
+      for (size_t i = 0; i < copy.sources.size() && s == copy.sources.size(); i++)
+        if (copy.sources[i].name == g->name) s = i;
+    if (s == copy.sources.size()) continue;
+    pasted.emplace_back();
+    pasted.back().target = g, pasted.back().source = s;
+  }
+  if (pasted.empty()) return why = "no copied object pairs with a selected one (one source goes on any target; otherwise the names must match)", 0;
+  std::stable_sort(pasted.begin(), pasted.end(), [](const PastedTarget &x, const PastedTarget &y) { return depth_of(x.target) < depth_of(y.target); });  // (parents first)
+  const int first_frame = (int)std::lround(std::max(0.0f, at)), count = copy.last - copy.first + 1;
+  const AnimationClip sampled = transform_tracks_of(clip);
+  {
+    BranchPose keep(root);
+    std::vector<Vec3> prev_euler(pasted.size());
+    std::vector<Quat> prev_quat(pasted.size());
+    for (int i = 0; i < count; i++) {
+      apply_clip(sampled, root, (float)(first_frame + i));
+      for (size_t k = 0; k < pasted.size(); k++) {
+        PastedTarget &p = pasted[k];
+        GameObject &g = *p.target;
+        if (i == 0) prev_euler[k] = g.local().euler_hint, prev_quat[k] = g.local().rotation;
+        const Mat4 parent = g.parent ? g.parent->world_matrix() : Mat4::identity();
+        Transform t = transform_from_matrix(parent.inverse() * copy.sources[p.source].world[(size_t)i]);
+        g.set_local(t);  // (its children - the targets after it - read this world matrix)
+        prev_euler[k] = euler_near(t.rotation, prev_euler[k]);
+        if (quat_dot(t.rotation, prev_quat[k]) < 0.0f) t.rotation = quat_negated(t.rotation);
+        prev_quat[k] = t.rotation;
+        p.local.push_back(t), p.euler.push_back(prev_euler[k]), p.quat.push_back(t.rotation);
+      }
+    }
+  }
+  for (PastedTarget &p : pasted) write_pasted_keys(clip, root, p, first_frame);
+  for (const PastedTarget &p : pasted) collapse_flat_created(clip, anim_path(root, *p.target), p);
+  clip.touch();
+  return (int)pasted.size();
 }
 
 float wrap_frame(float frame, float end, int wrap) {
