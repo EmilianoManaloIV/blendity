@@ -610,6 +610,29 @@ void solid_instance(gpu::RasterInstance &in, const DrawItem &it) {
   if (it.unlit) in.flags |= gpu::RasterInstance::Unlit;
 }
 
+/* Task 0537: an item's material colours (DrawItem::material_colors) for the card, one RGBA a render vertex. */
+uint32_t material_vertex_colors(const DrawItem &it, std::vector<float> &out) {
+  const uint32_t first = (uint32_t)(out.size() / 4) + 1;
+  const std::vector<Vec4> &c = *it.material_colors;
+  for (size_t v = 0; v < it.mesh->positions.size(); v++) {
+    const Vec4 x = v < c.size() ? c[v] : Vec4(1, 1, 1, 1);
+    out.insert(out.end(), {x.x, x.y, x.z, x.w});
+  }
+  return first;
+}
+
+/* IEEE half from a float in 0..1 (a vertex colour channel, already clamped): rounded to nearest. */
+static uint16_t half_of(float f) {
+  if (!(f > 0.0f)) return 0;
+  if (f >= 1.0f) return 0x3C00;
+  uint32_t b;
+  std::memcpy(&b, &f, 4);
+  const int e = (int)((b >> 23) & 0xFF) - 127 + 15;
+  if (e <= 0) return (uint16_t)(((b & 0x7FFFFF) | 0x800000) >> (14 - e) >> 10);  // (subnormal: only tiny values)
+  const uint32_t m = (b & 0x7FFFFF) + 0x1000;  // (round to nearest at bit 13)
+  return (uint16_t)((e << 10) + (m >> 13));
+}
+
 /* Weight Paint's colours for the card: one a vertex, the object's colour past the end (as shade_vertex reads them). */
 uint32_t solid_vertex_colors(const DrawItem &it, std::vector<float> &out) {
   const uint32_t first = (uint32_t)(out.size() / 4) + 1;
@@ -713,6 +736,13 @@ void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> 
       const RenderMesh &rm = *it.mesh;
       const uint32_t prim = see[(size_t)i].prim;
       const bool hl = it.face_highlight && prim < rm.tri_face.size() && rm.tri_face[prim] < it.face_highlight->size() && (*it.face_highlight)[rm.tri_face[prim]];
+      /* (Task 0537: this triangle's material reads the vertex colours.) */
+      bool vc_slot = false;
+      if (it.material_colors && it.material_colors->size() == rm.positions.size() && it.materials && !it.materials->empty()) {
+        const int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
+        const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
+        vc_slot = mp && mp->vertex_color;
+      }
       for (int q = 0; q < 3; q++) {
         const gpu::RasterVertex rv = raster_vertex(rm, rm.indices[(size_t)prim * 3 + q]);
         gpu::SeeCorner &c = out[(size_t)i * 3 + q];
@@ -722,7 +752,14 @@ void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> 
         std::memcpy(c.t, rv.t, 16);
         c.inst = see[(size_t)i].inst;
         c.highlight = hl ? 1.0f : 0.0f;
-        c.pad[0] = c.pad[1] = 0.0f;
+        /* Task 0537: the corner's vertex colour as four halves (white where its material doesn't read one). */
+        Vec4 vc(1, 1, 1, 1);
+        const uint32_t ri = rm.indices[(size_t)prim * 3 + q];
+        if (vc_slot && ri < it.material_colors->size()) vc = (*it.material_colors)[ri];
+        auto h = [](float x) { return half_of(std::max(0.0f, std::min(finite_bits(x) ? x : 1.0f, 1.0f))); };
+        const uint32_t lo = (uint32_t)h(vc.x) | ((uint32_t)h(vc.y) << 16), hi = (uint32_t)h(vc.z) | ((uint32_t)h(vc.w) << 16);
+        std::memcpy(&c.pad[0], &lo, 4);
+        std::memcpy(&c.pad[1], &hi, 4);
       }
     }
   };
@@ -1770,19 +1807,26 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const char *close_up_why = nullptr;
   /* One item's instances - and its see-through job, its baked ids - at the end of `inst`. */
   auto gather_item = [&](const DrawItem &it, int mesh, GpuMesh &e) {
-    if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's colours, a mesh made anew every frame)
+    if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors || it.material_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's or a Vertex Color material's colours, a mesh made anew every frame)
     if (it.materials && keepable)  // (live_close_up_of looks at every material of the item, used or not: its answer is the eye's)
       for (const MaterialPtr &mp : *it.materials)
         for (int k = 0; mp && k < 5; k++)
           if (mp->textures().live[k]) keepable = false;
     const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
-    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
+    const bool mul = !gouraud && it.material_colors && it.material_colors->size() == it.mesh->positions.size();  // (task 0537)
+    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : mul ? material_vertex_colors(it, vcols) : 0;
+    auto colour_slot = [&](const Material &m, gpu::RasterInstance &in) {  // (a slot whose material reads them multiplies; the others none)
+      if (!mul) return;
+      in.vertex_colors = m.vertex_color ? vc : 0;
+      in.vertex_color_mul = m.vertex_color;
+    };
     const uint32_t first_inst = (uint32_t)inst.size();
     if (e.parts.empty()) {
       inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
       note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
       inst.back().highlight = hl;
       inst.back().vertex_colors = vc;
+      colour_slot(*slot_material(it, mesh_slots(*it.mesh)[0]), inst.back());
       if (gouraud) solid_instance(inst.back(), it);
       axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
       if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
@@ -1796,6 +1840,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       in.index_count = part[2];
       in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
       in.vertex_colors = vc;
+      colour_slot(*slot_material(it, part[0]), in);
       if (gouraud) solid_instance(in, it);
       inst.push_back(in);
       axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
@@ -2078,9 +2123,9 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
   raster_world(fr, env, cam, scene_lights);
   if (render_clear_override_on_) fr.background = 0, fr.clear = render_clear_override_;  // (a transparent render's black / white pass: task 0195)
+  fr.vertex_colors = std::move(vcols);  // (Solid's Weight Paint colours, or Vertex Color materials' - task 0537)
   if (gouraud) {  // (shade()'s ambient: the LightingEnv's own colours, whatever the world)
     fr.gouraud = true;
-    fr.vertex_colors = std::move(vcols);
     set3(fr.sky, env.sky);
     set3(fr.equator, env.equator);
     set3(fr.ground, env.ground);
@@ -2138,6 +2183,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
    * that checks the picture is the same). Task 0204: with nothing to copy back the frame is left running on the card
    * while the editor goes on (the present, or the next use of the card, waits for it). */
   const bool nothing_back = !color && !depth && !ids && !(want_hdr && !post_on_card);  // (round 416: the card's filters read the linear light there; nothing comes back for them)
+  if (ok && gpu_frame_snapshot_on_ && &rt == &scene_rt_)  // (task 0537: tests read the packings; before see_through is moved)
+    gpu_frame_snapshot_ = {*insts, fr.vertex_colors, fr.see_through};
   if (ok) {
     ScopedTimer render_timer;
     if (gpu_split_readback_for_test_) ok = g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err);

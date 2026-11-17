@@ -6,6 +6,7 @@
 #include "../core/cpu.h"
 #include "display.h"
 #include "../core/jobs.h"
+#include "../scene/mesh.h"  // (task 0537: render_vertex_colors_into)
 
 #include <algorithm>
 #include <cmath>
@@ -969,6 +970,15 @@ struct GGX {
 }  // namespace
 
 /* World-space surface data at barycentrics (u, v) of a mesh triangle. */
+void pt_object_colors(const Mesh &mesh, const RenderMesh &rm, const std::vector<MaterialPtr> &materials, std::vector<Vec4> &out) {
+  out.clear();
+  for (const MaterialPtr &mp : materials)
+    if (mp && mp->vertex_color) {
+      render_vertex_colors_into(mesh, rm, out);
+      return;
+    }
+}
+
 const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const {
   const PTObject &ob = objects_[object];
   const RenderMesh &rm = *ob.mesh;
@@ -2706,7 +2716,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     g.flags[0] = m.unlit || m.shading_model == 2 ? 1 : 0;  // (task 0247: Hand-painted traces unlit on the card too)
     g.flags[1] = m.wrap;
     g.flags[2] = settings_.retro.active() && settings_.retro.tex.filter >= 0 ? settings_.retro.tex.filter : m.filter;  // a camera filter's
-    g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0);  // toon, an outline's hull (ADR 0020)
+    g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0) | (m.vertex_color ? 8192 : 0);  // toon, an outline's hull (ADR 0020), Vertex Color (task 0537)
     const float t0[4] = {(float)std::max(1, std::min(8, m.toon_bands)), clampf(m.toon_softness, 0.0f, 0.5f), clampf(m.toon_threshold, 0.0f, 0.95f),
                          clampf(m.toon_specular_smooth, 0.0f, 0.5f)};
     const float t1[4] = {m.toon_shadow.x, m.toon_shadow.y, m.toon_shadow.z, clampf(m.toon_specular_size, 0.0f, 1.0f)};
@@ -2777,6 +2787,12 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
         if (v < rm.normals.size()) { gv.n[0] = rm.normals[v].x; gv.n[1] = rm.normals[v].y; gv.n[2] = rm.normals[v].z; }
         if (v < rm.tangents.size()) { gv.t[0] = rm.tangents[v].x; gv.t[1] = rm.tangents[v].y; gv.t[2] = rm.tangents[v].z; gv.t[3] = rm.tangents[v].w; }
         if (v < rm.uvs.size()) { gv.uv[0] = rm.uvs[v].x; gv.uv[1] = rm.uvs[v].y; }
+        /* Task 0537: the vertex colour in the spare lanes (r p.w, g n.w, b uv.z, a uv.w) - white without colours, so a
+         * Vertex Color material on a mesh without them renders as its base colour. */
+        Vec4 vc(1, 1, 1, 1);
+        if (ob.colors && ob.colors->size() == rm.positions.size()) vc = (*ob.colors)[v];
+        auto ch = [](float x) { return finite_bits(x) ? std::max(0.0f, std::min(x, 1.0f)) : 1.0f; };
+        gv.p[3] = ch(vc.x), gv.n[3] = ch(vc.y), gv.uv[2] = ch(vc.z), gv.uv[3] = ch(vc.w);
         s.verts.push_back(gv);
       }
       for (size_t t = 0; t < rm.tri_count(); t++)

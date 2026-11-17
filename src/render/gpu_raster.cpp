@@ -242,6 +242,7 @@ layout(location = 5) noperspective out vec3 uvw; // UV / w, 1 / w: linear on scr
 layout(location = 6) out vec3 wt;                // the tangent in the world; its sign the triangle's first vertex's
 layout(location = 7) flat out float tw;
 layout(location = 8) out vec3 gc;                // task 0195: Solid shading's colour, lit here (Gouraud)
+layout(location = 9) out vec4 vcm;               // task 0537: the vertex colour a Vertex Color material multiplies in
 invariant gl_Position;  // (task 0196: the toon pass draws the same triangles with a depth test of EQUAL)
 void main() {
   mat4 m = inst[gl_InstanceIndex].model;
@@ -257,6 +258,8 @@ void main() {
   wt = nm * t.xyz;
   tw = t.w;
   gc = vec3(0.0);
+  int vci = inst[gl_InstanceIndex].toon5.y;
+  vcm = vci < 0 ? vcol[uint(-vci - 1) + uint(gl_VertexIndex)] : vec4(1.0);
   if (shadow.w > 0.5) {  // (Renderer3D::flush's shade_vertex: the vertex's colour or the object's, lit unless unlit)
     Inst I = inst[gl_InstanceIndex];
     vec3 base = I.toon5.y > 0 ? vcol[uint(I.toon5.y - 1) + uint(gl_VertexIndex)].rgb : I.albedo_rough.rgb;
@@ -346,6 +349,9 @@ float texture_lod(int t, vec2 ddx, vec2 ddy) {
 /* evaluate_surface's material, after kGlslProcedurals. */
 const char *kMaterialEval = R"(
 struct Surf { vec3 albedo; float metallic; float rough; vec3 emission; vec3 n; float alpha; float spec; };
+/* Task 0537: the mesh's vertex colour at this pixel for a material with Vertex Color (set by the fragment shader from
+ * its varying; 1 where the instance has none), multiplied in after the base map as evaluate_surface does. */
+vec4 g_vc = vec4(1.0);
 /* A Box projection's lod on one face from the pixel's object-space footprint times the face's tiling (task 0164). */
 float box_lod(int t, float ta, float tb, float fp) {
   return fp > 0.0 ? texture_lod(t, vec2(fp * abs(ta), 0.0), vec2(0.0, fp * abs(tb))) : 0.0;
@@ -437,6 +443,8 @@ Surf evaluate_part(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3
     s.albedo *= c.rgb;
     s.alpha *= c.a;  // (a cutout's holes come from the base map's alpha, as evaluate_surface takes it)
   }
+  s.albedo *= clamp(g_vc.rgb, 0.0, 1.0);  // (task 0537: before any cutout test reads the alpha; capped as the CPU caps it)
+  s.alpha *= clamp(g_vc.a, 0.0, 1.0);
   if (I.tex0.y >= 0) { SAMPLE(I.tex0.y, c); s.metallic *= c.x; }
   if (I.tex0.z >= 0) { SAMPLE(I.tex0.z, c); s.rough *= c.x; }
   s.emission = I.emission.rgb;
@@ -539,6 +547,7 @@ layout(location = 5) noperspective in vec3 uvw;
 layout(location = 6) in vec3 wt;
 layout(location = 7) flat in float tw;
 layout(location = 8) in vec3 gc;
+layout(location = 9) in vec4 vcm;  // (task 0537)
 layout(location = 0) out vec4 o_normal;  // normal, roughness
 layout(location = 1) out vec4 o_albedo;  // albedo, metallic
 layout(location = 2) out vec4 o_geo;     // the triangle's own normal (turned to the smooth one's side), specular
@@ -546,6 +555,7 @@ layout(location = 3) out vec4 o_emit;    // emission, flags
 layout(location = 4) out uint o_id;
 layout(location = 5) out uint o_inst;    // task 0102: the instance (the lighting pass reads its toon settings)
 void main() {
+  g_vc = vcm;  // (task 0537: what evaluate multiplies in)
   vec3 n = normalize(wn);
   vec3 g = cross(dFdx(wpos), dFdy(wpos));
   g = dot(g, g) > 0.0 ? normalize(g) : n;
@@ -2169,6 +2179,7 @@ layout(location = 5) noperspective in vec3 uvw;
 layout(location = 6) in vec3 wt;
 layout(location = 7) flat in float tw;
 layout(location = 8) in vec3 gc;
+layout(location = 9) in vec4 vcm;  // (task 0537)
 layout(location = 0) out vec4 o_t0;
 layout(location = 1) out vec4 o_t1;
 layout(location = 2) out vec4 o_t2;
@@ -2202,6 +2213,7 @@ int key_light(out vec3 L) {
   return best;
 }
 void main() {
+  g_vc = vcm;  // (task 0537: what evaluate multiplies in)
   vec3 n = normalize(wn);
   vec3 g = cross(dFdx(wpos), dFdy(wpos));
   g = dot(g, g) > 0.0 ? normalize(g) : n;
@@ -2292,6 +2304,7 @@ layout(location = 5) noperspective in vec3 uvw;
 layout(location = 6) in vec3 wt;
 layout(location = 7) flat in float tw;
 layout(location = 8) in vec3 gc;
+layout(location = 9) in vec4 vcm;  // (task 0537)
 layout(location = 0) out vec4 o_amb;
 layout(location = 1) out vec4 o_mask;  // round 454 (ADR 0118): the shadowmask's four lights (1 where there is none - always written)
 /* Lightmap::sample: bilinear, clamped, texel centres at (i + 0.5) / size (v down: the arena's rows run up). */
@@ -2329,6 +2342,7 @@ vec3 bary(vec3 p, vec3 a, vec3 b, vec3 c) {
   return vec3(1.0 - v - w, v, w);
 }
 void main() {
+  g_vc = vcm;  // (task 0537: what evaluate multiplies in)
   o_mask = vec4(1.0);
   Inst I = inst[ii];
   BakedRef B = bk[ii];
@@ -2407,8 +2421,10 @@ layout(location = 5) noperspective out vec3 uvw;
 layout(location = 6) out vec3 wt;
 layout(location = 7) flat out float tw;
 layout(location = 8) flat out float face_hl;
+layout(location = 9) out vec4 vcm;  // task 0537: the corner's vertex colour (uv.zw: four halves; 1 where none)
 void main() {
   SeeCorner c = see[gl_VertexIndex];
+  vcm = vec4(unpackHalf2x16(floatBitsToUint(c.uv.z)), unpackHalf2x16(floatBitsToUint(c.uv.w)));
   ii = floatBitsToUint(c.p_inst.w);
   mat4 m = inst[ii].model;
   vec4 w = m * vec4(c.p_inst.xyz, 1.0);
@@ -2439,6 +2455,7 @@ layout(location = 5) noperspective in vec3 uvw;
 layout(location = 6) in vec3 wt;
 layout(location = 7) flat in float tw;
 layout(location = 8) flat in float face_hl;
+layout(location = 9) in vec4 vcm;  // (task 0537)
 #ifdef BL_SEE_IDS
 layout(location = 0) out uint o_id;
 layout(location = 1) out uint o_inst;
@@ -2449,6 +2466,7 @@ layout(location = 0, index = 0) out vec4 o_color;
 layout(location = 0, index = 1) out vec4 o_blend;
 #endif
 void main() {
+  g_vc = vcm;  // (task 0537: what evaluate multiplies in)
   ivec2 px = ivec2(gl_FragCoord.xy);
   vec3 n = normalize(wn);
   vec3 g = cross(dFdx(wpos), dFdy(wpos));  // (the derivatives before any discard: undefined after one)
@@ -4448,7 +4466,7 @@ class VulkanRaster final : public Raster {
     if (s.flags & RasterInstance::Axis) std::memcpy(d.toon0, s.axis, 16), std::memcpy(d.toon1, s.axis2, 16), std::memcpy(d.toon2, s.axis_parts, 16);  // (task 0195)
     int32_t ior;
     std::memcpy(&ior, &s.ior, 4);
-    d.toon5[0] = s.toon_ramp, d.toon5[1] = (int32_t)s.vertex_colors, d.toon5[2] = s.surface, d.toon5[3] = ior;
+    d.toon5[0] = s.toon_ramp, d.toon5[1] = s.vertex_color_mul ? -(int32_t)s.vertex_colors : (int32_t)s.vertex_colors, d.toon5[2] = s.surface, d.toon5[3] = ior;
   }
   /* The face highlight's bits into their buffer (grown when a bigger mesh is edited; one zero word when none). */
   bool write_highlight(const RasterFrame &fr, std::string *err) {

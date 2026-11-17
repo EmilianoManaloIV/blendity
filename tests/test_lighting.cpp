@@ -12242,6 +12242,77 @@ static void tests_round508() {
   });
 }
 
+/* ================================================================ round 545b2 (task 0537): Vertex Color in the bakes */
+namespace {
+/* The floor's colour layer: every vertex `c` (a Point layer, the render layer). */
+void vcb_paint(GameObject *g, Vec4 c) {
+  MeshFilter *mf = g->get<MeshFilter>();
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  ColorAttribute a = m.make_color("Col", ColorAttribute::Domain::Point, c);
+  m.color_attributes.push_back(std::move(a));
+  m.active_color = m.render_color = 0;
+  m.touch();
+}
+
+struct VcbResult {
+  Vec3 wall;   // the baked lightmap on a white wall's face beside the floor, mean of its two faces
+  Vec3 probe;  // the probe volume's bounce at 0.5 above the floor, looking down at it
+  bool ok = false;
+};
+
+/* A floor (white albedo; a red Vertex Color layer when `layer`; the material reads it when `flag`) lit by a sun straight
+ * down, a white wall standing on it, a dark world: what bounces onto the wall and what the probes above the floor see. */
+VcbResult vcb_bake(bool flag, bool layer = true) {
+  Editor ed;
+  r35_open(ed);
+  ed.scene().environment.color = Vec3(0.02f);
+  GameObject *floor_go = r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(1.0f));
+  GameObject *wall = r35_add(ed, "Cube", "Wall", {0, 1, 0}, {0.2f, 2, 6}, Vec3(0.8f));
+  floor_go->get<MeshRenderer>()->materials[0]->vertex_color = flag;
+  if (layer) vcb_paint(floor_go, Vec4(1, 0, 0, 1));
+  GameObject *sun = ed.scene().find_by_name("Directional Light");
+  sun->set_local_euler({90, 0, 0});
+  ed.scene().create("Probes")->add<ProbeVolume>()->global = true;
+  ed.commit_change("vcb setup");
+  r35_sun_mode(ed, 2);  // (Baked: the sun's direct light is in the lightmaps and probes)
+  r35_bake(ed);
+  VcbResult r;
+  const LightingData &ld = ed.lighting_data_for_test();
+  const Mesh *wm = wall->evaluated_mesh(1);
+  Vec3 a, b;
+  r.ok = wm && r35_sample(ld, wall->id, *wm, wall->world_matrix(), {0.1f, 0.4f, 0.0f}, a) && r35_sample(ld, wall->id, *wm, wall->world_matrix(), {-0.1f, 0.4f, 0.0f}, b);
+  r.wall = (a + b) * 0.5f;
+  Vec3 p(0.0f);
+  r.ok = r.ok && ed.probes_for_test().sample(Vec3(2.0f, 0.5f, 2.0f), Vec3(0, -1, 0), Vec3(0.0f), false, p);
+  r.probe = p;
+  return r;
+}
+}  // namespace
+
+static void tests_round545b2() {
+  test("vertex colour in the bakes (task 0537): a red Vertex Color floor under a white sun bounces red onto a white wall in the lightmap, and into the probes above it; with the flag off the bounce is white", [] {
+    const VcbResult on = vcb_bake(true), off = vcb_bake(false);
+    std::printf("    flag on: wall %.4f %.4f %.4f, probe %.4f %.4f %.4f\n", on.wall.x, on.wall.y, on.wall.z, on.probe.x, on.probe.y, on.probe.z);
+    std::printf("    flag off: wall %.4f %.4f %.4f, probe %.4f %.4f %.4f\n", off.wall.x, off.wall.y, off.wall.z, off.probe.x, off.probe.y, off.probe.z);
+    CHECK(on.ok && off.ok);
+    /* Lightmap: red, not white. */
+    CHECK(on.wall.x > 0.01f && on.wall.x > 1.5f * on.wall.z && on.wall.x > 1.5f * on.wall.y);
+    CHECK(off.wall.x > 0.01f && std::fabs(off.wall.x - off.wall.z) <= 0.2f * off.wall.x && std::fabs(off.wall.x - off.wall.y) <= 0.2f * off.wall.x);
+    /* Probes: the floor seen from above is red (no green or blue bounce), white with the flag off. */
+    CHECK(on.probe.x > 0.01f && on.probe.x > 3.0f * on.probe.z && on.probe.x > 3.0f * on.probe.y);
+    CHECK(off.probe.x > 0.01f && std::fabs(off.probe.x - off.probe.z) <= 0.2f * off.probe.x && std::fabs(off.probe.x - off.probe.y) <= 0.2f * off.probe.x);
+  });
+  test("vertex colour in the bakes (task 0537): a Vertex Color material on a mesh without a colour layer bakes as its base colour - white bounce, same as flag off, no NaN", [] {
+    const VcbResult none = vcb_bake(true, false), off = vcb_bake(false, false);
+    std::printf("    flag on, no layer: wall %.4f %.4f %.4f, probe %.4f %.4f %.4f\n", none.wall.x, none.wall.y, none.wall.z, none.probe.x, none.probe.y, none.probe.z);
+    CHECK(none.ok && off.ok);
+    CHECK(r35_finite(none.wall) && r35_finite(none.probe));
+    CHECK(none.wall.x > 0.01f && std::fabs(none.wall.x - none.wall.z) <= 0.2f * none.wall.x);
+    CHECK(none.probe.x > 0.01f && std::fabs(none.probe.x - none.probe.z) <= 0.2f * none.probe.x);
+    CHECK(std::fabs(none.wall.x - off.wall.x) <= 0.15f * off.wall.x);  // (the bakes' own sampling noise apart)
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -12288,4 +12359,5 @@ void run_lighting_tests() {
   tests_round507();
   tests_round507_te();
   tests_round508();
+  tests_round545b2();
 }

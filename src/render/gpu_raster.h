@@ -77,6 +77,9 @@ struct RasterInstance {
   /* Task 0195: Weight Paint's colours - 1 + this mesh's first vertex's in RasterFrame::vertex_colors (0: none), lit per
    * vertex in place of the albedo with RasterFrame::gouraud. */
   uint32_t vertex_colors = 0;
+  /* Task 0537: the colours at `vertex_colors` multiply into a Vertex Color material (evaluated per pixel) rather than
+   * replace the albedo (Solid shading's Weight Paint colours). */
+  bool vertex_color_mul = false;
   /* Task 0195: a see-through surface (MaterialSurface: 2 Transparent, 3 Glass; else 0), drawn by the see-through pass
    * from RasterFrame::see_through rather than the g-buffer's; Glass's index of refraction. */
   int32_t surface = 0;

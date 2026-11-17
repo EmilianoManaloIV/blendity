@@ -6276,6 +6276,429 @@ static void tests_round508_gpu() {
   });
 }
 
+/* ================================================================ round 545b2 (task 0537): a material's Vertex Color on the card.
+ * Reuses round 545b1's scene (a 2 x 2 pad, its left half red, its right half blue, a Point layer on a white material). */
+namespace {
+using VcgDom = ColorAttribute::Domain;
+
+/* `alpha_left` is the red half's alpha; `two_slots` puts the right half in material slot 1 (the faces by their centre). */
+MeshPtr vcg_pad(float alpha_left = 1.0f, bool two_slots = false) {
+  MeshPtr m = primitives::grid(2.0f, 8, 8);
+  ColorAttribute c = m->make_color("Col", VcgDom::Point, Vec4(1, 1, 1, 1));
+  for (size_t v = 0; v < m->vert_count(); v++) c.rgba[v] = m->positions[v].x < 0.0f ? Vec4(1, 0, 0, alpha_left) : Vec4(0, 0, 1, 1);
+  m->color_attributes.push_back(std::move(c));
+  m->active_color = m->render_color = 0;
+  if (two_slots) {
+    m->face_material.assign(m->face_count(), 0);
+    for (size_t f = 0; f < m->face_count(); f++) {
+      float cx = 0.0f;
+      for (uint32_t k = m->face_offsets[f]; k < m->face_offsets[f + 1]; k++) cx += m->positions[m->corner_verts[k]].x;
+      m->face_material[f] = cx < 0.0f ? 0 : 1;
+    }
+  }
+  m->touch();
+  return m;
+}
+
+MaterialPtr vcg_mat(bool on, int surface = (int)MaterialSurface::Opaque, float alpha = 1.0f) {
+  MaterialPtr m = make_material("VC", Vec3(1, 1, 1));
+  m->vertex_color = on;
+  m->specular = 0.0f;
+  m->roughness = 1.0f;
+  m->surface = surface;
+  if (surface == (int)MaterialSurface::Cutout) m->alpha_clip = 0.5f;
+  if (surface == (int)MaterialSurface::Transparent) m->alpha = alpha;
+  m->touch();
+  return m;
+}
+
+/* The scene view as the tests of round 126 draw it - the object alone in front of the camera, on the CPU, on the card, and
+ * (hidden) empty - with the pad's red-half and blue-half pixels read off the card's picture. */
+struct VcgView {
+  size_t pixels = 0;
+  double mean = 0, within3 = 0;
+  uint64_t gpu_views = 0, fallbacks = 0;
+  std::string reason;
+  std::array<int, 3> left{}, right{}, left_cpu{}, left_empty{};
+  std::vector<uint32_t> gpu;
+};
+
+std::array<int, 3> vcg_rgb(uint32_t p) { return {(int)((p >> 16) & 255), (int)((p >> 8) & 255), (int)(p & 255)}; }
+bool vcg_red(const std::array<int, 3> &p) { return p[0] > 50 && p[1] * 10 < p[0] * 6 && p[2] * 10 < p[0] * 6; }
+bool vcg_blue(const std::array<int, 3> &p) { return p[2] > 50 && p[0] * 10 < p[2] * 6 && p[1] * 10 < p[2] * 6; }
+bool vcg_grey(const std::array<int, 3> &p) { return p[0] > 50 && std::abs(p[0] - p[1]) < 45 && std::abs(p[0] - p[2]) < 45; }
+bool vcg_same(const std::array<int, 3> &a, const std::array<int, 3> &b, int tol) {
+  return std::abs(a[0] - b[0]) <= tol && std::abs(a[1] - b[1]) <= tol && std::abs(a[2] - b[2]) <= tol;
+}
+
+void vcg_scene(Editor &ed) {
+  r34_open(ed);
+  for (const char *n : {"Plane", "Cube", "Sphere", "Cylinder"})
+    if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+  ed.command("overlay grid off");
+  ed.command("shading shaded");
+  ed.command("select Main Camera");
+}
+
+VcgView vcg_view(MeshPtr mesh, const std::vector<MaterialPtr> &mats) {
+  Editor ed;
+  vcg_scene(ed);
+  GameObject *obj = ed.scene().create("VCPad");
+  obj->add<MeshFilter>()->mesh = mesh;
+  obj->add<MeshRenderer>()->materials = mats;
+  obj->set_local_position({0.0f, 1.0f, 0.0f});
+  ed.command("camera 0 3.2 1.2 0 1 0");
+  r34_steps(ed, 3);
+  auto draw = [&](int device) {
+    ed.viewport_device_for_test(device);
+    for (int k = 0; k < 2; k++) {
+      obj->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  auto at = [&](const std::vector<uint32_t> &img, float x) {
+    int sx = 0, sy = 0;
+    CHECK(ed.project_to_window(Vec3(x, 1.0f, 0.6f), sx, sy));
+    const Recti r = ed.scene_view_rect();
+    const size_t i = (size_t)(sy - r.y) * (size_t)r.w + (size_t)(sx - r.x);
+    return i < img.size() ? vcg_rgb(img[i]) : std::array<int, 3>{0, 0, 0};
+  };
+  VcgView v;
+  const std::vector<uint32_t> cpu = draw(1);
+  const FrameProfile before = ed.frame_profile_totals();
+  const std::vector<uint32_t> gpu = draw(2);
+  const FrameProfile after = ed.frame_profile_totals();
+  v.gpu_views = after.gpu_views - before.gpu_views;
+  v.fallbacks = after.gpu_fallbacks - before.gpu_fallbacks;
+  v.reason = ed.gpu_view_reason();
+  v.gpu = gpu;
+  v.left = at(gpu, -0.6f);
+  v.right = at(gpu, 0.6f);
+  v.left_cpu = at(cpu, -0.6f);
+  obj->active = false;
+  const std::vector<uint32_t> empty = draw(1);
+  v.left_empty = at(empty, -0.6f);
+  auto worst = [](uint32_t a, uint32_t b) {
+    int w = 0;
+    for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+    return w;
+  };
+  double sum = 0;
+  size_t within = 0;
+  for (size_t i = 0; i < cpu.size() && i < gpu.size() && i < empty.size(); i++) {
+    if (worst(cpu[i], empty[i]) <= 8) continue;
+    const int w = worst(cpu[i], gpu[i]);
+    v.pixels++;
+    sum += w;
+    within += w <= 3;
+  }
+  v.mean = v.pixels ? sum / (double)v.pixels : 0;
+  v.within3 = v.pixels ? (double)within / (double)v.pixels : 0;
+  gpu_diff_dump("vcg", cpu, gpu, ed.scene_view_rect().w);
+  ed.viewport_device_for_test(1);
+  return v;
+}
+
+void vcg_print(const char *what, const VcgView &v) {
+  std::printf("    %s: %llu views on the card, %llu on the CPU%s%s; %zu pixels: mean %.3f / 255, %.2f %% within 3; red half on the card %d %d %d (CPU %d %d %d), blue half %d %d %d\n", what,
+              (unsigned long long)v.gpu_views, (unsigned long long)v.fallbacks, v.reason.empty() ? "" : ": ", v.reason.c_str(), v.pixels, v.mean, v.within3 * 100, v.left[0], v.left[1],
+              v.left[2], v.left_cpu[0], v.left_cpu[1], v.left_cpu[2], v.right[0], v.right[1], v.right[2]);
+}
+
+/* The path tracer on the pad from above through a uniform white world, on the CPU or a card: linear RGB per pixel. */
+const int kVcgW = 32;
+std::vector<float> vcg_pt(bool card, const char *backend, const MeshPtr &mesh, const MaterialPtr &mat, bool give_colours, std::string &device) {
+  const RenderMesh &rm = mesh->render_mesh_tangents();
+  std::vector<Vec4> cols;
+  const bool have = render_vertex_colors_into(*mesh, rm, cols);
+  std::vector<MaterialPtr> mats{mat};
+  PTObject o;
+  o.mesh = &rm;
+  o.model = Mat4::identity();
+  o.materials = &mats;
+  o.colors = give_colours && have ? &cols : nullptr;
+  Environment e;
+  e.mode = Environment::Color;
+  e.color = {0.5f, 0.5f, 0.5f};
+  set_env("BLENDITY_GPU_BACKEND", backend);
+  PathTracer pt;
+  PTSettings st;
+  st.use_cpu = !card;
+  if (card) st.gpus = {0};
+  st.gpu_hardware_rt = true;
+  st.max_bounces = 4;
+  st.clamp_indirect = 0;
+  st.denoise = false;
+  st.use_guiding = false;
+  pt.set_settings(st);
+  pt.build({o}, {}, e);
+  pt.set_camera(Mat4::look_at({0, 3, 0}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 10), kVcgW, kVcgW);
+  pt.render(1e9, 64);
+  device = card ? (pt.gpu_error().empty() ? pt.device_summary() : pt.gpu_error()) : "CPU";
+  set_env("BLENDITY_GPU_BACKEND", "vulkan");
+  return pt.linear_rgb(false);
+}
+
+Vec3 vcg_px(const std::vector<float> &rgb, int x) {
+  const size_t i = ((size_t)(kVcgW / 2) * kVcgW + (size_t)x) * 3;
+  return i + 2 < rgb.size() ? Vec3(rgb[i], rgb[i + 1], rgb[i + 2]) : Vec3(-1, -1, -1);
+}
+Vec3 vcg_mean(const std::vector<float> &rgb) {
+  Vec3 s(0.0f);
+  for (size_t i = 0; i + 2 < rgb.size(); i += 3) s = s + Vec3(rgb[i], rgb[i + 1], rgb[i + 2]);
+  return s * (3.0f / std::max<float>(1.0f, (float)rgb.size()));
+}
+
+/* The card path tracer's picture of the red / blue pad against the CPU's: columns 7 and 25 red and blue (either way
+ * round - the camera's orientation), the picture's mean within 0.02 a channel. Flag off: white. */
+void vcg_pt_checks(const char *backend, bool optix) {
+  const MeshPtr pad = vcg_pad();
+  std::string dc, dg, dgoff, dcoff;
+  const std::vector<float> cpu = vcg_pt(false, backend, pad, vcg_mat(true), true, dc), card = vcg_pt(true, backend, pad, vcg_mat(true), true, dg);
+  const Vec3 mc = vcg_mean(cpu), mg = vcg_mean(card);
+  const Vec3 a = vcg_px(card, 7), b = vcg_px(card, 25);
+  std::printf("    %s: %s\n    CPU mean %.4f %.4f %.4f, card mean %.4f %.4f %.4f; card col 7 %.3f %.3f %.3f, col 25 %.3f %.3f %.3f\n", backend, dg.c_str(), mc.x, mc.y, mc.z, mg.x, mg.y, mg.z, a.x, a.y,
+              a.z, b.x, b.y, b.z);
+  CHECK(cpu.size() == card.size() && !card.empty());
+  CHECK(std::fabs(mc.x - mg.x) < 0.02f && std::fabs(mc.y - mg.y) < 0.02f && std::fabs(mc.z - mg.z) < 0.02f);
+  auto red = [](Vec3 c) { return c.x > 0.3f && c.y < 0.1f && c.z < 0.1f; };
+  auto blue = [](Vec3 c) { return c.z > 0.3f && c.x < 0.1f && c.y < 0.1f; };
+  CHECK((red(a) && blue(b)) || (blue(a) && red(b)));
+  if (optix) CHECK(dg.find("(OptiX)") != std::string::npos);
+  else CHECK(dg.find("(OptiX)") == std::string::npos);
+  /* The flag off and no colours handed over: white on the card too. */
+  const std::vector<float> off = vcg_pt(true, backend, pad, vcg_mat(false), true, dgoff), none = vcg_pt(true, backend, pad, vcg_mat(true), false, dcoff);
+  for (const std::vector<float> *w : {&off, &none}) {
+    const Vec3 p = vcg_px(*w, 7), q = vcg_px(*w, 25);
+    std::printf("    white case: %.3f %.3f %.3f | %.3f %.3f %.3f\n", p.x, p.y, p.z, q.x, q.y, q.z);
+    CHECK(p.x > 0.4f && p.y > 0.4f && p.z > 0.4f && q.x > 0.4f && q.y > 0.4f && q.z > 0.4f);
+  }
+}
+}  // namespace
+
+static void tests_round545b2_gpu() {
+  test("vertex colour on the card (task 0537): the Shaded view's red / blue Point layer on a white Vertex Color material matches the CPU's, red and blue on the card; with the flag off both halves are white (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const VcgView on = vcg_view(vcg_pad(), {vcg_mat(true)});
+    vcg_print("Vertex Color on", on);
+    CHECK(on.gpu_views > 0 && on.fallbacks == 0 && on.pixels > 1000);
+    CHECK(on.mean < 1.0 && on.within3 >= 0.99);
+    const bool a = vcg_red(on.left) && vcg_blue(on.right), b = vcg_blue(on.left) && vcg_red(on.right);  // (the camera decides which side is which)
+    CHECK(a || b);
+    const VcgView off = vcg_view(vcg_pad(), {vcg_mat(false)});
+    vcg_print("flag off", off);
+    CHECK(off.gpu_views > 0 && off.fallbacks == 0 && off.mean < 1.0 && off.within3 >= 0.99);
+    CHECK(vcg_grey(off.left) && vcg_grey(off.right) && vcg_same(off.left, off.right, 12));
+  });
+
+  test("vertex colour on the card (task 0537): the colours' alpha under a Cutout material cuts the same holes on the card as on the CPU - the alpha-0 half shows the background, the other half is kept (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const VcgView v = vcg_view(vcg_pad(0.0f), {vcg_mat(true, (int)MaterialSurface::Cutout)});
+    vcg_print("Cutout", v);
+    CHECK(v.gpu_views > 0 && v.fallbacks == 0 && v.pixels > 500);
+    CHECK(v.mean < 1.0 && v.within3 >= 0.99);
+    CHECK(vcg_same(v.left, v.left_empty, 4));      // (the hole: the pixel the empty view has)
+    CHECK(vcg_same(v.left, v.left_cpu, 4));        // (and the CPU cuts the same one)
+    CHECK(vcg_blue(v.right) && !vcg_same(v.right, v.left_empty, 20));
+    const VcgView off = vcg_view(vcg_pad(0.0f), {vcg_mat(false, (int)MaterialSurface::Cutout)});
+    CHECK(!vcg_same(off.left, off.left_empty, 20));  // (flag off: no hole)
+  });
+
+  test("vertex colour on the card (task 0537): a Transparent Vertex Color material's colours - the see-through pass - match the CPU's, and show red and blue over the lit picture (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const VcgView v = vcg_view(vcg_pad(), {vcg_mat(true, (int)MaterialSurface::Transparent, 0.7f)});
+    vcg_print("Transparent", v);
+    CHECK(v.gpu_views > 0 && v.fallbacks == 0 && v.pixels > 1000);
+    CHECK(v.mean < 1.0 && v.within3 >= 0.99);
+    auto redder = [](const std::array<int, 3> &p) { return p[0] > p[2] + 20; };
+    auto bluer = [](const std::array<int, 3> &p) { return p[2] > p[0] + 20; };
+    CHECK((redder(v.left) && bluer(v.right)) || (bluer(v.left) && redder(v.right)));
+    /* Two slots: the left half's material reads the colours, the right half's doesn't - the right half keeps its own colour. */
+    const VcgView two = vcg_view(vcg_pad(1.0f, true), {vcg_mat(true, (int)MaterialSurface::Transparent, 0.7f), vcg_mat(false, (int)MaterialSurface::Transparent, 0.7f)});
+    vcg_print("Transparent, two slots", two);
+    CHECK(two.gpu_views > 0 && two.fallbacks == 0 && two.mean < 1.0 && two.within3 >= 0.99);
+  });
+
+  test("vertex colour on the card (task 0537): GPU Compute's path tracer renders the red / blue pad with Vertex Color on as the CPU path tracer does (mean within 0.02 a channel), white with it off (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    vcg_pt_checks("vulkan", false);
+  });
+
+  test("vertex colour on the card (task 0537): the OptiX device renders the red / blue pad with Vertex Color on as the CPU path tracer does (skipped without an OptiX card)", [] {
+    if (!gpu::available() || !gpu::optix_compiled_in() || gpu::optix_device_of(0) < 0) {
+      std::printf("    (no OptiX card here)\n");
+      return;
+    }
+    vcg_pt_checks("optix", true);
+  });
+
+  test("vertex colour on the card (task 0537): an item without colours draws on the card bit for bit as before - a Vertex Color material on a sphere with no layer gives the picture of the same material with the flag off (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    vcg_scene(ed);
+    MaterialPtr mat = vcg_mat(false);
+    mat->base_color = {0.8f, 0.4f, 0.2f};
+    mat->roughness = 0.5f;
+    mat->touch();
+    GameObject *obj = ed.scene().create("Ball");
+    obj->add<MeshFilter>()->mesh = primitives::uv_sphere(0.8f, 32, 16);
+    obj->add<MeshRenderer>()->materials = {mat};
+    obj->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.command("camera 0 2.2 2.6 0 1 0");
+    r34_steps(ed, 3);
+    auto draw = [&] {
+      ed.viewport_device_for_test(2);
+      for (int k = 0; k < 2; k++) {
+        obj->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    const std::vector<uint32_t> before = draw();
+    const FrameProfile f0 = ed.frame_profile_totals();
+    mat->vertex_color = true;  // (the flag on, the mesh has no layer)
+    mat->touch();
+    ed.commit_change("vcg flag on");
+    const std::vector<uint32_t> after = draw();
+    const FrameProfile f1 = ed.frame_profile_totals();
+    size_t differ = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); i++) differ += before[i] != after[i];
+    std::printf("    %zu pixels; %zu differ; %llu views on the card after; %s\n", before.size(), differ, (unsigned long long)(f1.gpu_views - f0.gpu_views), ed.gpu_view_status().c_str());
+    CHECK(!before.empty() && before.size() == after.size());
+    CHECK(f1.gpu_views > f0.gpu_views && ed.scene_on_gpu_for_test());
+    CHECK(differ == 0);
+    ed.viewport_device_for_test(1);
+  });
+
+  /* ---- the packing, read off the frame the editor sends the card (needs Editor's test accessor, see the report) */
+  test("vertex colour on the card (task 0537): the instances' colour index is negative for a Vertex Color item (multiply), positive for Weight Paint's Solid colours (replace), 0 for every other item; its colours go once an RGBA a render vertex (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    vcg_scene(ed);
+    ed.set_gpu_frame_snapshot_for_test(true);
+    GameObject *pad = ed.scene().create("VCPad");
+    pad->add<MeshFilter>()->mesh = vcg_pad();
+    pad->add<MeshRenderer>()->materials = {vcg_mat(true)};
+    pad->set_local_position({1.8f, 1.0f, 0.0f});
+    GameObject *plain = ed.scene().create("Plain");
+    plain->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 16, 8);
+    plain->add<MeshRenderer>()->materials = {vcg_mat(false)};
+    plain->set_local_position({0.0f, 1.0f, 2.0f});
+    ed.command("create Cylinder");
+    GameObject *body = ed.selected_object();
+    CHECK(body != nullptr);
+    if (!body) return;
+    body->name = "Body";
+    body->set_local_position({-1.8f, 0.5f, 0.0f});
+    ed.mark_changed_for_test("VCG name");
+    ed.step_frame_headless();
+    ed.command("create Armature");
+    ed.command("bone add Bone 1");
+    ed.command("skin bind Body");
+    ed.command("select Body");
+    ed.command("camera 0 4 5 0 0.5 0");
+    ed.viewport_device_for_test(2);
+    /* Shaded, Weight Paint off: the pad multiplies, nobody replaces. */
+    r34_steps(ed, 4);
+    {
+      const Editor::GpuFrameSnapshot &s = ed.gpu_frame_snapshot_for_test();
+      size_t mul = 0, replace = 0, none = 0;
+      uint32_t base = 0;
+      for (const gpu::RasterInstance &in : s.instances) {
+        if (in.vertex_color_mul) mul++, base = in.vertex_colors;
+        else if (in.vertex_colors) replace++;
+        else none++;
+      }
+      std::printf("    Shaded: %zu instances, %zu multiply, %zu replace, %zu without colours; %zu floats of colours\n", s.instances.size(), mul, replace, none, s.vertex_colors.size());
+      CHECK(ed.scene_on_gpu_for_test() && s.instances.size() >= 3);
+      CHECK(mul == 1 && replace == 0 && none == s.instances.size() - 1 && base >= 1);
+      const size_t verts = pad->get<MeshFilter>()->mesh->render_mesh().positions.size();
+      CHECK(s.vertex_colors.size() >= ((size_t)(base - 1) + verts) * 4);
+      size_t red = 0, blue = 0;
+      for (size_t v = 0; v < verts && ((size_t)(base - 1) + v) * 4 + 3 < s.vertex_colors.size(); v++) {
+        const float *c = &s.vertex_colors[((size_t)(base - 1) + v) * 4];
+        red += c[0] == 1 && c[1] == 0 && c[2] == 0 && c[3] == 1;
+        blue += c[0] == 0 && c[1] == 0 && c[2] == 1 && c[3] == 1;
+      }
+      std::printf("    the pad's %zu render vertices: %zu red, %zu blue\n", verts, red, blue);
+      CHECK(red > 0 && blue > 0 && red + blue == verts);
+    }
+    /* Solid with Weight Paint on: the body's weight colours replace (a positive index); nothing multiplies. */
+    ed.command("weightpaint on");
+    ed.command("shading solid");
+    r34_steps(ed, 4);
+    {
+      const Editor::GpuFrameSnapshot &s = ed.gpu_frame_snapshot_for_test();
+      size_t mul = 0, replace = 0;
+      for (const gpu::RasterInstance &in : s.instances) {
+        if (in.vertex_color_mul) mul++;
+        else if (in.vertex_colors) replace++;
+      }
+      std::printf("    Solid, Weight Paint on: %zu instances, %zu multiply, %zu replace\n", s.instances.size(), mul, replace);
+      CHECK(ed.weight_paint_active_for_test() && ed.scene_on_gpu_for_test());
+      CHECK(replace >= 1 && mul == 0);
+    }
+    ed.command("weightpaint off");
+    ed.viewport_device_for_test(1);
+  });
+
+  test("vertex colour on the card (task 0537): a see-through corner carries its colour as four halves in its two spare floats (lo = r | g << 16, hi = b | a << 16), white where its triangle's material has no Vertex Color (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    vcg_scene(ed);
+    ed.set_gpu_frame_snapshot_for_test(true);
+    GameObject *pad = ed.scene().create("VCPad");
+    pad->add<MeshFilter>()->mesh = vcg_pad(1.0f, true);  // (left half slot 0, right half slot 1)
+    pad->add<MeshRenderer>()->materials = {vcg_mat(true, (int)MaterialSurface::Transparent, 0.7f), vcg_mat(false, (int)MaterialSurface::Transparent, 0.7f)};
+    pad->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.command("camera 0 3.2 1.2 0 1 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 4);
+    const Editor::GpuFrameSnapshot &s = ed.gpu_frame_snapshot_for_test();
+    CHECK(ed.scene_on_gpu_for_test() && !s.see_through.empty() && s.see_through.size() % 3 == 0);
+    const uint32_t kOne = 0x3C00u;  // (1.0 as a half)
+    size_t red = 0, white = 0, wrong = 0;
+    for (const gpu::SeeCorner &c : s.see_through) {
+      uint32_t lo = 0, hi = 0;
+      std::memcpy(&lo, &c.pad[0], 4);
+      std::memcpy(&hi, &c.pad[1], 4);
+      if (c.p[0] < -0.1f) {  // (the red half, slot 0: (1, 0, 0, 1))
+        red++;
+        wrong += lo != kOne || hi != (kOne << 16);
+      }
+      else if (c.p[0] > 0.1f) {  // (the right half, slot 1: no Vertex Color - white, not its blue)
+        white++;
+        wrong += lo != (kOne | (kOne << 16)) || hi != (kOne | (kOne << 16));
+      }
+    }
+    std::printf("    %zu corners: %zu in the red half, %zu in the white half, %zu packed wrong\n", s.see_through.size(), red, white, wrong);
+    CHECK(red > 0 && white > 0 && wrong == 0);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -6318,4 +6741,5 @@ void run_gpu_tests() {
   tests_round506_third_gpu();
   tests_round506_engineer_gpu();
   tests_round508_gpu();
+  tests_round545b2_gpu();
 }

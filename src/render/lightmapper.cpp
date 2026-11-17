@@ -610,7 +610,13 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   /* 4. The scene the rays see: the static objects, the Baked and Mixed lights, the world. */
   pt_ = std::make_unique<PathTracer>();
   pt_objects_.clear();
-  for (const BakeObject &o : objects_) pt_objects_.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+  pt_colors_.assign(objects_.size(), {});  // (task 0537: sized first - the objects point into it)
+  for (const BakeObject &o : objects_) {
+    pt_objects_.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+    std::vector<Vec4> &c = pt_colors_[pt_objects_.size() - 1];
+    pt_object_colors(*o.mesh, *pt_objects_.back().mesh, o.materials, c);
+    if (!c.empty()) pt_objects_.back().colors = &c;
+  }
   const std::vector<RenderLight> pt_lights = bounce_lights(lights_);  // (round 452: at their Indirect Multipliers)
   PTSettings ps;
   /* The gather's own hit is the first bounce (its direct light comes by next-event estimation): the
