@@ -139,8 +139,28 @@ struct SplatStats {
 };
 
 /* The frame's splats, projected and ordered for drawing (CPU side; the card takes the same draws). */
+/* What one cloud's projection needs of a view (round 557: computed once, the same for the CPU's projection and the
+ * card's vertex shader). */
+struct SplatDrawView {
+  Mat4 mvp;                  // proj x view x model
+  Vec3 cam_local{0, 0, 0};   // the camera in the cloud's own space (a perspective view's colour direction)
+  Vec3 ortho_dir{0, 0, 0};   // an orthographic view's direction in the cloud's space; zero for perspective
+  float dot_px = 0.0f;       // a Points dot's radius in pixels times w
+};
+SplatDrawView gsplat_draw_view(const SplatDraw &d, const SplatView &v);
+
+/* A cloud's back-to-front order for a view, without projecting (round 557: the card projects itself). */
+struct SplatOrder {
+  const SplatDraw *draw = nullptr;
+  SplatDrawView dv;
+  std::shared_ptr<const std::vector<uint32_t>> order;  // indices into the cloud, farthest first
+};
+
 class SplatPass {
  public:
+  /* Each draw's order and view values, sorted as prepare() sorts (big clouds on a worker), for the card; the draws with
+   * no order yet or an empty cloud are left out. Stats: submitted and the sort's time. */
+  std::vector<SplatOrder> orders(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort = true);
   /* Projects every draw and orders it; the screen splats are kept in `screen()` back to front across all clouds. */
   void prepare(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort = true);
   /* Blends the prepared splats into the target after its opaque pass: colour over, depth-tested against the mesh
@@ -152,7 +172,9 @@ class SplatPass {
 
  private:
   void limit_to_budget(int width, int height);
+  void project_cloud(const PointCloud &pc, const std::vector<uint32_t> &ord, uint32_t id, const SplatDrawView &dv, const SplatView &v);
   std::vector<SplatScreen> screen_;
+  std::vector<SplatScreen> proj_, kept_;  // (round 557: kept between frames - their room, not their contents)
   mutable SplatStats stats_;  // (draw_cpu adds its time)
   std::vector<std::pair<uint64_t, std::unique_ptr<SplatSorter>>> sorters_;
   SplatSorter scratch_sorter_;  // draws with key 0

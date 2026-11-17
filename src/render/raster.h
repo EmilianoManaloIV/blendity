@@ -389,6 +389,9 @@ class Renderer3D {
   /* The renderer's own splat pass (review 532): it moves with the renderer - the editor swaps each window's renderer
    * into its views - so each view keeps the sorted orders of its own camera; made on first use. */
   SplatPass &splat_pass();
+  /* Round 557: the scene has no splats any more - the room the pass kept for them goes back (76 MB of screen splats each
+   * at 1M, and the sorted orders). */
+  void release_splat_pass() { own_splats_.reset(); }
   void flush();
 
   /* Overlays drawn after flush() (grid, wireframes, gizmo lines). */
