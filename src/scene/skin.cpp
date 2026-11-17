@@ -8,6 +8,7 @@
 #include "scene.h"
 #include "skin_weights.h"
 #include "pose_counts.h"
+#include "skin_render.h"
 #include "../core/core.h"
 #include "../core/edit_epoch.h"
 #include "../core/jobs.h"
@@ -26,33 +27,8 @@ namespace {
 
 bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
 
-Quat rotation_of(const Mat4 &m) {  // the rotation of a matrix without shear (columns normalised)
-  const Vec3 x = normalize(m.column(0)), y = normalize(m.column(1)), z = normalize(m.column(2));
-  return normalize(quat_from_axes(x, y, z));
-}
-
-/* A dual quaternion: real part (rotation) and dual part (half the translation, times the rotation). */
-struct DualQuat {
-  Quat r{0, 0, 0, 0}, d{0, 0, 0, 0};
-};
-
-DualQuat to_dual(const Mat4 &m) {
-  DualQuat q;
-  q.r = rotation_of(m);
-  const Vec3 t = m.translation();
-  const Quat tq(t.x, t.y, t.z, 0.0f);
-  const Quat d = tq * q.r;
-  q.d = {d.x * 0.5f, d.y * 0.5f, d.z * 0.5f, d.w * 0.5f};
-  return q;
-}
-
-/* Whether a matrix is a rotation and a translation (dual quaternions carry nothing else): unit, orthogonal axes. */
-bool rigid(const Mat4 &m) {
-  const Vec3 c[3] = {m.column(0), m.column(1), m.column(2)};
-  for (int k = 0; k < 3; k++)
-    if (std::fabs(length(c[k]) - 1.0f) > 1e-3f || std::fabs(dot(c[k], c[(k + 1) % 3])) > 1e-3f) return false;
-  return dot(cross(c[0], c[1]), c[2]) > 0.0f;
-}
+/* (Round 518: the dual quaternions, the rigid test and the blend itself moved to skin_render.cpp, which the render
+ * mesh's kernel shares with the deform.) */
 
 }  // namespace
 
@@ -456,21 +432,9 @@ uint64_t SkinModifier::modifier_dependency_hash() const {
   return h;
 }
 
-/* Each vertex's bones and weights as the deform's selection leaves them (the first Max Influences in group order, then
- * the lowest replaced), built once and read every frame after: the selection reads every vertex group for every vertex.
- * Rebuilt when the mesh, the scene's structure, Max Influences or which bones bind change. */
-struct SkinBinding {
-  const Mesh *mesh = nullptr;
-  const GameObject *root = nullptr;
-  uint64_t mesh_version = 0, names = 0;
-  size_t verts = 0, groups = 0, bones = 0;
-  int kmax = 0;
-  bool any = false;
-  std::vector<uint8_t> binds;  // (per bone of the armature: whether it bound when this was built)
-  std::vector<uint8_t> n;      // per vertex: how many
-  std::vector<int> idx;        // kmax a vertex: the armature's bone
-  std::vector<float> wt;       // kmax a vertex: its weight, not normalised (divided by the sum at use, as before)
-};
+/* SkinBinding (skin_render.h): each vertex's bones and weights, built once and read every frame after - the selection
+ * reads every vertex group for every vertex. Rebuilt when the mesh, the scene's structure, Max Influences or which
+ * bones bind change. */
 
 static std::shared_ptr<const SkinBinding> skin_binding(const SkinModifier &s, const Mesh &m, const GameObject &root, const ArmaturePose &pose,
                                                        const std::vector<uint8_t> &binds, int kmax) {
@@ -561,67 +525,34 @@ void SkinModifier::modify(Mesh &m) const {
   const std::shared_ptr<const SkinBinding> bind_held = skin_binding(*this, m, *root, pose, binds, kmax);
   const SkinBinding *bind = bind_held.get();
   if (!bind->any) return;
-  std::vector<Mat4> mats(bones.size());
-  std::vector<DualQuat> duals(bones.size());
-  std::vector<uint8_t> is_rigid(bones.size());
+  /* Round 518 (ADR 0146): the pose as the render kernel reads it - and the deform below blends through the same
+   * functions (skin_render.cpp), so the posed mesh and the posed render vertices agree to the bit. */
+  auto made = std::make_shared<SkinPose>();
+  SkinPose &sp = *made;
+  sp.owner = owner, sp.owner_inv = owner_inv, sp.dq = arm.deform == 1, sp.binding = bind_held;
+  sp.mats.resize(bones.size()), sp.duals.resize(bones.size()), sp.rigid.resize(bones.size());
   for (size_t i = 0; i < bones.size(); i++) {
-    mats[i] = bones[i].world * rest_inv[i];
-    is_rigid[i] = rigid(mats[i]);
-    duals[i] = to_dual(mats[i]);
+    sp.mats[i] = bones[i].world * rest_inv[i];
+    sp.rigid[i] = skin_rigid(sp.mats[i]) ? 1 : 0;
+    sp.duals[i] = skin_to_dual(sp.mats[i]);
   }
-  const bool dq = arm.deform == 1;
   const bool has_cn = m.custom_normals_fit();  // custom normals (task 0149) turn with the same blend
   pose_add(PoseStat::SkinSetup, whole.ms(), 0);
   JobSystem::global().parallel_for((int64_t)m.vert_count(), 1024, [&](int64_t b, int64_t e) {
     for (int64_t v = b; v < e; v++) {
-      const int n = bind->n[(size_t)v];
-      const int *idx = &bind->idx[(size_t)v * (size_t)kmax];
-      const float *wt = &bind->wt[(size_t)v * (size_t)kmax];
-      float sum = 0.0f;
-      for (int k = 0; k < n; k++) sum += wt[k];
-      if (!(sum > 0.0f)) continue;  // no bone: stays at rest
       Vec3 &p = m.positions[(size_t)v];
-      const Vec3 rest = owner.point(p);  // the character's space (the world's when there is none)
-      bool all_rigid = dq;
-      for (int k = 0; k < n && all_rigid; k++) all_rigid = is_rigid[(size_t)idx[k]] != 0;
-      Vec3 out(0.0f);
-      Quat turn(0, 0, 0, 1);  // the blended rotation (dual quaternions), for the custom normal
-      if (all_rigid) {
-        /* Dual quaternion blend, each kept on the first's side (q and -q are the same turn). */
-        const DualQuat &q0 = duals[(size_t)idx[0]];
-        Quat r(0, 0, 0, 0), d(0, 0, 0, 0);
-        for (int k = 0; k < n; k++) {
-          const DualQuat &q = duals[(size_t)idx[k]];
-          float w = wt[k] / sum;
-          if (q.r.x * q0.r.x + q.r.y * q0.r.y + q.r.z * q0.r.z + q.r.w * q0.r.w < 0.0f) w = -w;
-          r = {r.x + q.r.x * w, r.y + q.r.y * w, r.z + q.r.z * w, r.w + q.r.w * w};
-          d = {d.x + q.d.x * w, d.y + q.d.y * w, d.z + q.d.z * w, d.w + q.d.w * w};
-        }
-        const float len = std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
-        if (!(len > 1e-8f)) continue;
-        r = {r.x / len, r.y / len, r.z / len, r.w / len};
-        d = {d.x / len, d.y / len, d.z / len, d.w / len};
-        /* Translation = 2 d r*; then rotate and move. */
-        const Quat t = d * r.conjugate();
-        out = r.rotate(rest) + Vec3(t.x, t.y, t.z) * 2.0f;
-        turn = r;
-      }
-      else
-        for (int k = 0; k < n; k++) out += mats[(size_t)idx[k]].point(rest) * (wt[k] / sum);
-      out = owner_inv.point(out);
+      SkinBlend blend;
+      Vec3 out;
+      if (!skin_blend_point(sp, (size_t)v, p, out, blend)) continue;  // no bone (or a degenerate turn): stays at rest
       if (finite3(out)) p = out;
       if (!has_cn) continue;
       /* The custom normal through the same blend: the rotation of the dual quaternion, or the matrices' directions. */
-      const Vec3 nw = owner.dir(m.custom_normals[(size_t)v]);
-      Vec3 on(0.0f);
-      if (all_rigid) on = turn.rotate(nw);
-      else
-        for (int k = 0; k < n; k++) on += mats[(size_t)idx[k]].dir(nw) * (wt[k] / sum);
-      on = owner_inv.dir(on);
-      const float nlen = length(on);
-      if (finite_bits(nlen) && nlen > 1e-12f) m.custom_normals[(size_t)v] = on / nlen;
+      Vec3 on;
+      if (skin_blend_dir(sp, blend, m.custom_normals[(size_t)v], on)) m.custom_normals[(size_t)v] = on;
     }
   });
+  if (SkinPoseSink *sink = skin_pose_sink())
+    if (sink->target == &m) sink->pose = std::move(made);
   m.touch();
   pose_add(PoseStat::SkinDeform, whole.ms());
 }

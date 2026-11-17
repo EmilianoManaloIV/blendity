@@ -37,6 +37,10 @@ class JobSystem {
    * time) on a second pool of its own, two threads short of the machine (round 412, ADR 0106: before, serially), never
    * taking the main thread's pool. */
   void run_background(const std::function<void()> &fn);
+  /* Runs `fn` so that, while it waits on its own parallel loops, this thread takes up only their pieces - never a piece
+   * of a loop it is running inside (TBB's this_task_arena::isolate; the built-in pool runs nested loops inline anyway).
+   * For work done while holding a lock that an outer loop's other pieces may take too (round 518, review). */
+  void isolate(const std::function<void()> &fn);
   /* True on a thread inside run_background (a worker's own thread and the background pool's): what it runs stays off
    * the main thread's pool. */
   static bool in_background();

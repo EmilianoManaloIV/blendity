@@ -73,14 +73,21 @@ per-view list), the rest of the view stays on the card.
 - A timed window from the hub (about 30 minutes): `blendity_stress --only posing` and `--only animation` on main,
   `tools/bench_world.py --posing` on the owner's avatar scratch copies if they are still there; saved as the pass's
   baseline (Pass 25 changed the views since round 474).
-- `src/scene/skin_render.{h,cpp}` (new): `SkinRenderData` (per render vertex: bone slots and weights, from
-  `SkinBinding` and the render mesh's render-vertex -> mesh-vertex map), `SkinPalette` (from the final pose, after
-  the one solve of ADR 0126), `skin_render_vertices(data, palette, rest, out, from, to)` - positions, normals and
-  tangents by the rule ADR 0146 settles.
+- `src/scene/skin_render.{h,cpp}` (new). As built: `SkinPose` (per bone the matrix, dual quaternion and rigid flag,
+  the owner's matrices, the per-mesh-vertex `SkinBinding`, and the mesh before the skin), read per render vertex
+  through a render-vertex -> mesh-vertex table (`skin_render_vertex_table`); `skin_render_vertices(pose, rest, table,
+  out)` - positions, normals and tangents by ADR 0146's rule. The deform and the kernel share `skin_blend_point` /
+  `skin_blend_dir`. Round 519 flattens the pose into the card's per-render-vertex weights and palette.
+- Review 518: a bare copy (`MeshCopyBare`: a worker's) carries no pose; a pose's rest is read and filled under one lock
+  (`skin_rest_lock`); a rest that followed a shape key is settled with the mesh; the rest is written in place when
+  nothing else holds it.
 - The CPU views take it: an eligible skinned mesh keeps its rest render mesh and writes the posed render vertices
   in place each posed frame - no recompute of normals, no corner split that flips with the pose, no MikkTSpace
   rebuild (ADR 0124's "built whole" cause goes).
-- Profiler / `pose_counts()`: skins on the card, skins on the CPU, the reason a skin is not on the card.
+- Profiler (round 518): "render meshes skinned" and its time; skins on the card and the reason a skin is not on it
+  come with round 519.
+- The baseline: taken in the hub's window on 2026-11-16 00:35-00:51 (`C:/blcmp518/base518`, the owner's avatar in
+  `C:/blcmp518/bench518`); compared in round 522.
 
 ### Round 519 (spec 0502): the card's skin pass
 - `Raster::can_skin()`, `add_skin(rest_mesh, weights) -> mesh id` (its own posed vertex buffer, the rest mesh's
@@ -88,6 +95,10 @@ per-view list), the rest of the view stays on the card.
   `remove_skin`. A compute pipeline in the shader cache (`warm_shaders`), one dispatch per skinned instance before the
   first pass, one barrier (shader write -> vertex read). Every pass (g-buffer, shadows, see-through, outlines, ids)
   draws the posed buffer unchanged; both views of a frame share it (no second skin, as ADR 0124 for the CPU).
+- A hook for Pass 27's ray-traced shadows (M2, asked through the hub 2026-11-15): `add_skin` can give the posed
+  vertex buffer the acceleration-structure build-input usage flag (one switch M2 sets), and the raster says, a frame
+  at a time, which skinned meshes' posed buffers were written (a list M2 refits those BLASes from). The skin pass
+  takes no binding in the lighting layout (set 0): its own compute layout, made lazily, outside `init`.
 - `gpu_views.cpp`: a posed skinned mesh sends its palette, not its mesh; its bounds come from per-bone rest boxes
   moved by the palette (conservative, for culling and the shadow fit).
 - The Learn tab's posing lesson: what runs on the card, what still needs the CPU, the Profiler lines.
@@ -101,6 +112,10 @@ per-view list), the rest of the view stays on the card.
   posed mesh (`export.cpp`; a skinned export still writes rest + weights), the path tracers, MoonRay, the lightmapper
   and Realtime GI gathers (on their workers), F12's snapshot (`render_view.cpp`), Live Link (`livelink.cpp`), the
   modes that edit the mesh. The modifiers after an armature keep the whole stack on the CPU.
+- From review 518: Texture Bake of a posed skin (`texture_bake.cpp`) builds the posed mesh whole (posed diagonals,
+  MikkTSpace on the posed shape) while the views draw the rest's diagonals and turned rest tangents - the bake takes
+  the rest triangulation and the views' tangent frame. Sculpt and Weight Paint on a skinned mesh get no pose (ADR
+  0146 1(c)); round 518 excludes only Edit Mode's cage.
 - A test per caller that the posed shape is what it sees (a click on the raised arm picks it; a click where the arm
   was at rest does not).
 

@@ -20,6 +20,8 @@
 
 namespace bl {
 
+struct SkinPose;  // skin_render.h (round 518)
+
 /* A named vertex group (Blender's vertex groups, ADR 0024): one weight per vertex, 0 = not in the group. */
 struct VertexGroup {
   std::string name;
@@ -130,6 +132,12 @@ struct MeshCacheFields {
   mutable bool cache_approx_[2] = {false, false};  // tangents made the quick way while following a drag
   mutable bool cache_split_[2] = {false, false};   // (round 470) corners got render vertices of their own in place: a build would share them again
   mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
+  /* Round 518 (ADR 0146): cache_[i] holds the rest render mesh posed by the skin (Mesh::skin_pose) - its triangles are
+   * the rest's (which build of it: skin_build_, which state: skin_rest_), its vertices the kernel's; skin_rv_ is each
+   * render vertex's mesh vertex. A cache made this way never moves in place (cache_topo_ is left 0). */
+  mutable bool cache_skinned_[2] = {false, false};
+  mutable uint64_t skin_build_[2] = {0, 0}, skin_rest_[2] = {0, 0};
+  mutable std::vector<uint32_t> skin_rv_[2];
   /* What both caches' full builds share (task 0185: an Edit Mode operator rebuilt the flat one and the shaded one in
    * the same frame, each from scratch): the triangles (three corners and the face each, in face order) per version,
    * and the corners at each vertex (CSR, in corner order) per topology. */
@@ -178,6 +186,28 @@ struct MeshCopyBare {
   bool was = g_mesh_copy_bare;
   MeshCopyBare() { g_mesh_copy_bare = true; }
   ~MeshCopyBare() { g_mesh_copy_bare = was; }
+};
+
+/* Round 518 (review): Mesh::skin_pose's holder. A copy made under MeshCopyBare - an operator's, or a worker's that builds
+ * its own render meshes (Bake Textures, a lightmap bake, an export) - starts without it, as it starts without the
+ * caches: it never reaches the rest mesh the editor's frames pose from. */
+struct SkinPoseRef {
+  std::shared_ptr<const SkinPose> p;
+  SkinPoseRef() = default;
+  SkinPoseRef(const SkinPoseRef &o) : p(g_mesh_copy_bare ? nullptr : o.p) {}
+  SkinPoseRef(SkinPoseRef &&) = default;
+  SkinPoseRef &operator=(const SkinPoseRef &o) {
+    p = g_mesh_copy_bare ? nullptr : o.p;
+    return *this;
+  }
+  SkinPoseRef &operator=(SkinPoseRef &&) = default;
+  SkinPoseRef &operator=(std::shared_ptr<const SkinPose> q) {
+    p = std::move(q);
+    return *this;
+  }
+  const SkinPose *operator->() const { return p.get(); }
+  const SkinPose &operator*() const { return *p; }
+  explicit operator bool() const { return p != nullptr; }
 };
 
 struct MeshCaches : MeshCacheFields {
@@ -325,7 +355,7 @@ struct Mesh : MeshCaches {
   /* Whether a render mesh's tangents are the quick ones (settle() redoes them). */
   bool tangents_approximate() const { return cache_approx_[0] || cache_approx_[1]; }
   /* Round 470: what settle() puts right - quick tangents, or corners split one by one while the mesh moved in place. */
-  bool needs_settle() const { return tangents_approximate() || cache_split_[0] || cache_split_[1]; }
+  bool needs_settle() const;  // (round 518: and the skin's rest mesh, which follows a shape key in place)
   /* Drops the render and edge caches: the next render_mesh() builds from scratch (tests compare the two). */
   void forget_caches() const;
   /* The caches of `before`, when this mesh (an operator's bare copy of it, MeshCopyBare) still has its topology:
@@ -351,6 +381,11 @@ struct Mesh : MeshCaches {
    * render mesh then moves its vertices in place rather than being rebuilt. Code that caches positions
    * on `version` alone must check this too. */
   uint64_t deform_version = 0;
+  /* Round 518 (ADR 0146): on an evaluated mesh whose last modifier is a Skin, the pose it was skinned by and the mesh
+   * before the skin. While it holds for this version and deform_version, render_mesh() is the rest's render mesh
+   * posed by skin_render_vertices - normals and tangents turned by the bones, as Unity does - not this mesh's own
+   * built or moved in place. Set by GameObject::evaluated_mesh only; anything that changes the mesh ends it. */
+  SkinPoseRef skin_pose;
   /* Call right after `deform_version++` for a bump that moved only `ids` (any order, repeats fine): the render mesh then
    * follows by looking at those vertices alone. Not calling it is always safe (the render mesh scans every vertex). */
   void note_moved(const std::vector<uint32_t> &ids);
@@ -407,6 +442,9 @@ struct Mesh : MeshCaches {
    * the triangulation of quads and n-gons rewritten in place. False when the split pattern no longer holds (a full
    * build then). */
   bool update_in_place(int ci, bool flat) const;
+  /* Round 518: cache ci as the rest's render mesh posed by skin_pose (with tangents when asked); null when the pose
+   * doesn't hold for this mesh now (the usual build or move then). */
+  const RenderMesh *skinned_render_mesh(int ci, bool force_flat, bool tangents) const;
   void build_edge_sides() const;
   /* `moved`: the faces (ascending) with a vertex that moved (null: all of them); the others keep their triangles. */
   bool retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const std::vector<uint32_t> *moved) const;
@@ -429,6 +467,8 @@ struct MeshCounts {
    * them, the ones refused because a render vertex's corners no longer share a normal (the build would split it). */
   uint64_t in_place_refused = 0, in_place_split = 0;  // (in_place_split, since round 470: corners given a render vertex of their own in place)
   uint64_t settled = 0;  // (round 470: Mesh::settle calls that had something to put right)
+  uint64_t skinned = 0;  // (round 518: render meshes posed by the skin kernel, ADR 0146)
+  double ms_skinned = 0;
   MeshCounts operator-(const MeshCounts &o) const;
 };
 MeshCounts mesh_counts();

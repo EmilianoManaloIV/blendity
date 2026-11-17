@@ -10,6 +10,7 @@
 #include "stroke_object.h"
 #include "blockout_object.h"  // (Blockout's and BlockoutPiece's registration)
 #include "pose_counts.h"
+#include "skin_render.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -3188,6 +3189,17 @@ static bool blockout_stack_follows(const GameObject &g, bool has_result, const s
   return true;
 }
 
+/* Round 518 (ADR 0146): whether `rest` is the mesh before the skin as `m` is now - the same positions and custom
+ * normals on the same counts (the caller knows the topology is the same): the pose's rest, and its render mesh, are
+ * then kept from the last frame. */
+static bool same_rest(const Mesh &rest, const Mesh &m) {
+  auto same = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(Vec3)) == 0);
+  };
+  return rest.corner_verts.size() == m.corner_verts.size() && rest.face_offsets.size() == m.face_offsets.size() &&
+         same(rest.positions, m.positions) && same(rest.custom_normals, m.custom_normals);
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 8));
   const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
@@ -3277,6 +3289,56 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     for (size_t i = from; i < to; i++)
       if (on(*components[i])) run_modifier(*components[i], m);
   };
+  /* Round 518 (ADR 0146): the tail [split, end), and - when its last modifier drawn is a Skin without a limit group,
+   * outside Edit Mode's cage - the pose it skinned by and the mesh before it, for the render mesh to be posed from
+   * (Mesh::skin_pose). `prev`: the last result's pose, whose rest is kept while the mesh before the skin is the same
+   * (`same_topology`: the caller knows the topology held). The caller stamps the pose once the mesh's version is final. */
+  auto run_tail = [&](Mesh &m, const std::shared_ptr<const SkinPose> &prev, bool same_topology) -> std::shared_ptr<SkinPose> {
+    m.skin_pose = nullptr;
+    size_t last = components.size();
+    while (last > split && !on(*components[last - 1])) last--;
+    const auto *skin = last > split && mods != 2 ? dynamic_cast<const SkinModifier *>(components[last - 1].get()) : nullptr;
+    if (!skin || !skin->vertex_group.empty()) {
+      run(m, split, components.size());
+      return nullptr;
+    }
+    run(m, split, last - 1);
+    std::shared_ptr<const Mesh> rest;
+    std::shared_ptr<std::mutex> rest_lock;  // (SkinPose::rest_lock: kept with the rest it guards)
+    if (prev && prev->rest && prev->rest_lock && same_topology && same_rest(*prev->rest, m)) rest = prev->rest, rest_lock = prev->rest_lock;
+    else if (prev && prev->rest && prev->rest_lock && same_topology) {  // (only the positions before the skin moved - a shape key: the rest's render mesh follows in place)
+      std::lock_guard<std::mutex> lock(*prev->rest_lock);  // (a copy of a Mesh runs no parallel loop: no isolation needed)
+      const bool alone = prev.use_count() == 1 && prev->rest.use_count() == 1;
+      /* Written in place when nothing else holds the last pose or its rest (no snapshot, no copy on a worker); else
+       * copied, render caches included, so the copy still follows in place (review 518: not a whole copy a frame). */
+      std::shared_ptr<Mesh> r = alone ? std::const_pointer_cast<Mesh>(prev->rest) : std::make_shared<Mesh>(*prev->rest);
+      r->positions = m.positions, r->custom_normals = m.custom_normals;
+      r->deform_version++;
+      rest = r;
+      rest_lock = alone ? prev->rest_lock : std::make_shared<std::mutex>();
+    }
+    else {
+      MeshCopyBare bare;  // (no caches; and no skin_pose: SkinPoseRef)
+      auto r = std::make_shared<Mesh>(m);
+      /* What the rest's render mesh never reads (review 518: the weights alone are megabytes on an avatar). */
+      std::vector<VertexGroup>().swap(r->vertex_groups);
+      r->shape_keys.clear();
+      r->edit_basis.clear(), r->edit_shape.clear();
+      rest = r;
+      rest_lock = std::make_shared<std::mutex>();
+    }
+    SkinPoseSink sink(&m);
+    run(m, last - 1, last);
+    if (!sink.pose) return nullptr;
+    sink.pose->rest = std::move(rest);
+    sink.pose->rest_lock = std::move(rest_lock);
+    return sink.pose;
+  };
+  auto stamp = [](Mesh &m, std::shared_ptr<SkinPose> pose) {
+    if (!pose) return;
+    pose->for_version = m.version, pose->for_deform = m.deform_version;
+    m.skin_pose = std::move(pose);
+  };
   /* The head: built whole when its key changed - or, for one Subdivision Surface whose base only moved (ADR 0075),
    * followed in place by its chain, the moved vertices' footprint recomputed level by level. */
   bool head_followed = false;  // (the chain moved the head's positions only: its tail may deform again in place)
@@ -3365,20 +3427,23 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);  // (no head: the basis shaped here)
     m->deform_version++, edit_epoch::bump();  // before the tail runs: a deformer reading render_mesh() must not get last frame's
-    run(*m, split, components.size());
+    const std::shared_ptr<const SkinPose> prev = m->skin_pose.p;
+    std::shared_ptr<SkinPose> pose = run_tail(*m, prev, true);
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
         m->face_offsets.size() == head->face_offsets.size())
       m->version = v;  // the deformers touch() it; only the positions moved
     else
-      m->touch();  // a modifier that claims to deform changed topology: rebuild as usual
+      m->touch(), pose = nullptr;  // a modifier that claims to deform changed topology: rebuild as usual
+    stamp(*m, std::move(pose));
   }
   else {
     m = std::make_shared<Mesh>(*head);
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();
     m->edit_basis.clear(), m->edit_shape.clear(), m->edit_show_full = false;  // (round 406)
-    run(*m, split, components.size());
+    std::shared_ptr<SkinPose> pose = run_tail(*m, nullptr, false);
     m->touch();
+    stamp(*m, std::move(pose));
   }
   eval_mesh_[kind] = m;
   eval_key_[kind] = key;

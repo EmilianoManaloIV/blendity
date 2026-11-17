@@ -5,6 +5,7 @@
 #include "../src/scene/humanoid.h"
 #include "../src/scene/motion_check.h"
 #include "../src/scene/ragdoll.h"
+#include "../src/scene/skin_render.h"  // (round 518: Mesh::skin_pose)
 
 
 /* ===================================================================== */
@@ -8478,6 +8479,17 @@ static void r470_prepare(const R469Char &c) {
     m.touch();
   }
 }
+/* Round 518 (ADR 0146): a skin's render mesh is now its rest one posed by the bones - it never moves in place, splits a
+ * corner or gets quick tangents to settle. Every other deformer still takes that path, so the round 470 tests that pin it
+ * keep it: a limit group weighting every vertex 1 deforms as before (to rounding) and keeps the skin on the in-place path. */
+static void r518_keep_in_place(const R469Char &c) {
+  for (GameObject *g : {c.body, c.hair, c.glove}) {
+    Mesh &m = *g->mesh_filter()->mesh;
+    m.vertex_groups.push_back(VertexGroup{"R518 All", std::vector<float>(m.vert_count(), 1.0f)});
+    m.touch();
+    g->get<SkinModifier>()->vertex_group = "R518 All";
+  }
+}
 /* A bone swinging out and back every 20 steps. */
 static void r470_swing(const R469Char &c, int k) {
   const int ph = k % 20;
@@ -8518,6 +8530,7 @@ static void tests_round470() {
       Scene s;
       const R469Char c = r469_build(s, true, normals != 0);
       r470_prepare(c);
+      r518_keep_in_place(c);  // (round 518: the in-place path this test pins)
       const GameObject *objs[3] = {c.body, c.hair, c.glove};
       for (int warm = 0; warm < 2; warm++) {  // (the first poses build; the thousand follow)
         r470_swing(c, warm);
@@ -8603,7 +8616,9 @@ static void tests_round470() {
                   (unsigned long long)b.mesh.tangent_builds);
       CHECK(a.ok && b.ok);
       CHECK(a.mesh.in_place_refused == 0 && b.mesh.in_place_refused == 0);
-      CHECK(b.mesh.in_place > 0);
+      /* Round 518 (ADR 0146): the skins are posed from their rest render meshes, no longer moved in place. */
+      std::printf("    %s: long drag: %llu render meshes posed by the skin\n", scene, (unsigned long long)b.mesh.skinned);
+      CHECK(b.mesh.skinned > 0 && b.mesh.in_place == 0);
       /* The long drag's extra frames build nothing: its whole builds are the short one's (the first frame's), plus the
        * outline shells (ADR 0124 leaves them out: a shell is a new mesh every frame), which are counted apart. */
       CHECK(b.mesh.full_builds <= a.mesh.full_builds + (b.pose.outline_shells > a.pose.outline_shells ? b.pose.outline_shells - a.pose.outline_shells : 0));
@@ -8620,6 +8635,7 @@ static void tests_round470_editor() {
     r34_open(ed, false);
     const R469Char c = r469_build(ed.scene(), true, false);
     r470_prepare(c);
+    r518_keep_in_place(c);  // (round 518: the in-place path and its settling, which these tests pin)
     ed.mark_changed_for_test("R470 setup");
     r34_steps(ed, 4);
     return c;
@@ -10672,7 +10688,7 @@ static void tests_round474() {
      * were built whole as well - physics_step asked every mesh's bounds before the springs moved the pose, and the Game view's
      * mesh then no longer matched the Scene view's. */
     CHECK(d.full_builds <= pd.outline_shells);
-    CHECK(d.in_place_refused == 0 && d.in_place > 0);
+    CHECK(d.in_place_refused == 0 && d.skinned > 0);  // (round 518, ADR 0146: the skins are posed from their rest render meshes, not moved in place)
     size_t skins = 0, unequal = 0;
     ed.scene().for_each([&](GameObject &g) {
       if (!g.get<SkinModifier>() || !g.mesh_filter() || !g.mesh_filter()->mesh) return;
@@ -11576,6 +11592,456 @@ static void tests_round474_more() {
   });
 }
 
+/* ---------------------------------------------------------------- round 518 (task 0501, ADR 0146): the skin poses the
+ * render mesh - the rest's render vertices moved by the same blend as the deform, normals and tangents turned by the
+ * bones (Unity's way), no render mesh built whole or moved in place on a pose. */
+/* Whether every posed corner lands where the deform put its vertex: within the spec's 1e-5 of the bounding diagonal
+ * (review 518: the two share skin_blend_point, but MSVC's /fp:fast with /GL may inline it into its two call sites
+ * differently - build.bat - so bits are not promised; whether they agree is printed). */
+static bool r518_render_matches(const Mesh &em, const RenderMesh &rm, float &worst) {
+  worst = 0.0f;
+  bool bits = true, finite = true;
+  for (size_t i = 0; i < rm.indices.size() && i < rm.tri_corner.size(); i++) {
+    const Vec3 a = rm.positions[rm.indices[i]], b = em.positions[em.corner_verts[rm.tri_corner[i]]];
+    if (std::memcmp(&a, &b, sizeof(Vec3)) != 0) bits = false;
+    const float d = length(a - b);
+    if (!finite_bits(d)) finite = false;
+    worst = std::max(worst, d);
+  }
+  AABB box;
+  for (const Vec3 &p : em.positions) box.add(p);
+  const float diag = box.valid() ? length(box.max - box.min) : 1.0f;
+  if (!bits) std::printf("    (posed corners off the deform's last bits: worst %.3g of a %.3g diagonal)\n", worst, diag);
+  return finite && worst <= 1e-5f * std::max(diag, 1e-3f);
+}
+
+static void tests_round518() {
+  test("a posed character's render mesh is its rest one posed by the skin (round 518): every corner lands where the deform puts it (to 1e-5 of its size), linear and dual quaternion", [] {
+    for (int dq = 0; dq < 2; dq++) {
+      Scene s;
+      const R469Char c = r469_build(s, true);
+      c.rig->get<Armature>()->deform = dq;
+      c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+      c.hip->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.2f));
+      const Mesh *em = c.body->evaluated_mesh();
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) continue;
+      const MeshCounts m0 = mesh_counts();
+      const RenderMesh &rm = em->render_mesh();
+      const MeshCounts d = mesh_counts() - m0;
+      float worst = 0.0f;
+      const bool bits = r518_render_matches(*em, rm, worst);
+      std::printf("    %s: worst %.3g, within 1e-5 of the diagonal: %s, %llu skinned, %llu built whole\n", dq ? "dual quaternion" : "linear", worst, bits ? "yes" : "no",
+                  (unsigned long long)d.skinned, (unsigned long long)d.full_builds);
+      CHECK(bits);
+      CHECK(d.skinned == 1);
+    }
+  });
+
+  test("a posed frame builds no render mesh whole and moves none in place (round 518): ten poses, ten skinned render meshes", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.1f));
+    c.body->evaluated_mesh()->render_mesh();  // (the first: the rest's render mesh is built once)
+    const MeshCounts m0 = mesh_counts();
+    for (int i = 1; i <= 10; i++) {
+      c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.1f + 0.07f * (float)i));
+      const Mesh *em = c.body->evaluated_mesh();
+      float worst = 0.0f;
+      CHECK(r518_render_matches(*em, em->render_mesh(), worst));
+    }
+    const MeshCounts d = mesh_counts() - m0;
+    std::printf("    10 poses: %llu skinned, %llu built whole, %llu moved in place, %llu tangents built\n", (unsigned long long)d.skinned,
+                (unsigned long long)d.full_builds, (unsigned long long)d.in_place, (unsigned long long)d.tangent_builds);
+    CHECK(d.skinned == 10 && d.full_builds == 0 && d.in_place == 0 && d.tangent_builds == 0);
+  });
+
+  test("a posed render mesh's normals are its rest normals turned by the bone (round 518, ADR 0146: Unity's way), and come back at rest", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    const Quat q = Quat::axis_angle({0, 0, 1}, 0.9f);
+    c.head->set_local_rotation(q);  // (the hair is weighted to the head alone)
+    const Mesh *em = c.hair->evaluated_mesh();
+    CHECK(em && em->skin_pose && em->skin_pose->rest);
+    if (!em || !em->skin_pose || !em->skin_pose->rest) return;
+    const RenderMesh &rest = em->skin_pose->rest->render_mesh();
+    const RenderMesh &rm = em->render_mesh();
+    float worst = 0.0f;
+    for (size_t i = 0; i < rm.normals.size() && i < rest.normals.size(); i++) worst = std::max(worst, length(rm.normals[i] - q.rotate(rest.normals[i])));
+    std::printf("    the head turned 0.9: normals off the turned rest by %.3g at most\n", worst);
+    CHECK(rm.normals.size() == rest.normals.size() && worst < 1e-5f);
+    const std::vector<Vec3> rest_normals = rest.normals;
+    c.head->set_local_rotation(Quat());
+    const Mesh *back = c.hair->evaluated_mesh();
+    const RenderMesh &rb = back->render_mesh();
+    worst = 0.0f;
+    for (size_t i = 0; i < rb.normals.size() && i < rest_normals.size(); i++) worst = std::max(worst, length(rb.normals[i] - rest_normals[i]));
+    CHECK(rb.normals.size() == rest_normals.size() && worst < 1e-6f);
+  });
+
+  test("a skinned mesh with custom normals: the render normals are the deform's turned custom normals (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true, true);
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.6f));
+    const Mesh *em = c.body->evaluated_mesh();
+    CHECK(em && em->skin_pose && em->custom_normals_fit());
+    if (!em || !em->custom_normals_fit()) return;
+    const RenderMesh &rm = em->render_mesh();
+    float worst = 0.0f;
+    for (size_t i = 0; i < rm.indices.size(); i++) worst = std::max(worst, length(rm.normals[rm.indices[i]] - em->custom_normals[em->corner_verts[rm.tri_corner[i]]]));
+    std::printf("    custom normals: render normals off the deform's by %.3g at most\n", worst);
+    CHECK(worst < 1e-5f);
+  });
+
+  test("a Skin with a limit group, or a mesh changed after the skin, keeps the usual render mesh (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    c.body->get<SkinModifier>()->vertex_group = "Spine";
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+    const Mesh *em = c.body->evaluated_mesh();
+    CHECK(em && !em->skin_pose);
+    if (em) {
+      float worst = 0.0f;
+      r518_render_matches(*em, em->render_mesh(), worst);
+      CHECK(worst < 1e-5f);
+    }
+    const Mesh *hair = c.hair->evaluated_mesh();
+    CHECK(hair && hair->skin_pose);
+    if (!hair) return;
+    Mesh copy = *hair;  // (an edit of a copy: Apply Modifiers' path)
+    copy.positions[0] = copy.positions[0] + Vec3(0, 5, 0);
+    copy.touch();
+    const MeshCounts m0 = mesh_counts();
+    const RenderMesh &rm = copy.render_mesh();
+    CHECK((mesh_counts() - m0).skinned == 0);
+    float worst = 0.0f;
+    r518_render_matches(copy, rm, worst);
+    CHECK(worst < 1e-5f);
+  });
+}
+
+/* Round 518, second pass (written from the spec's criterion 1 and its risks, not from the diff): the cases that stress
+ * the blend - influences, weights, scales - and the places the pose must not appear. */
+static bool r518_sane_render(const Mesh &em, const RenderMesh &rm, float &worst, bool &normals_ok, bool &bounds_ok) {
+  const bool bits = r518_render_matches(em, rm, worst);
+  normals_ok = rm.normals.size() == rm.positions.size();
+  bounds_ok = rm.bounds.valid();
+  for (size_t i = 0; i < rm.indices.size(); i++) {
+    const uint32_t v = rm.indices[i];
+    const Vec3 n = rm.normals[v], p = rm.positions[v];
+    if (!finite_bits(n.x) || !finite_bits(n.y) || !finite_bits(n.z) || std::fabs(length(n) - 1.0f) > 1e-3f) normals_ok = false;
+    if (finite_bits(p.x) && finite_bits(p.y) && finite_bits(p.z) &&
+        (p.x < rm.bounds.min.x || p.y < rm.bounds.min.y || p.z < rm.bounds.min.z || p.x > rm.bounds.max.x || p.y > rm.bounds.max.y || p.z > rm.bounds.max.z))
+      bounds_ok = false;
+  }
+  return bits;
+}
+static GameObject *r518_chain(Scene &s, GameObject *rig, int n, float step, std::vector<GameObject *> &bones, std::vector<std::string> &names) {
+  GameObject *parent = rig;
+  for (int i = 0; i < n; i++) {
+    names.push_back("C" + std::to_string(i));
+    parent = r469_bone(s, names.back(), parent, {0, i == 0 ? 0.0f : step, 0});
+    bones.push_back(parent);
+  }
+  return parent;
+}
+
+static void tests_round518_more() {
+  test("a skinned render mesh lands where the deform puts it with 1 to 8 influences, weights under and over 1, an unweighted vertex, and NaN / infinite weights (round 518)", [] {
+    for (int dq = 0; dq < 2; dq++)
+      for (int influences = 1; influences <= 8; influences++)
+        for (int scale_kind = 0; scale_kind < 3; scale_kind++) {  // (weights as made, times 0.4: sums under 1, times 2.5: over 1)
+          Scene s;
+          GameObject *rig = s.create("Rig");
+          rig->add<Armature>()->deform = dq;
+          std::vector<GameObject *> bones;
+          std::vector<std::string> names;
+          r518_chain(s, rig, 8, 1.0f, bones, names);
+          const float k = scale_kind == 0 ? 1.0f : scale_kind == 1 ? 0.4f : 2.5f;
+          MeshPtr m = r469_tube(0, 0, 8, 33, names, [k](size_t gi, float y) { return k * (std::sin((float)(gi + 1) * 1.7f + y * 2.3f) * 0.5f + 0.5f); }, false);
+          for (VertexGroup &g : m->vertex_groups) g.weights[5] = 0.0f;  // (vertex 5: no bone at all)
+          m->vertex_groups[2].weights[17] = kNaN;
+          m->vertex_groups[4].weights[40] = std::numeric_limits<float>::infinity();
+          m->vertex_groups[1].weights[60] = -std::numeric_limits<float>::infinity();
+          m->touch();
+          GameObject *tube = r469_skinned(s, "Tube", nullptr, m, "Rig");
+          tube->get<SkinModifier>()->max_influences = influences;
+          for (int i = 0; i < 8; i++) bones[(size_t)i]->set_local_rotation(Quat::axis_angle(normalize(Vec3(1.0f, (float)i * 0.3f, 0.5f)), 0.15f + 0.05f * (float)i));
+          const Mesh *em = tube->evaluated_mesh();
+          CHECK(em && em->skin_pose);
+          if (!em || !em->skin_pose) continue;
+          const RenderMesh &rm = em->render_mesh();
+          float worst = 0.0f;
+          bool nok = false, bok = false;
+          const bool bits = r518_sane_render(*em, rm, worst, nok, bok);
+          const Vec3 at = em->positions[5], was = em->skin_pose->rest->positions[5];
+          if (!bits || !nok || !bok || std::memcmp(&at, &was, sizeof(Vec3)) != 0)
+            std::printf("    dq %d influences %d weights x%.1f: bits %d, normals %d, bounds %d, unweighted vertex stayed %d\n", dq, influences, k, (int)bits, (int)nok, (int)bok,
+                        (int)(std::memcmp(&at, &was, sizeof(Vec3)) == 0));
+          CHECK(bits);
+          CHECK(nok);
+          CHECK(bok);
+          CHECK(std::memcmp(&at, &was, sizeof(Vec3)) == 0);  // (a vertex with no bone stays at rest)
+        }
+  });
+
+  test("an unevenly scaled and turned owner, and a mirrored bone, skin the render mesh where the deform puts it (round 518): dual quaternions fall back to linear per vertex", [] {
+    for (int dq = 0; dq < 2; dq++)
+      for (int variant = 0; variant < 3; variant++) {
+        Scene s;
+        const R469Char c = r469_build(s, true, true);
+        c.rig->get<Armature>()->deform = dq;
+        if (variant == 0) c.chr->set_local_scale({1.0f, 2.0f, 0.5f}), c.chr->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.6f));
+        if (variant == 1) c.spine->set_local_scale({-1.0f, 1.0f, 1.0f});                    // (a mirrored bone)
+        if (variant == 2) c.chr->set_local_scale({-1.0f, 1.0f, 1.0f}), c.hip->set_local_scale({1.0f, 1.5f, 1.0f});  // (a mirrored owner and a stretched bone)
+        c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+        c.head->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.4f));
+        const GameObject *objs[3] = {c.body, c.hair, c.glove};
+        for (const GameObject *o : objs) {
+          const Mesh *em = o->evaluated_mesh();
+          CHECK(em && em->skin_pose);
+          if (!em || !em->skin_pose) continue;
+          float worst = 0.0f;
+          bool nok = false, bok = false;
+          const bool bits = r518_sane_render(*em, em->render_mesh(), worst, nok, bok);
+          if (!bits || !nok || !bok) std::printf("    dq %d variant %d %s: worst %.3g, normals %d, bounds %d\n", dq, variant, o->name.c_str(), worst, (int)nok, (int)bok);
+          CHECK(bits);
+          CHECK(nok);
+          CHECK(bok);
+        }
+      }
+  });
+
+  test("a 292-bone armature skins its render mesh where the deform puts it, normals unit and finite (round 518)", [] {
+    for (int dq = 0; dq < 2; dq++) {
+      Scene s;
+      GameObject *rig = s.create("Rig");
+      rig->add<Armature>()->deform = dq;
+      std::vector<GameObject *> bones;
+      std::vector<std::string> names;
+      r518_chain(s, rig, 292, 0.01f, bones, names);
+      MeshPtr m = r469_tube(0, 0, 2.9f, 59, names, [](size_t gi, float y) { return std::max(0.0f, 1.0f - std::fabs(y * 100.0f - (float)gi) / 4.0f); }, false);
+      GameObject *tube = r469_skinned(s, "Tube", nullptr, m, "Rig");
+      tube->get<SkinModifier>()->max_influences = 8;
+      for (size_t i = 0; i < bones.size(); i++) bones[i]->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.004f * (float)(i % 7)));
+      const Mesh *em = tube->evaluated_mesh();
+      CHECK(em && em->skin_pose && em->skin_pose->mats.size() == 292);
+      if (!em || !em->skin_pose) continue;
+      float worst = 0.0f;
+      bool nok = false, bok = false;
+      const bool bits = r518_sane_render(*em, em->render_mesh(), worst, nok, bok);
+      std::printf("    292 bones, %s: within 1e-5 %s, normals %d, bounds %d\n", dq ? "dual quaternion" : "linear", bits ? "yes" : "no", (int)nok, (int)bok);
+      CHECK(bits);
+      CHECK(nok);
+      CHECK(bok);
+    }
+  });
+
+  test("a shape key changing while the character is posed keeps the skinned render mesh (round 518): the rest's follows, the posed one matches the evaluated positions", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    Mesh &base = *c.hair->get<MeshFilter>()->mesh;
+    base.shape_keys.push_back(ShapeKey{"Fat", std::vector<Vec3>(base.vert_count(), Vec3(0.0f, 0.0f, 0.3f))});
+    base.touch();
+    MeshRenderer *mr = c.hair->add<MeshRenderer>();
+    c.head->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+    c.hair->evaluated_mesh()->render_mesh();
+    uint64_t skinned = 0, whole = 0;
+    for (int i = 1; i <= 6; i++) {
+      mr->set_shape_weight("Fat", 0.15f * (float)i);
+      c.head->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f + 0.05f * (float)(i % 2)));
+      const Mesh *em = c.hair->evaluated_mesh();
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) continue;
+      const MeshCounts m0 = mesh_counts();
+      float worst = 0.0f;
+      CHECK(r518_render_matches(*em, em->render_mesh(), worst));
+      const MeshCounts d = mesh_counts() - m0;
+      skinned += d.skinned, whole += d.full_builds;
+      // the rest the pose holds is the shaped basis: its first vertex moved with the weight
+      CHECK(em->skin_pose->rest && std::fabs(em->skin_pose->rest->positions[0].z - (base.positions[0].z + 0.15f * (float)i * 0.3f)) < 1e-5f);
+      CHECK(d.full_builds == 0);  // (a shape key moves the rest's positions only: its render mesh follows in place, and the posed mesh is never built whole)
+    }
+    std::printf("    6 shape weights while posed: %llu skinned, %llu built whole\n", (unsigned long long)skinned, (unsigned long long)whole);
+    CHECK(skinned == 6);
+  });
+
+  test("Edit Mode's cage, the Armature's Rest Position, a disabled and a removed Skin give no pose (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+    CHECK(c.body->evaluated_mesh() && c.body->evaluated_mesh()->skin_pose);
+    const Mesh *cage = c.body->evaluated_mesh(2);
+    CHECK(!cage || !cage->skin_pose);
+    if (cage) {
+      float worst = 0.0f;
+      r518_render_matches(*cage, cage->render_mesh(), worst);
+      CHECK(worst < 1e-5f);
+    }
+    c.rig->get<Armature>()->rest_position = true;
+    const Mesh *rest = c.body->evaluated_mesh();
+    CHECK(!rest || !rest->skin_pose);
+    c.rig->get<Armature>()->rest_position = false;
+    CHECK(c.body->evaluated_mesh() && c.body->evaluated_mesh()->skin_pose);  // (and it comes back)
+    c.body->get<SkinModifier>()->enabled = false;
+    const Mesh *off = c.body->evaluated_mesh();
+    CHECK(!off || !off->skin_pose);
+    CHECK(off == c.body->get<MeshFilter>()->mesh.get());  // (the base mesh itself, as with no modifier)
+    c.body->get<SkinModifier>()->enabled = true;
+    CHECK(c.body->evaluated_mesh() && c.body->evaluated_mesh()->skin_pose);
+    c.body->remove_component(c.body->get<SkinModifier>());
+    const Mesh *gone = c.body->evaluated_mesh();
+    CHECK(gone == c.body->get<MeshFilter>()->mesh.get() && !gone->skin_pose);
+  });
+
+  test("a posed quad and n-gon keep the rest's diagonals and the bounds hold every posed vertex (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    Mesh &hair = *c.hair->get<MeshFilter>()->mesh;
+    std::vector<uint32_t> cap;
+    for (uint32_t k = 0; k < 12; k++) cap.push_back(k);
+    hair.add_face(cap.data(), cap.size());  // (an n-gon on the ring at the bottom)
+    hair.touch();
+    c.head->set_local_rotation(Quat::axis_angle({0, 0, 1}, 1.3f));
+    const Mesh *em = c.hair->evaluated_mesh();
+    CHECK(em && em->skin_pose && em->skin_pose->rest);
+    if (!em || !em->skin_pose || !em->skin_pose->rest) return;
+    const RenderMesh &rest = em->skin_pose->rest->render_mesh();
+    const RenderMesh &rm = em->render_mesh();
+    CHECK(rm.indices == rest.indices);
+    CHECK(rm.tri_corner == rest.tri_corner && rm.tri_face == rest.tri_face);
+    float worst = 0.0f;
+    bool nok = false, bok = false;
+    CHECK(r518_sane_render(*em, rm, worst, nok, bok));
+    CHECK(nok && bok);
+    AABB want;
+    for (const Vec3 &p : em->positions) want.add(p);
+    CHECK(rm.bounds.min.x <= want.min.x + 1e-6f && rm.bounds.min.y <= want.min.y + 1e-6f && rm.bounds.min.z <= want.min.z + 1e-6f);
+    CHECK(rm.bounds.max.x >= want.max.x - 1e-6f && rm.bounds.max.y >= want.max.y - 1e-6f && rm.bounds.max.z >= want.max.z - 1e-6f);
+  });
+
+  test("a copy of an evaluated mesh draws the same, and an edited copy falls back (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+    const Mesh *em = c.body->evaluated_mesh();
+    CHECK(em && em->skin_pose);
+    if (!em) return;
+    Mesh copy = *em;  // (as a snapshot does)
+    float worst = 0.0f;
+    bool nok = false, bok = false;
+    CHECK(r518_sane_render(copy, copy.render_mesh(), worst, nok, bok));
+    CHECK(nok && bok);
+    Mesh edited = *em;
+    for (Vec3 &p : edited.positions) p = p * 2.0f;
+    edited.deform_version++;  // (positions only: the pose no longer fits)
+    const MeshCounts m0 = mesh_counts();
+    const RenderMesh &rm = edited.render_mesh();
+    CHECK((mesh_counts() - m0).skinned == 0);
+    r518_render_matches(edited, rm, worst);
+    CHECK(worst < 1e-5f);
+    Mesh edited2 = *em;
+    edited2.add_vert({0, 9, 0});
+    edited2.touch();  // (a version bump with a vertex more)
+    const MeshCounts m1 = mesh_counts();
+    const RenderMesh &rm2 = edited2.render_mesh();
+    CHECK((mesh_counts() - m1).skinned == 0);
+    CHECK(rm2.positions.size() >= 1);
+    // the original is untouched by its copies
+    CHECK(r518_render_matches(*em, em->render_mesh(), worst));
+  });
+
+  /* Review 518, finding 1: a worker's copy (Bake Textures, a lightmap bake, an export: mesh_copy_bare) must not reach the
+   * rest mesh the editor's frames keep posing from - it builds its own render mesh from the posed positions. */
+  test("a bare copy of a posed mesh - an operator's, a bake's - carries no pose and draws its own posed positions (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.6f));
+    const Mesh *em = c.body->evaluated_mesh();
+    CHECK(em && em->skin_pose);
+    if (!em) return;
+    const MeshPtr bare = mesh_copy_bare(*em);
+    CHECK(!bare->skin_pose);
+    float worst = 0.0f;
+    CHECK(r518_render_matches(*bare, bare->render_mesh_tangents(), worst));
+    const Mesh plain = *em;  // (a plain copy - a snapshot's - keeps it, and draws the same)
+    CHECK((bool)plain.skin_pose);
+    CHECK(r518_render_matches(plain, plain.render_mesh(), worst));
+  });
+
+  /* Review 518, finding 2: a shape key moving while posed makes the skin's rest follow in place, with quick tangents;
+   * once it rests they are settled with the mesh (ADR 0034: a picture never depends on how the mesh got its shape). */
+  test("a shape key that moved while the character was posed leaves exact tangents once it rests: the skin's rest is settled with the mesh (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    r470_prepare(c);  // (UVs and smooth by angle: tangents to compare)
+    Mesh &base = *c.hair->get<MeshFilter>()->mesh;
+    std::vector<Vec3> bulge(base.vert_count());
+    for (size_t v = 0; v < bulge.size(); v++) bulge[v] = Vec3(0.2f * base.positions[v].y, 0.0f, 0.3f * base.positions[v].y * base.positions[v].y);
+    base.shape_keys.push_back(ShapeKey{"Bulge", bulge});
+    base.touch();
+    MeshRenderer *mr = c.hair->add<MeshRenderer>();
+    c.head->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+    c.hair->evaluated_mesh()->render_mesh_tangents();  // (a normal-mapped draw: the rest's tangents made)
+    for (int i = 1; i <= 4; i++) {
+      mr->set_shape_weight("Bulge", 0.2f * (float)i);
+      c.hair->evaluated_mesh()->render_mesh_tangents();
+    }
+    const Mesh *em = c.hair->evaluated_mesh();
+    CHECK(em && em->skin_pose && em->skin_pose->rest);
+    if (!em || !em->skin_pose || !em->skin_pose->rest) return;
+    const bool needed = em->needs_settle();
+    const bool settled = em->settle();
+    const RenderMesh &drawn = em->render_mesh_tangents();
+    Mesh fresh = *em->skin_pose->rest;  // (the same rest built from scratch, posed by the same pose)
+    fresh.forget_caches();
+    const RenderMesh &fr = fresh.render_mesh_tangents();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(fresh, fr, table);
+    RenderMesh posed;
+    skin_render_vertices(*em->skin_pose, fr, table, posed);
+    float worst = 0.0f;
+    const bool same_size = drawn.tangents.size() == posed.tangents.size() && drawn.positions.size() == posed.positions.size();
+    for (size_t i = 0; same_size && i < posed.tangents.size(); i++) worst = std::max(worst, length(drawn.tangents[i].xyz() - posed.tangents[i].xyz()));
+    std::printf("    after the shape key rested: settle needed %d, settled %d, tangents off a fresh build's by %.3g\n", (int)needed, (int)settled, worst);
+    CHECK(needed && settled);
+    CHECK(same_size && worst < 1e-5f);
+    CHECK(!em->needs_settle());
+  });
+
+  /* Review 518: one lock for every skin's rest, held across the kernel's parallel loop, hung with oneTBB when a thread
+   * waiting inside it stole a piece of the outer loop that drew another posed skin (Editor::prebuild_render_meshes, a
+   * bake's gather). Each rest has its own lock now, taken inside JobSystem::isolate. A hang here is the failure. */
+  test("many posed skins drawn from one parallel loop - the views' warm-up, a bake's gather - all pose, none waits on another (round 518)", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    std::vector<GameObject *> skins;
+    for (int i = 0; i < 20; i++)  // (300 rings x 12: over the kernel's 2048-vertex grain, so it runs its own parallel loop)
+      skins.push_back(r469_skinned(s, strprintf("Big%d", i), c.chr,
+                                   r469_tube(0.05f * (float)i, 0, 2, 300, {"Hip", "Spine"}, [](size_t gi, float y) { return gi == 0 ? std::max(0.0f, 1.0f - y * 0.5f) : std::min(1.0f, y * 0.5f); }, false),
+                                   "Rig"));
+    const JobSystem::Backend was = JobSystem::global().backend();
+    if (JobSystem::tbb_available()) JobSystem::global().set_backend(JobSystem::Backend::TBB);
+    size_t matched = 0;
+    for (int frame = 0; frame < 3; frame++) {
+      c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.3f + 0.2f * (float)frame));
+      std::vector<const Mesh *> ems;
+      for (GameObject *g : skins) ems.push_back(g->evaluated_mesh());  // (evaluated on this thread, as the editor does)
+      JobSystem::global().parallel_for((int64_t)ems.size(), 1, [&](int64_t b, int64_t e) {
+        for (int64_t i = b; i < e; i++) (void)ems[(size_t)i]->render_mesh_tangents();
+      });
+      matched = 0;
+      for (const Mesh *em : ems) {
+        float worst = 0.0f;
+        matched += em->skin_pose && r518_render_matches(*em, em->render_mesh(), worst);
+      }
+    }
+    JobSystem::global().set_backend(was);
+    std::printf("    20 skins of 3,600 vertices posed from one parallel loop (%s): %zu of 20 match the deform\n", JobSystem::tbb_available() ? "oneTBB" : "built-in pool", matched);
+    CHECK(matched == skins.size());
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -11615,4 +12081,6 @@ void run_animation_tests() {
   tests_round473_more();
   tests_round474();
   tests_round474_more();
+  tests_round518();
+  tests_round518_more();
 }

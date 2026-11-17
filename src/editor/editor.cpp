@@ -878,6 +878,7 @@ Editor::PosingList Editor::posing_parts(const FrameProfile &p, const PoseCounts 
       {"skin keys", pc.ms_skin_keys}, {"shape key hashes", pc.ms_shape_hashes}, {"skin setup", pc.ms_skin_setup},
       {"skinning", pc.ms_skin_deforms}, {"shape keys", pc.ms_shape_applies}, {"evaluations", pc.ms_evaluations},
       {"in place", mc.ms_in_place}, {"normals", mc.ms_in_place_normals}, {"tangents", mc.ms_in_place_tangents},
+      {"render meshes posed by the skin", mc.ms_skinned},  // (round 518, ADR 0146)
       {"outlines", pc.ms_outline_shells}, {"mesh uploads", p.ms_mesh_uploads}, {"scene hashes", p.ms_hash},
       {"draw items", p.ms_collect}, {"instances", p.ms_gpu_instances}, {"overlays", p.ms_overlays}, {"rig overlay", p.ms_rig_overlay},
       {"puppet controls", p.ms_puppet}, {"lighting key", p.ms_lighting_key}, {"record", p.ms_record}, {"clip", pc.ms_clip_applies},
@@ -921,7 +922,8 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
       {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
       {"corners split in place", (double)mc.in_place_split}, {"meshes settled", (double)mc.settled}, {"render meshes built whole", (double)mc.full_builds},
-      {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies}};
+      {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies},
+      {"render meshes skinned", (double)mc.skinned}};
 }
 
 std::string Editor::posing_counts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames) {
