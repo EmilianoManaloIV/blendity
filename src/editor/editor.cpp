@@ -3827,6 +3827,7 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     const double n = std::max(1, frames);
     std::printf("  presented by the %s: %.2f ms a frame over %d frames, %.1f views a frame on the card%s%s\n", card ? "card" : "system", sum / n, frames,
                 (double)views / n, gpu_view_reason_.empty() ? "" : "; on the CPU: ", gpu_view_reason_.c_str());
+    print_rt_shadow_stats();  // (round 543: what the traced shadows built over these frames)
     /* Task 0203: where the frame went (the Profiler's parts, a frame's mean): what makes a row slow. The parts nest: the
      * overlays, gathering, hashing and the Scene view's own GPU path are inside the Scene view; the GPU path counts every
      * view's; the UI is the rest of the panels. */
@@ -5551,6 +5552,7 @@ void Editor::load_prefs() {
     else if (k == "other_views_follow") other_views_follow_ = v == "1";
     else if (k == "cpu_fallback_noticed") cpu_fallback_noticed_ = v == "1";
     else if (k == "simpler_while_moving") simpler_while_moving_ = v == "1";
+    else if (k == "rt_shadows") rt_shadows_ = v == "1";  // (round 543)
     else if (k == "always_redraw") always_redraw_ = v == "1";
     else if (k == "quality_tier") tier = std::atoi(v.c_str());
     else if (k == "workspace") workspace_ = v;
@@ -5662,6 +5664,7 @@ void Editor::save_prefs() {
   s += livelink_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
                  other_views_follow_ ? 1 : 0, simpler_while_moving_ ? 1 : 0, cpu_fallback_noticed_ ? 1 : 0);
+  s += strprintf("rt_shadows=%d\n", rt_shadows_ ? 1 : 0);  // (round 543)
   s += strprintf("update_check=%d\nupdate_previews=%d\nupdate_last=%.0f\nupdate_skip=%s\n", update_check_ ? 1 : 0, update_previews_ ? 1 : 0,
                  update_last_check_, update_skip_.c_str());
   s += strprintf("import_preview=%d\nimport_shading=%d\n", import_preview_pref_ ? 1 : 0, import_shading_pref_);  // (task 0152)

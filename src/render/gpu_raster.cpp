@@ -15,6 +15,7 @@
 
 #if defined(BL_WITH_VULKAN)
 #  include "gpu_vk.h"
+#  include "gpu_raster_rt.h"
 #  ifdef _WIN32
 #    ifndef WIN32_LEAN_AND_MEAN
 #      define WIN32_LEAN_AND_MEAN
@@ -162,6 +163,8 @@ layout(std140, set = 0, binding = 0) uniform Frame {
   vec4 gi;             // task 0197: realtime GI's specular occlusion
   vec4 sky_disc; vec4 sky_disc_color; vec4 sky_band;  // task 0248: the stylized sky (dir + cos, colour + softness, colour + width)
   vec4 fog; vec4 fog_color; vec4 fog_far;             // task 0248: start, end, on; the near and far colours
+  vec4 rt_shadow;      // round 543: traced shadows - on, -, the ray's offset per unit of distance from the eye
+  uvec4 rt_bits;       // round 543: x the lights that cast traced shadows (bit i: light i)
 };
 layout(std430, set = 0, binding = 21) readonly buffer Lights { Light lights[]; };  // task 0195: any number (view.z of them)
 layout(std430, set = 0, binding = 22) readonly buffer VertexColors { vec4 vcol[]; };  // task 0195: Weight Paint's (Inst.toon5.y)
@@ -1258,7 +1261,7 @@ vec3 solid_shade(vec3 albedo, float specular, vec3 n, vec3 wp) {
 }
 )";
 
-const char *kLightFrag2 = R"(
+const char *kLightFrag2a = R"(
 #ifndef BL_BAKED_PASS
 layout(set = 0, binding = 37) uniform sampler2D g_mask;  // round 454 (ADR 0118): the baked pass's shadowmask, four lights in RGBA8 (white where none)
 #endif
@@ -1332,6 +1335,9 @@ float shadow_lookup(vec3 world, float ndl) {
     for (int dx = -1; dx <= 1; dx++) lit += lit_at(ix + dx, iy + dy, z - b, size);
   return lit / 9.0;
 }
+)";
+/* (Round 543: shadow_vis - the map's lookup, or the traced test - between the two halves.) */
+const char *kLightFrag2b = R"(
 /* Environment::irradiance / radiance / specular, times the strength: Gradient, Color, and since task 0102 a Sky or
  * HDRI world's map (dir_to_equirect with shading.cpp's polynomial atan2 and asin, so the texels are the CPU's). */
 float fast_atan2(float y, float x) {
@@ -1727,7 +1733,7 @@ vec3 lil_pixel(uint self, ivec2 px, uint flags, vec3 P, vec3 n, vec3 geo, vec3 a
   }
   vec3 light = lil_main_light(S, key_color, sh_max);
   float vis = 1.0;
-  if (key_color.r + key_color.g + key_color.b > 0.0 && key == shadow_light && receive && dot(n, L) > 0.0) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
+  if (key_color.r + key_color.g + key_color.b > 0.0 && dot(n, L) > 0.0) vis = shadow_vis(key, shadow_light, receive, P, geo, L);
   float shadowmix = 1.0;
   vec3 col = lil_shade(S, X, albedo, n, L, vis, light, sh_min, true, shadowmix);
   for (int li = 0; li < count; li++) {
@@ -1745,7 +1751,7 @@ vec3 lil_pixel(uint self, ivec2 px, uint flags, vec3 P, vec3 n, vec3 geo, vec3 a
     }
     if (!(fall > 0.0)) continue;
     float sv = 1.0;
-    if (li == shadow_light && receive && dot(n, Lk) > 0.0) sv = shadow_lookup(P + geo * 0.01, dot(geo, Lk));
+    if (dot(n, Lk) > 0.0) sv = shadow_vis(li, shadow_light, receive, P, geo, Lk);
     vec3 lc = lil_add_light(S, l.color.rgb * (l.color.w * min(fall, 1.0)));
     float unused = 0.0;
     col = col + lil_shade(S, X, albedo, n, Lk, sv, lc, vec3(0.0), false, unused);
@@ -1890,7 +1896,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
       float ndl = dot(n, L), vis = 1.0;
       float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
       if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
-      if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
+      if (ndl > 0.0) vis = shadow_vis(li, shadow_light, receive, P, geo, L);
       vis = mask_combine(vis, light_mask(l.spot.w, kind, smask), light_mask_map(l.spot.w, kind, li, shadow_light, has_mask), length(P - eye.xyz));  // (round 444; round 454: Distance Shadowmask)
       float face = li == key ? T.t2.y : -1.0;  // (task 0196: the face shadow map's lit term for the key light - no cast shadow on it)
       float lit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * min(fall, 1.0);
@@ -1910,7 +1916,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     if (light_skip(l.spot.w, kind)) {
 #ifndef BL_NO_MASK
       if (l.spot.w > 2.5 && l.spot.w < 3.5 && kind == 1 && li == shadow_light && receive)
-        sub_vis = min(sub_vis, shadow_lookup(P + geo * 0.01, dot(geo, int(l.pos_type.w) == 0 ? -l.dir_range.xyz : normalize(l.pos_type.xyz - P))));
+        sub_vis = min(sub_vis, shadow_vis(li, shadow_light, receive, P, geo, int(l.pos_type.w) == 0 ? -l.dir_range.xyz : normalize(l.pos_type.xyz - P)));
 #endif
       continue;
     }
@@ -1931,7 +1937,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     }
     float ndl = dot(n, L);
     if (ndl <= 0.0 || atten <= 0.0) continue;
-    float vis = li == shadow_light && receive ? shadow_lookup(P + geo * 0.01, dot(geo, L)) : 1.0;
+    float vis = shadow_vis(li, shadow_light, receive, P, geo, L);
     vis = mask_combine(vis, mask_vis, light_mask_map(l.spot.w, kind, li, shadow_light, has_mask), length(P - eye.xyz));  // (round 454: the darker of the two, as the CPU; was their product)
     if (vis <= 0.0) continue;
     lo += brdf_eval(albedo, rough, metallic, specular, n, V, L) * l.color.rgb * (atten * vis);
@@ -1954,6 +1960,8 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
 }
 )";
+const std::string kLightFrag2s = std::string(kLightFrag2a) + rt::kShadowVisGlsl + kLightFrag2b;
+const char *const kLightFrag2 = kLightFrag2s.c_str();
 
 const char *kProbeFns = R"(
 /* Task 0197: the probe volume (ProbeVolumeData::find_brick and sample, probe_volume.cpp), packed by the editor
@@ -2680,6 +2688,7 @@ struct Img {
 struct Mesh {
   Buf vb, ib;
   uint32_t vertices = 0, indices = 0;
+  uint64_t rt_content = 0;  // round 543: moves when its buffers or vertices change (the traced shadows' bottom levels follow)
   bool live = false;  // false: removed (its index may be given out again)
 };
 /* One view's targets: the shadow map, the G-buffer, the picture, their framebuffers and the set that reads them. */
@@ -2711,6 +2720,8 @@ struct FrameUbo {
   float env[4], env_color[4], bg[4], bg_sky[4], bg_horizon[4], bg_ground[4], lut[4], env_map[4], sh[9][4], cage[4];
   float probe[4], gi[4];  // (task 0197)
   float sky_disc[4], sky_disc_color[4], sky_band[4], fog[4], fog_color[4], fog_far[4];  // (task 0248)
+  float rt_shadow[4];  // (round 543: kCommon's rt_shadow and rt_bits)
+  uint32_t rt_bits[4];
 };
 struct InstGpu {
   float model[16], albedo_rough[4], metal_spec[4], emission[4];
@@ -2734,6 +2745,48 @@ Mat4 vulkan_clip(const float *m) {
 class VulkanRaster final : public Raster {
  public:
   ~VulkanRaster() override { destroy(); }
+
+  /* The device, with ray queries chained when the card has them (round 543, ADR 0151: the views' traced shadows) - a
+   * driver that refuses them opens it as before. The features go through VkPhysicalDeviceFeatures2 then. */
+  bool open_device(const VkDeviceQueueCreateInfo &qci, const VkPhysicalDeviceFeatures &want, const char *swapchain_ext) {
+    std::vector<const char *> exts;
+    if (swapchain_ok_) exts.push_back(swapchain_ext);
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    if (info_.hardware_rt) {
+      std::vector<const char *> rt_exts = exts;
+      for (const char *e : rt::kDeviceExtensions) rt_exts.push_back(e);
+      VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+      VkPhysicalDeviceAccelerationStructureFeaturesKHR asf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+      VkPhysicalDeviceRayQueryFeaturesKHR rqf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+      VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+      f2.features = want;
+      v12.bufferDeviceAddress = VK_TRUE;
+      asf.accelerationStructure = VK_TRUE;
+      rqf.rayQuery = VK_TRUE;
+      f2.pNext = &v12;
+      v12.pNext = &asf;
+      asf.pNext = &rqf;
+      dci.pNext = &f2;
+      dci.enabledExtensionCount = (uint32_t)rt_exts.size();
+      dci.ppEnabledExtensionNames = rt_exts.data();
+      rt_device_ = f_.vkCreateDevice(pd_, &dci, nullptr, &dev_) == VK_SUCCESS;
+      if (rt_device_) return true;
+      Log::warn("%s: the device didn't open with ray queries: the views' shadows use the map", info_.name.c_str());
+    }
+    dci.pNext = nullptr;
+    dci.pEnabledFeatures = &want;
+    dci.enabledExtensionCount = (uint32_t)exts.size();
+    dci.ppEnabledExtensionNames = exts.data();
+    return f_.vkCreateDevice(pd_, &dci, nullptr, &dev_) == VK_SUCCESS;
+  }
+  /* Round 543: a mesh's buffers on a device with ray queries are also read by the shadow structures' builds (the one
+   * place their usage gains anything - Pass 26's posed buffers add theirs here too). */
+  VkBufferUsageFlags mesh_usage(VkBufferUsageFlags usage) const {
+    if (!rt_ok_) return usage;
+    return usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+  }
 
   bool init(int index, std::string *err) {
     info_ = devices()[(size_t)index];
@@ -2777,17 +2830,16 @@ class VulkanRaster final : public Raster {
     geometry_ = have.geometryShader != 0;
     want.dualSrcBlend = have.dualSrcBlend;  // (task 0195: the see-through pass's blending)
     dual_src_ = have.dualSrcBlend != 0;
-    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    dci.pEnabledFeatures = &want;
-    dci.queueCreateInfoCount = 1;
-    dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = swapchain_ok_ ? 1 : 0;
-    dci.ppEnabledExtensionNames = &swapchain_ext;
-    if (f_.vkCreateDevice(pd_, &dci, nullptr, &dev_) != VK_SUCCESS) return fail(err, "could not open " + info_.name);
+    if (!open_device(qci, want, swapchain_ext)) return fail(err, "could not open " + info_.name);
 #define BL_RV_LOAD_D(name) f_.name = (PFN_##name)f_.vkGetDeviceProcAddr(dev_, #name);
     BL_RV_DEVICE(BL_RV_LOAD_D)
     if (swapchain_ok_) {
       BL_RV_SWAPCHAIN(BL_RV_LOAD_D)
+    }
+    if (rt_device_) {  // (round 543: the traced shadows' structures; a device without their functions draws with the map)
+      std::string rerr;
+      rt_ok_ = rt_.init(dev_, f_.vkGetDeviceProcAddr, memprops_, rt_scratch_align(), &rerr);
+      if (!rt_ok_) Log::warn("%s: no ray-traced shadows in the views (%s)", info_.name.c_str(), rerr.c_str());
     }
     f_.vkGetDeviceQueue(dev_, qfam_, 0, &queue_);
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -2830,8 +2882,8 @@ class VulkanRaster final : public Raster {
     m.indices = (uint32_t)idx.size();
     const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     const VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // (SRC: read_mesh)
-    if (!make_buffer(m.vb, v.size() * sizeof(RasterVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | copies, local) ||
-        !make_buffer(m.ib, idx.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT | copies, local)) {
+    if (!make_buffer(m.vb, v.size() * sizeof(RasterVertex), mesh_usage(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | copies), local) ||
+        !make_buffer(m.ib, idx.size() * sizeof(uint32_t), mesh_usage(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | copies), local)) {
       fail(err, info_.name + ": out of memory for a mesh");
       return -1;
     }
@@ -2840,6 +2892,7 @@ class VulkanRaster final : public Raster {
       return -1;
     }
     m.live = true;
+    m.rt_content = ++rt_content_serial_;
     resources_gen_++;
     for (size_t i = 0; i < meshes_.size(); i++)
       if (!meshes_[i].live) {
@@ -2855,6 +2908,7 @@ class VulkanRaster final : public Raster {
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
     Mesh &m = meshes_[(size_t)mesh];
     if (v.size() != m.vertices || (idx && idx->size() != m.indices)) return fail(err, "a mesh of another size");
+    m.rt_content = ++rt_content_serial_;
     if (!upload(m.vb, v.data(), v.size() * sizeof(RasterVertex), err)) return false;
     return !idx || upload(m.ib, idx->data(), idx->size() * sizeof(uint32_t), err);
   }
@@ -2873,6 +2927,7 @@ class VulkanRaster final : public Raster {
       if ((uint64_t)r.first + r.second > idx.size()) return fail(err, "an index range past the mesh");
     if (nv != v.size()) return fail(err, "vertices for other ranges");
     size_t from = 0;  // (the vertices come one range after another)
+    if (!vr.empty() || !ir.empty()) m.rt_content = ++rt_content_serial_;
     for (const auto &r : vr) {
       queue_copy(m.vb.buf, v.data() + from, (size_t)r.first * sizeof(RasterVertex), (size_t)r.second * sizeof(RasterVertex));
       from += r.second;
@@ -3068,6 +3123,7 @@ class VulkanRaster final : public Raster {
     settle();  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return;
     free_mesh(meshes_[(size_t)mesh]);  // (no wait: every submission here is waited for before its call returns)
+    if (rt_ok_) rt_.forget_mesh((uint64_t)mesh);
   }
 
   /* Round 506 (keep 1): every call is a new generation - what the instance rows and the tables are written from, and what the
@@ -3102,7 +3158,7 @@ class VulkanRaster final : public Raster {
 
   bool render(const RasterFrame &fr, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
-    if (!record_frame(fr, err) || !submit_wait(err)) return false;
+    if (!record_frame(fr, err) || !submit_wait(err)) return rt_abandoned();
     read_times();
     return true;
   }
@@ -3111,7 +3167,7 @@ class VulkanRaster final : public Raster {
    * the frame's uniforms and the staging the frame reads stay untouched until the card is done with them). */
   bool render_async(const RasterFrame &fr, std::string *err) override {
     if (!settle(err)) return false;
-    if (!record_frame(fr, err)) return false;
+    if (!record_frame(fr, err)) return rt_abandoned();
     submits_++;
     ScopedTimer wall;
     f_.vkEndCommandBuffer(cmd_);
@@ -3152,7 +3208,7 @@ class VulkanRaster final : public Raster {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     const size_t px = (size_t)fr.width * fr.height;
     if (!readback_buffer(px, err)) return false;  // (before the frame is recorded: record_frame takes the queued mesh copies)
-    if (!record_frame(fr, err)) return false;
+    if (!record_frame(fr, err)) return rt_abandoned();
     const Slot &sl = slots_[fr.slot];
     record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
     if (!submit_wait(err)) return false;
@@ -3196,6 +3252,8 @@ class VulkanRaster final : public Raster {
     }
     begin();
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
+    bool traced = rt_wanted(fr);
+    if (traced && !record_rt_shadows(sl, err)) traced = rt_give_up(err);  // (round 543: after the copies, before any set is bound)
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 4);
     stamp(0);
     draw_pass(rp_shadow_, sl.fb_shadow, sl.shadow.w, sl.shadow.h, sl.set, 1, fr.shadow_size > 0 ? DrawShadow : DrawNothing, false);  // (cleared even when unused)
@@ -3218,7 +3276,7 @@ class VulkanRaster final : public Raster {
     rb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
     f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     viewport(fr.width, fr.height);
-    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_light_);
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced ? pl_light_rt_ : pl_light_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
     if (!fr.splats.empty() && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
@@ -3234,7 +3292,7 @@ class VulkanRaster final : public Raster {
       hb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
       f_.vkCmdBeginRenderPass(cmd_, &hb, VK_SUBPASS_CONTENTS_INLINE);
       viewport(fr.width, fr.height);
-      f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_hdr_);
+      f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced && pl_hdr_rt_ ? pl_hdr_rt_ : pl_hdr_);
       f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
       f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
       if (!fr.see_through.empty() && can_draw_see_through() && pl_see_hdr_) {  // (round 414: the see-through pixels marked "none", as the CPU marks them)
@@ -3247,6 +3305,114 @@ class VulkanRaster final : public Raster {
     if (!fr.post.empty() && post_ok_ && !record_post(fr, sl, err)) return false;  // (round 416: the camera's filters over the picture)
     stamp(3);
     return true;
+  }
+
+  /* Round 543 (task 0523, ADR 0151): the traced shadows. */
+  /* (A traced variant that didn't compile, or a build that failed, leaves the map: the option then reads as unavailable.) */
+  bool can_trace_shadows() const override { return rt_ok_ && !rt_failed_ && (!rt_pipelines_tried_ || pl_light_rt_); }
+  void fail_rt_shadows_for_test() override { rt_force_fail_ = true; }
+  RtShadowStats rt_shadow_stats() const override {
+    const rt::Counters &c = rt_.counters();
+    RtShadowStats s;
+    s.blas_builds = c.blas_builds, s.tlas_builds = c.tlas_builds, s.last_build_ms = c.last_build_ms;
+    return s;
+  }
+  /* The frame asks for them and they can be drawn: the device has them, no build failed, the lighting passes' traced
+   * variants compiled, and the view is lit (Solid shading shades no light: nothing to trace for). */
+  bool rt_wanted(const RasterFrame &fr) { return fr.rt_shadows && !fr.gouraud && rt_ok_ && !rt_failed_ && rt_pipelines(); }
+  /* A build that failed (out of card memory, a driver's refusal): said once, the map from then on - the frame still drawn
+   * on the card, not handed to the CPU. */
+  bool rt_give_up(std::string *err) {
+    Log::warn("%s: the traced shadows couldn't be built (%s): the views use the shadow map", info_.name.c_str(), err && !err->empty() ? err->c_str() : "?");
+    if (err) err->clear();
+    rt_failed_ = true;
+    rt_.invalidate();
+    return false;
+  }
+  bool rt_abandoned() {
+    if (rt_ok_) rt_.invalidate();  // (round 543: the frame's recorded builds never ran)
+    return false;
+  }
+  /* The card's alignment for a build's scratch (VkPhysicalDeviceAccelerationStructurePropertiesKHR), 0 when it can't say. */
+  VkDeviceSize rt_scratch_align() const {
+    auto props2 = (PFN_vkGetPhysicalDeviceProperties2)vk::get_instance_proc_addr()(vk::instance(), "vkGetPhysicalDeviceProperties2");
+    if (!props2) return 0;
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR asp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+    VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    p2.pNext = &asp;
+    props2(pd_, &p2);
+    return asp.minAccelerationStructureScratchOffsetAlignment;
+  }
+  bool rt_pipelines() {
+    if (rt_pipelines_tried_) return pl_light_rt_ != VK_NULL_HANDLE;
+    rt_pipelines_tried_ = true;
+    std::string e;
+    const std::string light = std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain;
+    VkShaderModule fv = module(kFullVert, shaderc_vertex_shader, &e), lf = module(rt::kRtExtension + light, shaderc_fragment_shader, &e),
+                   hf = rp_hdr_ ? module(std::string(rt::kRtExtension) + "#define BL_HDR 1\n" + light, shaderc_fragment_shader, &e) : VK_NULL_HANDLE;
+    if (fv && lf) pl_light_rt_ = make_pipeline(rp_light_, fv, lf, 1, false, VK_CULL_MODE_NONE);
+    if (fv && hf) pl_hdr_rt_ = make_pipeline(rp_hdr_, fv, hf, 1, false, VK_CULL_MODE_NONE);
+    for (VkShaderModule m : {fv, lf, hf})
+      if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
+    if (!pl_light_rt_) Log::warn("%s: the traced shadows' lighting pass didn't compile (%s): the views use the shadow map", info_.name.c_str(), e.c_str());
+    else if (rp_hdr_ && !pl_hdr_rt_) Log::warn("%s: the traced shadows' linear-light pass didn't compile (%s): a camera's bloom reads the map's shadows", info_.name.c_str(), e.c_str());
+    return pl_light_rt_ != VK_NULL_HANDLE;
+  }
+  /* The instances that cast shadows - as the map's pass draws them: Cast Shadows, not see-through, not an axis
+   * material's part - each part of a mesh as the draw reads it. */
+  void collect_rt_casters() {
+    rt_casters_.clear();
+    for (const RasterInstance &in : instances_) {
+      if (!(in.flags & RasterInstance::CastShadows) || draw_skips(in, DrawShadow)) continue;
+      const Mesh &m = meshes_[in.mesh];
+      rt::Caster c;
+      c.vb = m.vb.buf, c.ib = m.ib.buf;
+      c.vertices = m.vertices, c.vertex_stride = (uint32_t)sizeof(RasterVertex);
+      c.first_index = in.index_count ? in.first_index : 0;
+      c.index_count = in.index_count ? in.index_count : m.indices;
+      c.mesh = in.mesh, c.content = m.rt_content;
+      std::memcpy(c.model, in.model, sizeof(c.model));
+      rt_casters_.push_back(c);
+    }
+  }
+  /* The structures built in the frame's command buffer (after the queued vertex copies they read), and the slot's set
+   * pointed at the top level - before anything binds the set this recording. */
+  bool record_rt_shadows(Slot &sl, std::string *err) {
+    if (rt_force_fail_) return fail(err, "a test made the build fail");
+    collect_rt_casters();
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    if (!rt_.record(cmd_, rt_casters_, err)) return false;
+    const size_t k = (size_t)(&sl - slots_);
+    if (rt_written_[k] == rt_.tlas_serial()) return true;
+    VkAccelerationStructureKHR as = rt_.tlas();
+    VkWriteDescriptorSetAccelerationStructureKHR wa{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    wa.accelerationStructureCount = 1;
+    wa.pAccelerationStructures = &as;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.pNext = &wa;
+    w.dstSet = sl.set;
+    w.dstBinding = rt::kTlasBinding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    f_.vkUpdateDescriptorSets(dev_, 1, &w, 0, nullptr);
+    rt_written_[k] = rt_.tlas_serial();
+    return true;
+  }
+  /* The frame block's rt_shadow and rt_bits: on, the ray's offset per unit of distance from the eye (the reconstructed
+   * position's error grows with it), the lights that cast shadows (the first 32: their bits). */
+  void write_rt_shadow(FrameUbo &u, const RasterFrame &fr) const {
+    uint32_t bits = 0;
+    for (size_t i = 0; i < fr.lights.size() && i < 32; i++)
+      if (fr.lights[i].shadows) bits |= 1u << i;
+    u.rt_shadow[0] = fr.rt_shadows && rt_ok_ ? 1.0f : 0.0f;
+    u.rt_shadow[1] = 0.0f;
+    u.rt_shadow[2] = 2e-4f;
+    u.rt_shadow[3] = 0.0f;
+    u.rt_bits[0] = bits;
+    u.rt_bits[1] = u.rt_bits[2] = u.rt_bits[3] = 0;
   }
 
   RasterTimes times() const override { return times_; }
@@ -3841,6 +4007,14 @@ class VulkanRaster final : public Raster {
   VkPipeline pl_toon_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0196: the toon pass - not culled, back, front
   VkPipeline pl_baked_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0197: the baked pass
   VkPipeline pl_hdr_ = VK_NULL_HANDLE;    // task 0197: the lighting in linear light
+  /* Round 543 (ADR 0151): the traced shadows - the device opened with ray queries, its structures, the lighting passes'
+   * traced variants (made the first time a frame asks; a failed compile leaves the map). */
+  bool rt_device_ = false, rt_ok_ = false, rt_pipelines_tried_ = false, rt_failed_ = false, rt_force_fail_ = false;
+  rt::Shadows rt_;
+  uint64_t rt_content_serial_ = 0;
+  uint64_t rt_written_[kSlots] = {};  // the top level's serial each slot's set holds
+  VkPipeline pl_light_rt_ = VK_NULL_HANDLE, pl_hdr_rt_ = VK_NULL_HANDLE;
+  std::vector<rt::Caster> rt_casters_;
   VkRenderPass rp_hdr_ = VK_NULL_HANDLE;
   /* Round 416: the filters' passes - a pipeline a kind, the float planes' render pass, the passes' own set layout (set
    * 1: the pass's images) with the frame's set 0, and push constants for the settings. */
@@ -3897,8 +4071,11 @@ class VulkanRaster final : public Raster {
       if ((bits & (1u << i)) && (memprops_.memoryTypes[i].propertyFlags & want) == want) return i;
     return UINT32_MAX;
   }
-  bool allocate(VkMemoryRequirements req, VkMemoryPropertyFlags props, VkDeviceMemory &mem) {
+  bool allocate(VkMemoryRequirements req, VkMemoryPropertyFlags props, VkDeviceMemory &mem, bool device_address = false) {
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkMemoryAllocateFlagsInfo fi{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};  // (round 543: a buffer a shadow structure's build reads)
+    fi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    if (device_address) ai.pNext = &fi;
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = memory_type(req.memoryTypeBits, props);
     return ai.memoryTypeIndex != UINT32_MAX && f_.vkAllocateMemory(dev_, &ai, nullptr, &mem) == VK_SUCCESS;
@@ -3911,7 +4088,7 @@ class VulkanRaster final : public Raster {
     if (f_.vkCreateBuffer(dev_, &bi, nullptr, &b.buf) != VK_SUCCESS) return false;
     VkMemoryRequirements req;
     f_.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
-    if (!allocate(req, props, b.mem)) {
+    if (!allocate(req, props, b.mem, (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0)) {
       f_.vkDestroyBuffer(dev_, b.buf, nullptr);
       b = Buf{};
       return false;
@@ -4641,6 +4818,7 @@ class VulkanRaster final : public Raster {
     u.shadow[1] = fr.shadow_bias;
     u.shadow[2] = fr.shadow_fast ? 1.0f : 0.0f;
     u.shadow[3] = fr.gouraud ? 1.0f : 0.0f;  // (task 0195)
+    write_rt_shadow(u, fr);  // (round 543)
     for (int k = 0; k < 3; k++) u.background[k] = ((fr.clear >> (16 - 8 * k)) & 255) / 255.0f;
     u.background[3] = 1.0f;
     u.env[0] = (float)fr.env_mode;
@@ -4729,6 +4907,8 @@ class VulkanRaster final : public Raster {
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 21; i <= 24; i++)  // the lights, the vertex colours, the see-through corners (task 0195), the toon maps (task 0196)
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    if (rt_ok_)  // round 543: the traced shadows' top level (written once it is built)
+      b.push_back({rt::kTlasBinding, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
     dli.pBindings = b.data();
@@ -4737,18 +4917,20 @@ class VulkanRaster final : public Raster {
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
-    uint32_t n_uniform = 0, n_storage = 0, n_sampler = 0;  // (round 416: counted from the layout - a binding added without the pool had left every view on the CPU on a driver that enforces pool sizes)
+    uint32_t n_uniform = 0, n_storage = 0, n_sampler = 0, n_accel = 0;  // (round 416: counted from the layout - a binding added without the pool had left every view on the CPU on a driver that enforces pool sizes)
     for (const VkDescriptorSetLayoutBinding &x : b) {
       if (x.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_uniform += x.descriptorCount;
       else if (x.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) n_storage += x.descriptorCount;
+      else if (x.descriptorType == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) n_accel += x.descriptorCount;
       else n_sampler += x.descriptorCount;
     }
-    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, n_uniform * kSlots},
+    VkDescriptorPoolSize ps[4] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, n_uniform * kSlots},
                                   {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, n_storage * kSlots},
-                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n_sampler * kSlots}};
+                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n_sampler * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, n_accel * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
-    dpi.poolSizeCount = 3;
+    dpi.poolSizeCount = n_accel ? 4 : 3;
     dpi.pPoolSizes = ps;
     f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &dpool_);
     for (Slot &sl : slots_) {
@@ -4920,7 +5102,7 @@ class VulkanRaster final : public Raster {
   }
 
   VkShaderModule module(const std::string &body, shaderc_shader_kind kind, std::string *err) {
-    const std::vector<uint32_t> spv = vk::compile(std::string(kCommon) + view_off_defines() + body, kind, err);
+    const std::vector<uint32_t> spv = vk::compile(with_extensions(std::string(kCommon) + view_off_defines(), body), kind, err);
     if (spv.empty()) return VK_NULL_HANDLE;
     VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smi.codeSize = spv.size() * 4;
@@ -4928,6 +5110,22 @@ class VulkanRaster final : public Raster {
     VkShaderModule m = VK_NULL_HANDLE;
     f_.vkCreateShaderModule(dev_, &smi, nullptr, &m);
     return m;
+  }
+  /* Round 543: a body that leads with `#extension` lines (the traced shadows') has them moved right after kCommon's
+   * #version, before any declaration, as GLSL asks - and the version raised to 460, which ray queries need (glslang
+   * declares rayQueryEXT only from 460; the path tracer's kernel is 460 too). */
+  static std::string with_extensions(std::string head, const std::string &body) {
+    size_t lead = 0;
+    while (body.compare(lead, 10, "#extension") == 0) {
+      const size_t nl = body.find('\n', lead);
+      if (nl == std::string::npos) break;
+      lead = nl + 1;
+    }
+    if (!lead) return head + body;
+    const size_t v = head.find("#version 450\n");
+    if (v == std::string::npos) return body.substr(0, lead) + head + body.substr(lead);
+    head.replace(v, 13, "#version 460\n" + body.substr(0, lead));
+    return head + body.substr(lead);
   }
   /* A graphics pipeline: the vertex layout (position, normal) and the depth test unless full-screen; back faces culled
    * when asked. Front faces are the CPU's: clockwise on screen (Unity's convention), and the y flip keeps the screen's
@@ -5300,10 +5498,15 @@ class VulkanRaster final : public Raster {
                           "#define BL_POST_BASE 1\n", "#define BL_POST_DOWN 1\n", "#define BL_POST_UP 1\n", "#define BL_POST_ADD 1\n"})  // (round 416: the filters' passes)
       srcs.push_back({std::string(d) + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kPostFrag, shaderc_fragment_shader});
     if (geometry_) srcs.push_back({std::string("#define BL_BAKED_PASS 1\n") + mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
+    if (rt_ok_) {  // (round 543: the traced shadows' lighting passes, as rt_pipelines makes them)
+      const std::string lit = std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain;
+      srcs.push_back({rt::kRtExtension + lit, shaderc_fragment_shader});
+      srcs.push_back({std::string(rt::kRtExtension) + "#define BL_HDR 1\n" + lit, shaderc_fragment_shader});
+    }
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         std::string e;
-        vk::compile(std::string(kCommon) + view_off_defines() + srcs[(size_t)i].first, srcs[(size_t)i].second, &e);
+        vk::compile(with_extensions(std::string(kCommon) + view_off_defines(), srcs[(size_t)i].first), srcs[(size_t)i].second, &e);
       }
     });
   }
@@ -5443,6 +5646,7 @@ class VulkanRaster final : public Raster {
     settle();
     if (!dev_) return;
     f_.vkDeviceWaitIdle(dev_);
+    rt_.destroy();  // (round 543)
     for (size_t i = 0; i < wins_.size(); i++) detach_window((int)i);
     free_offscreen();
     free_ui(off_);
@@ -5459,7 +5663,7 @@ class VulkanRaster final : public Raster {
       for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_splat_, pl_splat_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_splat_, pl_splat_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_, pl_light_rt_, pl_hdr_rt_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkPipeline p : pl_post_)  // (round 416)
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
