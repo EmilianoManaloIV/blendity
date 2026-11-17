@@ -1089,6 +1089,18 @@ void Renderer3D::raster_tile(int tile_index) {
       float tol[3];
       for (int q = 0; q < 3; q++) tol[q] = ulps * (std::fabs(A[q]) * bx + std::fabs(B[q]) * by + std::fabs(C[q])) + 1e-6f;
       const float vx[3] = {x0, x1, x2}, vy[3] = {y0, y1, y2};
+      /* Round 554 (review, then #448's CI): the row's span solved in double from the vertices (A, B and C each exact or a
+       * single rounding), so its crossing is a hair from the true one and the old 1e-4 pixel margin brings a centre on the
+       * crossing to tri_covers. (The review's margin of the float band over |A| - tens of pixels for a nearly horizontal
+       * edge - and even a whole pixel of margin made two sculpt tests' strokes find no surface under the mouse on #448's CI,
+       * though their pixels kept the sphere's id; the old margin passes them. Why a wider margin matters there is not yet
+       * understood: round 556 looks at it.) */
+      double Ad[3], Bd[3], Cd[3];  // (A and B too: the float ones are differences rounded to float - 50.3 - 10.1 isn't exact)
+      for (int q = 0; q < 3; q++) {
+        const int a = (q + 1) % 3, b = (q + 2) % 3;
+        Ad[q] = (double)vy[a] - vy[b], Bd[q] = (double)vx[b] - vx[a];
+        Cd[q] = (double)vx[a] * vy[b] - (double)vx[b] * vy[a];
+      }
       const bool spans = opt_.span_rows;
       for (int y = miny; y <= maxy; y++) {
         const float py = y + 0.5f;
@@ -1096,17 +1108,15 @@ void Renderer3D::raster_tile(int tile_index) {
          * pixel of the bounding box (big win for thin / diagonal triangles). */
         float xl = (float)minx, xr = (float)maxx + 0.999f;
         bool empty = false;
-        /* Round 554: each edge's crossing is widened by its rounding band in x (the band in w over |A|, and a pixel), so
-         * every centre the float values can't settle reaches tri_covers - a nearly horizontal edge's band is wide; a
-         * horizontal edge's row is skipped only when it is clearly outside, its pixels on the edge left to the exact
-         * test (the two triangles of a horizontal shared edge, their row values rounded either way, would otherwise
-         * both leave it). */
+        /* Round 554: each edge's crossing in double, 1e-4 pixel of margin either side (tri_covers settles a centre on it); a
+         * horizontal edge's row skipped only when clearly outside - on the edge, its pixels go to the exact test (the two
+         * triangles of a horizontal shared edge, their row values rounded either way, would otherwise both leave it). */
         for (int q = 0; q < 3 && spans; q++) {
-          float row_c = B[q] * py + C[q];  // w = A*px + row_c, px = x + 0.5
-          const float slack = A[q] != 0.0f ? tol[q] / std::fabs(A[q]) + 1.0f : 0.0f;
-          if (A[q] > 0) xl = std::max(xl, -row_c / A[q] - 0.5f - slack);
-          else if (A[q] < 0) xr = std::min(xr, -row_c / A[q] - 0.5f + slack);
-          else if (row_c < -tol[q]) { empty = true; break; }
+          const double row_c = Bd[q] * py + Cd[q];  // w = A*px + row_c, px = x + 0.5
+          const double crossing = Ad[q] != 0.0 ? -row_c / Ad[q] - 0.5 : 0.0;
+          if (Ad[q] > 0) xl = (float)std::max((double)xl, crossing - 1e-4);
+          else if (Ad[q] < 0) xr = (float)std::min((double)xr, crossing + 1e-4);
+          else if (row_c < -1e-9 * (std::fabs(Bd[q] * py) + std::fabs(Cd[q]) + 1.0)) { empty = true; break; }
         }
         if (empty) continue;
         int sx = pixel_in(std::ceil(xl), minx, maxx + 1);
