@@ -12,9 +12,12 @@
   Vertex mode (the old hard-coded "F9" was wrong there).
 - **Clipped labels (part 2):** at 1024 x 768 / x1.5 words were cut with "..." on Pass 27's panels. The layout gives way, not the
   words:
-  - a dropdown whose longest word does not fit beside its label goes on a row of its own under it (the Inspector's enumerations:
-    point cloud Type "Gaussian Splats", camera Panorama Type "Equirectangular", Weight Paint's Brush "Add Weight" and Falloff
-    "Smooth");
+  - a dropdown whose longest word does not fit the field column starts right after its label's word, as three-number rows do;
+    only when even that is too narrow does it go on a row of its own under the label (the Inspector's enumerations: point cloud
+    Type "Gaussian Splats", camera Panorama Type "Equirectangular", Weight Paint's Brush "Add Weight" and Falloff "Smooth").
+    The first version went straight to a row of its own; with Linux's and macOS's wider fonts a narrow Inspector then stacked
+    a door's Style and Opening, the textures window's blend modes and the spring list's falloff each on a row, and the fields
+    under them ran off the window (#454's CI: the textures window, spring bones and door tests);
   - a switch whose name is longer than the label column ("Front Faces Only", "Unified Strength") takes the room it needs and its
     box moves after it;
   - Vertex Paint's toggle ("Exit Vertex Paint") and the Rigging button ("Vertex Groups, Weight Paint: Rigging...") are sized to

@@ -13344,18 +13344,22 @@ static void tests_round554() {
 
 /* ---------------------------------------------------------------- round 556 (task 0538): shadows at a distance, CPU and card */
 static void tests_round556() {
-  /* Round 556 (task 0538): the same sphere's shadow on the floor at 20 m, on the CPU and the card - the pixels it darkens
-   * fully and partly (the 3 x 3 filter's penumbra), the same on both. Round 553 had seen the CPU's "shadow edge" mid-grey
-   * where the card's was dark - with a level camera, which sees the floor edge-on: the whole shadow was one or two rows,
-   * and a pixel at their end (CPU 15, card 13 on an RTX 4070 SUPER) read as a harder edge. Looking down 30 degrees the
-   * shadow lies on the floor, and dumps of both show it the same pixels (156 fully, 7 partly, its core 43 grey levels).
-   * The sphere is taken from a picture of it casting no shadow (its shaded side touches its contact shadow), the grid is
-   * off (its X axis line lies over the floor) and only the darkened part nearest the sphere counts: the shadow alone. */
-  test("shadows at a distance (round 556): a sphere's shadow on the floor seen from 20 m has the same fully and partly shadowed pixels on the card as on the CPU - and a partly lit edge wherever the CPU's has one", [] {
+  /* Round 556 (task 0538): round 553 had seen the card's contact shadow at 20 m darker and harder than the CPU's - with a
+   * level camera, which sees the floor edge-on, so the sphere's whole shadow was a row or two and a pixel at its end read as
+   * a harder edge. Looking down 30 degrees the shadow lies on the floor. The window is fixed from the scene, not found in
+   * the picture: the sphere's centre carried along the sun's direction to the floor, a metre and more around it (the shadow
+   * of a 0.5 m ball with the sun 30 degrees up is about 1 x 2 m), projected. In it, the darkening the sphere casts (its
+   * picture casting against not casting) must be the same pixels on the card as on the CPU - and be there at all: so many
+   * pixels, and nothing brightened. The sphere's own pixels are left out, and the grid is off (its X axis line lies over
+   * the floor). */
+  test("shadows at a distance (round 556): a sphere's shadow on the floor seen from 20 m darkens the same pixels on the card as on the CPU - and it is there: the floor under the sun's line through the sphere darkened, nothing brightened", [] {
     auto luma = [](uint32_t p) { return 0.2126f * ((p >> 16) & 255) + 0.7152f * ((p >> 8) & 255) + 0.0722f * (p & 255); };
-    long cpu_partial = -1, cpu_full = -1;
+    std::vector<float> cpu_dark;
     for (int device : {1, 2}) {
-      if (device == 2 && !gpu::available()) continue;
+      if (device == 2 && !gpu::available()) {
+        std::printf("    no card: the CPU's shadow only\n");
+        continue;
+      }
       Editor ed;
       r34_open(ed);
       ed.command("select Main Camera");
@@ -13364,77 +13368,95 @@ static void tests_round556() {
       GameObject *ball = ed.scene().create("Ball");
       ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 64, 32);
       ball->add<MeshRenderer>()->materials = {make_material("grey", Vec3(0.6f, 0.6f, 0.6f))};
+      ball->set_local_position({0.0f, 1.0f, 0.0f});
       ed.command("set Directional Light.Transform.rotation 30 -60 0");
-      ed.command("overlay grid off");  // (the axis lines over the floor are not the shadow: see above)
+      ed.command("overlay grid off");
       ed.viewport_device_for_test(device);
-      ed.command("camera 0 30 20 0 1 0");  // (looking down 30 degrees: at 0 the floor is edge-on and the shadow one row)
-      ball->set_local_position({1000.0f, 1.0f, 0.0f});
+      ed.command("camera 0 30 20 0 1 0");  // (looking down 30 degrees: a level camera sees the floor edge-on, the shadow one row)
+      const GameObject *sun = ed.scene().find_by_name("Directional Light");
+      CHECK(sun != nullptr);
+      if (!sun) return;
+      const Vec3 d = normalize(sun->world_rotation().rotate({0, 0, 1}));  // (the way the light travels, as the renderers take it)
+      CHECK(d.y < -0.1f);
+      if (!(d.y < -0.1f)) return;
+      const Vec3 c = Vec3(0.0f, 1.0f, 0.0f) + d * (-1.0f / d.y);  // (the sphere's centre along the light to the floor)
       r34_steps(ed, 3);
       const Recti rect = ed.scene_view_rect();
-      const std::vector<uint32_t> empty = r34_crop(ed, rect);
-      ball->set_local_position({0.0f, 1.0f, 0.0f});
+      float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+      for (float sx : {-1.5f, 1.5f})
+        for (float sz : {-1.5f, 1.5f}) {
+          Vec2 s;
+          CHECK(ed.project_for_test(c + Vec3(sx, 0.0f, sz), s));
+          x0 = std::min(x0, s.x), y0 = std::min(y0, s.y), x1 = std::max(x1, s.x), y1 = std::max(y1, s.y);
+        }
+      const int W = rect.w, wx0 = std::max(0, (int)x0), wy0 = std::max(0, (int)y0);
+      const int wx1 = std::min(W - 1, (int)x1), wy1 = std::min(rect.h - 1, (int)y1);
+      CHECK(wx1 - wx0 > 10 && wy1 - wy0 > 5);
+      /* The sphere's own pixels (its lower rim reaches into the window, and shades itself once it casts): where it is drawn
+       * against not drawn, left out - a mask of the sphere, not a search for the shadow. */
+      ball->get<MeshRenderer>()->enabled = false;
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> bare = r34_crop(ed, rect);
+      ball->get<MeshRenderer>()->enabled = true;
       ball->get<MeshRenderer>()->cast_shadows = false;
       r34_steps(ed, 3);
-      const std::vector<uint32_t> lit = r34_crop(ed, rect);
+      const std::vector<uint32_t> off = r34_crop(ed, rect);
       ball->get<MeshRenderer>()->cast_shadows = true;
       r34_steps(ed, 3);
-      const std::vector<uint32_t> px = r34_crop(ed, rect);
-      const int W = rect.w, H = W > 0 ? (int)(px.size() / (size_t)W) : 0;
-      /* The sphere: what it changes casting no shadow. (A flood fill from the centre is not it: the sphere's shaded side
-       * touches its contact shadow in the picture, and took the shadow with it.) The shadow: what casting darkens off the
-       * sphere. */
-      std::vector<float> dark(px.size(), 0.0f);
-      for (size_t i = 0; i < px.size() && i < lit.size() && i < empty.size(); i++)
-        if (lit[i] == empty[i]) dark[i] = luma(lit[i]) - luma(px[i]);
-      /* The sphere's own shadow: the darkened part nearest the view's centre (the sphere's). */
-      std::vector<int> part(px.size(), -1);
-      int best = -1;
-      double best_d = 1e30;
-      for (size_t start = 0; start < px.size(); start++) {
-        if (dark[start] <= 3.0f || part[start] >= 0) continue;
-        std::vector<size_t> stack = {start};
-        part[start] = (int)start;
-        double nearest = 1e30;
-        while (!stack.empty()) {
-          const size_t i = stack.back();
-          stack.pop_back();
-          const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
-          nearest = std::min(nearest, std::hypot((double)x - W / 2, (double)y - H / 2));
-          const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
-          for (int k = 0; k < 4; k++) {
-            if (nx[k] < 0 || ny[k] < 0 || nx[k] >= W || ny[k] >= H) continue;
-            const size_t j = (size_t)ny[k] * W + nx[k];
-            if (dark[j] > 3.0f && part[j] < 0) part[j] = (int)start, stack.push_back(j);
-          }
+      const std::vector<uint32_t> on = r34_crop(ed, rect);
+      std::vector<float> dark;
+      long darkened = 0, brightened = 0;
+      float core = 0.0f;
+      for (int y = wy0; y <= wy1; y++)
+        for (int x = wx0; x <= wx1; x++) {
+          const size_t i = (size_t)y * W + x;
+          const bool sphere = i >= bare.size() || i >= off.size() || bare[i] != off[i];
+          const float v = !sphere && i < on.size() ? luma(off[i]) - luma(on[i]) : 0.0f;
+          dark.push_back(v);
+          darkened += v > 3.0f, brightened += v < -3.0f, core = std::max(core, v);
         }
-        if (nearest < best_d) best_d = nearest, best = (int)start;
-      }
-      float core = 0.0f;  // (the shadow's own darkest: the view's text overlay changes between frames too)
-      for (size_t i = 0; i < dark.size(); i++)
-        if (part[i] == best && best >= 0) core = std::max(core, dark[i]);
-      long partial = 0, full = 0;
-      for (size_t i = 0; i < dark.size(); i++) {
-        if (part[i] != best || best < 0) continue;
-        if (dark[i] >= 0.75f * core) full++;
-        else if (dark[i] > 0.25f * core) partial++;
-      }
       if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {
         fs::make_dirs(dir);
         const std::string base = fs::join(dir, device == 2 ? "shadow20_card" : "shadow20_cpu");
-        write_png(base + ".png", px.data(), W, H, W);
-        write_png(base + "_empty.png", empty.data(), W, H, W);
-        write_png(base + "_nocast.png", lit.data(), W, H, W);
+        write_png(base + ".png", on.data(), W, rect.h, W);
+        write_png(base + "_nocast.png", off.data(), W, rect.h, W);
       }
-      std::printf("    %s: the shadow's core %.0f grey levels darker; %ld pixels fully shadowed, %ld partly (its edge)\n",
-                  device == 2 ? "the card" : "the CPU", core, full, partial);
-      CHECK(core > 5.0f && full > 0);
-      if (device == 1) cpu_partial = partial, cpu_full = full;
-      else if (cpu_partial >= 0) {
-        std::printf("    card - CPU: %+ld fully, %+ld partly\n", full - cpu_full, partial - cpu_partial);
-        CHECK(std::labs(full - cpu_full) <= 1 && std::labs(partial - cpu_partial) <= 1);  // (the same pixels measured; a pixel's rounding)
-        CHECK(cpu_partial == 0 || partial > 0);  // (a hard edge on the card - round 553's worry - fails even where the counts are small)
+      std::printf("    %s: window %d..%d x %d..%d; %ld pixels darkened (core %.0f grey levels), %ld brightened\n",
+                  device == 2 ? "the card" : "the CPU", wx0, wx1, wy0, wy1, darkened, core, brightened);
+      /* The shadow is there (172 pixels on the CPU, 171 on an RTX 4070 SUPER, core 43): a run without a card still catches a
+       * shadow gone missing or shrunk. Casting only darkens - but when the ball starts casting the sun's shadow map is
+       * refitted, and a few lone floor pixels around the shadow flip either way on both renderers (3 brightened, measured
+       * from dumps; none inside the shadow), so a few are allowed. */
+      CHECK(darkened >= 100 && core >= 20.0f);
+      CHECK(brightened <= 4);
+      /* (Lone: a brightened pixel next to another would be a patch, not the refit's texels changing their depth bias.) */
+      const int ww = wx1 - wx0 + 1, wh = wy1 - wy0 + 1;
+      long touching = 0;
+      for (int y = 0; y < wh; y++)
+        for (int x = 0; x < ww; x++) {
+          if (!(dark[(size_t)y * ww + x] < -3.0f)) continue;
+          for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+              const int nx = x + dx, ny = y + dy;
+              if ((dx || dy) && nx >= 0 && ny >= 0 && nx < ww && ny < wh && dark[(size_t)ny * ww + nx] < -3.0f) touching++;
+            }
+        }
+      CHECK(touching == 0);
+      if (device == 1) {
+        cpu_dark = dark;
+        continue;
       }
-      ed.viewport_device_for_test(1);
+      long differ = 0;
+      float worst = 0.0f;
+      for (size_t i = 0; i < dark.size() && i < cpu_dark.size(); i++) {
+        differ += (dark[i] > 3.0f) != (cpu_dark[i] > 3.0f);
+        worst = std::max(worst, std::fabs(dark[i] - cpu_dark[i]));
+      }
+      if (dark.size() != cpu_dark.size()) differ += 1000000;
+      std::printf("    card - CPU: %ld pixels darkened on one only; the darkening differs by %.1f grey levels at most\n", differ, worst);
+      /* (Pixel by pixel - counts alone would pass a shadow moved or turned, and a shadow a pixel off differs in ~20. Measured
+       * 3: two of the lone refit flips and one pixel on the shadow's edge.) */
+      CHECK(differ <= 4);
     }
   });
 }
