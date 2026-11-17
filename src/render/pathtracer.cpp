@@ -969,7 +969,6 @@ struct GGX {
 };
 }  // namespace
 
-/* World-space surface data at barycentrics (u, v) of a mesh triangle. */
 void pt_object_colors(const Mesh &mesh, const RenderMesh &rm, const std::vector<MaterialPtr> &materials, std::vector<Vec4> &out) {
   out.clear();
   for (const MaterialPtr &mp : materials)
@@ -979,6 +978,7 @@ void pt_object_colors(const Mesh &mesh, const RenderMesh &rm, const std::vector<
     }
 }
 
+/* World-space surface data at barycentrics (u, v) of a mesh triangle. */
 const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const {
   const PTObject &ob = objects_[object];
   const RenderMesh &rm = *ob.mesh;
@@ -2766,6 +2766,12 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   material(*default_material(), false);  // index 0
   struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
   std::unordered_map<const RenderMesh *, MeshRec> meshes;
+  /* Task 0537: a mesh's vertices are written once for every object using it - with the colours of whichever of those
+   * objects has them (review 545b2: the first object's, plain, had left a later Vertex Color object white on the card).
+   * Writing them for a plain object is harmless: flag 8192, per material, decides the multiply. */
+  std::unordered_map<const RenderMesh *, const std::vector<Vec4> *> mesh_colors;
+  for (const PTObject &ob : objects_)
+    if (ob.mesh && ob.colors && ob.colors->size() == ob.mesh->positions.size()) mesh_colors.emplace(ob.mesh, ob.colors);
   s.instances.resize(objects_.size());
   s.object_blas.assign(objects_.size(), UINT32_MAX);
   for (size_t o = 0; o < objects_.size(); o++) {
@@ -2790,7 +2796,8 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
         /* Task 0537: the vertex colour in the spare lanes (r p.w, g n.w, b uv.z, a uv.w) - white without colours, so a
          * Vertex Color material on a mesh without them renders as its base colour. */
         Vec4 vc(1, 1, 1, 1);
-        if (ob.colors && ob.colors->size() == rm.positions.size()) vc = (*ob.colors)[v];
+        const auto mc = mesh_colors.find(&rm);
+        if (mc != mesh_colors.end()) vc = (*mc->second)[v];
         auto ch = [](float x) { return finite_bits(x) ? std::max(0.0f, std::min(x, 1.0f)) : 1.0f; };
         gv.p[3] = ch(vc.x), gv.n[3] = ch(vc.y), gv.uv[2] = ch(vc.z), gv.uv[3] = ch(vc.w);
         s.verts.push_back(gv);

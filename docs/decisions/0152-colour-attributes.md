@@ -61,7 +61,8 @@ Blendity's `Mesh` has no colour data. It does have two ways per-element data alr
 5. **Shown** in the Scene view through the colours path Weight Paint already uses (`RasterFrame::vertex_colors`);
    **exported** as glTF `COLOR_0` and PLY colours (round 545a). **A material's Vertex Color** multiplies the render
    layer into Base Color and Alpha (round 545b1: the CPU rasterizer, the CPU path tracer for the gathered objects, the
-   texture bake; 545b2: the card). The colours reach a renderer per render vertex from a cache on the mesh, one slot per
+   texture bake; 545b2: the card's raster and path tracer, and the lightmap, probe, volume and reflection-probe bakes,
+   whose key then follows the mesh's version so repainting re-bakes). The colours reach a renderer per render vertex from a cache on the mesh, one slot per
    render cache variant, keyed on the render mesh's build and the mesh's version - never part of the render mesh's
    topology, so a paint stroke doesn't rebuild it. A Corner layer's corners that share a render vertex give it their
    mean (each mesh corner once): a colour seam inside one render vertex softens there. **Importers** read PLY's

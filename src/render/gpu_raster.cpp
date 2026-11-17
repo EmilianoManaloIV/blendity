@@ -446,8 +446,10 @@ Surf evaluate_part(Inst I, vec3 n, vec2 uv0, vec2 dux, vec2 duy, vec3 lpos, vec3
     s.albedo *= c.rgb;
     s.alpha *= c.a;  // (a cutout's holes come from the base map's alpha, as evaluate_surface takes it)
   }
-  s.albedo *= clamp(g_vc.rgb, 0.0, 1.0);  // (task 0537: before any cutout test reads the alpha; capped as the CPU caps it)
-  s.alpha *= clamp(g_vc.a, 0.0, 1.0);
+  if (I.tex2.w == 2) {  // (task 0537: this instance's material reads them - an Axis part by its own; before any cutout test)
+    s.albedo *= clamp(g_vc.rgb, 0.0, 1.0);
+    s.alpha *= clamp(g_vc.a, 0.0, 1.0);
+  }
   if (I.tex0.y >= 0) { SAMPLE(I.tex0.y, c); s.metallic *= c.x; }
   if (I.tex0.z >= 0) { SAMPLE(I.tex0.z, c); s.rough *= c.x; }
   s.emission = I.emission.rgb;
@@ -4633,7 +4635,7 @@ class VulkanRaster final : public Raster {
     d.color2[3] = d.bmin[3] = d.bmax[3] = 0.0f;
     for (int k = 0; k < 4; k++) d.tex0[k] = s.tex[k];
     d.tex1[0] = s.tex[4], d.tex1[1] = s.mapping, d.tex1[2] = s.procedural, d.tex1[3] = s.wrap;
-    d.tex2[0] = s.filter, d.tex2[1] = s.has_uv ? 1 : 0, d.tex2[2] = s.has_tangent ? 1 : 0, d.tex2[3] = s.textured ? 1 : 0;
+    d.tex2[0] = s.filter, d.tex2[1] = s.has_uv ? 1 : 0, d.tex2[2] = s.has_tangent ? 1 : 0, d.tex2[3] = s.textured ? (s.vertex_color_mul ? 2 : 1) : 0;  // (task 0537: 2 - textured, multiplying the vertex colours)
     const float t0[4] = {(float)s.toon_bands, s.toon_softness, s.toon_threshold, s.toon_specular_smooth};
     const float t1[4] = {s.toon_shadow[0], s.toon_shadow[1], s.toon_shadow[2], s.toon_specular_size};
     const float t2[4] = {s.toon_rim[0], s.toon_rim[1], s.toon_rim[2], s.toon_rim_width};
@@ -4643,7 +4645,7 @@ class VulkanRaster final : public Raster {
     if (s.flags & RasterInstance::Axis) std::memcpy(d.toon0, s.axis, 16), std::memcpy(d.toon1, s.axis2, 16), std::memcpy(d.toon2, s.axis_parts, 16);  // (task 0195)
     int32_t ior;
     std::memcpy(&ior, &s.ior, 4);
-    d.toon5[0] = s.toon_ramp, d.toon5[1] = s.vertex_color_mul ? -(int32_t)s.vertex_colors : (int32_t)s.vertex_colors, d.toon5[2] = s.surface, d.toon5[3] = ior;
+    d.toon5[0] = s.toon_ramp, d.toon5[1] = s.vertex_color_src ? -(int32_t)s.vertex_colors : (int32_t)s.vertex_colors, d.toon5[2] = s.surface, d.toon5[3] = ior;
   }
   /* The face highlight's bits into their buffer (grown when a bigger mesh is edited; one zero word when none). */
   bool write_highlight(const RasterFrame &fr, std::string *err) {

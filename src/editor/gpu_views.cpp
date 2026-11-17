@@ -407,6 +407,7 @@ void raster_axis(gpu::RasterInstance &in, const Material &m, const RenderMesh &r
     gpu::RasterInstance part = in;
     part.flags = gpu::RasterInstance::AxisPart;
     raster_textured(part, *tx.axis[k], rm, tex, tx.axis_tx[k]);
+    part.vertex_color_mul = tx.axis[k]->vertex_color;  // (task 0537: each part multiplies by its own material, as the CPU's)
     part.metal_spec[3] = tx.axis[k]->alpha;
     parts.push_back({part, k});
   }
@@ -615,9 +616,12 @@ void solid_instance(gpu::RasterInstance &in, const DrawItem &it) {
 uint32_t material_vertex_colors(const DrawItem &it, std::vector<float> &out) {
   const uint32_t first = (uint32_t)(out.size() / 4) + 1;
   const std::vector<Vec4> &c = *it.material_colors;
-  for (size_t v = 0; v < it.mesh->positions.size(); v++) {
+  const size_t n = it.mesh->positions.size();
+  out.reserve(out.size() + n * 4);
+  auto ch = [](float x) { return finite_bits(x) ? std::max(0.0f, std::min(x, 1.0f)) : 1.0f; };  // (GLSL's clamp of a NaN is undefined)
+  for (size_t v = 0; v < n; v++) {
     const Vec4 x = v < c.size() ? c[v] : Vec4(1, 1, 1, 1);
-    out.insert(out.end(), {x.x, x.y, x.z, x.w});
+    out.insert(out.end(), {ch(x.x), ch(x.y), ch(x.z), ch(x.w)});
   }
   return first;
 }
@@ -629,7 +633,8 @@ static uint16_t half_of(float f) {
   uint32_t b;
   std::memcpy(&b, &f, 4);
   const int e = (int)((b >> 23) & 0xFF) - 127 + 15;
-  if (e <= 0) return (uint16_t)(((b & 0x7FFFFF) | 0x800000) >> (14 - e) >> 10);  // (subnormal: only tiny values)
+  if (e < -10) return 0;  // (under the smallest subnormal half)
+  if (e <= 0) return (uint16_t)(((b & 0x7FFFFF) | 0x800000) >> (14 - e));  // (subnormal: the mantissa with its leading one, shifted down)
   const uint32_t m = (b & 0x7FFFFF) + 0x1000;  // (round to nearest at bit 13)
   return (uint16_t)((e << 10) + (m >> 13));
 }
@@ -740,7 +745,7 @@ void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> 
       /* (Task 0537: this triangle's material reads the vertex colours.) */
       bool vc_slot = false;
       if (it.material_colors && it.material_colors->size() == rm.positions.size() && it.materials && !it.materials->empty()) {
-        const int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
+        const int slot = prim < rm.tri_material.size() ? rm.tri_material[prim] : 0;
         const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
         vc_slot = mp && mp->vertex_color;
       }
@@ -1818,7 +1823,13 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : mul ? material_vertex_colors(it, vcols) : 0;
     auto colour_slot = [&](const Material &m, gpu::RasterInstance &in) {  // (a slot whose material reads them multiplies; the others none)
       if (!mul) return;
-      in.vertex_colors = m.vertex_color ? vc : 0;
+      /* The colours reach the slot's vertices when its material or one of its Axis parts reads them; the slot itself
+       * multiplies only by its own material (an Axis part by its own: raster_axis). */
+      bool src = m.vertex_color;
+      if (m.axis_mode != 0)
+        for (int k = 0; k < 4; k++) src = src || (m.textures().axis[k] && m.textures().axis[k]->vertex_color);
+      in.vertex_colors = src ? vc : 0;
+      in.vertex_color_src = src;
       in.vertex_color_mul = m.vertex_color;
     };
     const uint32_t first_inst = (uint32_t)inst.size();

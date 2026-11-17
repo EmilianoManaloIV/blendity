@@ -1205,6 +1205,24 @@ static void vertex_colour_card_packing_tests() {
     std::printf("    NaN / 2 / -1 / 0.5 in the lanes: %g %g %g %g\n", o[0].p[3], o[0].n[3], o[0].uv[2], o[0].uv[3]);
     CHECK(o[0].p[3] == 1.0f && o[0].n[3] == 1.0f && o[0].uv[2] == 0.0f && o[0].uv[3] == 0.5f);
     CHECK(std::isfinite(o[0].p[3] + o[0].n[3] + o[0].uv[2] + o[0].uv[3]));
+    /* Two objects sharing the mesh, the plain one (no colours) first: the mesh's one vertex block still carries the
+     * colours the Vertex Color object has (review of round 545b2: the first object's had left the second white). */
+    {
+      std::vector<MaterialPtr> plain{vci_mat(false)};
+      PTObject a, b;
+      a.mesh = b.mesh = &rm;
+      a.model = Mat4::identity(), b.model = Mat4::translate({3, 0, 0});
+      a.materials = &plain, b.materials = &mats;
+      b.colors = &cols;
+      PathTracer pt;
+      pt.build({a, b}, {}, e);
+      gpu::Scene s;
+      CHECK(pt.build_gpu_scene_fit(s, 0, nullptr, false));
+      size_t wrong_shared = 0;
+      for (size_t v = 0; v < s.verts.size() && v < cols.size(); v++) wrong_shared += s.verts[v].p[3] != cols[v].x || s.verts[v].uv[2] != cols[v].z;
+      std::printf("    shared mesh, plain object first: %zu vertices in the block, %zu with the wrong colour\n", s.verts.size(), wrong_shared);
+      CHECK(s.verts.size() == rm.positions.size() && wrong_shared == 0);
+    }
   });
 }
 

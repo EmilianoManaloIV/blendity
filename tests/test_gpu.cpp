@@ -6990,7 +6990,13 @@ static void tests_round545b2_gpu() {
     /* Two slots: the left half's material reads the colours, the right half's doesn't - the right half keeps its own colour. */
     const VcgView two = vcg_view(vcg_pad(1.0f, true), {vcg_mat(true, (int)MaterialSurface::Transparent, 0.7f), vcg_mat(false, (int)MaterialSurface::Transparent, 0.7f)});
     vcg_print("Transparent, two slots", two);
-    CHECK(two.gpu_views > 0 && two.fallbacks == 0 && two.mean < 1.0 && two.within3 >= 0.99);
+    /* The see-through pass's own card / CPU difference on this two-slot mesh is the baseline (the first card run read
+     * mean 1.005 / 255 here, with matching colours, 172 36 37 / 172 37 37: the pass's blending, not the colours). So
+     * the same mesh with Vertex Color off on both slots is measured, and the colours may add at most 0.25 / 255. */
+    const VcgView base = vcg_view(vcg_pad(1.0f, true), {vcg_mat(false, (int)MaterialSurface::Transparent, 0.7f), vcg_mat(false, (int)MaterialSurface::Transparent, 0.7f)});
+    vcg_print("Transparent, two slots, Vertex Color off (the baseline)", base);
+    CHECK(two.gpu_views > 0 && two.fallbacks == 0 && two.within3 >= 0.99);
+    CHECK(two.mean < std::max(1.0, base.mean + 0.25));
   });
 
   test("vertex colour on the card (task 0537): GPU Compute's path tracer renders the red / blue pad with Vertex Color on as the CPU path tracer does (mean within 0.02 a channel), white with it off (skipped without a GPU)", [] {

@@ -15,7 +15,9 @@ the card path tracer and OptiX, the lightmapper, the light probes and the reflec
 ## Design
 - **Raster:** no new binding. The colour buffer Weight Paint's Solid view already uses (binding 22,
   `RasterFrame::vertex_colors`) carries a Vertex Color item's colours too, one RGBA a render vertex; the instance's
-  `toon5.y` is negative for "multiply" (positive keeps Solid's replace). The g-buffer vertex shader hands the colour on
+  `toon5.y` is negative when the colours reach the vertices (the slot's material or one of its Axis parts reads them;
+  positive keeps Solid's replace), and `tex2.w` is 2 when the instance's own material multiplies them (an Axis part
+  by its own material, as the CPU's). The g-buffer vertex shader hands the colour on
   (location 9), and every fragment shader that evaluates the material sets `g_vc` before `evaluate`, which multiplies
   it in after the base map (capped at 1, before any cutout test) - the g-buffer, toon, baked and see-through passes
   alike. A see-through corner carries its colour as four halves in `SeeCorner`'s two spare floats (no layout change),
@@ -42,4 +44,4 @@ the card path tracer and OptiX, the lightmapper, the light probes and the reflec
   Linux; CI's four jobs.
 
 ## Documentation to update
-- `changelog.d/545-vertex-painted-colors-on-card.md`; ADR 0152 section 5.
+- `changelog.d/545-vertex-colors-card.md`; ADR 0152 section 5.

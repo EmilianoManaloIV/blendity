@@ -58,6 +58,9 @@ uint64_t Editor::lightmap_scene_key() {
       mix(lightmap_hash_of(g, *m));
       mixf(&mr->scale_in_lightmap, 1);
       mix(mr->generate_lightmap_uvs);
+      bool reads_colours = false;  // (task 0537: a Vertex Color material bakes the colours: they and the flag key the bake)
+      for (const MaterialPtr &mp : mr->materials) reads_colours = reads_colours || (mp && mp->vertex_color);
+      if (reads_colours) mix(0x9e3779b9u ^ m->version);  // (only then: the keys saved with bakes before stay valid)
       for (const MaterialPtr &mp : mr->materials)
         if (mp) {
           mixf(&mp->base_color.x, 3);

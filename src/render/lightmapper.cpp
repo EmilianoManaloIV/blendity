@@ -1200,6 +1200,7 @@ bool Lightmapper::step(double budget_ms) {
 void Lightmapper::cancel() {
   active_ = false;
   pt_.reset();  // a cancelled bake keeps nothing
+  std::vector<std::vector<Vec4>>().swap(pt_colors_);  // (task 0537)
   texels_.clear();
   texels_.shrink_to_fit();
   values_.clear();
@@ -1817,6 +1818,7 @@ LightingData Lightmapper::take_result() {
   if (pt_) gpu_cards_ = pt_->gpu_gather_cards();  // (round 487: the path tracer holds the cards' counts)
   if (pt_ && !gpu_cards_.empty()) Log::info("Generate Lighting: the gather's time: %s", pt_->gpu_gather_times().c_str());
   pt_.reset();
+  std::vector<std::vector<Vec4>>().swap(pt_colors_);  // (task 0537)
   texels_.clear();
   values_.clear();
   gather_.clear(), gather_.shrink_to_fit();
