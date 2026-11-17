@@ -4,7 +4,7 @@
 - **Requirements:** the suite's reliability (ADR 0056)
 - **Decisions:** none needed
 - **Model:** main session (the HCI worker)
-- **PR:** (link when opened) - base `main`, its own
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/444 - base `main`, its own
 
 ## Goal
 Three `gpu` tests passed alone and failed inside a full `--group gpu` run on M1's, Pass 26's and R1's trees: "gpu views: the
