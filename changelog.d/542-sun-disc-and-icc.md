@@ -11,6 +11,8 @@ EEVEE now does, with a switch for the old look; an ICC profile in saved sRGB PNG
   scaled so the noon sun is intensity 1, the sun the Sky world's ambient was calibrated to; it dims and reddens
   toward the horizon and is gone below it. Turbidity sets the haze (3, a clear day, is Blender's aerosol density 1).
   The disc made one light is EEVEE's world sun extraction (`sun_extraction`), ported in `src/render/sky_sun.cpp`.
+- Learn > Light, Sky and Tone Mapping: a section on the sky's sun, with three questions and three Try-its (the
+  Directional Light deleted under a Sky world, Sun Lights Scene off, back on at Sun Intensity 2).
 - World > Sky: **Sun Lights Scene** (on; off is the look before 5.3) and **Sun Intensity** (Blender's). A scene with
   a Directional Light is unchanged: that light is the sun, and the sky's sun is not added on top of it.
 - Every 8-bit PNG Blendity writes carries an `iCCP` chunk and every JPEG an `APP2 ICC_PROFILE` marker holding the
