@@ -11555,6 +11555,86 @@ static void tests_round535() {
   });
 }
 
+/* Round 549 (task 0529): the curved stress section's shapes drawn on a cylinder's faces, then turned - its very steps (imprint, turn
+ * the new face's corners about its middle, repair_rings, which zips the ring again: by angle, or by two bridges). On CI's
+ * ubuntu-26.04 runners one of them crashed: the bridges were sorted by lengths worked out again at every comparison, no
+ * consistent ordering - std::sort then read before its array. The sort now orders keys worked out once (NaN last). */
+static void tests_round549() {
+  test("imprint: octagons drawn on every face of a 48-sided cylinder at 40% and 80% of the face, turned 0 to 170 degrees and the rings repaired, as the curved stress section does - valid meshes", [] {
+    const Mesh base = *primitives::cylinder(0.5f, 1.0f, 48);
+    size_t tried = 0, made = 0, bad = 0;
+    std::string first;
+    for (size_t f = 0; f < base.face_count(); f++) {
+      const Vec3 n = normalize(base.face_normal(f));
+      const Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), v = cross(n, u);
+      const Vec3 c = meshops::face_area_center(base, f);
+      float rmin = 1e30f;
+      for (uint32_t k = 0; k < base.face_size(f); k++) {
+        const Vec3 a = base.positions[base.face_verts(f)[k]], b = base.positions[base.face_verts(f)[(k + 1) % base.face_size(f)]];
+        rmin = std::min(rmin, length(closest_on_segment(c, a, b) - c));
+      }
+      for (float frac : {0.4f, 0.8f}) {
+        std::vector<Vec3> sq;
+        for (int i = 0; i < 8; i++) {
+          const float a = 2.0f * kPi * i / 8;
+          sq.push_back(c + (u * std::cos(a) + v * std::sin(a)) * (rmin * frac));
+        }
+        for (float deg : {0.0f, 30.0f, 90.0f, 170.0f}) {
+          Mesh m = base;
+          tried++;
+          const long in = meshops::imprint_loop(m, f, sq);
+          if (in < 0) continue;
+          made++;
+          std::vector<uint8_t> moved(m.vert_count(), 0);
+          for (uint32_t k = 0; k < m.face_size((size_t)in); k++) moved[m.face_verts((size_t)in)[k]] = 1;
+          const Vec3 nn = normalize(m.face_normal((size_t)in)), cc = m.face_center((size_t)in);
+          const Quat q = Quat::axis_angle(nn, deg * kDeg2Rad);
+          for (size_t k = 0; k < moved.size(); k++)
+            if (moved[k]) m.positions[k] = cc + q.rotate(m.positions[k] - cc);
+          meshops::repair_rings(m, moved);
+          std::string why;
+          if (!structurally_valid(m, &why)) {
+            bad++;
+            if (first.empty()) first = strprintf("face %zu, %.0f%%, %.0f deg: %s", f, frac * 100, deg, why.c_str());
+          }
+        }
+      }
+    }
+    std::printf("    %zu octagons, %zu drawn, %zu left a broken mesh%s%s\n", tried, made, bad, first.empty() ? "" : " - first: ", first.c_str());
+    CHECK(made > 0 && bad == 0);
+  });
+
+  test("imprint: a ring whose inner corner has gone NaN is repaired without reading outside its arrays (the bridges' sort) and leaves a valid mesh", [] {
+    /* (The sort's keys are lengths to the inner corners: a NaN one made the old comparison inconsistent. CI's sanitizer job
+     * would name a read outside the array.) */
+    size_t runs = 0, bad = 0;
+    for (float bad_value : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+      for (int corner = 0; corner < 8; corner++) {
+        Mesh m = *primitives::cylinder(0.5f, 1.0f, 48);
+        const size_t top = m.face_count() - 1;
+        const Vec3 c = meshops::face_area_center(m, top), n = normalize(m.face_normal(top));
+        const Vec3 u = normalize(cross(std::fabs(n.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), n)), v = cross(n, u);
+        std::vector<Vec3> sq;
+        for (int i = 0; i < 8; i++) sq.push_back(c + (u * std::cos(2.0f * kPi * i / 8) + v * std::sin(2.0f * kPi * i / 8)) * 0.3f);
+        const long in = meshops::imprint_loop(m, top, sq);
+        if (in < 0) continue;
+        std::vector<uint8_t> moved(m.vert_count(), 0);
+        const uint32_t vk = m.face_verts((size_t)in)[corner % m.face_size((size_t)in)];
+        moved[vk] = 1;
+        m.positions[vk].x = bad_value;
+        meshops::repair_rings(m, moved);
+        runs++;
+        bad += m.corner_verts.empty() == false && [&] {
+          for (uint32_t cv : m.corner_verts)
+            if (cv >= m.vert_count()) return true;
+          return false;
+        }();
+      }
+    std::printf("    %zu rings repaired around a NaN or infinite corner, %zu with a corner index out of range\n", runs, bad);
+    CHECK(runs > 0 && bad == 0);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -11609,4 +11689,5 @@ void run_modeling_tests() {
   tests_round535();
   run_weight_paint_tests();
   run_vertex_paint_tests();
+  tests_round549();
 }
