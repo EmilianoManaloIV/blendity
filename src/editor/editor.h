@@ -62,6 +62,7 @@
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
+#include "paint_automask.h"  // (task 0525: what Weight Paint and Vertex Paint share)
 #include "ui.h"
 #include "livelink.h"
 #include "../scene/partfield.h"
@@ -147,22 +148,29 @@ extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plastici
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
 /* Weight Paint's brush (task 0046): radius in screen pixels (at UI scale 1). */
-struct WeightBrush {
+/* The automasking (task 0519, Blender 5.3) comes from PaintAutomaskFields, shared with Vertex Paint (task 0525). */
+struct WeightBrush : PaintAutomaskFields {
   int mode = 0;  // kWeightBrushModes
   float radius = 50.0f, strength = 0.5f, weight = 1.0f;
   int falloff = 0;  // kWeightFalloffs
   bool mirror_x = false, front_only = true;
-  /* Task 0519 (Blender 5.3): automasking, as Blender's mesh automasking settings and their defaults. Limits in
-   * degrees; falloffs as fractions of pi. */
-  bool am_topology = false, am_boundary = false, am_view_normal = false, am_area_normal = false;
-  int am_cavity = 0;  // kWeightCavityModes: Off, Cavity, Inverted
-  int am_boundary_steps = 1, am_cavity_blur = 2;
-  float am_cavity_factor = 0.5f;
-  float am_view_limit = 90.0f, am_view_falloff = 0.25f, am_area_limit = 20.0f, am_area_falloff = 0.25f;
 };
 extern const char *const kWeightBrushModes[4];  // Add Weight, Subtract, Set Weight, Blur (task 0046; names task 0519)
 extern const char *const kWeightFalloffs[6];
-extern const char *const kWeightCavityModes[3];  // Off, Cavity, Inverted (task 0519)
+/* Vertex Paint's brush (task 0525, Blender's vertex paint brushes): radius in screen pixels (at UI scale 1); colour
+ * linear RGB. */
+struct VertexBrush : PaintAutomaskFields {
+  int tool = 0;   // kVertexPaintTools: Draw, Blur, Average, Smear
+  int blend = 0;  // kVertexPaintBlends: Mix, Add, Subtract, Multiply, Lighten, Darken
+  Vec3 color{1.0f, 0.0f, 0.0f};
+  float alpha = 1.0f;  // the colour's alpha (what Mix paints into the layer's alpha)
+  float radius = 50.0f, strength = 1.0f;
+  int falloff = 0;  // kWeightFalloffs
+  bool mirror_x = false, front_only = true;
+};
+struct ToolTargets;  // (vertex_paint.cpp: what Blur, Average and Smear move towards)
+extern const char *const kVertexPaintTools[4];
+extern const char *const kVertexPaintBlends[6];
 /* Sculpt Mode's brush (task 0236). */
 struct SculptBrush {
   int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab, Clay Buildup, Inflate, Flatten, Pinch, Crease, Scrape, Snake Hook, Mask
@@ -1465,6 +1473,8 @@ class Editor {
   const std::vector<Vec2> &sculpt_dab_px_for_test() const { return sculpt_dab_px_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
+  VertexBrush &vp_brush_for_test() { return vp_brush_; }  // (task 0525)
+  bool vertex_paint_for_test() const { return vertex_paint_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   void set_background_gpu_open_for_test(bool on) {
     cam_preview_pt_.set_background_gpu_open(on);
@@ -3380,16 +3390,31 @@ class Editor {
   int wp_effective_mode(bool ctrl, bool eraser) const;  // (task 0259)
   int wp_stroke_mode_ = 0;  // (decided once when the stroke begins: Ctrl or the eraser then makes an Add stroke a Subtract one)
   int wp_group(const Mesh &m) const;  // the group being painted (pinned while painting)
-  void wp_prepare(const Mesh &m);
   void wp_abort_stroke();
   const std::vector<Vec3> *wp_colors(const Mesh &m, const RenderMesh &rm);
-  /* Task 0519: automasking (weight_paint_automask.cpp). */
-  bool wp_automask_any() const;
-  bool wp_automask_start(const Mesh &m, const Mat4 &W, const Mat4 &N, float x, float y, float R);
-  bool wp_automask_pick(const Mesh &m, const Mat4 &W, const Mat4 &N, float x, float y, float R, size_t &start, Vec3 &area);
-  float wp_automask(const Mesh &m, const Mat4 &N, size_t v);
-  void wp_automask_command(const std::vector<std::string> &t);
   void weight_paint_command(const std::vector<std::string> &t);
+  /* Task 0525: what Weight Paint and Vertex Paint share (paint_automask.cpp). */
+  bool paint_pick_start(const PaintMeshHelpers &h, const Mesh &m, const Mat4 &W, const Mat4 &N, float x, float y, float R, uint64_t obj, size_t &start,
+                        Vec3 &area);
+  bool paint_dab_amounts(const PaintDab &d, PaintMeshHelpers &h, PaintAutomask &am, std::vector<float> &amount, std::vector<float> &mask);
+  /* Vertex Paint (task 0525, ADR 0152; vertex_paint.cpp). */
+  bool set_vertex_paint(bool on);
+  Mesh *vp_mesh();
+  bool vp_update(const Recti &view);  // the brush owns the mouse
+  void vp_draw(const Recti &view);
+  bool vp_begin_stroke();
+  void vp_end_stroke();
+  void vp_abort_stroke();
+  void vp_dab(float x, float y);
+  void vp_stroke_to(float x, float y, bool first);
+  bool vp_draw_dab(const Mesh &m, ColorAttribute &layer, const std::vector<float> &amount);
+  void vp_smear_targets(const Mesh &m, const Mat4 &W, const std::vector<Vec4> &vc, const std::vector<float> &amount, ToolTargets &t);
+  const std::vector<Vec3> *vp_colors(const Mesh &m, const RenderMesh &rm);
+  void vertex_paint_command(const std::vector<std::string> &t);
+  void color_attribute_command(const std::vector<std::string> &t);
+  /* After an edit (the undo step's carry, beside the vertex groups'): Point colour layers the operator left the wrong
+   * size come back by position from the mesh before; layers that no longer match go and are reported (ADR 0152). */
+  void carry_colors(MeshPtr &mesh, const Mesh *before, uint64_t obj);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
@@ -3423,6 +3448,7 @@ class Editor {
   GameObject *add_bone(GameObject *parent, float length);
   IKConstraint *add_ik(GameObject *bone);
   void draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay);
+  void draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay, Recti toggle);  // (task 0525: the toggle in the Rigging row)
   bool draw_reflected(const std::function<void(Reflector &)> &fields, ui::Layout &lay);
   uint64_t wp_last_active_ = 0;  // Weight Paint: the selection last seen (a bone selected picks its group)
   const std::vector<std::string> &texture_asset_paths();
@@ -5455,30 +5481,40 @@ class Editor {
   float sculpt_stroke_move_ = 0.0f;  // (the farthest a vertex moved this stroke: the gather reaches that much past the radius, the grid being the stroke's start)
   /* Weight Paint (task 0046). */
   WeightBrush wp_brush_;
-  bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false, wp_mirror_done_ = false;
-  uint64_t wp_obj_ = 0, wp_version_ = 0, wp_cache_version_ = 0;
+  bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false;
+  uint64_t wp_obj_ = 0, wp_version_ = 0;
   const Scene *wp_scene_ = nullptr;        // the scene the mode started in (ids restart in every scene)
   const Mesh *wp_stroke_mesh_ = nullptr;   // the mesh a stroke writes (anything else ends it)
-  const Mesh *wp_cache_mesh_ = nullptr;    // what wp_normals_ / wp_nb_ / wp_mirror_ were made for
+  PaintMeshHelpers wp_mh_;                 // normals, neighbours, the X-mirror map (task 0525: shared with Vertex Paint's kind)
   int wp_group_ = 0;
   std::vector<float> wp_start_, wp_alpha_;  // a stroke's starting weights and strongest amount per vertex
-  /* Task 0519: a stroke's automask, started at its first dab that reaches a vertex: the island (topology), the cavity
-   * per vertex (-1: not worked out yet), the area normal and the view direction, the boundary's distances and the
-   * steps they were made for. wp_stroke_flip_: Ctrl at the stroke's start with Set Weight paints 1 - Weight. */
-  bool wp_am_started_ = false, wp_stroke_flip_ = false;
-  std::vector<uint8_t> wp_am_island_;
-  std::vector<float> wp_am_cavity_;
-  Vec3 wp_am_area_normal_, wp_am_view_dir_;
-  std::vector<int> wp_am_edge_dist_;
-  int wp_am_edge_steps_ = 1;
+  /* Task 0519: a stroke's automask. wp_stroke_flip_: Ctrl at the stroke's start with Set Weight paints 1 - Weight. */
+  PaintAutomask wp_am_;
+  bool wp_stroke_flip_ = false;
   Shading wp_saved_shading_ = Shading::Shaded;
   Vec2 wp_last_;
-  std::vector<Vec3> wp_normals_;
-  std::vector<uint32_t> wp_nb_off_, wp_nb_, wp_mirror_;
   std::vector<Vec3> wp_colors_;
   uint64_t wp_colors_serial_ = 0, wp_colors_version_ = ~0ull;
   int wp_colors_group_ = -1;
   int active_vgroup_ = 0;        // the Inspector's chosen vertex group
+  /* Vertex Paint (task 0525, ADR 0152): the mode, its object and scene, a stroke's starting colours and strongest
+   * amount per element (vertex or corner, as the layer's domain), the helpers and the automask. */
+  VertexBrush vp_brush_;
+  bool vertex_paint_ = false, vp_stroking_ = false, vp_dabbed_ = false;
+  uint64_t vp_obj_ = 0, vp_version_ = 0;
+  const Scene *vp_scene_ = nullptr;
+  const Mesh *vp_stroke_mesh_ = nullptr;
+  std::vector<Vec4> vp_start_;
+  std::vector<float> vp_alpha_;
+  bool vp_stroke_flip_ = false;  // (Ctrl at the stroke's start: Add subtracts, Subtract adds, Mix paints the inverse colour)
+  Shading vp_saved_shading_ = Shading::Shaded;
+  Vec2 vp_last_, vp_smear_dir_;
+  PaintMeshHelpers vp_mh_;
+  PaintAutomask vp_am_;
+  std::vector<Vec3> vp_colors_;
+  uint64_t vp_colors_serial_ = 0, vp_colors_version_ = ~0ull;
+  std::string colors_dropped_note_;  // (ADR 0152) what the last edit dropped, shown in the Inspector until dismissed
+  uint64_t colors_dropped_obj_ = 0;
   float vgroup_weight_ = 1.0f;   // what Assign gives
   std::string vgroup_name_edit_;
   uint64_t pt_obj_ = 0;     // the curve or lattice whose points are selected (only while it is the active object)

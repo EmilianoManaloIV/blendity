@@ -2007,9 +2007,12 @@ void Editor::draw_inspector(const Recti &r) {
           Recti wrow = lay.row(u.row_h() + u.px(2));
           const size_t ng = mf->mesh->vertex_groups.size();
           const std::string label = ng ? strprintf("Vertex Groups (%zu), Weight Paint: Rigging...", ng) : std::string("Vertex Groups, Weight Paint: Rigging...");
-          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
+          /* Task 0525: Vertex Paint shares the row (the Inspector grows only while painting). */
+          const int vpw = std::min(u.px(120), (wrow.w - u.px(12)) / 3);
+          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - vpw - u.px(12), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
             dock_open(WindowKind::Rigging);
           u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
+          draw_vertex_paint_controls(g, mf, lay, {wrow.x + wrow.w - vpw - u.px(4), wrow.y, vpw, wrow.h});
         }
         Recti row = lay.row(u.row_h() + u.px(2));
         const bool edit_hit = u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex);
@@ -3962,6 +3965,37 @@ bool Editor::draw_reflected(const std::function<void(Reflector &)> &fields, ui::
   return ir.changed;
 }
 
+/* The automasking options (task 0519, Blender 5.3; shared by Weight and Vertex Paint since task 0525): they hold parts
+ * of the mesh back from the brush, and multiply. */
+static void reflect_automask(Reflector &br, PaintAutomaskFields &a) {
+  if (br.group("Automasking", false)) {
+    br.field("Topology", a.am_topology);
+    br.help("Only the connected piece the stroke starts on.");
+    br.field("Mesh Boundary", a.am_boundary);
+    br.help("Keeps the brush off the mesh's open edges, fading in over Propagation Steps edges.");
+    if (a.am_boundary) br.field("Propagation Steps", a.am_boundary_steps, 1, 20);
+    br.enumeration("Cavity", a.am_cavity, kWeightCavityModes, 3);
+    br.help("Cavity paints the hollows more than the ridges; Inverted the ridges more than the hollows.");
+    if (a.am_cavity != 0) {
+      br.field("Cavity Factor", a.am_cavity_factor, 0.01f, 0.0f, 5.0f);
+      br.field("Cavity Blur", a.am_cavity_blur, 0, 25);
+    }
+    br.field("View Normal", a.am_view_normal);
+    br.help("Only the faces turned towards you, up to Limit degrees.");
+    if (a.am_view_normal) {
+      br.field("View Limit", a.am_view_limit, 1.0f, 0.0f, 180.0f);
+      br.field("View Falloff", a.am_view_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+    br.field("Area Normal", a.am_area_normal);
+    br.help("Only the faces turned the way the surface faced where the stroke began.");
+    if (a.am_area_normal) {
+      br.field("Area Limit", a.am_area_limit, 1.0f, 0.0f, 180.0f);
+      br.field("Area Falloff", a.am_area_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+  }
+  br.group_end();
+}
+
 /* Weight Paint's toggle and, while painting `g`, the brush (task 0046; in the Rigging window since task 0052). */
 void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay) {
   auto &u = ui_;
@@ -3981,33 +4015,7 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
   br.field("Front Faces Only", wp_brush_.front_only);
-  /* Task 0519 (Blender 5.3): automasking holds parts of the mesh back from the brush; the options multiply. */
-  if (br.group("Automasking", false)) {
-    br.field("Topology", wp_brush_.am_topology);
-    br.help("Only the connected piece the stroke starts on.");
-    br.field("Mesh Boundary", wp_brush_.am_boundary);
-    br.help("Keeps the brush off the mesh's open edges, fading in over Propagation Steps edges.");
-    if (wp_brush_.am_boundary) br.field("Propagation Steps", wp_brush_.am_boundary_steps, 1, 20);
-    br.enumeration("Cavity", wp_brush_.am_cavity, kWeightCavityModes, 3);
-    br.help("Cavity paints the hollows more than the ridges; Inverted the ridges more than the hollows.");
-    if (wp_brush_.am_cavity != 0) {
-      br.field("Cavity Factor", wp_brush_.am_cavity_factor, 0.01f, 0.0f, 5.0f);
-      br.field("Cavity Blur", wp_brush_.am_cavity_blur, 0, 25);
-    }
-    br.field("View Normal", wp_brush_.am_view_normal);
-    br.help("Only the faces turned towards you, up to Limit degrees.");
-    if (wp_brush_.am_view_normal) {
-      br.field("View Limit", wp_brush_.am_view_limit, 1.0f, 0.0f, 180.0f);
-      br.field("View Falloff", wp_brush_.am_view_falloff, 0.01f, 0.0001f, 1.0f);
-    }
-    br.field("Area Normal", wp_brush_.am_area_normal);
-    br.help("Only the faces turned the way the surface faced where the stroke began.");
-    if (wp_brush_.am_area_normal) {
-      br.field("Area Limit", wp_brush_.am_area_limit, 1.0f, 0.0f, 180.0f);
-      br.field("Area Falloff", wp_brush_.am_area_falloff, 0.01f, 0.0001f, 1.0f);
-    }
-  }
-  br.group_end();
+  reflect_automask(br, wp_brush_);
   br.field("Clean Below", wp_clean_below_, 0.005f, 0.0f, 1.0f);  // (task 0287: Clean's threshold)
   const int hw = (lay.area.w - u.px(16)) / 2;
   Recti brow = lay.row(u.row_h() + u.px(2));
@@ -4017,6 +4025,62 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (u.record_buttons) u.button_rects["wp:Clean"] = cb;
   if (u.button(cb, "Clean")) weight_paint_command({"wpclean", strprintf("%g", wp_clean_below_)});
   u.tooltip(strprintf("Weights at or under %g (Clean Below) become 0 (Blender: Clean).", wp_clean_below_));
+}
+
+/* Vertex Paint's toggle and, while painting `g`, the layer and the brush (task 0525, ADR 0152; in the Inspector's
+ * MeshFilter, under the Rigging row). */
+void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay, Recti toggle) {
+  auto &u = ui_;
+  if (!g || !mf || !mf->mesh) return;
+  const bool painting = vertex_paint_ && vp_obj_ == g->id;
+  if (u.record_buttons) u.button_rects["vp:Toggle"] = toggle;
+  if (u.button(toggle, painting ? "Exit Vertex Paint" : "Vertex Paint", painting, Icon::Vertex)) set_vertex_paint(!painting);
+  u.tooltip("Paint the mesh's colour attribute with a brush (Blender: Vertex Paint mode). Games read it as the vertex colours.");
+  if (!colors_dropped_note_.empty() && colors_dropped_obj_ == g->id) {  // (ADR 0152: paint is never lost silently)
+    Recti note = lay.row(u.row_h() + u.px(2));
+    const int okw = u.px(40);
+    u.label({note.x + u.px(4), note.y, note.w - okw - u.px(12), note.h}, "A colour layer was dropped by the last edit (Undo brings it back)", u.theme.warning);
+    u.tooltip(colors_dropped_note_);
+    if (u.record_buttons) u.button_rects["vp:DroppedOK"] = {note.x + note.w - okw - u.px(4), note.y, okw, note.h};
+    if (u.button({note.x + note.w - okw - u.px(4), note.y, okw, note.h}, "OK")) colors_dropped_note_.clear();
+  }
+  if (!painting) return;
+  const Mesh &m = *mf->mesh;
+  std::vector<const char *> names;
+  for (const ColorAttribute &c : m.color_attributes) names.push_back(c.name.c_str());
+  InspectorReflector br(*this, u, lay);
+  if (!names.empty()) {
+    int active = std::max(0, std::min(m.active_color, (int)names.size() - 1));
+    const int was = active;
+    br.enumeration("Layer", active, names.data(), (int)names.size());
+    const bool point = m.color_attributes[(size_t)was].domain == ColorAttribute::Domain::Point;
+    br.help(point ? "One colour per vertex (Blender: Point)." : "One colour per face corner, so a seam can change colour (Blender: Face Corner).");
+    if (active != was) {
+      /* The name directly (it may hold spaces); the command copies the mesh, so `m` is not read after it. */
+      const std::string name = m.color_attributes[(size_t)active].name;
+      color_attribute_command({"colorattr", "active", name});
+      return;
+    }
+  }
+  br.enumeration("Brush", vp_brush_.tool, kVertexPaintTools, 4);
+  br.help("Draw paints the colour (Ctrl: the inverse, or Add and Subtract swapped), Blur evens out with the neighbours, Average with the whole brush, Smear drags colour along the stroke.");
+  if (vp_brush_.tool == 0) br.enumeration("Blend", vp_brush_.blend, kVertexPaintBlends, 6);
+  br.color("Color", vp_brush_.color);
+  br.field("Alpha", vp_brush_.alpha, 0.01f, 0.0f, 1.0f);
+  br.field("Radius", vp_brush_.radius, 1.0f, 1.0f, 500.0f);
+  br.field("Strength", vp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.enumeration("Falloff", vp_brush_.falloff, kWeightFalloffs, 6);
+  br.field("Mirror X", vp_brush_.mirror_x);
+  br.field("Front Faces Only", vp_brush_.front_only);
+  reflect_automask(br, vp_brush_);
+  const int hw = (lay.area.w - u.px(16)) / 2;
+  Recti brow = lay.row(u.row_h() + u.px(2));
+  int k = 1;
+  while (m.find_color(strprintf("Color.%03d", k)) >= 0) k++;
+  if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "New Point Layer")) command(strprintf("colorattr add Color.%03d point", k));
+  u.tooltip("A new white layer, one colour per vertex.");
+  if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "New Corner Layer")) command(strprintf("colorattr add Color.%03d corner", k));
+  u.tooltip("A new white layer, one colour per face corner (sharp colour changes across edges).");
 }
 
 }  // namespace bl

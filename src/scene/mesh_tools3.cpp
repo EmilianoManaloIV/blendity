@@ -36,6 +36,32 @@ void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<i
       for (size_t i = 0; i < src.vert_count(); i++) dg.weights.push_back(si >= 0 ? src.vertex_groups[(size_t)si].weights[i] : 0.0f);
     }
   }
+  /* Task 0525 (ADR 0152): Point colour layers joined by name as the groups are - white where a side has none. Corner
+   * layers can't follow add_face yet: sync_attributes drops dst's (reported by the editor), src's aren't joined. */
+  {
+    auto point_fits = [](const Mesh &m, const ColorAttribute &c) { return c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m.vert_count(); };
+    /* What can't be joined, decided before dst's layers grow (they fit again only once the positions have): src's
+     * Corner or stale layers, and src's Point ones whose name dst holds as another kind (reported by the editor). */
+    for (const ColorAttribute &sc : src.color_attributes) {
+      const int di = dst.find_color(sc.name);
+      if (point_fits(src, sc) && (di < 0 || point_fits(dst, dst.color_attributes[(size_t)di]))) continue;
+      dst.dropped_colors.push_back("'" + sc.name + (sc.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+    }
+    const bool dst_had = !dst.color_attributes.empty();
+    for (const ColorAttribute &sc : src.color_attributes)
+      if (point_fits(src, sc) && dst.find_color(sc.name) < 0) dst.color_attributes.push_back(dst.make_color(sc.name, ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1)));
+    for (ColorAttribute &dc : dst.color_attributes) {
+      if (!point_fits(dst, dc)) continue;
+      const int si = src.find_color(dc.name);
+      const bool has = si >= 0 && point_fits(src, src.color_attributes[(size_t)si]);
+      for (size_t i = 0; i < src.vert_count(); i++) dc.rgba.push_back(has ? src.color_attributes[(size_t)si].rgba[i] : Vec4(1, 1, 1, 1));
+    }
+    /* src's choices only when dst had no layers to choose from ("none" on dst stays none). */
+    if (!dst_had && src.active_color >= 0 && src.active_color < (int)src.color_attributes.size())
+      dst.active_color = dst.find_color(src.color_attributes[(size_t)src.active_color].name);
+    if (!dst_had && src.render_color >= 0 && src.render_color < (int)src.color_attributes.size())
+      dst.render_color = dst.find_color(src.color_attributes[(size_t)src.render_color].name);
+  }
   /* Shape keys joined by name too (round 357: they had been left a vertex count short - "the mesh was edited since"):
    * dst's go on with src's offsets turned into dst's space (0 where src has none), src's new ones start at 0. */
   if (join_keys && dst.keys_fit() && src.keys_fit()) {
@@ -85,6 +111,16 @@ size_t drop_unmoving_keys(Mesh &m) {
   return before - m.shape_keys.size();
 }
 
+/* The active and render layers of `from`, by name, on `to`'s layers (task 0525). */
+static void copy_color_choices(const Mesh &from, Mesh &to) {
+  auto name_of = [&](int i) { return i >= 0 && i < (int)from.color_attributes.size() ? from.color_attributes[(size_t)i].name : std::string(); };
+  to.active_color = to.find_color(name_of(from.active_color));
+  to.render_color = to.find_color(name_of(from.render_color));
+  /* (A choice whose layer didn't come along falls back to the first; "none" stays none.) */
+  if (to.active_color < 0 && from.active_color >= 0 && !to.color_attributes.empty()) to.active_color = 0;
+  if (to.render_color < 0 && from.render_color >= 0 && !to.color_attributes.empty()) to.render_color = 0;
+}
+
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   Mesh out;
   out.name = m.name;
@@ -95,6 +131,11 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   out.seams = m.seams;
   out.sharp_edges = m.sharp_edges;
   out.vertex_groups = m.vertex_groups;  // remove_loose_verts below keeps the separated vertices' weights
+  for (const ColorAttribute &c : m.color_attributes) {  // (task 0525) Point colours likewise; Corner ones don't follow add_face yet
+    if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m.vert_count()) out.color_attributes.push_back(c);
+    else out.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+  }
+  copy_color_choices(m, out);
   if (!m.face_smooth.empty()) out.face_smooth.reserve(m.face_count());
   const bool uv = m.has_uvs();
   for (size_t f = 0; f < m.face_count(); f++) {
@@ -182,6 +223,16 @@ std::vector<Mesh> split_by_part(const Mesh &m, const std::vector<int> &face_part
       for (uint32_t v : touched) nk.delta[remap[v]] = k.delta[v];
       o.shape_keys.push_back(std::move(nk));
     }
+    for (const ColorAttribute &c : m.color_attributes) {  // (task 0525) Point colours of the part's vertices
+      if (c.domain != ColorAttribute::Domain::Point || c.rgba.size() != m.vert_count()) {
+        o.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+        continue;
+      }
+      ColorAttribute nc = o.make_color(c.name, ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
+      for (uint32_t v : touched) nc.rgba[remap[v]] = c.rgba[v];
+      o.color_attributes.push_back(std::move(nc));
+    }
+    copy_color_choices(m, o);
     for (uint32_t v : touched) remap[v] = UINT32_MAX;
     o.sync_attributes();
     o.touch();

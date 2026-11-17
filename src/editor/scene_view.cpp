@@ -163,6 +163,7 @@ void Editor::draw_scene_view(const Recti &r) {
   }
   if (show_gizmos_ && !piloting) draw_gizmo(view);
   wp_draw(view);
+  vp_draw(view);  // (task 0525)
   sculpt_draw(view);  // (task 0236)
   paint_draw(view);   // (task 0245)
   strokeobj_draw(view);  // (task 0248)
@@ -276,6 +277,7 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (puppet_handles_update(view)) busy = true;  // (task 0281: before the gizmo - a handle is the puppet's string)
   if (gizmo_update(view)) busy = true;
   if (wp_update(view)) busy = true;
+  if (vp_update(view)) busy = true;  // (task 0525)
   if (sculpt_update(view)) busy = true;  // (task 0236)
   if (paint_update(view)) busy = true;   // (task 0245)
   if (strokeobj_update(view)) busy = true;  // (task 0248)
@@ -620,6 +622,12 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
       it.unlit = false;
       it.materials = nullptr;  // (with materials, Solid shades per pixel from them: the weight colours are the point here)
     }
+    if (!game && vertex_paint_ && g.id == vp_obj_ && mf->mesh) {  // Vertex Paint (task 0525): the painted layer's colours
+      it.mesh = &mf->mesh->render_mesh();
+      it.vertex_colors = vp_colors(*mf->mesh, *it.mesh);
+      it.unlit = false;
+      it.materials = nullptr;
+    }
     if (!game && sculpt_ && g.id == sculpt_obj_ && g.evaluated_mesh(editing ? 2 : 0) == mf->mesh.get() && sculpt_colors_wanted(*mf->mesh)) {  // Sculpt Mode: the mask darkens, the groups colour (task 0238; on the cage only when the cage is what is drawn - task 0239)
       it.mesh = &mf->mesh->render_mesh();
       it.vertex_colors = sculpt_colors(*mf->mesh, *it.mesh, it.albedo);
@@ -937,7 +945,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || weight_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || room_.active || blockout_drag_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || vertex_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || room_.active || blockout_drag_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
   if (puppet_control_selected()) return false;  // (round 346: a bone selected by its control is posed by the control, no gizmo over it)
 
   /* Targets & pivot. */
@@ -1416,7 +1424,7 @@ bool Editor::gizmo_update(const Recti &view) {
 
 void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
-  if (tool_ == Tool::View || weight_paint_ || sculpt_ || paint_) return;  // Weight Paint, Sculpt, Paint: the brush, not the gizmo
+  if (tool_ == Tool::View || weight_paint_ || vertex_paint_ || sculpt_ || paint_) return;  // Weight / Vertex Paint, Sculpt, Paint: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
   if (!has_target || puppet_control_selected()) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
