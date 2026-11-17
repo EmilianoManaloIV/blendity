@@ -111,3 +111,20 @@ and the Inspector says so, or the numbers stay the size of the first copy.
   `blockout_editor.cpp` (round 547 changes the leaf, frame and glass). Proposed split: round 547 owns the leaf code;
   this round asks it for one plan per placement through a single function both use (`blockout_opening_placements`,
   in this round's file), or this round lands after 547 and adds the per-copy loop then.
+
+## Decided with round 547 (2026-11-16, the hub for the owner)
+The owner chose "repeat the whole opening"; the copies are generated, never hand-made, so:
+1. **Copies take copy 0's part stacks** (round 547's Frame / Glass / Leaf objects) and stay in step with them: an edit goes
+   to copy 0 - the opening's own parts - and the Inspector says so on a copy's part.
+2. **When the count drops**, the extra copies' parts and their stacks go (generated: nothing hand-made is lost).
+3. **Deleting one copy's leaf** turns Leaf off for the whole opening, as today; the Inspector or the log says it applies to
+   every copy.
+
+## What taking round 547 in needs (its worker's notes)
+- `blockout_opening_cut`: each placement's hole gets its own piece id (the copy index in the id), stable while the
+  placements change; a Revolving door's ring and drum go per placement too.
+- The per-copy parts (`opening_plans`) take each placement's rotation and mirror, not only its origin;
+  `blockout_leaf_open_of` reads the hand turn relative to it. A mirror is made without a negative scale (ADR 0135): a
+  mirrored leaf flips its hinge side instead.
+- Copy 0 is transformed too when placement 0 is not the identity.
+- Round 547's local stub `opening_placements` (`blockout_editor.cpp`) is replaced by `blockout_opening_placements()`.

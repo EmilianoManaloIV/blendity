@@ -313,11 +313,149 @@ std::string blockout_piece_modifier_refusal(const char *type) {
 
 /* Why this piece takes no stack at all ("" when it does): a room, a door or window, an Intersect piece (ADR 0138 decision 4). */
 std::string blockout_piece_stack_refusal(const BlockoutPiece &bp) {
-  if (bp.opening != 0) return "a door or window is a cut sized by its Width, Head and Sill";
   if (bp.is_room()) return "a room's walls, floor and ceiling come from its numbers";
   if (bp.is_preset()) return "a preset (a column, beam, railing, roof or stair) is several shapes made from its numbers";  // (round 500's presets are collected apart: a stack would never run)
   if (bp.operation == 2) return "an Intersect piece with a stack is not built yet";
   return "";
+}
+
+/* ---- Round 546: an opening's repeats (ADR 0150) ---- */
+
+bool blockout_opening_repeat(const Component &c) {
+  if (const auto *a = dynamic_cast<const ArrayModifier *>(&c)) return a->fit_type != 2;  // (fitted to a curve: refused, as on any piece)
+  return dynamic_cast<const MirrorModifier *>(&c) != nullptr;
+}
+
+namespace {
+
+/* The box of the hole at every placement, in the opening's space: what an Array's relative offset is a multiple of. */
+AABB copies_bounds(const BlockoutPiece &bp, const std::vector<Mat4> &at) {
+  const Vec3 half(0.5f * bp.width, 0.5f * std::max(0.0f, bp.head - bp.sill), 0.5f * bp.depth), mid(0.0f, 0.5f * (bp.head + bp.sill), 0.0f);
+  AABB b;
+  for (const Mat4 &m : at)
+    for (int k = 0; k < 8; k++) b.add(m.point(mid + Vec3(k & 1 ? half.x : -half.x, k & 2 ? half.y : -half.y, k & 4 ? half.z : -half.z)));
+  return b;
+}
+
+/* The hole a placement cuts, as what tells two apart: where its middle lands and how long each of its axes is, which way. The hole
+ * is symmetric about its middle in each axis (a box, an arch, a drum), so a copy mirrored onto itself cuts the same hole. */
+bool same_hole(const BlockoutPiece &bp, const Mat4 &a, const Mat4 &b, float tol) {
+  const Vec3 mid(0.0f, 0.5f * (bp.head + bp.sill), 0.0f);
+  if (length(a.point(mid) - b.point(mid)) > tol) return false;
+  for (int c = 0; c < 3; c++) {
+    const Vec3 u = a.column(c), v = b.column(c);
+    if (length(u - v) > tol && length(u + v) > tol) return false;
+  }
+  return true;
+}
+
+bool finite_mat(const Mat4 &m) {
+  for (float f : m.m)
+    if (!std::isfinite(f)) return false;
+  return true;
+}
+
+/* One Array's copies of everything placed so far. */
+std::vector<Mat4> array_copies(const BlockoutPiece &bp, const ArrayModifier &a, const std::vector<Mat4> &at) {
+  std::vector<Mat4> out;
+  if (a.mode == 1) {  // (Radial: turned about the opening's own axis, as radial_array turns a mesh about its origin)
+    const int n = std::max(1, std::min(a.count, 1000));
+    Vec3 ax(0.0f);
+    ax[std::max(0, std::min(a.radial_axis, 2))] = 1.0f;
+    const bool full = std::fabs(std::fabs(a.radial_angle) - 360.0f) < 1e-3f;
+    const float step = n == 1 ? 0.0f : a.radial_angle / (float)(full ? n : n - 1);
+    for (int c = 0; c < n; c++)
+      for (const Mat4 &m : at) out.push_back(Mat4::rotate(Quat::axis_angle(ax, step * (float)c * kDeg2Rad)) * m);
+    return out;
+  }
+  const AABB b = copies_bounds(bp, at);
+  const Vec3 size = b.max - b.min;
+  const Vec3 step = Vec3(a.relative_offset.x * size.x, a.relative_offset.y * size.y, a.relative_offset.z * size.z) + a.constant_offset;
+  int n = std::max(1, std::min(a.count, 1000));
+  if (a.fit_type == 1) {  // (Fit Length: as many steps as fit, as ArrayModifier::modify counts them)
+    const float L = a.fit_length, s = length(step);
+    n = 1;
+    if (std::isfinite(L) && std::isfinite(s) && s > 1e-6f && L > 0.0f) n = (int)std::max(1.0, std::min(1000.0, std::floor(L / s + 1e-4)));
+  }
+  for (int c = 0; c < n; c++)
+    for (const Mat4 &m : at) out.push_back(Mat4::translate(step * (float)c) * m);
+  return out;
+}
+
+/* A Mirror's: what is placed, and its image across each ticked plane of the opening, axis by axis (as meshops::mirror does). */
+std::vector<Mat4> mirror_copies(const MirrorModifier &mm, std::vector<Mat4> at) {
+  const bool axes[3] = {mm.x, mm.y, mm.z};
+  for (int ax = 0; ax < 3; ax++) {
+    if (!axes[ax]) continue;
+    Vec3 s(1.0f);
+    s[ax] = -1.0f;
+    const size_t n = at.size();
+    for (size_t i = 0; i < n; i++) at.push_back(Mat4::scale(s) * at[i]);
+  }
+  return at;
+}
+
+}  // namespace
+
+std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::string *why) {
+  std::vector<Mat4> at{Mat4::identity()};
+  const BlockoutPiece *bp = opening.get<BlockoutPiece>();
+  if (!bp || bp->opening == 0) return at;
+  for (const auto &c : opening.components) {
+    if (!c->is_modifier() || !c->enabled || !blockout_opening_repeat(*c)) continue;
+    if (const auto *a = dynamic_cast<const ArrayModifier *>(c.get())) at = array_copies(*bp, *a, at);
+    else at = mirror_copies(*static_cast<const MirrorModifier *>(c.get()), std::move(at));
+    if (at.size() > 4 * kBlockoutOpeningCopies) break;  // (already far past the cap: no need to make the rest)
+  }
+  /* Copies on another copy's hole go (a Mirror of a lone opening lands on itself): the kernel would cut the same hole twice. */
+  const float tol = 1e-4f * std::max(1.0f, std::max(bp->width, std::max(bp->head, bp->depth)));
+  std::vector<Mat4> kept;
+  for (const Mat4 &m : at) {
+    if (!finite_mat(m)) {
+      if (why) *why = "a number of its Array or Mirror is not finite: it is built as one opening";
+      return {Mat4::identity()};
+    }
+    bool dup = false;
+    for (size_t i = 0; i < kept.size() && !dup; i++) dup = same_hole(*bp, kept[i], m, tol);
+    if (!dup) kept.push_back(m);
+    if (kept.size() > kBlockoutOpeningCopies) {
+      if (why) *why = strprintf("its Array and Mirror make more than %zu copies: it is built as one opening", kBlockoutOpeningCopies);
+      return {Mat4::identity()};
+    }
+  }
+  return kept;
+}
+
+size_t blockout_opening_copies(const GameObject &opening, const Mat4 &at, size_t first, std::vector<blockout::Piece> &pieces, BlockoutSurface *surface) {
+  const std::vector<Mat4> place = blockout_opening_placements(opening);
+  if (place.size() < 2 || first >= pieces.size()) return 0;
+  const size_t end = pieces.size();
+  const bool own = surface && surface->pieces.size() == end;  // (the surface's pieces are the snapshot's, in its order)
+  const Mat4 back = at.inverse();
+  std::vector<BlockoutSurface::Stack> stacked;
+  for (size_t k = 1; k < place.size(); k++) {
+    Mat4 p = place[k];
+    const Vec3 c0 = p.column(0), c1 = p.column(1), c2 = p.column(2);
+    if (dot(cross(c0, c1), c2) < 0.0f) p = p * Mat4::scale(Vec3(-1.0f, 1.0f, 1.0f));  // (mirrored: the same hole, turned)
+    const Mat4 move = at * p * back;
+    for (size_t i = first; i < end; i++) {
+      blockout::Piece q = pieces[i];
+      q.to_blockout = move * q.to_blockout;
+      q.id = blockout_copy_id(q.id, k);
+      if (surface) {
+        for (const BlockoutSurface::Stack &st : surface->stacks)
+          if (st.index == i) stacked.push_back({pieces.size(), st.key, st.modifiers});  // (the same key: the copies share one evaluation)
+        if (own) {
+          BlockoutSurface::Piece sp = surface->pieces[i];
+          sp.id = q.id;
+          surface->pieces.push_back(sp);
+        }
+      }
+      pieces.push_back(std::move(q));
+    }
+  }
+  if (surface) surface->stacks.insert(surface->stacks.end(), stacked.begin(), stacked.end());
+  return place.size() - 1;
 }
 
 /* The piece's enabled modifiers that it takes, in the stack's order (none when the piece takes no stack). */
@@ -325,8 +463,9 @@ void blockout_piece_stack(const GameObject &piece, std::vector<const Component *
   out.clear();
   const BlockoutPiece *bp = piece.get<BlockoutPiece>();
   if (!bp || !blockout_piece_stack_refusal(*bp).empty()) return;
+  const bool opening = bp->opening != 0;  // (round 546: an opening's Array and Mirror are its copies, not part of its hole's stack)
   for (const auto &c : piece.components)
-    if (c->is_modifier() && c->enabled && taken(c->type_name()) && instance_refusal(*c).empty()) out.push_back(c.get());
+    if (c->is_modifier() && c->enabled && taken(c->type_name()) && instance_refusal(*c).empty() && !(opening && blockout_opening_repeat(*c))) out.push_back(c.get());
 }
 
 bool blockout_piece_stack_live(const GameObject &piece) {

@@ -1558,6 +1558,35 @@ bool Editor::inspector_any_open(GameObject *g) const {
   return mods == foldouts_.end() ? false : mods->second;
 }
 
+/* Round 546 (ADR 0150): what a door's or window's modifiers do, under its Modifiers section - its Array and Mirror repeat the whole
+ * opening, the rest reshape its hole; Width, Head and Sill stay one opening's size; repeats run after the others whatever their order;
+ * and why its copies were refused, when they were. */
+static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const GameObject &g) {
+  auto row = [&](const std::string &text, bool warn, const char *tip) {
+    Recti nr = lay.row();
+    u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, text, warn ? u.theme.warning : u.theme.text_dim);
+    u.tooltip(tip);
+  };
+  std::string why;
+  const size_t copies = blockout_opening_placements(g, &why).size();
+  bool repeats = false, repeat_above = false;
+  for (const auto &c : g.components) {
+    if (!c->is_modifier() || !c->enabled) continue;
+    if (blockout_opening_repeat(*c)) repeats = true;
+    else if (repeats) repeat_above = true;  // (a reshaping modifier below a repeat: it still runs first)
+  }
+  row(copies > 1 ? strprintf("Array and Mirror repeat the whole opening: %zu copies. The others reshape its hole.", copies)
+                 : std::string("Array and Mirror repeat the whole opening; the others reshape its hole."),
+      false,
+      "Each copy is the whole door or window - its hole, frame, glass, sill board and a door's leaf - placed in the opening's own axes "
+      "(an Array steps along them in multiples of its size, a Mirror mirrors across its middle). Bevel and the others reshape the hole only; "
+      "the frame, glass and leaf take modifiers of their own.");
+  row("Width, Head and Sill are one opening's size, before its modifiers.", false,
+      "The handles, F9 and the console set the first opening's size; the copies follow it.");
+  if (repeat_above) row("Array and Mirror run after the others, whatever their order here.", true, "The hole is reshaped first, then repeated.");
+  if (!why.empty()) row("Not repeated: " + why + ".", true, "The opening is built once; the Blockout's status says the same.");
+}
+
 void Editor::inspector_fold_all(GameObject *g, bool open) {
   if (!g) return;
   for (size_t ci = 0; ci < g->components.size(); ci++) {
@@ -2080,7 +2109,8 @@ void Editor::draw_inspector(const Recti &r) {
       u.tooltip(mod_piece ? "Refused on a Blockout piece: Bake the Blockout to Mesh to keep the result as a mesh."
                 : on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
-      if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
+      if (mod_piece && mod_piece->opening != 0) draw_opening_modifier_rows(u, lay, *g);  // (round 546: a door's or window's own lines)
+      else if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
         const std::string why = blockout_piece_stack_refusal(*mod_piece);
         const bool live = mods.empty() || blockout_piece_stack_live(*g);  // (no modifiers yet: nothing to warn of)
         Recti nr = lay.row();

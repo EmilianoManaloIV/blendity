@@ -1186,7 +1186,9 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
       collect(*c, m, pieces, notes, grid_cell);
       continue;
     }
+    const size_t first = pieces.size();  // (round 546: an opening's pieces from here on are copied for each of its placements)
     if (bp && bp->enabled && bp->is_styled_opening() && collect_window(*bp, c->id, m, pieces, notes, grid_cell)) {
+      blockout_opening_copies(*c, m, first, pieces, notes ? &notes->surface : nullptr);
       collect(*c, m, pieces, notes, grid_cell);
       continue;
     }
@@ -1203,6 +1205,7 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
         pieces.push_back(std::move(p));
         if (source && notes) notes->sources.push_back(source->id);
         if (notes) notes->surface.pieces.push_back(surface_of(*bp, c->id));  // (round 482: what the faces of this piece are given besides their shape)
+        if (bp->opening != 0) blockout_opening_copies(*c, m, first, pieces, notes ? &notes->surface : nullptr);  // (round 546)
       }
     }
     collect(*c, m, pieces, notes, grid_cell);
@@ -1613,7 +1616,8 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
 /* ===================================================================== */
 
 int blockout_face_class(const blockout::Piece &piece, uint32_t side) {
-  if (blockout_id_generated(piece.id) && side != blockout::kSideBlend) return window_part(piece.id) & 0x40 ? blockout_preset_face_class(piece, side) : window_face_class(piece, side);
+  if (blockout_id_generated(piece.id) && window_part(piece.id) != 0 && side != blockout::kSideBlend)  // (part 0: a plain opening's copy, round 546 - a plain piece)
+    return window_part(piece.id) & 0x40 ? blockout_preset_face_class(piece, side) : window_face_class(piece, side);
   const bool plain = !piece.room || side == blockout::kSideBlend;  // (a blend only comes from a piece that is no room)
   if (plain) return piece.op == blockout::Op::Add ? kClassSolid : kClassCut;
   switch (blockout::side_class(piece, side)) {

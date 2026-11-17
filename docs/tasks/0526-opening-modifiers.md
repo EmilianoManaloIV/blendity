@@ -56,7 +56,7 @@ opening's size.
    equals, face for face, three such windows placed by hand at those places.
 3. A styled door with an Array of 2: two holes, two frames, two leaf objects (one per copy), each leaf in its copy's
    doorway.
-4. A Mirror X on a window whose Array has 2 copies: 4 copies, symmetric about the opening's middle; a Mirror on a lone
+4. A Mirror X on a window whose Array has 2 copies: 3 openings (the window, its copy, the copy's image - the window, on the mirror plane, is its own image), symmetric about its middle; a Mirror on a lone
    opening leaves one hole (the copy lands on itself and is cut once).
 5. Width, Head and Sill are unchanged by any modifier; the handles drag the first copy's size and every copy follows
    (one evaluation for a shaper change, none for a move).
