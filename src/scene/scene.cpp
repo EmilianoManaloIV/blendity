@@ -185,7 +185,7 @@ void register_builtin_components() {
   reg<MeshDeformModifier>("Mesh", "Binds the mesh to a closed cage mesh round it; moving the cage's vertices shapes the mesh smoothly.",
                           "Mesh Deform modifier (Bind)");
   reg<LatticeModifier>("Mesh", "Moves the mesh with a Lattice object's points: squash, bulge, taper.", "Lattice modifier");
-  reg<PointCloudObject>("Mesh", "A cloud of points: plain dots, or Gaussian Splats - soft turned ellipsoids whose colour changes with the view. "
+  reg<PointCloudObject>("Mesh", "A cloud of points: plain dots, or Gaussian Splats - soft turned ellipsoids whose color changes with the view. "
                         "Create > Point Cloud > Test Splats makes a filled one to try.", "Point Cloud object (Type: Points / Gaussian Splats)");
   reg<Lattice>("Mesh", "A box of points round a mesh: a Lattice modifier moves the mesh with them. Click a point to move it with the gizmo.",
                "Lattice object");

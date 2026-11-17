@@ -53,6 +53,10 @@ struct PTObject {
   const std::vector<Vec4> *colors = nullptr;  // (task 0533) the render colour layer per render vertex (DrawItem::material_colors)
 };
 
+/* Task 0537: a bake's object's colours for PTObject::colors - the mesh's render layer per vertex of `rm`, filled only
+ * when one of `materials` reads them (Vertex Color); empty otherwise. Cache-free: for a bake's worker thread. */
+void pt_object_colors(const struct Mesh &mesh, const RenderMesh &rm, const std::vector<MaterialPtr> &materials, std::vector<Vec4> &out);
+
 /* A thin lens for depth of field (Cycles: kernel/camera/camera.h). */
 struct PTLens {
   float radius = 0.0f;           // world units; 0 = pinhole

@@ -428,7 +428,7 @@ void Editor::carry_colors(MeshPtr &mesh, const Mesh *before, uint64_t obj) {
   if (!m.dropped_colors.empty()) {
     std::string names;
     for (const std::string &n : m.dropped_colors) names += (names.empty() ? "" : ", ") + n;
-    colors_dropped_note_ = strprintf("Colour layer %s dropped by the last edit: it couldn't follow how the edit rebuilt the mesh. Undo brings it back.",
+    colors_dropped_note_ = strprintf("Color layer %s dropped by the last edit: it couldn't follow how the edit rebuilt the mesh. Undo brings it back.",
                                      names.c_str());
     colors_dropped_obj_ = obj;
     Log::warn("%s", colors_dropped_note_.c_str());

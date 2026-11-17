@@ -12985,6 +12985,47 @@ static void tests_round541_review() {
   });
 }
 
+/* Round 559 (task 0541): the Key menu's tooltips name the chords the keymap gives, not ones written by hand. The Key
+ * button clicked and a row hovered by real mouse events, the clock moved past the tooltip's delay. */
+static std::string r559_key_menu_tip(const char *preset, const char *row, const char *rebind = nullptr) {
+  Editor ed;
+  r541_editor_rig(ed, "R559Tips");
+  ed.command("layout Animation");  // (the Animation window, whose toolbar has the Key menu)
+  ed.command(std::string("keymap ") + preset);
+  if (rebind) ed.command(std::string("keymap bind ") + rebind);
+  ed.record_buttons_for_test(true);
+  ed.set_clock_for_test(100.0);
+  r34_steps(ed, 3);
+  Recti key;
+  if (!ed.button_rect_for_test("anim:Key", key)) return "(no Key button)";
+  const int kx = key.x + key.w / 2, ky = key.y + key.h / 2;
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, kx, ky)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, kx, ky)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseUp, kx, ky)});
+  r34_steps(ed, 2);
+  Recti r;
+  if (!ed.button_rect_for_test(std::string("menu:") + row, r)) return "(no row)";
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+  ed.set_clock_for_test(102.0);
+  for (int i = 0; i < 2; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+  return ed.ui_for_test().tooltip_text_for_test();
+}
+
+static void tests_round559() {
+  test("the Key menu's tooltips say the preset's own chords: Paste Pose's Adjust Last is F9 in Unity's and Ctrl+F9 in Maya's; Convert to Quaternion names Ctrl+R (round 559)", [] {
+    const std::string unity = r559_key_menu_tip("Unity", "Paste Pose"), maya = r559_key_menu_tip("Maya", "Paste Pose");
+    std::printf("    Unity: '%s'\n    Maya: '%s'\n", unity.c_str(), maya.c_str());
+    CHECK(unity.find("F9 afterwards") != std::string::npos && unity.find("Ctrl+F9") == std::string::npos);
+    CHECK(maya.find("Ctrl+F9 afterwards") != std::string::npos);
+    const std::string convert = r559_key_menu_tip("Unity", "Convert to Quaternion");
+    CHECK(convert.find("Ctrl+R in the Scene view") != std::string::npos);
+    /* (Ctrl+R is the chord in every preset, so a rebinding shows the tooltip reads the keymap rather than a literal.) */
+    const std::string rebound = r559_key_menu_tip("Unity", "Convert to Quaternion", "pose.rotation_convert Ctrl+Shift+Q");
+    CHECK(rebound.find("Ctrl+Shift+Q in the Scene view") != std::string::npos && rebound.find("Ctrl+R") == std::string::npos);
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -13027,4 +13068,5 @@ void run_animation_tests() {
   tests_round541();
   tests_round541_te();
   tests_round541_review();
+  tests_round559();
 }

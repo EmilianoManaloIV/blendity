@@ -872,40 +872,43 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     walk_generate();
   if (assist_on(Assist::Ai)) group(u.px(380)), draw_ai_toolbar(x, y, bh);  // (AI Inbetween, its span, the style, Fit to Clips)
   if (!assist_on(Assist::Physics)) return finish_anim_toolbar(rows);  // (Preferences > Animation Assistants: the physics tools off)
-  group(u.px(121 + 79 + 63 + 89 + 89) + (ragdoll::available() ? u.px(73) : 0) + (body_.ghost ? u.px(57) : 0));
-  if (button(u.px(118), "Center of Mass", body_.show_com,
+  /* Round 559: the physics tools wrap one by one, each as wide as its word (and its busy word, "Solving...") needs: as one
+   * group they ran past the window's edge on a row of their own (1024 x 1.5, where AutoPosing was cut and Ragdoll lost). */
+  auto wide = [&](int base, const char *a, const char *b = "") { return std::max(u.px(base), std::max(u.font.text_width(a), u.font.text_width(b)) + u.px(12)); };
+  auto own = [&](int w) { group(w + u.px(3)); return w; };
+  if (button(own(wide(118, "Center of Mass")), "Center of Mass", body_.show_com,
              "Physics (Cascadeur's center of mass): the body's center of mass over the whole clip in the Scene view, where it is\n"
              "at the playhead and straight below it. Each bone weighs what its share of the skinned mesh does (Armature > Body Mass)."))
     body_command({"body", "show", body_.show_com ? "off" : "on"});
-  if (button(u.px(76), "Contacts", false,
+  if (button(own(wide(76, "Contacts")), "Contacts", false,
              "Find where the feet and hands rest (low and still) and mark those frames as contacts under the ruler (Cascadeur's\n"
              "fulcrum points). Contacts set by hand (Puppet > Contacts) are kept, and Pin there holds them still."))
     body_contacts_command({"body", "contacts", "find"});
-  if (button(u.px(60), "Flight", body_.ghost && body_.kind == "Flight",
+  if (button(own(wide(60, "Flight")), "Flight", body_.ghost && body_.kind == "Flight",
              "Physics in the air (Cascadeur's AutoPhysics): between contacts the center of mass follows a parabola under gravity\n"
              "and the spin keeps its angular momentum. Shows the corrected body as a ghost; frames green (fine), blue (changed),\n"
              "red (impossible: change the timing or the poses). Apply writes it into the clip."))
     body_flight_command({"body", "flight", body_.ghost && body_.kind == "Flight" ? "off" : "show"});
   const bool solving = body_.solve && body_.solve->kind == "AutoPhysics", shown = body_.ghost && body_.kind == "AutoPhysics";
-  if (button(u.px(86), solving ? "Solving..." : "AutoPhysics", shown || solving,
+  if (button(own(wide(86, "AutoPhysics", "Solving...")), solving ? "Solving..." : "AutoPhysics", shown || solving,
              "The whole clip made physically possible (Cascadeur's AutoPhysics): the center of mass and the spin moved as little as\n"
              "they can while the contacts' forces stay inside their friction and gravity does the rest - the take-offs and landings\n"
              "too, not only the air. Needs contacts. Solved in the background; shown as a ghost with the frames' colors, then Apply."))
     body_physics_command({"body", "physics", shown || solving ? "off" : "show"});
-  if (button(u.px(86), "AutoPosing", autopose_.on,
+  if (button(own(wide(86, "AutoPosing")), "AutoPosing", autopose_.on,
              "Drag a hand, a foot, the head or the hips with the move gizmo and the whole body follows (Cascadeur's AutoPosing):\n"
              "the spine and limbs bend within their limits, the feet stay on the ground, the center of mass stays over them. Keys\n"
              "at the playhead on release. Puppet > Lock the Selected Bone keeps one still."))
     autopose_command({"autopose", autopose_.on ? "off" : "on"});
   if (ragdoll::available()) {
     const bool rag_shown = body_.ghost && body_.kind == "Ragdoll", rag_busy = body_.solve && body_.solve->kind == "Ragdoll";
-    if (button(u.px(70), rag_busy ? "Simulating..." : "Ragdoll", rag_shown || rag_busy,
+    if (button(own(wide(70, "Ragdoll", "Simulating...")), rag_busy ? "Simulating..." : "Ragdoll", rag_shown || rag_busy,
                "The clip played by an active ragdoll (Jolt): a capsule a bone, its joints' motors following the clip, so hits and\n"
                "falls react physically. Hits, limp (motors off: a fall) and strong at the playhead: Puppet > Ragdoll Events.\n"
                "Simulated in the background, shown as a ghost, then Apply."))
       body_ragdoll_command({"body", "ragdoll", rag_shown || rag_busy ? "off" : "show"});
   }
-  if (body_.ghost && button(u.px(54), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
+  if (body_.ghost && button(own(wide(54, "Apply")), "Apply", false, "Write the corrected motion into the clip (one undo step)."))
     body_flight_command({"body", "flight", "apply"});
   finish_anim_toolbar(rows);
 }
@@ -1676,8 +1679,9 @@ void Editor::draw_anim_key_menu() {
     u.menu_label("Rotation");
     const std::string convert = shortcut_text("pose.rotation_convert");
     if (u.menu_item("Convert to Quaternion", convert.c_str())) anim_rotation_convert(1, false);
-    u.tooltip("The selected bones' Euler rotation keys rewritten as quaternion keys (no gimbal lock, the short way round), the same poses.\n"
-              "Ctrl+R in the Scene view with bones selected turns each the other way.");
+    /* (Round 559: the chord comes from the keymap, so a preset that moves it, or none, is told the truth.) */
+    const std::string convert_tip = convert.empty() ? std::string() : "\n" + convert + " in the Scene view with bones selected turns each the other way.";
+    u.tooltip("The selected bones' Euler rotation keys rewritten as quaternion keys (no gimbal lock, the short way round), the same poses." + convert_tip);
     if (u.menu_item("Convert to Euler")) anim_rotation_convert(2, false);
     u.tooltip("Quaternion keys back to Euler keys, kept continuous (no 360 degree jump between neighbours).");
     if (u.menu_item("Convert to Quaternion, a Key Every Frame")) anim_rotation_convert(1, true);
@@ -1694,7 +1698,8 @@ void Editor::draw_anim_key_menu() {
     u.menu_label("Pose");
     if (u.menu_item("Copy Pose", shortcut_text("pose.copy").c_str())) pose_copy();
     if (u.menu_item("Paste Pose", shortcut_text("pose.paste").c_str())) pose_paste_step(1.0f, false, false);
-    u.tooltip("The copied pose on the bones of those names. F9 afterwards: Influence and Flipped.");
+    const std::string adjust = shortcut_text("edit.adjust_last");  // (F9; Ctrl+F9 in Maya's preset, whose F9 is Vertex mode)
+    u.tooltip("The copied pose on the bones of those names." + (adjust.empty() ? std::string() : " " + adjust + " afterwards: Influence and Flipped."));
     if (u.menu_item("Paste Pose Flipped", shortcut_text("pose.paste_flipped").c_str())) pose_paste_step(1.0f, true, false);
     u.tooltip("Onto the bone on the other side (.L / .R, Left / Right), mirrored: Position X and the rotation's Y and Z negated.");
     if (u.menu_item("Align to Transform Orientation", shortcut_text("pose.align").c_str())) pose_align();

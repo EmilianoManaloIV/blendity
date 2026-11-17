@@ -155,7 +155,7 @@ long long pointcloud_validate(PointCloud &pc, std::string *why) {
   if (!pc.is_splats()) pc.sh_degree = 0;
   pc.sh_degree = std::max(0, std::min(kSplatMaxShDegree, pc.sh_degree));
   const size_t rest = (size_t)pc.sh_rest_per_point();
-  if (pc.color.size() != n) return fail("the colours don't match the point count");
+  if (pc.color.size() != n) return fail("the colors don't match the point count");
   if (pc.is_splats() && (pc.opacity.size() != n || pc.scale.size() != n || pc.rotation.size() != n || pc.sh_rest.size() != n * rest))
     return fail("the splat arrays don't match the point count");
   if (!pc.is_splats() && (!pc.opacity.empty() || !pc.scale.empty() || !pc.rotation.empty() || !pc.sh_rest.empty()))

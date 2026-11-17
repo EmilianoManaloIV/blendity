@@ -457,7 +457,10 @@ static void round28_tests() {
   });
   test("Inspector: a modifier's menu (Apply, Duplicate) acts on a click", [&] {
     Editor ed;
-    ed.init_headless(1600, 900);
+    /* 1000 high, not 900 (round 559): with Linux's wider font the Rigging button and the Vertex Paint toggle take a row
+     * each, and the Array modifier's header then sat 20 px from the window's bottom, under its edge. The menu is what is
+     * tested, not where the Inspector ends. */
+    ed.init_headless(1600, 1000);
     ed.step_frame_headless();
     ed.command("select Cube");
     ed.command("component ArrayModifier");
@@ -16730,6 +16733,38 @@ static void tests_round549() {
   });
 }
 
+/* ---------------------------------------------------------------- round 556 (task 0538): a test run never reads the user's preferences */
+static void tests_round556() {
+  test("test runs (round 556): a test editor's preferences path is in the run's own folder - the runner's default, and set_env's \"\" - never the user's ~/.blendity", [] {
+    const std::string user_prefs = fs::normalize(fs::join(fs::join(fs::home_dir(), ".blendity"), "prefs.txt"));
+    const std::string run = fs::normalize(test_dir());
+    auto under_run = [&](const std::string &p) {
+      const std::string n = fs::normalize(p);
+      return n.size() > run.size() && n.compare(0, run.size(), run) == 0;
+    };
+    {
+      Editor ed;  // (the runner's own setting: main() points BLENDITY_PREFS_DIR at the run's folder unless a caller chose one)
+      ed.init_headless(320, 200);  // (the preferences' path is set up here, as every test's editor gets it)
+      std::printf("    the run's editor reads %s\n", ed.prefs_path_for_test().c_str());
+      CHECK(!ed.prefs_path_for_test().empty());
+      CHECK(fs::normalize(ed.prefs_path_for_test()) != user_prefs);
+      const char *env = std::getenv("BLENDITY_PREFS_DIR");
+      if (env && fs::normalize(env) == fs::normalize(fs::join(test_dir(), "prefs"))) CHECK(under_run(ed.prefs_path_for_test()));  // (the runner's choice, not a caller's)
+    }
+    const char *was = std::getenv("BLENDITY_PREFS_DIR");
+    const std::string keep = was ? was : "";
+    set_env("BLENDITY_PREFS_DIR", "");  // ("" is the run's own preferences - before, an empty path: a prefs.txt in the working folder)
+    {
+      Editor ed;
+      ed.init_headless(320, 200);
+      CHECK(!ed.prefs_path_for_test().empty() && under_run(ed.prefs_path_for_test()));
+      CHECK(fs::normalize(ed.prefs_path_for_test()) != user_prefs);
+      CHECK(ed.prefs_path_for_test() != "prefs.txt" && fs::normalize(ed.prefs_path_for_test()) != fs::normalize("prefs.txt"));
+    }
+    set_env("BLENDITY_PREFS_DIR", keep);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -16846,5 +16881,6 @@ void run_editor_tests() {
   tests_round538();
   tests_round544();
   tests_round549();
+  tests_round556();
   coverage_tests();
 }

@@ -2847,8 +2847,9 @@ static void tests_round540() {
       CHECK(path.rfind(fs::normalize(test_dir()), 0) == 0);
       CHECK(path.rfind(fs::normalize(fs::join(fs::home_dir(), ".blendity")), 0) != 0);
     }
-    /* An empty variable is no folder (Linux keeps it set after set_env(k, "")): no path, and Save writes nothing. */
-    set_env("BLENDITY_PREFS_DIR", "");
+    /* No variable is no folder: no path, and Save writes nothing. (Round 556: cleared with clear_env - set_env(k, "") now
+     * means the run's own preferences folder, as it does for the project and the trash.) */
+    clear_env("BLENDITY_PREFS_DIR");
     {
       Editor ed;
       ed.init_headless(1400, 900);

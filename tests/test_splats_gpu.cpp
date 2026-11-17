@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <set>
+#include <thread>
 
 namespace {
 
@@ -373,6 +374,95 @@ static void round534_tests() {
   });
 }
 
+/* Round 558 (task 0540): OptiX's kernel compiled before the first render - the cold cost found and warmed. */
+static bool optix_card_here() { return gpu::available() && gpu::optix_compiled_in() && gpu::optix_device_of(0) >= 0; }
+static void wait_for_prewarm(double max_ms) {
+  ScopedTimer t;
+  while (gpu::optix_prewarm_state() == 1 && t.ms() < max_ms) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+static void round558_tests() {
+  /* (Times here are printed, never checked, ADR 0056 - except one: a module time under 2 s against a compile's 20-30 s
+   * is how a test tells OptiX's cache answering from a compile; the gap is a factor of ten, not a measurement.) */
+  test("OptiX warm-up: without OptiX (BLENDITY_NO_OPTIX=1, or a build or machine without it) the kernel's warm-up does nothing and says it is done", [] {
+    const char *before = std::getenv("BLENDITY_NO_OPTIX");
+    const std::string restore = before ? before : "";
+    set_env("BLENDITY_NO_OPTIX", "1");
+    ScopedTimer t;
+    gpu::optix_prewarm();
+    std::printf("    optix_prewarm without OptiX: %.2f ms\n", t.ms());
+    CHECK(gpu::optix_prewarm_state() == 2);
+    CHECK(gpu::optix_kernel_ms(0) < 0.0);
+    CHECK(!gpu::optix_compiling(0));
+    std::string why;
+    CHECK(gpu::optix_compile_kernel(0, true, &why) < 0.0 && !why.empty());
+    set_env("BLENDITY_NO_OPTIX", restore);
+  });
+
+  test("OptiX warm-up: choosing OptiX in Render Settings starts compiling its kernel on a thread (the call doesn't wait for it); the first OptiX render after it finds the kernel compiled (skipped without an OptiX card)", [] {
+    if (!optix_card_here()) {
+      std::printf("    (no OptiX card here: skipped)\n");
+      return;
+    }
+    const char *pin = std::getenv("BLENDITY_GPU_BACKEND");
+    const std::string restore = pin ? pin : "";
+    set_env("BLENDITY_GPU_BACKEND", "");  // (the setting's path: the suite pins Vulkan, which set_backend respects)
+    gpu::set_backend(0);
+    ScopedTimer t;
+    gpu::set_backend(2);  // (as Render Settings > GPU Backend does)
+    const double call_ms = t.ms();
+    CHECK(gpu::optix_prewarm_state() >= 1);
+    wait_for_prewarm(180000.0);
+    CHECK(gpu::optix_prewarm_state() == 2);
+    const double warm_ms = gpu::optix_kernel_ms(0);
+    CHECK(warm_ms >= 0.0);  // (the warm-up compiled for the card - or an open before it did)
+    std::string err;
+    ScopedTimer topen;
+    std::unique_ptr<gpu::Renderer> r = gpu::create_optix_renderer(0, &err);
+    const double open_ms = topen.ms();
+    CHECK(r != nullptr);
+    if (r) {
+      const double module_ms = r->open_stats().pipeline_ms;
+      std::printf("    set_backend(2) %.1f ms; the warm-up's compile %.0f ms; then the first OptiX open %.0f ms, its kernel %.0f ms\n", call_ms, warm_ms,
+                  open_ms, module_ms);
+      CHECK(module_ms < 2000.0);  // (OptiX's cache answered: see the note above)
+    }
+    gpu::set_backend(0);
+    set_env("BLENDITY_GPU_BACKEND", restore);
+  });
+
+  test("OptiX warm-up: an OptiX open that comes while the card's kernel compiles waits for that compile, then finds the kernel cached instead of compiling a second time (skipped without an OptiX card)", [] {
+    if (!optix_card_here()) {
+      std::printf("    (no OptiX card here: skipped)\n");
+      return;
+    }
+    gpu::optix_compile_kernel(0, true, nullptr);  // (the cache holds the kernel, whatever ran before this test)
+    /* A cold compile (its own context with OptiX's cache off) holds the card for its whole time; an open started
+     * while it holds it must end after it ends, and its own module must come from the cache. */
+    std::atomic<bool> cold_done{false};
+    double cold_ms = -1.0;
+    std::thread th([&] {
+      cold_ms = gpu::optix_compile_kernel(0, false, nullptr);
+      cold_done = true;
+    });
+    ScopedTimer wait;
+    while (!gpu::optix_compiling(0) && !cold_done && wait.ms() < 60000.0) std::this_thread::yield();
+    const bool held = gpu::optix_compiling(0);
+    std::string err;
+    std::unique_ptr<gpu::Renderer> r = gpu::create_optix_renderer(0, &err);
+    const bool ended_after = cold_done.load();
+    th.join();
+    CHECK(held);
+    CHECK(r != nullptr && cold_ms > 0.0);
+    if (!r) return;
+    const double module_ms = r->open_stats().pipeline_ms;
+    std::printf("    a cold compile %.0f ms; the open during it: its own kernel %.0f ms\n", cold_ms, module_ms);
+    CHECK(ended_after);         // (it waited for the compile ...)
+    CHECK(module_ms < 2000.0);  // (... and didn't compile again: see the note above)
+  });
+}
+
 void run_splats_gpu_tests() {
   round534_tests();
+  round558_tests();
 }
