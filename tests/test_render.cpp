@@ -12925,6 +12925,165 @@ static void tests_round538() {
   });
 }
 
+/* ---------------------------------------------------------------- round 554 (task 0535): shared edges covered exactly once */
+/* A W x H view where a world point (x, y, 0) lands on the pixel position (x + W / 2, H / 2 - y) or its mirror - either way
+ * a pixel centre on a pixel centre: an orthographic camera one world unit a pixel. */
+struct R554View {
+  int W = 64, H = 64;
+  Mat4 v = Mat4::look_at({0, 0, -10}, {0, 0, 0}, {0, 1, 0});
+  Mat4 p = Mat4::ortho(32.0f, 1.0f, 0.1f, 100.0f);
+  Vec3 at(float sx, float sy) const { return {sx - W * 0.5f, H * 0.5f - sy, 0.0f}; }  // (screen position -> world)
+};
+static MeshPtr r554_tri(Vec3 a, Vec3 b, Vec3 c) {
+  MeshPtr m = std::make_shared<Mesh>();
+  m->add_vert(a), m->add_vert(b), m->add_vert(c);
+  m->add_face({0, 1, 2});
+  m->sync_attributes();
+  return m;
+}
+/* The ids buffer of these triangles drawn together (each its own id, 1..n), double-sided, unlit. */
+static std::vector<uint32_t> r554_draw(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, Renderer3D *keep = nullptr) {
+  CfScene sc;
+  for (size_t i = 0; i < tris.size(); i++) {
+    sc.add(r554_tri(tris[i][0], tris[i][1], tris[i][2]), Mat4::identity(), (uint32_t)i + 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+    sc.items.back().double_sided = true;
+  }
+  sc.seal();
+  Image img;
+  RenderTarget rt;
+  cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF204060u, keep);
+  return rt.ids;
+}
+static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float py);
+/* Exactly once: the pixels each triangle covers alone add up to the pixels they cover together (none twice), and every
+ * pixel centre more than 0.01 pixel inside the union - `outline`, a convex polygon in world space, projected by the
+ * renderer itself - is covered (none missed). */
+static void r554_check(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, const std::vector<Vec3> &outline,
+                       size_t &gaps, size_t &doubles) {
+  Renderer3D r3d;
+  const std::vector<uint32_t> all = r554_draw(view, tris, &r3d);
+  std::vector<Vec2> poly;
+  for (const Vec3 &w : outline) {
+    Vec2 sp;
+    float z;
+    CHECK(r3d.project(w, sp, z));
+    poly.push_back(sp);
+  }
+  size_t together = 0, alone = 0;
+  for (uint32_t id : all) together += id != 0;
+  for (const auto &t : tris) {
+    const std::vector<uint32_t> one = r554_draw(view, {t});
+    for (uint32_t id : one) alone += id != 0;
+  }
+  doubles = alone > together ? alone - together : 0;
+  gaps = 0;
+  for (int y = 0; y < view.H; y++)
+    for (int x = 0; x < view.W; x++)
+      if (r554_inside_convex(poly, x + 0.5f, y + 0.5f) > 0.01f && all[(size_t)y * view.W + x] == 0) gaps++;
+}
+/* How far (pixels) a point is inside a convex polygon given in screen positions, either winding (negative: outside). */
+static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float py) {
+  float area = 0.0f;
+  for (size_t i = 0; i < poly.size(); i++) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const float s = area >= 0.0f ? 1.0f : -1.0f;
+  float d = 1e30f;
+  for (size_t i = 0; i < poly.size(); i++) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    const float ex = b.x - a.x, ey = b.y - a.y, len = std::sqrt(ex * ex + ey * ey);
+    if (len <= 0.0f) continue;
+    d = std::min(d, s * (ex * (py - a.y) - ey * (px - a.x)) / len);
+  }
+  return d;
+}
+
+static void tests_round554() {
+  test("rasterizer (round 554): a quad's two triangles cover every pixel on their shared diagonal exactly once - the diagonal through pixel centres, at sub-pixel offsets and turned - on every compiler", [] {
+    const R554View view;
+    size_t worst_gaps = 0, worst_doubles = 0, cases = 0;
+    for (float turn : {0.0f, 45.0f, 30.0f, 60.0f, 17.0f})
+      for (float off : {0.0f, 0.25f, 0.5f, 1.0f / 3.0f}) {
+        /* A square 36 pixels across about (32 + off, 32 + off), its corners turned by `turn`: at 0 and 45 its diagonal and
+         * edges run through pixel centres. */
+        const float cx = 32.0f + off, cy = 32.0f + off, r = 18.0f * std::sqrt(2.0f);
+        std::vector<Vec2> sq;
+        for (int k = 0; k < 4; k++) {
+          const float a = (45.0f + turn + 90.0f * k) * kDeg2Rad;
+          sq.push_back({cx + r * std::cos(a), cy + r * std::sin(a)});
+        }
+        const Vec3 A = view.at(sq[0].x, sq[0].y), B = view.at(sq[1].x, sq[1].y), C = view.at(sq[2].x, sq[2].y), D = view.at(sq[3].x, sq[3].y);
+        size_t gaps = 0, doubles = 0;
+        r554_check(view, {{A, B, C}, {A, C, D}}, {A, B, C, D}, gaps, doubles);
+        worst_gaps = std::max(worst_gaps, gaps), worst_doubles = std::max(worst_doubles, doubles), cases++;
+        if (gaps || doubles) std::printf("    turned %.0f, offset %.2f: %zu missed, %zu twice\n", turn, off, gaps, doubles);
+      }
+    std::printf("    %zu squares: at worst %zu pixels missed, %zu covered twice\n", cases, worst_gaps, worst_doubles);
+    CHECK(worst_gaps == 0 && worst_doubles == 0);
+  });
+  test("rasterizer (round 554, review): a quad split along a horizontal line through pixel centres, its ends between pixels, and the same line tilted a hair, covers the line's pixels once", [] {
+    const R554View view;
+    /* The shared edge from (10.1, 32.5) to (50.3, 32.5): its row values round either way (the ends aren't halves), where
+     * the span setup used to skip the row for both triangles. Then the far end raised by 1e-5 pixel: a nearly horizontal
+     * edge whose float crossing is far from the true one. */
+    for (float tilt : {0.0f, 1e-5f, -1e-5f}) {
+      const Vec3 L = view.at(10.1f, 32.5f), R = view.at(50.3f, 32.5f - tilt);
+      const Vec3 top = view.at(30.2f, 12.25f), bottom = view.at(30.2f, 52.75f);
+      size_t gaps = 0, doubles = 0;
+      r554_check(view, {{L, R, top}, {R, L, bottom}}, {L, top, R, bottom}, gaps, doubles);
+      std::printf("    the horizontal split, tilted %g: %zu missed, %zu twice\n", tilt, gaps, doubles);
+      CHECK(gaps == 0 && doubles == 0);
+    }
+  });
+  test("rasterizer (round 554, review): a see-through quad's two triangles blend their shared diagonal once - its pixels the same colour as the rest of the quad", [] {
+    const R554View view;
+    for (float off : {0.0f, 0.37f}) {
+      const Vec3 A = view.at(12.5f + off, 12.5f + off), B = view.at(52.5f + off, 12.5f + off), C = view.at(52.5f + off, 52.5f + off),
+                 D = view.at(12.5f + off, 52.5f + off);
+      CfScene sc;
+      for (const auto &t : std::vector<std::array<Vec3, 3>>{{A, B, C}, {A, C, D}}) {
+        MaterialPtr m = cf_unlit({1.0f, 1.0f, 1.0f});
+        m->surface = (int)MaterialSurface::Transparent;
+        m->alpha = 0.5f;
+        sc.add(r554_tri(t[0], t[1], t[2]), Mat4::identity(), 1, m);
+        sc.items.back().double_sided = true;
+      }
+      sc.seal();
+      Image img;
+      RenderTarget rt;
+      cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF000000u);
+      /* The quad's middle: one colour where the blend landed once. Along the diagonal x == y: a darker pixel was missed, a
+       * lighter one blended twice. */
+      const uint32_t mid = img.pixels[(size_t)30 * view.W + 40] & 0xFFFFFFu;
+      size_t odd = 0, inside = 0;
+      for (int y = 16; y < 50; y++)
+        for (int x = 16; x < 50; x++) {
+          inside++;
+          odd += (img.pixels[(size_t)y * view.W + x] & 0xFFFFFFu) != mid;
+        }
+      std::printf("    offset %.2f: the quad's colour %06X, %zu of its %zu inner pixels another\n", off, mid, odd, inside);
+      CHECK(mid != 0 && odd == 0);
+    }
+  });
+  test("rasterizer (round 554): a fan of eight triangles around a pixel centre covers its disc once - no pixel missed or covered twice at the centre or along the spokes", [] {
+    const R554View view;
+    for (float off : {0.0f, 0.5f}) {
+      const float cx = 32.5f + off, cy = 32.5f + off, r = 20.0f;  // (the centre on a pixel centre, then between four)
+      std::vector<Vec2> rim;
+      for (int k = 0; k < 8; k++) rim.push_back({cx + r * std::cos(k * 45.0f * kDeg2Rad), cy + r * std::sin(k * 45.0f * kDeg2Rad)});
+      std::vector<std::array<Vec3, 3>> fan;
+      for (int k = 0; k < 8; k++) fan.push_back({view.at(cx, cy), view.at(rim[k].x, rim[k].y), view.at(rim[(k + 1) % 8].x, rim[(k + 1) % 8].y)});
+      std::vector<Vec3> outline;
+      for (const Vec2 &q : rim) outline.push_back(view.at(q.x, q.y));
+      size_t gaps = 0, doubles = 0;
+      r554_check(view, fan, outline, gaps, doubles);
+      std::printf("    the fan about (%.1f, %.1f): %zu missed, %zu twice\n", cx, cy, gaps, doubles);
+      CHECK(gaps == 0 && doubles == 0);
+    }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -12980,4 +13139,5 @@ void run_render_tests() {
   tests_round341();
   tests_round462();
   tests_round538();
+  tests_round554();
 }

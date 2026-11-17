@@ -1481,8 +1481,75 @@ static void tests_round531_engineer() {
   });
 }
 
+/* ------------------------------------------------------------- round 561: the Learn section's steps (task 0543) */
+
+static void tests_round561() {
+  test("learn: 'Point clouds and Gaussian splats' walks clean in a fresh editor - splats, Points beside them, the Game view, F12 on the CPU, the card's device - with its questions", [] {
+    int at = -1;
+    for (int i = 0; i < lesson_count() && at < 0; i++)
+      if (std::string(lesson(i).body).find("\n# Point clouds and Gaussian splats") != std::string::npos) at = i;
+    CHECK(at >= 0);
+    if (at < 0) return;
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    std::istringstream lines(std::string(lesson(at).body));
+    std::string line;
+    bool in = false;
+    int steps = 0, questions = 0, warned = 0;
+    while (std::getline(lines, line)) {
+      if (line.rfind("# ", 0) == 0) in = line == "# Point clouds and Gaussian splats";
+      if (!in) continue;
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      steps++;
+      const std::string cmds = line.substr(6, line.find(" | ") - 6);
+      std::vector<LogEntry> sink;
+      const size_t base = Log::fetch(0, sink);
+      for (size_t a = 0; a <= cmds.size();) {  // (';'-separated, as the Learn tab runs them)
+        const size_t e = cmds.find(';', a);
+        std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+      ed.step_frame_headless();
+      std::vector<LogEntry> got;
+      Log::fetch(base, got);
+      bool w = false;
+      for (const LogEntry &le : got)
+        if (le.level != LogLevel::Info) w = true, std::printf("    '%s' warned: %s\n", cmds.c_str(), le.text.c_str());
+      warned += w;
+    }
+    std::printf("    %d Try-it steps, %d warned, %d questions\n", steps, warned, questions);
+    CHECK(steps >= 6);
+    CHECK(warned == 0);
+    CHECK(questions >= 6);
+    /* What the steps leave (review 561): exactly two clouds - the splats and the Points refilled in place, level with
+     * them beside them - and the path tracer on GPU Compute (the card's step: it falls back to the CPU without one). */
+    int clouds = 0, splats = 0, points = 0;
+    Vec3 points_at(0.0f);
+    ed.scene().for_each([&](GameObject &g) {
+      const PointCloudObject *pc = g.get<PointCloudObject>();
+      if (!pc) return;
+      clouds++;
+      if (!pc->data || pc->data->count() != 10000) return;
+      if (pc->data->is_splats()) splats++;
+      else points++, points_at = g.world_position();
+    });
+    CHECK(clouds == 2);
+    CHECK(splats == 1 && points == 1);
+    CHECK(points_at.x == 2.5f && points_at.y == 0.5f && points_at.z == 0.0f);
+    CHECK(ed.scene().render.engine == 1);
+    CHECK(ed.scene().render.device == 1);
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
   tests_round531_engineer();
+  tests_round561();
 }
