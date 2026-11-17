@@ -2859,7 +2859,7 @@ void Editor::blockout_parts_select(bool to_parts, int kind, const char *command)
       add(g->parent->id);
   }
   if (ids.empty()) {
-    Log::warn(to_parts ? "%s: select a styled door or window first (blockout add door single | blockout add window single)" : "%s: select a door's or window's part first (blockout part select)", command);
+    Log::warn(to_parts ? "%s: select a styled door or window first - draw one with Draw Piece (Shape: Door or Window, under Openings) or pick one in the Hierarchy" : "%s: select a door's or window's Frame, Glass or Leaf first - click a styled opening twice, or pick the part under it in the Hierarchy", command);
     return;
   }
   select(ids.front());
