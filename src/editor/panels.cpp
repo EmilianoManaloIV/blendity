@@ -1592,8 +1592,9 @@ bool Editor::inspector_any_open(GameObject *g) const {
 /* Round 546 (ADR 0150): what a door's or window's modifiers do, under its Modifiers section - its Array and Mirror repeat the whole
  * opening, the rest reshape its hole; Width, Head and Sill stay one opening's size; repeats run after the others whatever their order;
  * and why its copies were refused, when they were. */
-static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const GameObject &g) {
-  auto row = [&](const std::string &text, bool warn, const char *tip) {
+/* `adjust`: Adjust Last Operation's shortcut as the keymap has it (F9; Ctrl+F9 in Maya's preset), empty when unbound. */
+static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const GameObject &g, const std::string &adjust) {
+  auto row = [&](const std::string &text, bool warn, const std::string &tip) {
     Recti nr = lay.row();
     u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, text, warn ? u.theme.warning : u.theme.text_dim);
     u.tooltip(tip);
@@ -1614,7 +1615,8 @@ static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const Ga
       "(an Array steps along them in multiples of its size, a Mirror mirrors across its middle). Bevel and the others reshape the hole only; "
       "the frame, glass and leaf take modifiers of their own.");
   row("Width, Head and Sill are one opening's size, before its modifiers.", false,
-      "Its handles and F9 set the first opening's size; the copies follow it.");
+      adjust.empty() ? std::string("Its handles set the first opening's size; the copies follow it.")
+                     : "Its handles and " + adjust + " set the first opening's size; the copies follow it.");
   if (repeat_above) row("Array and Mirror run after the others, whatever their order here.", true, "The hole is reshaped first, then repeated.");
   if (!why.empty()) row("Its copies: " + why + ".", true, "The Blockout's status says the same.");
 }
@@ -2178,7 +2180,7 @@ void Editor::draw_inspector(const Recti &r) {
       u.tooltip(mod_piece ? "Refused on a Blockout piece: Bake the Blockout to Mesh to keep the result as a mesh."
                 : on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
-      if (mod_piece && mod_piece->opening != 0) draw_opening_modifier_rows(u, lay, *g);  // (round 546: a door's or window's own lines)
+      if (mod_piece && mod_piece->opening != 0) draw_opening_modifier_rows(u, lay, *g, shortcut_text("edit.adjust_last"));  // (round 546: a door's or window's own lines)
       else if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
         const std::string why = blockout_piece_stack_refusal(*mod_piece);
         const bool live = mods.empty() || blockout_piece_stack_live(*g);  // (no modifiers yet: nothing to warn of)
@@ -3188,9 +3190,11 @@ void Editor::draw_edit_dimensions(ui::Layout &lay) {
   static const char *kFrames[] = {"Global", "Local"};
   int frame = dims_local_ ? 1 : 0;
   if (u.combo(u.id("frame"), {hr.x + hr.w / 2, hr.y, hr.w / 2 - u.px(6), hr.h}, frame, kFrames, 2)) dims_local_ = frame == 1;
-  u.tooltip("The size of the selected vertices. Global: along the world's axes, in world units. Local: along the object's own\n"
-            "axes, in the object's units (Blender: the Transform panel's Global / Local switch). Type a size to scale the\n"
-            "selection to it about its median, as S does; Adjust Last Operation (F9) re-runs it.");
+  const std::string adjust = shortcut_text("edit.adjust_last");  // (F9; Ctrl+F9 in Maya's preset, whose F9 is Vertex mode)
+  u.tooltip(std::string("The size of the selected vertices. Global: along the world's axes, in world units. Local: along the object's own\n"
+                        "axes, in the object's units (Blender: the Transform panel's Global / Local switch). Type a size to scale the\n"
+                        "selection to it about its median, as S does; Adjust Last Operation") +
+            (adjust.empty() ? std::string() : " (" + adjust + ")") + " re-runs it.");
   static const char *kAxes[] = {"X", "Y", "Z"};
   for (int k = 0; k < 3; k++) {
     Recti row = lay.row();

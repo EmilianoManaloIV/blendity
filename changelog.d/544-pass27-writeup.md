@@ -34,6 +34,9 @@ folded, published as the single top of every Pass 27 stack (CLAUDE.md item 7: no
   lines in order in a fresh editor, no warning, at least one question - every Pass 27 feature passes (542's section came
   with #425's `7bb5ca0d`); 532 - 534's drawing and tracing have no step of their own (round 561, S1).
 - **`docs/perf/verify-544.md`**: the tree, the timed rows, the HCI sweep, the Learn check list.
+- **Two tooltips name Adjust Last's chord from the keymap** (the label audit after round 559): the Inspector's Dimensions
+  (round 536) and a repeated door's or window's rows (round 546) wrote "F9" by hand - Ctrl+F9 in Maya's preset. The
+  label audit is at 0 (one test: both tooltips in Unity's and Maya's presets).
 
 **Numbers** (the hub's batched timed window, 2026-11-17 06:31 - 06:43, normal priority, a quiet machine; logs in the
 notes folder's `pass27-timed/`; printed, never asserted - ADR 0056):
@@ -60,6 +63,10 @@ elided labels on the point cloud Type, Vertex Paint, Weight Paint's brush rows a
 (assets) and round 507's "Save As ... the moment a bake lands" (lighting).
 
 **Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux).
+
+<!-- docs/USABILITY.md -->
+after: | With AutoPosing on: a Puppet handle dragged, Ctrl+Z
+| The Inspector's Dimensions and a repeated door's or window's rows named F9 by hand in their tooltips - wrong in Maya's preset, where Adjust Last is Ctrl+F9. (round 544) | Both say the keymap's own chord, as the Animation window's do since round 559. |
 
 <!-- docs/PERFORMANCE.md -->
 append:
