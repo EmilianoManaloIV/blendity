@@ -211,8 +211,8 @@ and `C:/blab/s4-timed-558/out/`):
 | 1M splats orbiting, CPU (557) | 108.4 / 148.7 ms | 86.8 / 91.3 ms | still over 50 ms on the CPU |
 | 100k splats orbiting, card / CPU (557) | 16.0 / 15.7 ms | 7.8 / 15.4 ms | |
 | the card views' first open (557) | 92.5 s | **537 ms** (an empty cache), 156 ms from the cache | met |
-| OptiX kernel compile (558) | 29.9 s inside the 3060 Ti's first build | measured alone: 19.3 s / 19.1 s cold (4070 SUPER / 3060 Ti), 6.6 / 6.8 ms warm; OptiX build at 100k 149 / 133 ms | the cold compile is now its own row |
-| splat trace at 100k, ray queries and BVH walk (558's run) | 4070 SUPER ray queries: build 304 ms, 1,752 samples / s | **build 16.6 s, 188 samples / s**; BVH walk builds 16.9 s / 13.3 s | the cold compile seems to land on the first row of each path now - the 1M rows are as before (1,323 samples / s); for S4 |
+| OptiX kernel compile (558) | 29.9 s inside the 3060 Ti's first build | measured alone: 19.3 s / 19.1 s cold (4070 SUPER / 3060 Ti), 6.6 / 6.8 ms warm; the first 100k OptiX build 148.5 / 132.7 ms | met: a warm-up compiles it on a background thread when OptiX is chosen |
+| splat trace at 100k, ray queries and BVH walk (558's run) | 4070 SUPER ray queries: build 304 ms, 1,752 samples / s | **build 16.6 s, 188 samples / s**; BVH walk builds 16.9 s / 13.3 s | a stress-only cold cost (S4): the stress run opens its cards with empty caches, so the path tracer's Vulkan pipelines compile cold in its first build; the editor's `gpu::prewarm` opens a renderer per card off the UI thread and the view traces on the CPU meanwhile. The 1M rows are as before (1,323 samples / s) |
 | editor frames before / after (554, the CPU rasterizer's shared edges; two runs each) | moving an object 14.7 / 15.3 ms | 15.8 / 15.9 ms | CPU rows +3 - 7 %; two card rows rose in both runs: toon (GPU) 9.1 -> 11.3 / 11.5 ms, glass in solid shading (GPU) 15.7 / 16.3 -> 19.6 / 19.9 ms - for R1 |
 
 Not in this window (the hub's list for it): rows 6 (Quad Sphere, snapping), 7 (Edit Mode dimensions), 9 (Weight Paint),
