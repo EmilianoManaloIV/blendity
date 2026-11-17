@@ -42,9 +42,9 @@ shader evaluates a splat six times (once per corner) and converts its colour per
 splat) is the next step if the timed rows show it. An edit that changes a cloud every frame (a slider drag) sends the
 whole cloud again every frame.
 
-**Checked:** Windows with Blender's libraries, `splats_raster` (175), `gpu` (1,153) and `editor` (3,481 checks), none failed;
-Linux (WSL, with the libraries) `splats_raster` and `editor` before the review's fixes, 3,584 checks, none failed (after
-them: on CI); the full suite on CI. The card against the CPU on the small splat scene through Standard, Filmic and ACES:
+**Checked:** on #443's head (27a16b4a) with the review's fixes: Windows with Blender's libraries, `splats_raster`, `splats`,
+`splats_trace`, `gpu` and `editor`, 9,197 checks, none failed; Linux (WSL, with the libraries) `splats_raster` and `editor`,
+3,585 checks, none failed; the full suite on CI. The card against the CPU on the small splat scene through Standard, Filmic and ACES:
 whole-picture means 0.27 / 255, a Points cloud 0.000. The timed rows (1M orbit, the card's open) wait for the hub's timed
 batch.
 
