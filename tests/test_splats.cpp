@@ -1524,15 +1524,26 @@ static void tests_round561() {
       warned += w;
     }
     std::printf("    %d Try-it steps, %d warned, %d questions\n", steps, warned, questions);
-    CHECK(steps >= 6 && warned == 0 && questions >= 5);
-    /* What the steps leave: the splats and a Points cloud beside them, the path tracer chosen with Device Auto. */
-    int splats = 0, points = 0;
+    CHECK(steps >= 6);
+    CHECK(warned == 0);
+    CHECK(questions >= 6);
+    /* What the steps leave (review 561): exactly two clouds - the splats and the Points refilled in place, level with
+     * them beside them - and the path tracer on GPU Compute (the card's step: it falls back to the CPU without one). */
+    int clouds = 0, splats = 0, points = 0;
+    Vec3 points_at(0.0f);
     ed.scene().for_each([&](GameObject &g) {
       const PointCloudObject *pc = g.get<PointCloudObject>();
-      if (pc && pc->data && pc->data->count() == 10000) (pc->data->is_splats() ? splats : points)++;
+      if (!pc) return;
+      clouds++;
+      if (!pc->data || pc->data->count() != 10000) return;
+      if (pc->data->is_splats()) splats++;
+      else points++, points_at = g.world_position();
     });
+    CHECK(clouds == 2);
     CHECK(splats == 1 && points == 1);
-    CHECK(ed.scene().render.engine == 1 && ed.scene().render.device == 2);
+    CHECK(points_at.x == 2.5f && points_at.y == 0.5f && points_at.z == 0.0f);
+    CHECK(ed.scene().render.engine == 1);
+    CHECK(ed.scene().render.device == 1);
   });
 }
 

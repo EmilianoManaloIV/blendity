@@ -9,8 +9,10 @@ splats.
   - put a Points cloud beside them;
   - look through the Main Camera in the Game view;
   - render with F12 on the CPU path tracer;
-  - switch to Device Auto to render on the graphics card.
-- Three new questions: Points against splats, why a splat lights the floor only in F12, and why the card's picture and
-  the CPU's differ slightly.
+  - switch the Device to GPU Compute to render on the graphics card.
+- Four new questions: Points against splats, why Points are missing from F12, why a splat lights the floor only in F12,
+  and why the card's picture and the CPU's differ slightly.
 
-**Checked:** the section's walk in a fresh editor: 6 Try-it steps, none warned, 5 questions. `splats` 382 checks, 0 failed, on Windows with Blender's libraries; console audit at the baseline.
+**Checked:** the section's walk in a fresh editor: 6 Try-it steps, none warned, 6 questions. `splats` 387 checks, 0 failed, on Windows with Blender's libraries; console audit at the baseline.
+
+**Review:** both camera steps looked up from under the floor (a negative pitch); the card step used Device Auto, which mixes the CPU in, and is now GPU Compute; F12 leaves Points out, which the text now says.
