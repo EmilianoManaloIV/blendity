@@ -16552,6 +16552,94 @@ static void tests_round538() {
   });
 }
 
+/* ---- round 544 (task 0524): Pass 27's write-up walks the pass's Learn lessons ---- */
+namespace walk544 {
+/* A feature's lesson: the lesson titled `needle`, or the one whose body has a `# needle` section heading. -1: none. */
+static int lesson_holding(const std::string &needle) {
+  for (int i = 0; i < lesson_count(); i++) {
+    if (std::string(lesson(i).title) == needle) return i;
+    const std::string body = lesson(i).body;
+    if (body.find("\n# " + needle) != std::string::npos || body.rfind("# " + needle, 0) == 0) return i;
+  }
+  return -1;
+}
+
+/* Runs the Try-it lines of a lesson's `# section` (from its heading to the next `# ` line; the whole lesson when
+ * `section` is empty) in order in a fresh editor, as the Learn tab does (';'-separated console commands); returns the
+ * number of steps that logged a warning or an error (each printed). A section only: the big lessons hold many passes'
+ * sections, and some older Try-its warn on an empty scene on purpose ("select a mesh with a Skin modifier"). */
+static int walk(int at, const std::string &section, int &steps, int &questions) {
+  Editor ed;
+  ed.init_headless(1200, 800);
+  ed.step_frame_headless();
+  int warned_steps = 0;
+  std::istringstream lines(std::string(lesson(at).body));
+  std::string line;
+  bool in = section.empty();
+  while (std::getline(lines, line)) {
+    if (!section.empty() && line.rfind("# ", 0) == 0) in = line == "# " + section;
+    if (!in) continue;
+    if (line.rfind("? ", 0) == 0) questions++;
+    if (line.rfind("! cmd:", 0) != 0) continue;
+    steps++;
+    const std::string cmds = line.substr(6, line.find(" | ") - 6);
+    std::vector<LogEntry> sink;
+    const size_t base = Log::fetch(0, sink);
+    size_t a = 0;
+    while (a <= cmds.size()) {
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    ed.step_frame_headless();
+    std::vector<LogEntry> got;
+    Log::fetch(base, got);
+    bool warned = false;
+    for (const LogEntry &e : got)
+      if (e.level != LogLevel::Info) warned = true, std::printf("    '%s' Try it '%s' warned: %s\n", lesson(at).title, cmds.c_str(), e.text.c_str());
+    warned_steps += warned;
+  }
+  return warned_steps;
+}
+}  // namespace walk544
+
+static void tests_round544() {
+  test("learn (Pass 27's write-up): every feature of the pass has a lesson or a section, its lesson's Try-it steps run without a warning, and it has questions", [] {
+    struct Feature {
+      const char *rounds, *needle;
+    };
+    const Feature features[] = {{"530 - 534", "Point clouds and Gaussian splats"},
+                                {"535", "Quad Sphere"},
+                                {"536", "Typing a size (Dimensions)"},
+                                {"537", "LoopTools: Loops to Circles, Curves and Planes"},
+                                {"538", "Panoramic Cameras"},
+                                {"539", "Automasking the weight brush"},
+                                {"540", "Each brush keeps its own size"},
+                                {"541", "Blender 5.3's animation tools: rotation, world space, poses, scrubbing"},
+                                {"543", "Shadows traced by the card (round 543)"},
+                                {"545", "Vertex colours and Vertex Paint"},
+                                {"547", "Windows with a style"}};  // (547's "# The frame and the glass are objects" is text; its steps 6-10 are this lesson's Try it)
+    for (const Feature &f : features) {
+      int at = walk544::lesson_holding(f.needle);
+      if (at < 0 && std::string(f.needle) == "Quad Sphere")  // (round 535: a Try-it line in a lesson, not a section of its own)
+        for (int i = 0; i < lesson_count() && at < 0; i++)
+          if (std::string(lesson(i).body).find("! cmd:create Quad Sphere") != std::string::npos) at = i;
+      std::printf("    round %s: '%s' -> %s\n", f.rounds, f.needle, at >= 0 ? lesson(at).title : "NO LESSON");
+      CHECK(at >= 0);
+      if (at < 0) continue;
+      const bool own_lesson = std::string(lesson(at).title) == f.needle || std::string(f.needle) == "Quad Sphere";
+      int steps = 0, questions = 0;
+      const int warned = walk544::walk(at, own_lesson ? std::string() : std::string(f.needle), steps, questions);
+      std::printf("      %d Try-it step(s), %d warned, %d question(s)\n", steps, warned, questions);
+      CHECK(steps > 0 && warned == 0 && questions > 0);
+    }
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -16666,5 +16754,6 @@ void run_editor_tests() {
   tests_round542();
   tests_round535();
   tests_round538();
+  tests_round544();
   coverage_tests();
 }
