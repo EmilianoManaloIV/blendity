@@ -5777,6 +5777,20 @@ static void test_splats_gpu(Report &rep, const Options &o) {
   const Mat4 v = Mat4::look_at({0, 1.5f, -4.0f}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 100.0f);
   const char *user_backend = std::getenv("BLENDITY_GPU_BACKEND");
   const std::string restore = user_backend ? user_backend : "vulkan";
+  /* Round 558 (task 0540): OptiX's kernel compile a card - cold (OptiX's disk cache off: the first render after an
+   * update) and warm (the cache answering: every later open; measured on the second cached compile, since the first
+   * fills the cache when it is empty). */
+  if (gpu::optix_compiled_in()) {
+    rep.table({"card", "OptiX kernel compile, cold ms", "warm ms"});
+    for (const gpu::DeviceInfo &d : gpu::devices()) {
+      if (gpu::optix_device_of(d.index) < 0) continue;
+      std::string err;
+      const double cold = gpu::optix_compile_kernel(d.index, false, &err);
+      gpu::optix_compile_kernel(d.index, true, &err);  // (fills the cache if it was empty)
+      const double warm = gpu::optix_compile_kernel(d.index, true, &err);
+      rep.row({d.name, cold < 0 ? err : f1(cold), warm < 0 ? err : f1(warm)});
+    }
+  }
   rep.table({"splats", "device", "flatten ms", "build ms", "samples / s", "card MB"});
   for (size_t n : {(size_t)100000, (size_t)1000000}) {
     const PointCloudPtr pc = pointcloud_random(PointCloudType::GaussianSplats, n, 3, 5, 1.0f);
@@ -7494,6 +7508,16 @@ static void test_blender_parity(Report &rep, const Options &o) {
 
 int main(int argc, char **argv) {
   install_crash_handler();
+  /* Round 558: OptiX's kernel cache of the stress run's own (never the user's), kept between runs - as the tests'. */
+  if (!std::getenv("OPTIX_CACHE_PATH")) {
+    const std::string optix_cache = fs::join(fs::temp_dir(), "blendity_stress_optix_cache");
+    fs::make_dirs(optix_cache);
+#if defined(_WIN32)
+    _putenv_s("OPTIX_CACHE_PATH", optix_cache.c_str());
+#else
+    setenv("OPTIX_CACHE_PATH", optix_cache.c_str(), 1);
+#endif
+  }
   Options o;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
