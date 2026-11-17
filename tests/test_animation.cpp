@@ -12949,6 +12949,40 @@ static void tests_round541_review() {
     r34_steps(ed, 2);
     CHECK(!ed.anim_for_test().playing);
   });
+
+  /* Round 548 read a chord's modifiers as its key went down: Ctrl pressed and let go within one frame (a quick tap, or a
+   * slow frame) used to leave the frame's last modifiers - none - on R, C and V. The Pose chords go through the same
+   * keymap dispatch, so each is pressed and released with Ctrl in a single frame here. */
+  test("Pose chords pressed and let go within one frame: Ctrl+R converts, Ctrl+C / Ctrl+V copy and paste the pose (round 541 on round 548's chord reading)", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541QuickChord");
+    ed.command("anim key Arm Rotation 1 0 0");
+    ed.command("anim key Arm Rotation 1 10 90");
+    ed.command("select Arm");
+    r34_steps(ed, 2);
+    const Recti view = ed.scene_view_rect();
+    const int x = view.x + view.w / 2, y = view.y + view.h / 2;
+    auto quick = [&](int key) {
+      platform::Event m, cd, kd, ku, cu;
+      m.type = R34ET::MouseMove, cd.type = kd.type = R34ET::KeyDown, ku.type = cu.type = R34ET::KeyUp;
+      m.x = cd.x = kd.x = ku.x = cu.x = x;
+      m.y = cd.y = kd.y = ku.y = cu.y = y;
+      cd.key = cu.key = platform::KEY_CTRL, kd.key = ku.key = key;
+      cd.mods = kd.mods = ku.mods = platform::MOD_CTRL, cu.mods = 0;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({cd, kd, ku, cu});
+      r34_steps(ed, 2);
+    };
+    quick(platform::KEY_R);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "RotationQ", 3) != nullptr && clip->find("Arm", "Rotation", 1) == nullptr);
+    if (!arm) return;
+    arm->set_local_position({0.25f, 0.5f, 0.75f});
+    quick(platform::KEY_C);
+    arm->set_local_position({3, 3, 3});
+    quick(platform::KEY_V);
+    CHECK(length(arm->local().position - Vec3(0.25f, 0.5f, 0.75f)) < 1e-5f);
+  });
 }
 
 void run_animation_tests() {
