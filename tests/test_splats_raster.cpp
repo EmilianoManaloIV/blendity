@@ -3,6 +3,7 @@
 // (round 531's importers are not needed).
 #include "test_common.h"
 
+#include <cctype>
 #include <chrono>
 #include <thread>
 
@@ -912,16 +913,31 @@ static void splat_raster_round557_cache_tests() {
   test("splats: the tests keep the cards' caches out of the user's folder (the rasterizer's pipeline cache included)", [] {
     const char *dir = std::getenv("BLENDITY_CACHE_DIR");
     CHECK(dir != nullptr && *dir);
-    const std::string user = fs::join(fs::join(fs::home_dir(), ".blendity"), "cache");
-    CHECK(!dir || std::string(dir) != user);
+    /* (Round 557b: compared as paths, not as text - a folder given with backslashes is the one fs::join writes with
+     * forward slashes; on Windows the case doesn't matter either.) */
+    auto norm = [](std::string p) {
+      for (char &c : p) {
+        if (c == '\\') c = '/';
+#ifdef _WIN32
+        c = (char)std::tolower((unsigned char)c);
+#endif
+      }
+      while (p.size() > 1 && p.back() == '/') p.pop_back();
+      return p;
+    };
+    const std::string user = norm(fs::join(fs::join(fs::home_dir(), ".blendity"), "cache"));
+    const std::string own = dir ? norm(dir) : std::string();
+    CHECK(own != user);
+    /* (557b: a build's own - another worktree's test run never shares it) */
+    CHECK(own.find("blendity_test_cache_") != std::string::npos);
     if (!gpu::available() || gpu::devices().empty()) {
       std::printf("    no Vulkan GPU: the file's path not checked\n");
       return;
     }
     const std::string file = gpu::raster_pipeline_cache_file(gpu::devices()[0].index);
     std::printf("    the rasterizer's pipeline cache: %s\n", file.c_str());
-    CHECK(!file.empty() && dir && file.rfind(std::string(dir), 0) == 0);
-    CHECK(file.rfind(user, 0) != 0);
+    CHECK(!file.empty() && norm(file).rfind(own + "/", 0) == 0);
+    CHECK(norm(file).rfind(user + "/", 0) != 0);
   });
 }
 

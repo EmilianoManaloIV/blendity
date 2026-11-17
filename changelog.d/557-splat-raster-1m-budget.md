@@ -28,7 +28,8 @@ time (162 ms the second). Find where the time goes, and fix it or name the cause
 - The `splat_raster` stress section prints each orbit's parts (`splat stats`) and the card's open with an empty and a
   written pipeline cache.
 - Tests and stress keep the cards' caches (the compiled kernels, both pipeline caches) in a folder of their own under
-  the system's temporary folder, never the user's `~/.blendity/cache`.
+  the system's temporary folder, never the user's `~/.blendity/cache` (557b: one folder per build, named by where the program runs from, so two
+  sessions' test runs never share it).
 
 **Review:** the card keeps a budget too: a cloud the camera is inside or right next to (most splats at the 1024 px cap:
 about a million screens of pixels) is drawn by the CPU that frame, within its budget, instead of risking the card's
@@ -41,6 +42,14 @@ open no longer pays for that; a machine's very first open still does - on a work
 shader evaluates a splat six times (once per corner) and converts its colour per pixel; a projecting compute pass (once a
 splat) is the next step if the timed rows show it. An edit that changes a cloud every frame (a slider drag) sends the
 whole cloud again every frame.
+
+**Round 557b (after P1's card run):** the test that the cards' caches stay out of the user's folder compares the
+folders as paths, not as text (a folder given with backslashes, or in another case, is the same folder). The round-508
+"Generate Lighting with the views on the card" failure P1 saw (4,586 / 4,800 pixels) did not come back on the card here:
+the test alone with the pipeline cache as it is, with none and with a fresh one, the whole `gpu` group (1,153 checks), and
+the round-557 exe before the merge - 0 pixels differ in each. Seen on P1's merged run under heavy CPU load (3 of 3), not reproduced here (alone, in the group, and under a lighter load on
+the pre-557 exe and on 557b, 0 pixels each); the likely cause is round 508's recorded starvation follow-up (HCI, round 555). The tests'
+card cache is now per build (the one folder every session's test run had shared).
 
 **Checked:** on #443's head (27a16b4a) with the review's fixes: Windows with Blender's libraries, `splats_raster`, `splats`,
 `splats_trace`, `gpu` and `editor`, 9,197 checks, none failed; Linux (WSL, with the libraries) `splats_raster` and `editor`,
