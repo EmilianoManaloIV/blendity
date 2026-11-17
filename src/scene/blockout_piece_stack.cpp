@@ -541,6 +541,18 @@ bool blockout_piece_stacked(const BlockoutSurface &surface, size_t index, const 
   return false;
 }
 
+namespace {
+
+/* An opening's line in the status (round 546): how many copies its Array and Mirror make, or why it is built once. */
+void opening_status(const GameObject &g, std::vector<std::pair<std::string, bool>> &lines) {
+  std::string why;
+  const size_t copies = blockout_opening_placements(g, &why).size();
+  if (!why.empty()) lines.push_back({"'" + g.name + "': " + why, true});
+  else if (copies > 1) lines.push_back({strprintf("'%s' is repeated by its Array and Mirror: %zu copies", g.name.c_str(), copies), false});
+}
+
+}  // namespace
+
 void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pair<std::string, bool>> &lines) {
   std::vector<const GameObject *> pieces;
   blockout_piece_objects(blockout, pieces);
@@ -560,6 +572,7 @@ void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pa
     bool carries = false;
     for (const auto &c : g->components) carries = carries || (c->is_modifier() && c->enabled);
     if (!bp || !carries) continue;
+    if (bp->opening != 0) opening_status(*g, lines);  // (round 546: its copies, or why it has none)
     const std::string why = blockout_piece_stack_refusal(*bp);
     if (!why.empty()) {
       lines.push_back({"'" + g->name + "': its modifiers do nothing - " + why, true});

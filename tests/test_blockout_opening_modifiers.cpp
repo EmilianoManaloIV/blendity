@@ -202,9 +202,38 @@ void tests_round546_build() {
   });
 }
 
+void tests_round546_lesson() {
+  test("opening modifiers: the Learn section's Try-it commands run - a window with an Array of 3, and the status says it is repeated: 3 copies", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("newscene");
+    ed.command("blockout draw room auto at 0 0 0 normal 0 1 0 size 8 4 2.6");
+    ed.command("blockout add window 1 1.8 0.9");
+    GameObject *win = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (const BlockoutPiece *bp = g.get<BlockoutPiece>(); bp && bp->opening == 2) win = &g;
+    });
+    CHECK(win != nullptr);
+    if (!win) return;
+    for (const char *c : {"component ArrayModifier", "set ArrayModifier.Count 3", "set ArrayModifier.RelativeOffset 2 0 0"}) ed.command(c);  // (the lesson's line, split at ';' as the Learn tab runs it)
+    const ArrayModifier *a = win->get<ArrayModifier>();
+    CHECK(a && a->count == 3 && std::fabs(a->relative_offset.x - 2.0f) < 1e-6f);  // (on the window: it was the selection)
+    CHECK(blockout_opening_placements(*win).size() == 3);
+    ed.command("blockout wait");
+    std::vector<std::pair<std::string, bool>> lines;
+    GameObject *bo = win->parent;
+    while (bo && !bo->get<Blockout>()) bo = bo->parent;
+    if (bo) blockout_piece_stack_status(*bo, lines);
+    bool said = false;
+    for (const auto &l : lines) said = said || l.first.find("3 copies") != std::string::npos;
+    CHECK(said);
+  });
+}
+
 }  // namespace
 
 void run_blockout_opening_modifiers_tests() {
+  tests_round546_lesson();
   tests_round546_placements();
   tests_round546_build();
 }
