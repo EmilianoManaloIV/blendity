@@ -835,9 +835,27 @@ static void splat_raster_round557_tests() {
   });
 }
 
+static void splat_raster_round557_cache_tests() {
+  test("splats: the tests keep the cards' caches out of the user's folder (the rasterizer's pipeline cache included)", [] {
+    const char *dir = std::getenv("BLENDITY_CACHE_DIR");
+    CHECK(dir != nullptr && *dir);
+    const std::string user = fs::join(fs::join(fs::home_dir(), ".blendity"), "cache");
+    CHECK(!dir || std::string(dir) != user);
+    if (!gpu::available() || gpu::devices().empty()) {
+      std::printf("    no Vulkan GPU: the file's path not checked\n");
+      return;
+    }
+    const std::string file = gpu::raster_pipeline_cache_file(gpu::devices()[0].index);
+    std::printf("    the rasterizer's pipeline cache: %s\n", file.c_str());
+    CHECK(!file.empty() && dir && file.rfind(std::string(dir), 0) == 0);
+    CHECK(file.rfind(user, 0) != 0);
+  });
+}
+
 void run_splats_raster_tests() {
   splat_raster_round532_tests();
   splat_raster_round532_test_pass();
   splat_raster_round532_review();
+  splat_raster_round557_cache_tests();
   splat_raster_round557_tests();
 }
