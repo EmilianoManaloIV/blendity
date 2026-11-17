@@ -120,6 +120,18 @@ The owner chose "repeat the whole opening"; the copies are generated, never hand
 3. **Deleting one copy's leaf** turns Leaf off for the whole opening, as today; the Inspector or the log says it applies to
    every copy.
 
+## As built (round 546, before round 547)
+- `blockout_opening_placements()` gives the copies; `blockout_opening_copies()` copies the opening's kernel pieces per placement
+  in the snapshot (each copy a made id - the copy's index in bits 55-62 - whose owner is the opening, so a click on a copy
+  selects it); `blockout_opening_frames()` gives the Scene view's cut outline (drawn and clicked) for every copy.
+- A mirrored copy is made as its turn: every kernel piece a style makes is symmetric across the opening's local X through its
+  middle (checked for each window and door style, the Revolving door's drum and ring included). Round 547's leaf, frame and glass
+  objects per copy must flip the hinge side instead.
+- Copies on another copy's hole are dropped (the hole is symmetric across X and Z through its middle, not across Y). The cap is
+  checked before copies are made; past it, and for a number that is not finite, the opening is built once and says why.
+- Until round 547 makes a styled opening's hole one piece, its reshaping modifiers do nothing (the Inspector and the status say
+  so); a plain opening's do. Join's overlap test and the size handles see the first copy only (the spec's "Out").
+
 ## What taking round 547 in needs (its worker's notes)
 - `blockout_opening_cut`: each placement's hole gets its own piece id (the copy index in the id), stable while the
   placements change; a Revolving door's ring and drum go per placement too.

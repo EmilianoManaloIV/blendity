@@ -59,6 +59,12 @@ void blockout_piece_stack_status(const GameObject &blockout, std::vector<std::pa
  * `why` (when given) says why when it was refused. */
 constexpr size_t kBlockoutOpeningCopies = 256;
 std::vector<Mat4> blockout_opening_placements(const GameObject &opening, std::string *why = nullptr);
+/* The copies' frames for what is drawn and picked of them (the Scene view's cut outline): `world` (the opening's world matrix) times
+ * each placement, a mirrored one made as its turn - the identity's first. */
+std::vector<Mat4> blockout_opening_frames(const GameObject &opening, const Mat4 &world);
+/* Whether an opening's other modifiers (Bevel ...) reshape its hole: a plain opening's hole is one piece; a styled door's or window's
+ * is several until round 547 makes it one (then this is true for every opening). */
+bool blockout_opening_takes_shapers(const BlockoutPiece &bp);
 /* Whether this modifier is one of an opening's repeats (Array, Mirror) rather than one that reshapes its hole. */
 bool blockout_opening_repeat(const Component &c);
 /* A copy's kernel piece id: the opening's piece `id` (its own, or a made part's) with the copy's index (1 .. 255) in bits 55-62 - a

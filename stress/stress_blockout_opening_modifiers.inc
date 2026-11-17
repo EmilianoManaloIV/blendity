@@ -151,9 +151,9 @@ static void sweep(Report &rep, const Options &o) {
           t.problems++;
           if (t.first.empty()) t.first = strprintf("%s + %s%s: %s", k.name, md[m].name, arrayed ? " (arrayed)" : "", bad.c_str());
         }
-        const size_t over = bkpm::overlaps_of(*mesh, t.unchecked);
-        if (over > baseline) {
-          t.newly += over - baseline;
+        const size_t over = bkpm::overlaps_of(*mesh, t.unchecked), base = baseline * (arrayed ? 3 : 1);  // (three copies: the opening's own pairs three times)
+        if (over > base) {
+          t.newly += over - base;
           std::printf("  faces newly on top: %s + %s%s: %zu (the opening alone %zu)\n", k.name, md[m].name, arrayed ? " (arrayed)" : "", over, baseline);
         }
       }

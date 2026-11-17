@@ -76,8 +76,9 @@ opening's size.
 - Unit: `--group blockout_opening_modifiers`, then the round's groups (`blockout_piece_modifiers`, `blockout`,
   `blockout_modifiers`, `blockout_join`, `modeling`, `editor`, `hci`) on Windows with and without Blender's libraries
   and on Linux; the full suite before done.
-- Stress: `--only blockout_opening_modifiers` (new: `interior 100` with a window row made by an Array of 10 against ten
-  hand-placed windows - build time and face count; a drag of the opening and of another piece, frame budget 16.7 ms,
+- Stress: `--only blockout_opening_modifiers` (new: a 40 m wall with a window row made by an Array of 10 against ten
+  hand-placed windows, plain and Grid - build time and face count (a bare wall rather than `interior 100`: the row is what is
+  measured, and the copies' cost is the same in any building); a drag of the opening and of another piece, frame budget 16.7 ms,
   no evaluation during it; an untimed sweep of every modifier on plain and styled windows and doors, problems 0, faces
   newly on top of each other counted and traced), and `--only blockout` (counts unchanged).
 

@@ -1106,10 +1106,8 @@ void blockout_piece_edited(BlockoutPiece &p, int style_before, int opening_befor
 size_t blockout_user_piece_count(const std::vector<blockout::Piece> &pieces) {
   size_t n = 0;
   std::unordered_set<uint64_t> windows;
-  for (const blockout::Piece &p : pieces) {
-    if (!blockout_id_generated(p.id)) n++;
-    else if (windows.insert(blockout_piece_owner(p.id)).second) n++;
-  }
+  for (const blockout::Piece &p : pieces)  // (one per object: a plain piece, or the owner of made pieces - a styled window's parts, an opening's copies, round 546)
+    if (windows.insert(blockout_piece_owner(p.id)).second) n++;
   return n;
 }
 

@@ -1316,10 +1316,11 @@ uint64_t blockout_pick_outline(Scene &scene, const Renderer3D &r3d, const Render
       const BlockoutPiece *bp = p->get<BlockoutPiece>();
       const bool cuts = bp->opening != 0 || bp->operation == 1 || (bp->operation == 2 && !bp->room);
       if (!cuts) continue;  // (a piece with a surface is clicked on its surface: its outline runs along edges two pieces share)
-      piece_outline(p->world_matrix(), *bp, [&](Vec3 a, Vec3 b) {
-        const float d = outline_distance(r3d, rt, a, b, px, py, best);
-        if (d < best) best = d, hit = p->id;
-      });
+      for (const Mat4 &frame : blockout_opening_frames(*p, p->world_matrix()))  // (round 546: each copy of an opening; the piece itself otherwise)
+        piece_outline(frame, *bp, [&](Vec3 a, Vec3 b) {
+          const float d = outline_distance(r3d, rt, a, b, px, py, best);
+          if (d < best) best = d, hit = p->id;
+        });
     }
   });
   return hit;
@@ -1346,7 +1347,7 @@ void Editor::draw_blockouts() {
       auto draw = [&](uint32_t c, float wd) { return [this, c, wd](Vec3 a, Vec3 b) { scene_r3d_.line(a, b, c, true, wd); }; };
       auto own = [&](uint32_t c, float wd) { return [this, c, wd, w](Vec3 a, Vec3 b) { scene_r3d_.line(w.point(a), w.point(b), c, true, wd); }; };
       const bool shaped = !opening && bp->shape >= 3 && bp->shape <= 6;
-      piece_outline(w, *bp, draw(col, width));
+      for (const Mat4 &frame : blockout_opening_frames(*p, w)) piece_outline(frame, *bp, draw(col, width));  // (round 546: each copy of an opening)
       if (!mine && !whole) continue;  // (a room's grown shell is drawn for the pieces in hand only)
       if (!bp->is_room()) continue;
       RoomGrowth grow;
