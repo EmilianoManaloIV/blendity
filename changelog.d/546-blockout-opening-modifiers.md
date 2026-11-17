@@ -28,7 +28,12 @@ works when the scene opens. Rooms, presets and Intersect pieces still take none.
 frame and leaf cannot - and the status says so; a plain opening's is made. A copy that falls outside every wall cuts nothing
 (its parts still stand there) and the status does not name it yet. Join's overlap test and the size handles see the first copy.
 
-**Checked:** CHECKED_546
+**Checked:** the round's groups (`blockout_opening_modifiers`, `blockout_piece_modifiers`, `blockout_modifiers`, `blockout_join`,
+`blockout`, `modeling`, `editor`, `hci`), not the full suite: Windows with Blender's libraries 32,900 checks, 0 failed; on round 547's
+head with main merged, Windows without them (as CI) 27,975 and Linux (with `lighting`) 37,815, 0 failed. Stress: the new section
+`blockout_opening_modifiers` - a 40 m wall, ten windows by hand against one with an Array of 10: 70 / 70 faces plain and Grid, a
+drag of the arrayed, bevelled window 0 stack evaluations and 0 main-thread builds, the sweep 30 cases with 0 problems and 0 faces
+newly on top of each other. `--only blockout`: no problem count rose against round 514's run.
 
 <!-- README -->
 after:   Draw Piece draws a door or a window onto a wall of a Blockout by dragging a rectangle

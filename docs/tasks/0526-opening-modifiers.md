@@ -1,6 +1,6 @@
 # 0526: Modifiers on a door or window (round 546)
 
-- **Status:** approved 2026-11-16 with ADR 0150's recommendation (the owner, through the hub: "Array and mirror repeat the
+- **Status:** done 2026-11-17 (criterion 6 deferred: see the changelog's Limits); approved 2026-11-16 with ADR 0150's recommendation (the owner, through the hub: "Array and mirror repeat the
   whole opening"). Work starts after round 549 (main's Linux red), or between its CI waits.
 - **Requirements:** R-02, R-03 (modeling, modifiers), Q-06 (responsiveness), U-01, C-02, R-09
 - **Decisions:** ADR 0150 (new); amends ADR 0138; next to ADR 0149 (round 547, the opening's parts)
