@@ -2436,6 +2436,7 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   else if (sub == "roomopt") room_options_command(t);
   else if (sub == "applyscale") blockout_apply_scale_command(t);  // (round 496)
   else if (sub == "leaf") blockout_leaf_command(t);  // (round 515)
+  else if (sub == "part") blockout_part_command(t);  // (round 547)
   else if (sub == "turn") blockout_turn_command(t);
   else if (sub == "set") {
     const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";
@@ -2508,35 +2509,44 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
 }
 
 /* ===================================================================== */
-/* A door's leaves as objects (round 515, task 0497, ADR 0136)            */
+/* A styled opening's parts as objects (round 515, task 0497, ADR 0136; the frame and the glass round 547, task 0527, ADR 0149) */
 /* ===================================================================== */
 
 namespace {
 
 constexpr float kOpenEps = 1e-3f;  // (an Open Amount that differs from another by less than this - a tenth of a degree - is the same)
+constexpr size_t kNoSlot = (size_t)-1;
 
 float open_clamped(float v) { return std::min(1.0f, std::max(0.0f, v)); }
 
-/* Whether `c` is a leaf made by `door` (an empty owner - a file from before the field - counts as the parent's). */
+/* Whether `c` is a part made by `door` (an empty owner - a file from before the field - counts as the parent's). */
 bool is_leaf_of(const GameObject &c, const GameObject &door) {
   const BlockoutLeaf *mark = c.get<BlockoutLeaf>();
   return mark && (mark->made_by.empty() || mark->made_by == std::to_string(door.id));
 }
 
-/* The door's leaf objects: its children that are its own leaves, in the order they stand. */
-std::vector<GameObject *> leaf_children(const GameObject &door) {
+/* The opening's part objects (`kind` -1: every kind, else a BlockoutPartKind): its children that are its own, in the order they stand. */
+std::vector<GameObject *> part_children(const GameObject &door, int kind = -1) {
   std::vector<GameObject *> out;
   for (GameObject *c : door.children)
-    if (is_leaf_of(*c, door)) out.push_back(c);
+    if (is_leaf_of(*c, door) && (kind < 0 || c->get<BlockoutLeaf>()->kind == kind)) out.push_back(c);
   return out;
 }
 
-/* The material of a door's leaf: the door's own Leaf material, else the Blockout's. */
-std::string leaf_material(const BlockoutPiece &door, const Blockout &bo) {
-  return door.material[kClassLeaf].empty() ? bo.material[kClassLeaf] : door.material[kClassLeaf];
+/* The plan a part stands for: a leaf by its index, a Frame or a Glass by its kind. kNoSlot: the opening has no such part now. */
+size_t plan_slot(const std::vector<BlockoutLeafPlan> &plans, const BlockoutLeaf &mark) {
+  for (size_t i = 0; i < plans.size(); i++)
+    if (plans[i].part == mark.kind && plans[i].copy == mark.copy && (mark.kind != kPartKindLeaf || plans[i].index == std::max(0, mark.index))) return i;
+  return kNoSlot;
 }
 
-/* The leaf's local place at `open`: position, turn about Y, and scale 1 (Scale on the Blockout or the door went into the numbers: ADR 0135). */
+/* The material of a part: the opening's own material of the part's class (Frame: Solid, Glass: Glass, Leaf: Leaf), else the Blockout's. */
+std::string part_material(const BlockoutPiece &door, const Blockout &bo, int part) {
+  const int cls = part == kPartKindFrame ? kClassSolid : part == kPartKindGlass ? kClassGlass : kClassLeaf;
+  return door.material[cls].empty() ? bo.material[cls] : door.material[cls];
+}
+
+/* The part's local place at `open`: position, turn about Y, and scale 1 (Scale on the Blockout or the door went into the numbers: ADR 0135). */
 void leaf_place(GameObject &leaf, const BlockoutLeafPlan &plan, float open) {
   Vec3 position;
   float yaw = 0.0f;
@@ -2546,14 +2556,31 @@ void leaf_place(GameObject &leaf, const BlockoutLeafPlan &plan, float open) {
   leaf.set_local_scale(Vec3(1.0f, 1.0f, 1.0f));
 }
 
-/* A leaf the door no longer owns - taken out of it by hand - is an ordinary object from now on. */
+/* A part the opening no longer owns - taken out of it by hand - is an ordinary object from now on. */
 void let_go(GameObject &leaf) {
   if (BlockoutLeaf *mark = leaf.get<BlockoutLeaf>()) leaf.remove_component(mark);
 }
 
-/* The leaves under `piece` that another door made. A copy of the whole door (Ctrl+D, paste) has its leaves marked with the original's id: the original still has a leaf of that index
- * of its own, so the copy's are the copy's - adopted, but only into a slot this door has a plan for and has no leaf in yet. Any other (a leaf the user dragged here from another door, one
- * pasted under a door with Leaf off or under a room or a box) stays what the user made it, an ordinary object: never destroyed. */
+/* The places the opening stands at: one, the identity (round 547's stub). Round 546 replaces this with blockout_opening_placements() and applies the placement's rotation / mirror to the parts. */
+std::vector<Mat4> opening_placements(const GameObject &) { return {Mat4::identity()}; }
+
+/* Every part the opening has now: one set for each place it stands at (the copy's index and place in each plan). */
+void opening_plans(const GameObject &door, const BlockoutPiece &bp, std::vector<BlockoutLeafPlan> &plans) {
+  plans.clear();
+  std::vector<BlockoutLeafPlan> one;
+  blockout_part_plans(bp, one);
+  const std::vector<Mat4> places = opening_placements(door);
+  for (size_t c = 0; c < places.size(); c++)
+    for (BlockoutLeafPlan plan : one) {
+      plan.copy = (int)c;
+      if (c > 0) plan.origin = places[c].point(plan.origin);
+      plans.push_back(std::move(plan));
+    }
+}
+
+/* The parts under `piece` that another opening made. A copy of the whole opening (Ctrl+D, paste) has its parts marked with the original's id: the original still has a part of that kind and index
+ * of its own, so the copy's are the copy's - adopted, but only into a slot this opening has a plan for and has no part in yet. Any other (a part the user dragged here from another opening, one
+ * pasted under an opening with that part off or under a room or a box) stays what the user made it, an ordinary object: never destroyed. */
 void claim_leaves(Scene &scene, GameObject &door) {
   const std::string mine = std::to_string(door.id);
   std::vector<GameObject *> strangers;
@@ -2562,78 +2589,115 @@ void claim_leaves(Scene &scene, GameObject &door) {
   if (strangers.empty()) return;
   const BlockoutPiece *bp = door.get<BlockoutPiece>();
   std::vector<BlockoutLeafPlan> plans;
-  if (bp && bp->enabled) blockout_leaf_plans(*bp, plans);
+  if (bp && bp->enabled) opening_plans(door, *bp, plans);
   std::vector<bool> taken(plans.size(), false);
-  for (const GameObject *c : door.children)
-    if (is_leaf_of(*c, door) && c->get<BlockoutLeaf>()->index >= 0 && (size_t)c->get<BlockoutLeaf>()->index < taken.size()) taken[(size_t)c->get<BlockoutLeaf>()->index] = true;
+  for (const GameObject *c : door.children) {
+    if (!is_leaf_of(*c, door)) continue;
+    const size_t at = plan_slot(plans, *c->get<BlockoutLeaf>());
+    if (at != kNoSlot) taken[at] = true;
+  }
   for (GameObject *c : strangers) {
     BlockoutLeaf *mark = c->get<BlockoutLeaf>();
     const GameObject *from = scene.find((uint64_t)std::strtoull(mark->made_by.c_str(), nullptr, 10));
     bool twin = false;
     if (from && from != &door)
-      for (const GameObject *o : from->children) twin = twin || (is_leaf_of(*o, *from) && o->get<BlockoutLeaf>()->index == mark->index);
-    const size_t index = (size_t)std::max(0, mark->index);
-    const bool wanted = index < taken.size() && !taken[index];
-    if ((twin || !from) && wanted) mark->made_by = mine, taken[index] = true;
+      for (const GameObject *o : from->children) {
+        const BlockoutLeaf *om = o->get<BlockoutLeaf>();
+        twin = twin || (is_leaf_of(*o, *from) && om->kind == mark->kind && om->copy == mark->copy && (mark->kind != kPartKindLeaf || om->index == mark->index));
+      }
+    const size_t at = plan_slot(plans, *mark);
+    const bool wanted = at != kNoSlot && !taken[at];
+    if ((twin || !from) && wanted) mark->made_by = mine, taken[at] = true;
     else let_go(*c);
   }
 }
 
+/* A new leaf beside one that has a modifier stack takes a copy of it (ADR 0149 decision 5: Single -> Double). */
+void copy_stack(const GameObject &from, GameObject &to) {
+  for (const auto &c : from.components)
+    if (c->is_modifier()) to.add_component(c->clone());
+}
+
+/* Whether the renderer still holds what the editor last gave this part, so the editor may change it; a material the user dropped on the part is theirs. `last` is the mark's record: a path; "-" for
+ * none given; empty when the editor has not recorded one (a leaf of round 515, which has no such field, or a new part) - then the renderer is taken as the editor's. Compared by asset path: a
+ * material reloaded from its file is another instance. */
+bool material_is_ours(const MeshRenderer &mr, const std::string &last) {
+  if (last.empty()) return true;
+  if (last == "-") return mr.materials.empty();
+  if (mr.materials.size() != 1) return false;
+  return mr.materials[0] ? mr.materials[0]->asset_path == last : material_asset(last) == nullptr;
+}
+
 }  // namespace
 
-/* The leaf's mesh, renderer, collider and key, made from the plan: a mesh in the Blockout's Leaf material, not Contribute GI (a leaf moves, so the lightmap is baked with the doorway
- * open and probes light the leaf), and a Box collider fitted to the slab(s). */
+/* The part's mesh, renderer, collider and key, made from the plan. A leaf: a mesh in the Leaf material, not Contribute GI (it moves, so the lightmap is baked with the doorway open and probes light
+ * the leaf), a Box collider fitted to the slab(s) and a kinematic Rigidbody. A Frame: a static mesh in the Solid material, Contribute GI on, no collider (the wall's hole is what is walked through); a
+ * Glass: the same in the Glass material, Contribute GI off (a transparent sheet), no collider. The object and what the user put on it stay: only the mesh is replaced. */
 void Editor::blockout_leaf_made(GameObject &leaf, const BlockoutLeafPlan &plan, const std::string &material, float texture_scale, uint64_t key) {
   MeshFilter *mf = leaf.get<MeshFilter>();
   if (!mf) mf = leaf.add<MeshFilter>();
   mf->mesh = blockout_leaf_mesh(plan, texture_scale);
-  MeshRenderer *mr = leaf.get<MeshRenderer>();
-  if (!mr) mr = leaf.add<MeshRenderer>();
-  mr->contribute_gi = false;
-  mr->materials.clear();
-  if (!material.empty()) mr->materials.push_back(material_asset(material));
-  ColliderComponent *col = leaf.get<ColliderComponent>();
-  if (!col) col = leaf.add<ColliderComponent>();
-  Vec3 lo(1e30f), hi(-1e30f);
-  for (const auto &box : plan.boxes)
-    for (int a = 0; a < 3; a++) lo[a] = std::min(lo[a], box.first[a]), hi[a] = std::max(hi[a], box.second[a]);
-  col->shape = 0, col->center = (lo + hi) * 0.5f, col->size = hi - lo, col->fit = true;
-  /* Kinematic in Play mode: a body that moves when its transform does (a script, an animation), and pushes nothing by gravity. One the user changed is kept; one the user removed comes back when the leaf is made again. */
-  if (!leaf.get<Rigidbody>()) {
-    Rigidbody *rb = leaf.add<Rigidbody>();
-    rb->is_kinematic = true, rb->use_gravity = false;
-  }
   BlockoutLeaf *mark = leaf.get<BlockoutLeaf>();
+  MeshRenderer *mr = leaf.get<MeshRenderer>();
+  if (!mr) {
+    mr = leaf.add<MeshRenderer>();
+    mr->contribute_gi = plan.part == kPartKindFrame;
+  }
+  else if (plan.part == kPartKindLeaf) mr->contribute_gi = false;
+  if (material_is_ours(*mr, mark->material)) {
+    mr->materials.clear();
+    if (!material.empty()) mr->materials.push_back(material_asset(material));
+  }
+  mark->material = material.empty() ? "-" : material;
+  if (plan.part == kPartKindLeaf) {
+    ColliderComponent *col = leaf.get<ColliderComponent>();
+    if (!col) col = leaf.add<ColliderComponent>();
+    Vec3 lo(1e30f), hi(-1e30f);
+    for (const auto &box : plan.boxes)
+      for (int a = 0; a < 3; a++) lo[a] = std::min(lo[a], box.first[a]), hi[a] = std::max(hi[a], box.second[a]);
+    col->shape = 0, col->center = (lo + hi) * 0.5f, col->size = hi - lo, col->fit = true;
+    /* Kinematic in Play mode: a body that moves when its transform does (a script, an animation), and pushes nothing by gravity. One the user changed is kept; one the user removed comes back when the leaf is made again. */
+    if (!leaf.get<Rigidbody>()) {
+      Rigidbody *rb = leaf.add<Rigidbody>();
+      rb->is_kinematic = true, rb->use_gravity = false;
+    }
+  }
+  mark->kind = plan.part, mark->copy = plan.copy;
   mark->index = plan.index, mark->made_from = std::to_string(key);
 }
 
-/* One door: its leaves made, made again (the numbers of their shape changed), removed or turned to match it. */
+/* One styled opening: its parts - the leaves of a door, the Frame, a window's Glass - made, made again (the numbers of their shape changed), removed or turned to match it. */
 void Editor::blockout_sync_door(GameObject &door) {
   BlockoutPiece *bp = door.get<BlockoutPiece>();
   claim_leaves(*scene_, door);
-  /* A door that has no leaf objects and wants none costs nothing more than this look at its children. */
-  bool has_leaf = false;
-  for (const GameObject *c : door.children) has_leaf = has_leaf || c->get<BlockoutLeaf>();
-  if (!has_leaf && (!bp->is_styled_door() || !bp->enabled || !bp->leaf_on())) {
+  /* An opening that has no part objects and wants none costs nothing more than this look at its children. */
+  bool has_part = false;
+  for (const GameObject *c : door.children) has_part = has_part || c->get<BlockoutLeaf>();
+  if (!has_part && (!bp->is_styled_opening() || !bp->enabled)) {
     blockout_leaves_seen_.erase(door.id);
+    blockout_fixed_seen_.erase(door.id);
     return;
   }
-  const std::vector<GameObject *> leaves = leaf_children(door);
+  const std::vector<GameObject *> leaves = part_children(door, kPartKindLeaf);
   const GameObject *owner = blockout_of_piece(door);
   const Blockout *bo = owner ? owner->get<Blockout>() : nullptr;
-  if (!bo) return;  // (a door under a baked object's holder or outside any Blockout: Bake and Unbake look after its leaves)
+  if (!bo) return;  // (an opening under a baked object's holder or outside any Blockout: Bake and Unbake look after its parts)
   std::vector<BlockoutLeafPlan> plans;
-  if (bp->enabled) blockout_leaf_plans(*bp, plans);
+  if (bp->enabled) opening_plans(door, *bp, plans);
+  std::vector<size_t> leaf_at;  // (the plans of the leaves, of every copy)
+  for (size_t i = 0; i < plans.size(); i++)
+    if (plans[i].part == kPartKindLeaf) leaf_at.push_back(i);
   std::vector<uint64_t> &seen = blockout_leaves_seen_[door.id];
+  std::vector<uint64_t> &fixed_seen = blockout_fixed_seen_[door.id];
   /* A leaf that was there at the last walk and is not the door's child now: deleted by hand (the door's Leaf goes off, with the deletion in the same undo step) or taken out of the
-   * door (it is an ordinary object, and the door makes a new leaf). */
+   * door (it is an ordinary object, and the door makes a new leaf). A Frame or Glass deleted by hand is made again, with nothing turned off. */
   bool deleted = false;
   for (uint64_t id : seen) {
     if (std::any_of(leaves.begin(), leaves.end(), [&](const GameObject *l) { return l->id == id; })) continue;
     if (GameObject *o = scene_->find(id)) let_go(*o);
     else deleted = true;
   }
-  if (deleted && !plans.empty()) {
+  if (deleted && !leaf_at.empty()) {
     (bp->style == kDoorRevolving ? bp->wings : bp->leaf) = false;
     scene_->destroy(leaves);
     seen.clear();
@@ -2641,35 +2705,54 @@ void Editor::blockout_sync_door(GameObject &door) {
     Log::info("Door '%s': a leaf was deleted, so its Leaf is off now (turn it on to make the leaves again)", door.name.c_str());
     return;
   }
-  /* The leaves the plans want, by index; a leaf the door made that no plan wants (an index too high, a door that wants none) goes. A second leaf of one index - a copy of a leaf made
-   * with Ctrl+D - is not the door's doing: the one it knew stays, the copy becomes an ordinary object. */
+  /* The parts the plans want, by slot; a part the opening made that no plan wants (an index too high, a Glass turned off, an opening that wants none) goes - but a Frame or a Glass whose numbers
+   * only make nothing for now (a Width typed down to zero on its way to another number) stays as it is, with its modifiers, until they make something again. A second part of one slot - a copy of a
+   * part made with Ctrl+D - is not the opening's doing: the one it knew stays, the copy becomes an ordinary object. */
+  const bool keeps_shape = bp->enabled && bp->is_styled_opening() && !(bp->is_styled_door() && bp->style == kDoorRevolving);
   std::vector<GameObject *> slot(plans.size(), nullptr), gone;
-  std::vector<GameObject *> ordered(leaves);
+  std::vector<GameObject *> ordered(part_children(door));
   std::stable_sort(ordered.begin(), ordered.end(), [&](const GameObject *a, const GameObject *b) {
-    const bool sa = std::find(seen.begin(), seen.end(), a->id) != seen.end(), sb = std::find(seen.begin(), seen.end(), b->id) != seen.end();
-    return sa && !sb;  // (the leaves of the last walk first)
+    auto known = [&](const GameObject *g) { return std::find(seen.begin(), seen.end(), g->id) != seen.end() || std::find(fixed_seen.begin(), fixed_seen.end(), g->id) != fixed_seen.end(); };
+    return known(a) && !known(b);  // (the parts of the last walk first: a copy dragged above the original does not take its place)
   });
   for (GameObject *l : ordered) {
-    const size_t index = (size_t)std::max(0, l->get<BlockoutLeaf>()->index);
-    if (index >= slot.size()) gone.push_back(l);
-    else if (!slot[index]) slot[index] = l;
+    const BlockoutLeaf *mark = l->get<BlockoutLeaf>();
+    const size_t at = plan_slot(plans, *mark);
+    const bool shape_pending = keeps_shape && mark->kind != kPartKindLeaf && mark->copy == 0 && (mark->kind == kPartKindFrame || (bp->is_styled_window() && bp->glass));
+    /* An opening switched off (Enabled) or whose numbers make nothing keeps its Frame and Glass, hidden: their modifiers are the user's work. */
+    const bool hold = mark->kind != kPartKindLeaf && mark->copy == 0 && bp->is_styled_opening() && (!bp->enabled || shape_pending);
+    if (at == kNoSlot) {
+      if (!hold) gone.push_back(l);
+      else {
+        BlockoutLeaf *m = l->get<BlockoutLeaf>();
+        if (l->active) l->active = false, m->hidden = true;
+      }
+    }
+    else if (!slot[at]) slot[at] = l;
     else let_go(*l);
   }
   if (!gone.empty()) scene_->destroy(gone);
   const float open = blockout_door_open(*bp), scale = bo->safe_texture_scale();
-  const std::string material = leaf_material(*bp, *bo);
   std::vector<bool> fresh(plans.size(), false);
   for (size_t i = 0; i < plans.size(); i++) {
     const BlockoutLeafPlan &plan = plans[i];
+    const std::string material = part_material(*bp, *bo, plan.part);
     const uint64_t key = blockout_leaf_key(plan, scale, material);
     if (!slot[i]) {
       slot[i] = scene_->create(plan.name, &door);
-      slot[i]->add<BlockoutLeaf>();
+      slot[i]->add<BlockoutLeaf>()->kind = plan.part;
+      if (plan.part == kPartKindLeaf && plan.index > 0)  // (Single -> Double: the new leaf has the first one's stack, in the same copy)
+        for (size_t k = 0; k < i; k++)
+          if (slot[k] && plans[k].part == kPartKindLeaf && plans[k].copy == plan.copy && plans[k].index == 0) {
+            copy_stack(*slot[k], *slot[i]);
+            break;
+          }
     }
     GameObject &leaf = *slot[i];
     BlockoutLeaf *mark = leaf.get<BlockoutLeaf>();
     mark->made_by = std::to_string(door.id);
-    /* A leaf kept when the style changed takes the style's name (Leaf, or Leaf L / Leaf R); a name the user gave it is theirs. */
+    if (mark->hidden) leaf.active = true, mark->hidden = false;  // (its opening is on again, its numbers make something)
+    /* A part kept when the style changed takes the style's name (Leaf, or Leaf L / Leaf R); a name the user gave it is theirs. */
     if (leaf.name != plan.name && (leaf.name == "Leaf" || leaf.name == "Leaf L" || leaf.name == "Leaf R" || leaf.name == "Wings")) leaf.name = plan.name;
     if (mark->made_from == std::to_string(key) && leaf.get<MeshFilter>()) continue;
     blockout_leaf_made(leaf, plan, material, scale, key);
@@ -2678,10 +2761,10 @@ void Editor::blockout_sync_door(GameObject &door) {
     fresh[i] = true;
   }
   /* Turned by hand: a leaf the door agreed with at the last walk that now stands at another angle writes it to the door's Open Amount (same undo step); the other leaves follow.
-   * Not while the turn is still going (a Rotate drag, a held slider): the angle is read when it is let go. */
+   * Not while the turn is still going (a Rotate drag, a held slider): the angle is read when it is let go. A Frame and a Glass do not turn: only the leaves are read. */
   /* The first walk after a preview ended: a leaf the preview left at an angle the door does not say is put back to the door's number, not written back into whatever step comes last. */
   if (blockout_preview_ended_)
-    for (size_t i = 0; i < plans.size(); i++) {
+    for (size_t i : leaf_at) {
       float angle = 0.0f;
       if (blockout_leaf_open_of(plans[i], slot[i]->local(), angle) && std::fabs(open_clamped(angle) - open) > kOpenEps) leaf_place(*slot[i], plans[i], open);
       slot[i]->get<BlockoutLeaf>()->open_seen = open;
@@ -2690,7 +2773,8 @@ void Editor::blockout_sync_door(GameObject &door) {
   size_t turned = plans.size();
   /* Not while an animation, a clip, the Sequencer or Play moves objects behind the undo stack: a leaf an animation turns is not the user's turn, and no step is amended for it. */
   const bool follow_only = interacting() || blockout_preview_now_;
-  for (size_t i = 0; i < plans.size() && turned == plans.size() && !follow_only; i++) {
+  for (size_t i : leaf_at) {
+    if (turned != plans.size() || follow_only) break;
     const BlockoutLeaf *mark = slot[i]->get<BlockoutLeaf>();
     float angle = 0.0f;
     if (fresh[i] || std::fabs(mark->open_seen - open) > kOpenEps || !blockout_leaf_open_of(plans[i], slot[i]->local(), angle)) continue;
@@ -2702,7 +2786,7 @@ void Editor::blockout_sync_door(GameObject &door) {
     /* The number joins the user's step: still to be kept - its label stays; kept already (the walk runs the frame after it) - that step is amended, so that one undo returns both. */
     blockout_join_step("Swing Door Leaf");
   }
-  for (size_t i = 0; i < plans.size(); i++) {
+  for (size_t i : leaf_at) {
     BlockoutLeaf *mark = slot[i]->get<BlockoutLeaf>();
     /* The leaf that was turned stays where it is - unless the angle was out of range (a leaf swung past 90 degrees or back through its hinge): then the number is held and the leaf with it. */
     const bool exact = i == turned && std::fabs(turned_angle - now) <= kOpenEps;
@@ -2711,8 +2795,14 @@ void Editor::blockout_sync_door(GameObject &door) {
     mark->open_seen = now;
   }
   seen.clear();
-  for (GameObject *l : slot) seen.push_back(l->id);
+  for (size_t i : leaf_at) seen.push_back(slot[i]->id);
+  fixed_seen.clear();
+  for (size_t i = 0; i < plans.size(); i++)
+    if (plans[i].part != kPartKindLeaf) fixed_seen.push_back(slot[i]->id);
+  for (const GameObject *l : ordered)
+    if (std::find(gone.begin(), gone.end(), l) == gone.end() && l->get<BlockoutLeaf>() && l->get<BlockoutLeaf>()->hidden) fixed_seen.push_back(l->id);  // (not a destroyed part, not one let go)
   if (seen.empty()) blockout_leaves_seen_.erase(door.id);
+  if (fixed_seen.empty()) blockout_fixed_seen_.erase(door.id);
 }
 
 /* A change the sync makes to the scene: it belongs to the step the user's action makes. Not kept yet - that step's label stays; kept already (the walk ran the frame after) - that step
@@ -2724,11 +2814,12 @@ void Editor::blockout_join_step(const char *label) {
   else mark_changed(label);
 }
 
-/* Every walk: the leaves of every styled door in step with it (see blockout_sync_door); a leaf whose parent is no door (moved out by hand) is an ordinary object. */
+/* Every walk: the parts of every styled opening in step with it (see blockout_sync_door); a part whose parent is no opening (moved out by hand) is an ordinary object. */
 void Editor::blockout_sync_leaves() {
   if (!scene_) return;
   if (blockout_leaves_scene_ != scene_->serial) {  // (a load, an undo or a new scene: the ids of the last walk are another scene's - by its serial, as an address repeats)
     blockout_leaves_seen_.clear();
+    blockout_fixed_seen_.clear();
     blockout_leaves_scene_ = scene_->serial;
   }
   /* Play, the Animation window's Preview or Play, the Sequencer's: objects move behind the undo stack, so no leaf's pose is the user's turn. (Not Live Link's clients: a hand turn
@@ -2750,35 +2841,67 @@ void Editor::blockout_sync_leaves() {
     if (GameObject *door = scene_->find(id)) blockout_sync_door(*door);
   for (auto it = blockout_leaves_seen_.begin(); it != blockout_leaves_seen_.end();)
     it = scene_->find(it->first) ? std::next(it) : blockout_leaves_seen_.erase(it);
+  for (auto it = blockout_fixed_seen_.begin(); it != blockout_fixed_seen_.end();)
+    it = scene_->find(it->first) ? std::next(it) : blockout_fixed_seen_.erase(it);
 }
 
-/* blockout leaf select | door: the selected doors' leaf objects, so a script can turn them; and from the leaves back to their doors. Nothing changes when there is none to select. */
-void Editor::blockout_leaf_command(const std::vector<std::string> &t) {
-  const std::string what = t.size() > 2 ? to_lower(t[2]) : "";
-  if (what != "select" && what != "door") return Log::warn("blockout leaf select | door: select the leaf objects of the selected doors, or the doors of the selected leaves");
+/* The selected openings' parts (`to_parts`) or the selected parts' openings, for `blockout part select | opening` and `blockout leaf select | door`. `kind` -1: every kind, else a BlockoutPartKind. Nothing
+ * changes when there is none to select. */
+void Editor::blockout_parts_select(bool to_parts, int kind, const char *command) {
   std::vector<uint64_t> ids;
+  auto add = [&](uint64_t id) {
+    if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+  };
   for (GameObject *g : selected_objects(false)) {
-    if (what == "select")
-      for (GameObject *l : leaf_children(*g)) ids.push_back(l->id);
-    else if (g->get<BlockoutLeaf>() && g->parent && std::find(ids.begin(), ids.end(), g->parent->id) == ids.end())
-      ids.push_back(g->parent->id);
+    if (to_parts)
+      for (GameObject *l : part_children(*g, kind)) add(l->id);
+    else if (g->get<BlockoutLeaf>() && g->parent && g->parent->get<BlockoutPiece>())
+      add(g->parent->id);
   }
-  if (ids.empty()) return Log::warn(what == "select" ? "blockout leaf select: select a styled door with its Leaf on first (blockout add door single)" : "blockout leaf door: select a door's leaf object first (blockout leaf select)");
+  if (ids.empty()) {
+    Log::warn(to_parts ? "%s: select a styled door or window first (blockout add door single | blockout add window single)" : "%s: select a door's or window's part first (blockout part select)", command);
+    return;
+  }
   select(ids.front());
   for (size_t i = 1; i < ids.size(); i++) select(ids[i], SEL_ADD);
 }
 
-/* The Inspector's note on a leaf object: whose it is, and that its shape is the door's. */
-void Editor::draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &, ui::Layout &lay) {
+/* blockout leaf select | door: the selected doors' leaf objects, so a script can turn them; and from the leaves back to their doors. */
+void Editor::blockout_leaf_command(const std::vector<std::string> &t) {
+  const std::string what = t.size() > 2 ? to_lower(t[2]) : "";
+  if (what != "select" && what != "door") return Log::warn("blockout leaf select | door: select the leaf objects of the selected doors, or the doors of the selected leaves");
+  blockout_parts_select(what == "select", kPartKindLeaf, what == "select" ? "blockout leaf select" : "blockout leaf door");
+}
+
+/* blockout part select [frame|glass|leaf] | opening (round 547): the selected openings' part objects (all of them, or one kind), so a script can put a modifier on them; and from the parts back to their openings. */
+void Editor::blockout_part_command(const std::vector<std::string> &t) {
+  const std::string what = t.size() > 2 ? to_lower(t[2]) : "", kind = t.size() > 3 ? to_lower(t[3]) : "";
+  const bool known = kind.empty() || kind == "frame" || kind == "glass" || kind == "leaf";
+  if ((what != "select" && what != "opening") || !known || (what == "opening" && !kind.empty()))
+    return Log::warn("blockout part select [frame|glass|leaf] | opening: select the part objects of the selected doors and windows, or the openings of the selected parts");
+  const int k = kind == "frame" ? kPartKindFrame : kind == "glass" ? kPartKindGlass : kind == "leaf" ? kPartKindLeaf : -1;
+  blockout_parts_select(what == "select", k, what == "select" ? "blockout part select" : "blockout part opening");
+}
+
+/* The Inspector's note on a part object: whose it is, and that its shape is the opening's while its modifiers are the user's. */
+void Editor::draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &mark, ui::Layout &lay) {
   auto &u = ui_;
   const GameObject *door = g.parent && g.parent->get<BlockoutPiece>() ? g.parent : nullptr;
   const Recti row = lay.row(u.row_h() + u.px(2));
-  const std::string text = door ? "Made by Door '" + door->name + "' - its shape follows the door's numbers" : "Not under a door any more - an ordinary object from the next frame";
+  const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+  const bool window = bp && bp->opening == 2;
+  const std::string noun = window ? "window" : "door", What = window ? "Window" : "Door";
+  const std::string text = door ? "Made by " + What + " '" + door->name + "' - its shape follows the " + noun + "'s numbers; its modifiers are yours"
+                                : "Not under a door or window any more - an ordinary object from the next frame";
   u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, text, u.theme.text_dim);
   const std::string duplicate_key = shortcut_text("edit.duplicate");  // (the keymap's label: it can be rebound)
-  u.tooltip("This leaf is its own object under the door, with its pivot at the hinge. Open Amount (the door's) and the Rotate tool turn it; its size, thickness and material follow the door.\n"
-            "Delete it and the door's Leaf goes off. A copy of it" + (duplicate_key.empty() ? std::string() : " (" + duplicate_key + ")") +
-                ", or it moved out of its door or under another, is an ordinary object: the door makes its own again. Bake to Mesh keeps it as a separate object.");
+  const std::string part = mark.kind == kPartKindFrame ? "frame" : mark.kind == kPartKindGlass ? "glass" : "leaf";
+  const std::string moves = mark.kind == kPartKindLeaf ? " Open Amount (the door's) and the Rotate tool turn it; its pivot is at the hinge." : " Its pivot is the middle of the hole's bottom line.";
+  u.tooltip("This " + part + " is its own object under the " + noun + ", so it takes modifiers (Bevel, Solidify, Wireframe ...) like any object; they stay when the " + noun + "'s numbers change." + moves +
+            " Its size and material follow the " + noun + ".\n"
+            "Click the " + part + " in the Scene view to select its " + noun + "; click the same spot again to select the " + part + ". "
+            "Delete a leaf and the door's Leaf goes off; a deleted frame or glass is made again. A copy of it" + (duplicate_key.empty() ? std::string() : " (" + duplicate_key + ")") +
+                ", or it moved out of its " + noun + " or under another, is an ordinary object: the " + noun + " makes its own again. Bake to Mesh keeps it as a separate object.");
   if (u.record_buttons) u.button_rects["shown:" + text] = row;
 }
 

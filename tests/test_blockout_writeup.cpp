@@ -323,7 +323,7 @@ void tests_round503() {
     r503_built(ed);
     size_t leaves = 0, leaf_pieces = 0;
     ed.scene().for_each([&](GameObject &g) {
-      leaves += g.get<BlockoutLeaf>() != nullptr;
+      leaves += (g.get<BlockoutLeaf>() && g.get<BlockoutLeaf>()->kind == kPartKindLeaf);
       leaf_pieces += g.get<BlockoutLeaf>() && g.get<BlockoutPiece>();
     });
     std::printf("    %zu leaf objects\n", leaves);
@@ -406,7 +406,7 @@ void tests_round503() {
     CHECK(w && w->style == kWindowDouble);
     CHECK(c && c->preset == kPresetColumn);
     size_t leaves = 0;
-    ed.scene().for_each([&](GameObject &g) { leaves += g.get<BlockoutLeaf>() != nullptr; });
+    ed.scene().for_each([&](GameObject &g) { leaves += (g.get<BlockoutLeaf>() && g.get<BlockoutLeaf>()->kind == kPartKindLeaf); });
     CHECK(leaves == 1);
   });
 

@@ -256,6 +256,16 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
    * Blockout is selected, is what a click finds. */
   if (!hit)
     hit = blockout_pick_outline(*scene_, scene_r3d_, scene_rt_, [this](uint64_t id) { return is_selected(id); }, mx - view.x, my - view.y, (float)ui_.px(6));
+  /* Round 547: the outline of an opening lies within a few pixels of its Frame's jamb - on the second click the outline would win and the Frame could never be picked. When the pixel under the cursor is
+   * one of this opening's own Frame or Glass, the click is on that part (pick_part_target then decides between the opening and the part). */
+  if (hit) {
+    const uint32_t under = scene_rt_.id_at(mx - view.x, my - view.y);
+    const GameObject *under_g = under ? scene_->find(under) : nullptr;
+    const BlockoutLeaf *under_mark = under_g ? under_g->get<BlockoutLeaf>() : nullptr;
+    const GameObject *op = under_mark && under_mark->kind != kPartKindLeaf && under_g->parent && under_g->parent->get<BlockoutPiece>() ? under_g->parent : nullptr;
+    const GameObject *owner = op ? blockout_of_piece(*op) : nullptr;
+    if (op && (op->id == hit || (owner && owner->id == hit))) hit = under_g->id;  // (the outline names the opening, or its Blockout)
+  }
   if (!hit) hit = pick_wire_object(view, mx, my, ui_.px(6));
   if (!hit) {
     uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);
@@ -266,8 +276,28 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
   if (GameObject *bo = hit ? scene_->find(hit) : nullptr)
     if (bo->get<Blockout>() && !blockout_pick_takes_whole(*bo))  // (round 502: a stack that changes the faces leaves no piece to name)
       if (const uint64_t piece = blockout_pick_piece_shown(*bo, mx - view.x, my - view.y)) hit = piece;
+  const uint64_t clicked = hit;
+  if (hit) hit = pick_part_target(hit, mx, my);
+  if (hit && hit != clicked && mode == SEL_TOGGLE && is_selected(hit)) return;  // (a click on a selected opening's frame in toggle mode keeps it: the opening stands for its parts)
   if (hit) select(hit, mode);
   else if (mode == SEL_REPLACE) clear_selection();
+}
+
+/* Round 547 (ADR 0149 decision 9): a click on a window's or door's Frame or a window's Glass selects its opening - what the user edits most (Width, Style); a second click on the same spot, with the
+ * opening selected, selects the part itself (the Unity prefab convention). A leaf is swung by hand and selects itself, like any other object. */
+uint64_t Editor::pick_part_target(uint64_t hit, int mx, int my) {
+  const GameObject *g = scene_->find(hit);
+  const BlockoutLeaf *mark = g ? g->get<BlockoutLeaf>() : nullptr;
+  const GameObject *opening = g && g->parent && g->parent->get<BlockoutPiece>() ? g->parent : nullptr;
+  if (!mark || !opening || mark->kind == kPartKindLeaf) return hit;
+  if (is_selected(hit)) return hit;  // (the part is the selection: a click on it keeps it)
+  const int slop = ui_.px(6);
+  const std::vector<GameObject *> now = selected_objects(false);
+  const bool only_opening = now.size() == 1 && now[0] == opening;  // (another way of changing the selection - the Hierarchy, a box - ends the pair of clicks)
+  const bool again = only_opening && pick_part_spot_.part == hit && std::abs(mx - pick_part_spot_.x) <= slop && std::abs(my - pick_part_spot_.y) <= slop;
+  if (again) return hit;
+  pick_part_spot_ = {hit, mx, my};
+  return opening->id;
 }
 
 /* Wire and Bounds objects have no pixels in the id buffer: pick them by
@@ -384,6 +414,9 @@ void Editor::box_select(const Recti &view, Recti box, int mode) {
     /* A Blockout in the box gives its pieces there, as a click gives the piece under it (the user, after round 479: a click that
      * moved a few pixels is a small box, and it selected the whole Blockout where the click selects a piece). */
     if (g->get<Blockout>() && !blockout_pick_takes_whole(*g) && blockout_box_select_shown(*g, view, b)) continue;  // (round 502: as the click)
+    /* Round 547: a Frame or a Glass stands for its opening, as in a click (a shaky click is a small box). */
+    const BlockoutLeaf *part = g->get<BlockoutLeaf>();
+    if (part && part->kind != kPartKindLeaf && g->parent && g->parent->get<BlockoutPiece>()) g = g->parent;
     select(g->id, SEL_ADD);
   }
   scene_->for_each([&](GameObject &g) {

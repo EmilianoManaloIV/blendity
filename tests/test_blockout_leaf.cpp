@@ -316,7 +316,8 @@ R499Wall r499_wall(Editor &ed, int style, int method, float cell = 0.01f) {
 std::vector<GameObject *> r515_leaves(const GameObject &door) {
   std::vector<GameObject *> out;
   for (GameObject *c : door.children)
-    if (c->get<BlockoutLeaf>()) out.push_back(c);
+    if (c->get<BlockoutLeaf>() && c->get<BlockoutLeaf>()->kind == kPartKindLeaf)  // (round 547: the Frame and the Glass are parts too; these helpers count the leaves)
+      out.push_back(c);
   return out;
 }
 
@@ -631,7 +632,7 @@ static void tests_round515_doorway() {
       r515_settle(ed);
       CHECK(r515_bytes(*s.bo) == bytes && r515_leaves(*s.door).empty());
       CHECK(r498_class(*s.bo, *s.door, kClassLeaf).faces == 0);  // (no Leaf faces in the Blockout's mesh at all: the leaf is an object)
-      CHECK(r498_class(*s.bo, *s.door, kClassSolid).faces >= 4 && r498_class(*s.bo, *s.door, kClassCut).faces >= 4);
+      CHECK(r498_class(*s.bo, *s.door, kClassSolid).faces >= 4 && r498_class(*s.bo, *s.door, kClassCut).faces >= 3);  // (round 547: the Solid faces are the Frame object's; the hole's reveal is three faces - the jambs and the head - of the Cut class)
     }
   });
 }
@@ -666,7 +667,7 @@ static void tests_round515_follow() {
     CHECK(copy && copy != s.door && copy->get<BlockoutPiece>());
     if (!copy) return;
     const std::vector<GameObject *> mine = r515_leaves(*copy);
-    CHECK(mine.size() == 2 && r515_leaves(*s.door).size() == 2 && ed.scene().object_count() == before + 3);
+    CHECK(mine.size() == 2 && r515_leaves(*s.door).size() == 2 && ed.scene().object_count() == before + 4);  // (round 547: the door, its Frame and its two leaves)
     for (GameObject *l : mine) CHECK(l != leaves[0] && l != leaves[1] && l->parent == copy);
     const uint64_t copy_id = copy->id, second = mine[1]->id;  // (an undo makes the objects again: the ids, not the pointers, are kept)
     /* A leaf deleted by hand turns the copy's Leaf off, in one undo step; the other leaf goes with it. */
@@ -687,7 +688,7 @@ static void tests_round515_follow() {
     ed.select_for_test(copy_id, false);
     ed.command("delete");
     r515_settle(ed);
-    CHECK(ed.scene().object_count() == objects - 3 && ed.scene().find(second) == nullptr);
+    CHECK(ed.scene().object_count() == objects - 4 && ed.scene().find(second) == nullptr);  // (round 547: the door, its Frame and its two leaves go)
     ed.command("undo");
     r515_settle(ed);
     const GameObject *door_back = ed.scene().find(copy_id);
@@ -828,7 +829,7 @@ static void tests_round515_object() {
       std::printf("    %s: %zu mesh node(s), %zu named Leaf\n", name.c_str(), meshes, leaf_nodes);
       CHECK(meshes >= 1);
       if (std::string(format) == "obj") continue;  // (an OBJ is flat: a mesh per object, no node's place to read back)
-      CHECK(meshes == 2 && leaf_nodes == 1);
+      CHECK(meshes == 3 && leaf_nodes == 1);  // (round 547: the Blockout's mesh, the door's Frame and its leaf)
     }
     /* Keep Transforms (glTF): the leaf's node is where its pivot is - the hinge - and turned as the leaf is, its vertices around the pivot. */
     const std::string dir = ed.resolve_asset_path_for_test("Assets/Exports");
@@ -907,7 +908,7 @@ static void tests_round515_old() {
     ed.command("window Inspector");
     ed.record_buttons_for_test(true);
     r477_settle(ed, 3);
-    CHECK(r496_has(ed, "field:Open Amount") && r496_has(ed, strprintf("shown:Made by Door '%s' - its shape follows the door's numbers", s.door->name.c_str()).c_str()));
+    CHECK(r496_has(ed, "field:Open Amount") && r496_has(ed, strprintf("shown:Made by Door '%s' - its shape follows the door's numbers; its modifiers are yours", s.door->name.c_str()).c_str()));
     CHECK(r479_type(ed, "field:Open Amount", "0.6"));
     CHECK_NEAR(s.door->get<BlockoutPiece>()->open_amount, 0.6f, 1e-6f);
     r515_settle(ed);
@@ -1212,7 +1213,7 @@ GameObject *r515te_door_in(GameObject &root) {
 /* Every leaf object in the scene, wherever it stands (an orphan or a stray one counts). */
 size_t r515te_all_leaves(Editor &ed) {
   size_t n = 0;
-  ed.scene().for_each([&](GameObject &g) { n += g.get<BlockoutLeaf>() != nullptr; });
+  ed.scene().for_each([&](GameObject &g) { n += (g.get<BlockoutLeaf>() && g.get<BlockoutLeaf>()->kind == kPartKindLeaf); });
   return n;
 }
 

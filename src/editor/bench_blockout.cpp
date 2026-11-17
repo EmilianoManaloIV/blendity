@@ -263,7 +263,9 @@ void Editor::build_blockout_bench(int pieces) {
 
   /* The 400 is 9 x 6 rooms, not 10 x 6: the 10 x 6 grid alone is 394 pieces, and the 10 pieces round 503 added (nine presets and the Bevel box) would have gone past 400. */
   Interior in{*scene_, *bo, big ? 9 : 4, big ? 6 : 3};
-  in.door_limit = in.window_limit = 6;  // (every style once, the rest plain: see Interior)
+  /* Round 547 (ADR 0149): a styled opening is a plain hole on the grid and its frame an object, so the interior of 100 styles all its openings again. The 400 keeps round 503's six of each: with all 239
+   * styled its mesh was not sound on the field path (142 unresolved places, from the arched and round heads' outlines), where six of each is. */
+  if (big) in.door_limit = in.window_limit = 6;
   in.rooms();
   in.joined_rooms();
   in.doors();
