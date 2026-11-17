@@ -127,13 +127,13 @@ Each feature has a lesson (or a section of one) with Try-it lines that run headl
 | 539 | Weight Paint automasking | "Automasking the weight brush" (in "Modifiers vs Components") | yes - 1 step | 1 |
 | 540 | per-brush settings | "Each brush keeps its own size" (in "Modifiers vs Components") | yes - 1 step | 3 |
 | 541 | animation | "Blender 5.3's animation tools: rotation, world space, poses, scrubbing" (in "Modifiers vs Components") | yes - 2 steps | 4 |
-| 542 | sun disc, ICC | **none** | - | - |
+| 542 | sun disc, ICC | "The sky's sun lights the scene (Blender 5.3)" (in "Light, Sky and Tone Mapping"; #425 at `7bb5ca0d`) | yes - 3 steps | 3 |
 | 543 | RT shadows | "Shadows traced by the card (round 543)" (in "Rendering on the GPU") | yes - 2 steps | 2 |
 | 545 | Vertex Paint | "Vertex colours and Vertex Paint" (in "Modifiers vs Components") | yes - 1 step | 2 |
 | 547 | a door's and a window's parts | "The frame and the glass are objects" (in "Windows with a style"; steps 6 - 10 of its Try it) | yes - 17 steps (the lesson) | 5 |
 
 The walk is a unit test (`tests/test_editor.cpp`, "learn (Pass 27's write-up): ..."): each feature's section's Try-it
-lines in order in a fresh editor, no warning, at least one question. Gaps: 542 has no section, and 532 - 534's drawing
+lines in order in a fresh editor, no warning, at least one question. Gap: 532 - 534's drawing
 and tracing have no step of their own.
 
 ## What the documentation gets
