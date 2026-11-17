@@ -2499,12 +2499,32 @@ A Blockout piece can carry modifiers of its own. They run on that piece's shape 
 # What a piece takes
 - Every modifier that changes a mesh by itself: Bevel, Array, Mirror, Solidify, Subdivision Surface, Displace, Decimate, Triangulate, Weld, Wireframe, Screw, Cast, Simple Deform, Smooth.
 - Not: modifiers that read another object (Boolean - on a Blockout use a Subtract piece; Curve, Lattice, Mesh Deform, Armature, Normal Transfer) or only change shading (Smooth Normals). They are off in a piece's Add Modifier list, with the reason.
-- Not on a room, a door or window, or an Intersect piece yet: their section says so, and a stack put there by the console does nothing (the Blockout's status names the piece).
+- Not on a room or an Intersect piece yet: their section says so, and a stack put there by the console does nothing (the Blockout's status names the piece). A door or window takes one in its own way: "Modifiers on a door or window".
 - Apply is refused on a piece: Bake the Blockout to Mesh to keep the result as a mesh. Bake and Unbake keep every piece's modifiers.
 
 ? You put an Array of 10 on one column and then drag that column across the room. Does the Array run again on every frame? | No: the stack's result is kept by the piece's numbers and modifiers, not by its place - moving or turning the piece takes the kept mesh, and only changing a number or a modifier runs the stack again.
 ? The Blockout has a Mirror of its own and one column carries a Bevel. Which runs first? | The column's Bevel, on the column's shape; then the pieces are combined; then the Blockout's Mirror mirrors the whole result - bevelled column included.
 ? Why is the Boolean modifier off for a piece? | A Boolean reads another object, and a piece's shape is made from its numbers alone; on a Blockout the same cut is a Subtract piece - exact and live.
+)"},
+    {"Modifiers on a door or window", "An Array of windows along a wall from one, a Mirror across a facade, a bevelled hole", R"(
+A door or window piece takes modifiers too, in two ways. An Array or a Mirror repeats the whole opening - each copy a hole with its frame, glass and a door's leaf - while every other modifier reshapes the hole itself. Width, Head and Sill stay one opening's size.
+
+# Try it
+! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 4 8 2.6 | 1. A room 4 m by 8 m, in a new Blockout: its first wall is the 8 m one
+! cmd:blockout add window 1 1.8 0.9 | 2. A window in the middle of that wall: 1 m wide, sill 0.9 m, head 1.8 m
+! cmd:component ArrayModifier; set ArrayModifier.Count 3; set ArrayModifier.RelativeOffset 1.5 0 0 | 3. An Array of 3: three windows along the wall, each one and a half widths from the last - one piece in the Hierarchy, three holes in the wall
+! cmd:blockout info | 4. The status says the window is repeated: 3 copies
+
+# How it works
+- Array and Mirror repeat the opening in its own axes: an Array steps along its X (along the wall) in multiples of its size, a Mirror mirrors across its middle. Moving the window moves every copy.
+- Bevel, Subdivision and the other reshaping modifiers run on the hole - round its edges, soften it - before it is cut; the frame, the glass and a door's leaf take modifiers of their own.
+- Whatever their order in the stack, the reshaping ones run first and the repeats last, and the Modifiers section says so when they are listed the other way.
+- Width, Head and Sill are one opening's size, before its modifiers: the handles and F9 change the first one, and the copies follow.
+- More than 256 copies, a number that is not finite, an Array that fits a curve: the opening is built once and the status says why.
+
+? A window has an Array of 4. You make it wider with its Width handle. What happens to the other three? | They become wider too: every copy is the same window, placed by the Array; and since the Array's step is in multiples of the window's size, they also move apart.
+? You put a Bevel on a window that has an Array. Is one hole bevelled, or all of them? | All of them: the Bevel reshapes the hole, and the Array then repeats the whole window - bevelled hole and all.
+? A window has a Mirror X and nothing else. How many holes does it cut? | One: the Mirror mirrors across the window's own middle, so the copy lands on the window and is cut once. After an Array, the Mirror adds the copies' images on the other side.
 )"},
     {"Building rooms with Blockout", "From an empty scene to a lit interior: two rooms, a door, a window, a rounded column, materials and Bake to Mesh", R"(
 This lesson is the whole path in one sitting, with the other Blockout lessons as its chapters: you make a Blockout, make two materials, drag out two rooms side by side and give each its floor and walls, cut a door between them and a window in an outer wall, stand a column in one room with a rounded foot and bake the result to an ordinary mesh. At every step the mesh is built again from the pieces, so you can go back and change any number. It starts best from File > New Scene: each Try-it works on what the one before it left selected (a piece you draw is selected, and the commands that follow act on its Blockout), so a Blockout left over from another lesson would take the rooms in.

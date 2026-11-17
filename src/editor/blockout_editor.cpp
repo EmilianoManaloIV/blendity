@@ -1316,10 +1316,11 @@ uint64_t blockout_pick_outline(Scene &scene, const Renderer3D &r3d, const Render
       const BlockoutPiece *bp = p->get<BlockoutPiece>();
       const bool cuts = bp->opening != 0 || bp->operation == 1 || (bp->operation == 2 && !bp->room);
       if (!cuts) continue;  // (a piece with a surface is clicked on its surface: its outline runs along edges two pieces share)
-      piece_outline(p->world_matrix(), *bp, [&](Vec3 a, Vec3 b) {
-        const float d = outline_distance(r3d, rt, a, b, px, py, best);
-        if (d < best) best = d, hit = p->id;
-      });
+      for (const Mat4 &frame : blockout_opening_frames(*p, p->world_matrix()))  // (round 546: each copy of an opening; the piece itself otherwise)
+        piece_outline(frame, *bp, [&](Vec3 a, Vec3 b) {
+          const float d = outline_distance(r3d, rt, a, b, px, py, best);
+          if (d < best) best = d, hit = p->id;
+        });
     }
   });
   return hit;
@@ -1346,7 +1347,7 @@ void Editor::draw_blockouts() {
       auto draw = [&](uint32_t c, float wd) { return [this, c, wd](Vec3 a, Vec3 b) { scene_r3d_.line(a, b, c, true, wd); }; };
       auto own = [&](uint32_t c, float wd) { return [this, c, wd, w](Vec3 a, Vec3 b) { scene_r3d_.line(w.point(a), w.point(b), c, true, wd); }; };
       const bool shaped = !opening && bp->shape >= 3 && bp->shape <= 6;
-      piece_outline(w, *bp, draw(col, width));
+      for (const Mat4 &frame : blockout_opening_frames(*p, w)) piece_outline(frame, *bp, draw(col, width));  // (round 546: each copy of an opening)
       if (!mine && !whole) continue;  // (a room's grown shell is drawn for the pieces in hand only)
       if (!bp->is_room()) continue;
       RoomGrowth grow;
@@ -2561,21 +2562,33 @@ void let_go(GameObject &leaf) {
   if (BlockoutLeaf *mark = leaf.get<BlockoutLeaf>()) leaf.remove_component(mark);
 }
 
-/* The places the opening stands at: one, the identity (round 547's stub). Round 546 replaces this with blockout_opening_placements() and applies the placement's rotation / mirror to the parts. */
-std::vector<Mat4> opening_placements(const GameObject &) { return {Mat4::identity()}; }
-
-/* Every part the opening has now: one set for each place it stands at (the copy's index and place in each plan). */
+/* Every part the opening has now: one set for each place it stands at (round 546: its Array and Mirror - blockout_opening_placements), the copy's index, place and turn in
+ * each plan. A mirrored copy is the opening turned over (blockout_opening_frames): its leaf hinges on the other jamb, its slabs mirrored across the leaf's X - the part is
+ * never given a negative scale (ADR 0135). */
 void opening_plans(const GameObject &door, const BlockoutPiece &bp, std::vector<BlockoutLeafPlan> &plans) {
   plans.clear();
   std::vector<BlockoutLeafPlan> one;
   blockout_part_plans(bp, one);
-  const std::vector<Mat4> places = opening_placements(door);
-  for (size_t c = 0; c < places.size(); c++)
+  const std::vector<Mat4> places = blockout_opening_placements(door);
+  for (size_t c = 0; c < places.size(); c++) {
+    const Mat4 &p = places[c];
+    const bool mirrored = dot(cross(p.column(0), p.column(1)), p.column(2)) < 0.0f;
+    const Mat4 f = mirrored ? p * Mat4::scale(Vec3(-1.0f, 1.0f, 1.0f)) : p;  // (the copy turned: as blockout_opening_frames makes it)
+    const Vec3 x = f.column(0);
+    const float yaw = std::atan2(-x.z, x.x) / kDeg2Rad;
     for (BlockoutLeafPlan plan : one) {
       plan.copy = (int)c;
-      if (c > 0) plan.origin = places[c].point(plan.origin);
+      /* The part's place is the mirror image itself (p, not the turned frame: a hinge 0.44 m right of the middle is 0.44 m left of the
+       * mirrored copy's); it stands turned by the frame's turn, and a mirrored one is hinged and shaped the other way round. */
+      plan.origin = p.point(plan.origin);
+      plan.yaw = std::fabs(yaw) < 1e-4f ? 0.0f : yaw;
+      if (mirrored) {
+        plan.sign = -plan.sign;
+        for (auto &b : plan.boxes) b = {Vec3(-b.second.x, b.first.y, b.first.z), Vec3(-b.first.x, b.second.y, b.second.z)};
+      }
       plans.push_back(std::move(plan));
     }
+  }
 }
 
 /* The parts under `piece` that another opening made. A copy of the whole opening (Ctrl+D, paste) has its parts marked with the original's id: the original still has a part of that kind and index
@@ -2616,6 +2629,23 @@ void claim_leaves(Scene &scene, GameObject &door) {
 void copy_stack(const GameObject &from, GameObject &to) {
   for (const auto &c : from.components)
     if (c->is_modifier()) to.add_component(c->clone());
+}
+
+/* Round 546 (ADR 0150, decided 1): a copy's part has the stack of copy 0's part of its kind and index - an edit is made on copy 0, the opening's own
+ * part, and every copy follows it; a stack put on a copy's part by hand is replaced (the copies are generated, never hand-made). */
+void follow_first_copy(const std::vector<GameObject *> &slot, const std::vector<BlockoutLeafPlan> &plans) {
+  for (size_t i = 0; i < plans.size(); i++) {
+    if (plans[i].copy == 0 || !slot[i]) continue;
+    const GameObject *first = nullptr;
+    for (size_t k = 0; k < plans.size() && !first; k++)
+      if (plans[k].copy == 0 && plans[k].part == plans[i].part && plans[k].index == plans[i].index) first = slot[k];
+    if (!first || blockout_modifiers_hash(*first) == blockout_modifiers_hash(*slot[i])) continue;
+    std::vector<Component *> old;
+    for (const auto &c : slot[i]->components)
+      if (c->is_modifier()) old.push_back(c.get());
+    for (Component *c : old) slot[i]->remove_component(c);
+    copy_stack(*first, *slot[i]);
+  }
 }
 
 /* Whether the renderer still holds what the editor last gave this part, so the editor may change it; a material the user dropped on the part is theirs. `last` is the mark's record: a path; "-" for
@@ -2702,7 +2732,8 @@ void Editor::blockout_sync_door(GameObject &door) {
     scene_->destroy(leaves);
     seen.clear();
     blockout_join_step("Delete Door Leaf");
-    Log::info("Door '%s': a leaf was deleted, so its Leaf is off now (turn it on to make the leaves again)", door.name.c_str());
+    const bool copies = std::any_of(plans.begin(), plans.end(), [](const BlockoutLeafPlan &p) { return p.copy > 0; });
+    Log::info("Door '%s': a leaf was deleted, so its Leaf is off now%s (turn it on to make the leaves again)", door.name.c_str(), copies ? " - for every copy" : "");
     return;
   }
   /* The parts the plans want, by slot; a part the opening made that no plan wants (an index too high, a Glass turned off, an opening that wants none) goes - but a Frame or a Glass whose numbers
@@ -2760,6 +2791,7 @@ void Editor::blockout_sync_door(GameObject &door) {
     mark->open_seen = open;
     fresh[i] = true;
   }
+  follow_first_copy(slot, plans);
   /* Turned by hand: a leaf the door agreed with at the last walk that now stands at another angle writes it to the door's Open Amount (same undo step); the other leaves follow.
    * Not while the turn is still going (a Rotate drag, a held slider): the angle is read when it is let go. A Frame and a Glass do not turn: only the leaves are read. */
   /* The first walk after a preview ended: a leaf the preview left at an angle the door does not say is put back to the door's number, not written back into whatever step comes last. */
@@ -2891,8 +2923,9 @@ void Editor::draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &mark, ui::La
   const BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
   const bool window = bp && bp->opening == 2;
   const std::string noun = window ? "window" : "door", What = window ? "Window" : "Door";
-  const std::string text = door ? "Made by " + What + " '" + door->name + "' - its shape follows the " + noun + "'s numbers; its modifiers are yours"
-                                : "Not under a door or window any more - an ordinary object from the next frame";
+  const std::string text = !door ? "Not under a door or window any more - an ordinary object from the next frame"
+                            : mark.copy > 0 ? strprintf("Copy %d of %s '%s' - its modifiers follow the first copy's: edit those", mark.copy, What.c_str(), door->name.c_str())
+                                            : "Made by " + What + " '" + door->name + "' - its shape follows the " + noun + "'s numbers; its modifiers are yours";
   u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, text, u.theme.text_dim);
   const std::string duplicate_key = shortcut_text("edit.duplicate");  // (the keymap's label: it can be rebound)
   const std::string part = mark.kind == kPartKindFrame ? "frame" : mark.kind == kPartKindGlass ? "glass" : "leaf";

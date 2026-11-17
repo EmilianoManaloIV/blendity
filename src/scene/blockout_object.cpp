@@ -1026,10 +1026,8 @@ void blockout_piece_edited(BlockoutPiece &p, int style_before, int opening_befor
 size_t blockout_user_piece_count(const std::vector<blockout::Piece> &pieces) {
   size_t n = 0;
   std::unordered_set<uint64_t> windows;
-  for (const blockout::Piece &p : pieces) {
-    if (!blockout_id_generated(p.id)) n++;
-    else if (windows.insert(blockout_piece_owner(p.id)).second) n++;
-  }
+  for (const blockout::Piece &p : pieces)  // (one per object: a plain piece, or the owner of made pieces - a styled window's parts, an opening's copies, round 546)
+    if (windows.insert(blockout_piece_owner(p.id)).second) n++;
   return n;
 }
 
@@ -1111,7 +1109,12 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
       collect(*c, m, pieces, notes, grid_cell);
       continue;
     }
+    const size_t first = pieces.size();  // (round 546: an opening's pieces from here on are copied for each of its placements)
     if (bp && bp->enabled && bp->is_styled_opening() && collect_window(*bp, c->id, m, pieces, notes, grid_cell)) {
+      for (size_t i = first; notes && i < pieces.size(); i++)  // (round 546: the reshaping modifiers on the one hole round 547 makes - a Revolving door's drum)
+        if (const int part = window_part(pieces[i].id) & ~kPartDoorFlag; part == kPartHole || (part == kPartDrum && pieces[i].shape == blockout::Shape::Cylinder))
+          blockout_piece_stack_note(*c, pieces[i], i, notes->surface);  // (a Revolving door's drum: the cylinder, not its entry box - one evaluation, no seam between two)
+      blockout_opening_copies(*c, m, first, pieces, notes ? &notes->surface : nullptr);
       collect(*c, m, pieces, notes, grid_cell);
       continue;
     }
@@ -1128,6 +1131,7 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
         pieces.push_back(std::move(p));
         if (source && notes) notes->sources.push_back(source->id);
         if (notes) notes->surface.pieces.push_back(surface_of(*bp, c->id));  // (round 482: what the faces of this piece are given besides their shape)
+        if (bp->opening != 0) blockout_opening_copies(*c, m, first, pieces, notes ? &notes->surface : nullptr);  // (round 546)
       }
     }
     collect(*c, m, pieces, notes, grid_cell);
@@ -1538,7 +1542,8 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
 /* ===================================================================== */
 
 int blockout_face_class(const blockout::Piece &piece, uint32_t side) {
-  if (blockout_id_generated(piece.id) && side != blockout::kSideBlend) return window_part(piece.id) & 0x40 ? blockout_preset_face_class(piece, side) : window_face_class(piece, side);
+  if (blockout_id_generated(piece.id) && window_part(piece.id) != 0 && side != blockout::kSideBlend)  // (part 0: a plain opening's copy, round 546 - a plain piece)
+    return window_part(piece.id) & 0x40 ? blockout_preset_face_class(piece, side) : window_face_class(piece, side);
   const bool plain = !piece.room || side == blockout::kSideBlend;  // (a blend only comes from a piece that is no room)
   if (plain) return piece.op == blockout::Op::Add ? kClassSolid : kClassCut;
   switch (blockout::side_class(piece, side)) {
@@ -1805,17 +1810,18 @@ void blockout_part_plans(const BlockoutPiece &bp, std::vector<BlockoutLeafPlan> 
 }
 
 void blockout_leaf_pose(const BlockoutLeafPlan &plan, float open, Vec3 &position, float &yaw_degrees) {
-  position = plan.origin, yaw_degrees = 0.0f;
+  position = plan.origin, yaw_degrees = plan.yaw;  // (round 546: a copy's turn)
   if (plan.kind == BlockoutLeafPlan::Fixed) return;  // (a Frame or a Glass does not move with Open Amount)
-  if (plan.kind == BlockoutLeafPlan::Slide) position.x += plan.sign * open * plan.travel;
-  else yaw_degrees = plan.sign * open * 90.0f;
+  if (plan.kind == BlockoutLeafPlan::Slide) position += Quat::axis_angle(Vec3(0, 1, 0), plan.yaw * kDeg2Rad).rotate(Vec3(plan.sign * open * plan.travel, 0.0f, 0.0f));
+  else yaw_degrees += plan.sign * open * 90.0f;
 }
 
 bool blockout_leaf_open_of(const BlockoutLeafPlan &plan, const Transform &local, float &open) {
   if (plan.kind == BlockoutLeafPlan::Slide || plan.kind == BlockoutLeafPlan::Fixed) return false;
   const Vec3 forward = local.rotation.rotate(Vec3(0.0f, 0.0f, 1.0f)), up = local.rotation.rotate(Vec3(0.0f, 1.0f, 0.0f));
   if (!(up.y > 0.9995f)) return false;  // (tipped over by hand: it is just an object turned)
-  open = plan.sign * std::atan2(forward.x, forward.z) / kHalfPi;
+  const float turned = std::remainder(std::atan2(forward.x, forward.z) - plan.yaw * kDeg2Rad, 2.0f * kPi);  // (round 546: relative to the copy's own turn)
+  open = plan.sign * turned / kHalfPi;
   return finite_bits(open);
 }
 
@@ -2017,6 +2023,7 @@ uint64_t blockout_leaf_key(const BlockoutLeafPlan &plan, float texture_scale, co
   h = fnv1a(plan.name, std::strlen(plan.name), h);
   for (int a = 0; a < 3; a++) h = mix_float(h, plan.origin[a]);
   h = mix_float(mix_float(h, plan.sign), plan.travel);
+  if (plan.yaw != 0.0f) h = mix_float(h, plan.yaw);  // (round 546: a copy turned another way is placed again - only when turned, so the keys round 515 saved stay valid)
   for (const auto &box : plan.boxes)
     for (int a = 0; a < 3; a++) h = mix_float(mix_float(h, box.first[a]), box.second[a]);
   if (plan.kind == BlockoutLeafPlan::Fixed) {  // (a leaf's key is what round 515 wrote: the scenes it saved keep their leaves)

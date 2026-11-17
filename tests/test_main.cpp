@@ -92,6 +92,7 @@ void run_blockout_join_tests();
 void run_blockout_piece_modifiers_tests();
 void run_splats_tests();
 void run_splats_raster_tests();
+void run_blockout_opening_modifiers_tests();
 void run_runner_tests();
 void run_splats_trace_tests();
 void run_splats_gpu_tests();
@@ -120,6 +121,7 @@ static const TestGroup kTestGroups[] = {
     {"splats_raster", run_splats_raster_tests},  // (round 532)
     {"splats_trace", run_splats_trace_tests},
     {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
+    {"blockout_opening_modifiers", run_blockout_opening_modifiers_tests},
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 
