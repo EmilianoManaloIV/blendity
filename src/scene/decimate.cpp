@@ -91,6 +91,21 @@ bool decimate(Mesh &m, float ratio) {
       if (new_vert[v] != UINT32_MAX) s.delta[new_vert[v]] = k.delta[v];
     out.shape_keys.push_back(std::move(s));
   }
+  /* Task 0525: Point colours likewise (each kept vertex its own); the layers that can't follow are reported. */
+  for (const ColorAttribute &c : m.color_attributes) {
+    if (c.domain != ColorAttribute::Domain::Point || c.rgba.size() != m.vert_count()) continue;
+    ColorAttribute nc = out.make_color(c.name, ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
+    for (size_t v = 0; v < new_vert.size(); v++)
+      if (new_vert[v] != UINT32_MAX && new_vert[v] < nc.rgba.size()) nc.rgba[new_vert[v]] = c.rgba[v];
+    out.color_attributes.push_back(std::move(nc));
+  }
+  if (!m.color_attributes.empty()) {
+    note_unkept_colors(m, out);
+    auto name_of = [&](int i) { return i >= 0 && i < (int)m.color_attributes.size() ? m.color_attributes[(size_t)i].name : std::string(); };
+    out.active_color = out.find_color(name_of(m.active_color));
+    out.render_color = out.find_color(name_of(m.render_color));
+    out.prune_colors();
+  }
   m = std::move(out);
   m.touch();
   return true;
