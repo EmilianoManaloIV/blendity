@@ -35,6 +35,9 @@ void Mesh::clear() {
   loose_edges.clear();
   sculpt_mask.clear();  // (task 0238)
   face_group.clear();
+  color_attributes.clear();  // (task 0525)
+  dropped_colors.clear();
+  active_color = render_color = -1;
   touch();
 }
 
@@ -92,6 +95,82 @@ void Mesh::sync_attributes() {
    * wrong size has renumbered what they belong to, so they go rather than land on the wrong faces or vertices. */
   if (face_group.size() != face_count()) face_group.clear();
   if (sculpt_mask.size() != positions.size()) sculpt_mask.clear();
+  /* ADR 0152: a Corner colour layer of the wrong size goes, by the same rule. A Point layer stays for now: the editor's
+   * and the modifier stack's carry by position mend it after the operator, as they do the vertex groups. */
+  prune_colors(false);
+}
+
+/* ---- colour attributes (ADR 0152, task 0525) ---- */
+
+void Mesh::remap_color_vertices(const std::vector<uint32_t> &remap, size_t new_count) {
+  for (ColorAttribute &c : color_attributes) {
+    if (c.domain == ColorAttribute::Domain::Corner) {  // the corner list it matched before matches the remapped one
+      if (c.corners.size() != corner_verts.size()) continue;
+      for (uint32_t &v : c.corners) v = v < remap.size() ? remap[v] : UINT32_MAX;
+      continue;
+    }
+    if (c.rgba.size() != remap.size()) {
+      /* A layer an operator left the wrong size before this renumbering: its values no longer belong to any numbering.
+       * Emptied, so it can't fit the new count by chance (and land on the wrong vertices); the editor's carry by
+       * position restores it from the mesh before (review of round 545). */
+      if (!c.rgba.empty()) c.rgba.clear();
+      continue;
+    }
+    std::vector<Vec4> d(new_count, Vec4(1, 1, 1, 1));
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX && remap[i] < new_count) d[remap[i]] = c.rgba[i];
+    c.rgba = std::move(d);
+  }
+}
+
+ColorAttribute Mesh::make_color(const std::string &name, ColorAttribute::Domain domain, Vec4 fill) const {
+  ColorAttribute c;
+  c.name = name;
+  c.domain = domain;
+  const bool point = domain == ColorAttribute::Domain::Point;
+  c.rgba.assign(point ? vert_count() : corner_count(), fill);
+  if (!point) c.corners = corner_verts;
+  return c;
+}
+
+int Mesh::find_color(const std::string &name) const {
+  for (size_t i = 0; i < color_attributes.size(); i++)
+    if (color_attributes[i].name == name) return (int)i;
+  return -1;
+}
+
+const ColorAttribute *Mesh::render_colors() const {
+  if (render_color < 0 || render_color >= (int)color_attributes.size()) return nullptr;
+  const ColorAttribute &c = color_attributes[(size_t)render_color];
+  return color_fits(c) ? &c : nullptr;
+}
+
+/* A layer that no longer fits has had its elements renumbered by an operator that didn't carry it: it goes whole
+ * rather than colour the wrong vertices or corners. The active and render choices follow the layers that stay. */
+void Mesh::prune_colors(bool points_too) {
+  if (color_attributes.empty()) {
+    active_color = render_color = -1;
+    return;
+  }
+  std::vector<int> remap(color_attributes.size(), -1);
+  std::vector<ColorAttribute> kept;
+  for (size_t i = 0; i < color_attributes.size(); i++) {
+    const bool point = color_attributes[i].domain == ColorAttribute::Domain::Point;
+    if (!color_fits(color_attributes[i]) && (points_too || !point)) {
+      dropped_colors.push_back("'" + color_attributes[i].name + (point ? "' (per vertex)" : "' (per corner)"));
+      continue;
+    }
+    remap[i] = (int)kept.size();
+    kept.push_back(std::move(color_attributes[i]));
+  }
+  auto follow = [&](int i) { return i >= 0 && i < (int)remap.size() ? remap[(size_t)i] : -1; };
+  const int a = follow(active_color), r = follow(render_color);
+  color_attributes = std::move(kept);
+  /* A choice whose layer went falls back to the first left; "none" (-1) stays none - a render layer chosen away isn't
+   * chosen back by a tidy-up (the review of round 545's tests: an export then wrote colours the user had turned off). */
+  const int fallback = color_attributes.empty() ? -1 : 0;
+  active_color = a >= 0 ? a : active_color < 0 ? -1 : fallback;
+  render_color = r >= 0 ? r : render_color < 0 ? -1 : fallback;
 }
 
 int Mesh::find_group(const std::string &group) const {
@@ -114,6 +193,11 @@ bool Mesh::keys_fit() const {
 
 void Mesh::copy_vertex_weights(uint32_t from) {
   for (VertexGroup &g : vertex_groups) g.weights.push_back(from < g.weights.size() ? g.weights[from] : 0.0f);
+  /* Point colours ride along (ADR 0152): the new vertex takes its source's colour. A layer already the wrong size is
+   * left for prune_colors to drop. */
+  for (ColorAttribute &c : color_attributes)
+    if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() + 1 == positions.size())
+      c.rgba.push_back(from < c.rgba.size() ? c.rgba[from] : Vec4(1, 1, 1, 1));
 }
 
 int Mesh::material_count() const {
@@ -172,7 +256,18 @@ void Mesh::set_face_smooth(size_t f, bool on) {
 /* Reverses a face's winding together with its corner attributes. */
 static void reverse_face(Mesh &m, size_t f) {
   std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
-  if (m.has_uvs()) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+  m.reverse_corner_layers(f);
+}
+
+void Mesh::reverse_corner_layers(size_t f) {
+  if (f + 1 >= face_offsets.size()) return;
+  const uint32_t a = face_offsets[f], b = face_offsets[f + 1];
+  if (has_uvs()) std::reverse(uvs.begin() + a, uvs.begin() + b);
+  for (ColorAttribute &c : color_attributes) {  // (ADR 0152: Corner colours turn with their corners)
+    if (c.domain != ColorAttribute::Domain::Corner || c.rgba.size() != corner_verts.size() || c.corners.size() != corner_verts.size()) continue;
+    std::reverse(c.rgba.begin() + a, c.rgba.begin() + b);
+    std::reverse(c.corners.begin() + a, c.corners.begin() + b);
+  }
 }
 
 Vec3 Mesh::face_normal(size_t f) const {
@@ -454,6 +549,7 @@ size_t Mesh::edge_count() const {
 size_t Mesh::memory_bytes() const {
   size_t b = positions.capacity() * sizeof(Vec3) + face_offsets.capacity() * 4 + corner_verts.capacity() * 4 + edit_basis.capacity() * sizeof(Vec3);
   b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8 + sculpt_mask.capacity() * 4 + face_group.capacity() * 4;
+  for (const ColorAttribute &c : color_attributes) b += c.rgba.capacity() * sizeof(Vec4) + c.corners.capacity() * 4;  // (task 0525)
   for (const RenderMesh &c : cache_)
     b += c.positions.capacity() * sizeof(Vec3) * 2 + c.uvs.capacity() * sizeof(Vec2) + c.tangents.capacity() * sizeof(Vec4) +
          c.indices.capacity() * 4 + c.tri_face.capacity() * 6 + c.tri_corner.capacity() * 4;
@@ -2361,6 +2457,7 @@ std::vector<uint32_t> remove_loose_verts(Mesh &m) {
       if (remap[i] != UINT32_MAX) w[remap[i]] = g.weights[i];
     g.weights = std::move(w);
   }
+  m.remap_color_vertices(remap, np.size());  // (ADR 0152)
   for (ShapeKey &k : m.shape_keys) {  // (round 358: keys that fitted follow the remap too)
     if (k.delta.size() != remap.size()) continue;
     std::vector<Vec3> d(np.size(), Vec3(0.0f));

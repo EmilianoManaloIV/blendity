@@ -146,6 +146,8 @@ uint32_t Dyntopo::new_vertex(uint32_t a, uint32_t b) {
   for (ShapeKey &k : m_.shape_keys)
     if (k.delta.size() == v) k.delta.push_back((k.delta[a] + k.delta[b]) * 0.5f);
   if (m_.custom_normals.size() == v) m_.custom_normals.push_back(normalize(m_.custom_normals[a] + m_.custom_normals[b]));
+  for (ColorAttribute &c : m_.color_attributes)  // (task 0525: Point colours the mean of the ends'; no layers, no cost)
+    if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() == v) c.rgba.push_back((c.rgba[a] + c.rgba[b]) * 0.5f);
   vf_.emplace_back();
   had_faces_.push_back(1);
   return v;
@@ -243,6 +245,8 @@ bool Dyntopo::collapse_edge(uint32_t a, uint32_t b) {
     if (g.weights.size() == m_.vert_count()) g.weights[a] = 0.5f * (g.weights[a] + g.weights[b]);
   for (ShapeKey &k : m_.shape_keys)
     if (k.delta.size() == m_.vert_count()) k.delta[a] = (k.delta[a] + k.delta[b]) * 0.5f;
+  for (ColorAttribute &c : m_.color_attributes)  // (task 0525)
+    if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m_.vert_count()) c.rgba[a] = (c.rgba[a] + c.rgba[b]) * 0.5f;
   rekey_edges(a, b, a);
   for (uint32_t f : std::vector<uint32_t>(vf_[b])) {
     for (uint32_t c = m_.face_offsets[f]; c < m_.face_offsets[f + 1]; c++)
@@ -411,6 +415,7 @@ void Dyntopo::finish() {
     for (ShapeKey &k : m.shape_keys)
       if (k.delta.size() == remap.size()) compact(k.delta);
     for (uint32_t &v : m.corner_verts) v = remap[v];
+    m.remap_color_vertices(remap, kept);  // (task 0525: Point colours follow; Corner ones keep matching only if they did)
     auto remap_edges = [&](std::vector<uint64_t> &edges) {
       std::vector<uint64_t> out;
       for (uint64_t k : edges) {
