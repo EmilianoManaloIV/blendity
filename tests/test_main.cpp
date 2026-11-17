@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
    * every test process (OptiX's cache takes several at once) and kept between runs, so a run after the first finds the
    * kernel compiled for its PTX. */
   if (!std::getenv("OPTIX_CACHE_PATH")) {
-    const std::string optix_cache = fs::join(temp_dir(), "blendity_tests_optix_cache");
+    const std::string optix_cache = fs::join(fs::temp_dir(), "blendity_tests_optix_cache");
     fs::make_dirs(optix_cache);
     set_env("OPTIX_CACHE_PATH", optix_cache);
   }
