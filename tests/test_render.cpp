@@ -10283,8 +10283,10 @@ static void tests_round184() {
       }
       /* Round 553 (task 0534): the sphere's own pixels - the largest 4-connected part of the mask. Moving the sphere away
        * also changes its shadow on the floor, at the view's bottom, and those pixels counted as the sphere's: at 20 m they
-       * were 8 of the CPU's 17 "between" pixels (its shadow's edge mid-grey where the card's is dark), so the CPU's count
-       * looked twice the card's while the sphere's own edge was 8 pixels on the CPU and 7 on the card. */
+       * were most of the CPU's 17 "between" pixels (its shadow's edge mid-grey where the card's is dark), so the CPU's count
+       * looked twice the card's while the sphere's own edge was 8 pixels on the CPU and 6-7 on the card. The part kept is
+       * the one at the crop's centre - the camera's pivot is the sphere's centre - so a shadow touching the sphere's rim
+       * at 2 m, larger than it, can't be taken instead (the largest part when the centre is not the object's). */
       auto sphere_only = [](const R184 &r) {
         const int W = r.rect.w, H = W > 0 ? (int)(r.mask.size() / (size_t)W) : 0;
         std::vector<int> comp(r.mask.size(), -1);
@@ -10310,6 +10312,8 @@ static void tests_round184() {
           }
           if (n > best_n) best_n = n, best = id;
         }
+        const size_t centre = H > 0 ? (size_t)(H / 2) * W + (size_t)(W / 2) : 0;
+        if (centre < comp.size() && comp[centre] >= 0) best = comp[centre];
         std::vector<uint8_t> keep(r.mask.size(), 0);
         for (size_t i = 0; i < keep.size(); i++) keep[i] = comp[i] == best && best >= 0;
         return keep;
@@ -10326,6 +10330,11 @@ static void tests_round184() {
             top = std::min(top, y), bottom = std::max(bottom, y);
           }
         rows = bottom >= top ? bottom - top + 1 : 0;
+        if (l.empty()) {  // (no object pixel: fail, not index an empty list)
+          CHECK(!l.empty());
+          lit_n = shade_n = mid_n = 0;
+          return 0.0f;
+        }
         std::sort(l.begin(), l.end());
         const float lo = l[l.size() / 10], hi = l[l.size() * 9 / 10];  // (the shade tone and the lit tone: the deciles)
         const float margin = (hi - lo) * 0.25f;  // (a tone is the lit or the shade one within a quarter of their contrast; the middle half is "between")

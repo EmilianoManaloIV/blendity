@@ -29,8 +29,10 @@ sphere. Make the card's edge width the CPU's and put the 20th back.
 - `toon at a distance` and `--group gpu` in a CARD window; the full suite on Windows (libraries) and Linux.
 
 ## Outcome (round 553)
-The card's cel edge was the CPU's all along: the 20 m pictures show the same 9 mid-tone edge pixels on both. The test's
-mask took in the sphere's shadow on the floor, whose edge is mid-grey on the CPU and dark on the card - 8 of the CPU's
-17 "between" pixels. The test now counts the sphere's own pixels (largest connected part of the mask), holds both
-renderers to a 40th (a 20th never held for the sphere: 9 of ~270), and the card within 3 pixels of the CPU. No product
-change. The shadow-edge difference is round 556 (task 0538).
+The card's cel edge was the CPU's all along: the 20 m pictures show the sphere's edge in the same places on both,
+8 mid-tone pixels on the CPU and 6-7 on the card (the sphere 243 and 242 pixels, 17 rows). The test's mask took in the
+sphere's shadow on the floor, whose edge is mid-grey on the CPU and dark on the card - the source of most of the CPU's
+17 "between" pixels (the counts don't simply add: the shadow's pixels also move the deciles the tones are cut at). The
+test now counts the sphere's own pixels (largest connected part of the mask) and holds the edge to a fifth of the
+sphere's rows (4 of 17), the card within 3 pixels of the CPU. A 20th of the area never held for the sphere on either
+renderer (8 of 243). No product change. The shadow-edge difference is round 556 (task 0538).

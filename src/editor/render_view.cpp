@@ -1408,7 +1408,10 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     const float so = scene_->lighting.gi_specular_occlusion;
     env.rt_specular_occlusion = finite_bits(so) ? std::max(0.0f, std::min(1.0f, so)) : 1.0f;
   }
-  if (env.gi || frozen) {
+  /* (Round 549: live GI that adds nothing - Sky Occlusion and Bounce both off - reads no published maps either: a pass made while
+   * one was on would still darken or light them, so the picture was not GI off's until the next pass landed.) */
+  const bool gi_adds = env.gi && (env.gi->params.sky_occlusion || env.gi->params.bounce);
+  if (gi_adds || frozen) {
     /* Realtime lightmaps where a pass has been published: read, not traced, and not probe-lit (Receive GI =
      * Lightmaps, as Unity's realtime GI). */
     const RealtimeLightmaps &rl = vgi_[game ? 1 : 0].rtlm;

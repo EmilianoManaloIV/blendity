@@ -15670,6 +15670,43 @@ static void tests_round538() {
     CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 2);
     run(cmds[2]);
     CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 0);
+/* Round 549 (task 0529): a click or a ray exactly on the edge two triangles of a face share lands on the face. CI's new runners
+ * (ubuntu-26.04) put round 513's window test's ray through the far wall's diagonal and it missed both triangles. */
+static void tests_round549() {
+  test("raycast: a ray exactly through a quad's diagonal hits the quad, at every turn of the quad and off its middle", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    /* One quad (two triangles; their shared diagonal runs through its middle), far from the default scene's objects. */
+    GameObject *plane = ed.scene().create("Diag");
+    plane->add<MeshFilter>()->mesh = primitives::quad(2.0f);
+    plane->add<MeshRenderer>();
+    size_t tried = 0, missed = 0, plain_missed = 0;
+    for (int deg = 0; deg < 360; deg++)
+      for (float off : {0.0f, 0.37f, -1.9f}) {
+        plane->set_local_position(Vec3(200.0f + off, 0.0f, 200.0f + 2.0f * off));
+        plane->set_local_euler(Vec3(90.0f + 0.5f * off, (float)deg + 0.25f * off, 0.0f));
+        /* The quad's middle lies on its diagonal: along its normal onto it, and slanted through it. */
+        const Vec3 mid = plane->world_matrix().point(Vec3(0.0f)), nrm = normalize(plane->world_matrix().dir(Vec3(0, 0, 1)));
+        for (Vec3 from : {nrm * 5.0f, nrm * 4.0f + Vec3(1.3f, 0.0f, -0.7f)}) {
+          SceneHit hit;
+          tried++;
+          missed += !(scene_raycast(ed.scene(), mid + from, from * -1.0f, 100.0f, hit) && hit.object == plane);
+          /* The plain test on the same two triangles: how many of these rays it lets through here (on CI's ubuntu-26.04 the
+           * window test's ray was one). */
+          const Mat4 &xf = plane->world_matrix();
+          const Mesh &q = *plane->get<MeshFilter>()->mesh;
+          std::vector<uint32_t> tri;
+          meshops::triangulate_face_local(q, 0, tri);
+          const Ray ray{mid + from, normalize(from * -1.0f)};
+          bool plain = false;
+          for (size_t k = 0; k + 2 < tri.size(); k += 3)
+            plain = plain || ray_triangle(ray, xf.point(q.positions[q.face_verts(0)[tri[k]]]), xf.point(q.positions[q.face_verts(0)[tri[k + 1]]]),
+                                          xf.point(q.positions[q.face_verts(0)[tri[k + 2]]])) > 0.0f;
+          plain_missed += !plain;
+        }
+      }
+    std::printf("    %zu rays through the diagonal, %zu missed (the plain ray-triangle test would miss %zu of them here)\n", tried, missed, plain_missed);
+    CHECK(missed == 0);
   });
 }
 
@@ -15782,5 +15819,6 @@ void run_editor_tests() {
   tests_round515_collider_wire();
   tests_round535();
   tests_round538();
+  tests_round549();
   coverage_tests();
 }
