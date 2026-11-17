@@ -38,6 +38,8 @@ Lanczos. For each: fix the card where it is wrong, or bound the test from a meas
 stipple on the normal-mapped sphere's underside; a depth test for the grid that does not z-fight with the floor at the
 horizon (both renderers).
 
-**Checked:** on the card, the `gpu` group 1,052 checks, 0 failed; the suite without it (Windows, Blender's libraries)
-70,599 checks, the known "assets: Ctrl and Shift click select several materials" and toon-at-a-distance's card half
-(now held as above) failing. Linux: CHECKS_L.
+**Checked:** on the card (RTX 4070 SUPER), on #435's head, the `gpu` group 1,052 checks, 0 failed (a first run under
+other sessions' load had two one-off failures that pass alone and in the re-run), toon at a distance passing; the suite
+without `gpu` (Windows, Blender's libraries) 70,599 checks with only the known "assets: Ctrl and Shift click select
+several materials" failing (and toon at a distance's card half before its bound). Linux (dependency-free): render, gpu
+(skipped without a card) and editor, 5,868 checks, 0 failed.
