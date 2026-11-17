@@ -1875,6 +1875,103 @@ MeshPtr ico_sphere(float r, int subdivisions) {
   return m;
 }
 
+/* Quad Sphere (round 535): a cube of `segments` quads along each edge pushed onto a sphere, all quads. Ported from
+ * Blender's bmo_create_quadsphere_exec (blender/source/blender/bmesh/operators/bmo_primitive.cc, Blender Authors,
+ * GPL-2.0-or-later): the same vertex order (Z layers: full bottom and top grids, rings between), the same face
+ * layout, the two mappings (method 0 Even Area, 1 Even Angle) and the cube UV layout. Blender is Z-up, so its Z
+ * becomes our Y (a rotation, so the winding stays). The vertex and face tables below are our own write-up. */
+int quad_sphere_segments(int requested) { return std::max(1, std::min(requested, 500)); }  // (Blender's own limit is 500 too)
+
+MeshPtr quad_sphere(float r, int segments, int method) {
+  auto m = std::make_shared<Mesh>();
+  m->name = "Quad Sphere";
+  if (!std::isfinite(r) || r <= 0.0f) r = 0.5f;
+  const int seg = quad_sphere_segments(segments);
+  const int seg_vert = seg + 1;
+  const int layer_full = seg_vert * seg_vert, layer_ring = seg * 4;
+
+  /* Where a cube vertex goes on the sphere: a face axis maps to itself, the other two through a warp that depends
+   * only on the axis (the angle is 0.8687 rad with 1 / tan(angle) as the scale for Even Area, pi/4 for Even Angle). */
+  const float angle = method == 1 ? kPi * 0.25f : 0.8687f;
+  const float angle_scale = method == 1 ? 1.0f : 0.845878184f;
+  auto cube_co = [seg](int i) { return float(i * 2 - seg) / float(seg); };
+  std::vector<float> warp(seg_vert);
+  for (int i = 0; i <= seg; i++) warp[i] = (i == 0 || i == seg) ? cube_co(i) : std::tan(cube_co(i) * angle) * angle_scale;
+
+  /* The vertex index of a grid point (each axis in [0, seg], one of them at an extreme). */
+  auto vert_index = [&](int x, int y, int z) -> uint32_t {
+    if (z == 0) return (uint32_t)(y * seg_vert + x);
+    if (z == seg) return (uint32_t)(layer_full + layer_ring * (seg - 1) + y * seg_vert + x);
+    int ring;
+    if (y == 0) ring = x;
+    else if (x == seg) ring = seg + y;
+    else if (y == seg) ring = seg * 3 - x;
+    else ring = seg * 4 - y;
+    return (uint32_t)(layer_full + layer_ring * (z - 1) + ring);
+  };
+  auto add_vertex = [&](int x, int y, int z) {
+    const int g[3] = {x, y, z};
+    const int face_axis = (x == 0 || x == seg) ? 0 : ((y == 0 || y == seg) ? 1 : 2);
+    float c[3];
+    for (int a = 0; a < 3; a++) c[a] = a == face_axis ? cube_co(g[a]) : warp[g[a]];
+    const Vec3 d = normalize(Vec3(c[0], c[1], c[2])) * r;
+    m->add_vert({d.x, d.z, -d.y});  // Blender's Z up to our Y up
+  };
+  for (int z = 0; z <= seg; z++) {
+    if (z == 0 || z == seg) {
+      for (int y = 0; y <= seg; y++)
+        for (int x = 0; x <= seg; x++) add_vertex(x, y, z);
+      continue;
+    }
+    for (int x = 0; x <= seg; x++) add_vertex(x, 0, z);
+    for (int y = 1; y <= seg; y++) add_vertex(seg, y, z);
+    for (int x = seg - 1; x >= 0; x--) add_vertex(x, seg, z);
+    for (int y = seg - 1; y >= 1; y--) add_vertex(0, y, z);
+  }
+
+  /* The six cube faces as corner indices (bit 2 = x, bit 1 = y, bit 0 = z) and the lower left of each in the UV
+   * layout, each face a quarter-wide square. */
+  static const int kCubeFaces[6][4] = {{0, 1, 3, 2}, {2, 3, 7, 6}, {6, 7, 5, 4}, {4, 5, 1, 0}, {2, 6, 4, 0}, {7, 3, 1, 5}};
+  static const float kFaceUv[6][2] = {{0.375f, 0.0f}, {0.375f, 0.25f}, {0.375f, 0.5f}, {0.375f, 0.75f}, {0.125f, 0.5f}, {0.625f, 0.5f}};
+  auto corner = [](int cube_vert, int out[3]) {
+    out[0] = (cube_vert >> 2) & 1;
+    out[1] = (cube_vert >> 1) & 1;
+    out[2] = cube_vert & 1;
+  };
+  const float uv_step = 0.25f / float(seg);
+  std::vector<Vec2> uvs;
+  for (int f = 0; f < 6; f++) {
+    int c0[3], c1[3], c3[3], su[3], sv[3];
+    corner(kCubeFaces[f][0], c0);
+    corner(kCubeFaces[f][1], c1);
+    corner(kCubeFaces[f][3], c3);
+    for (int a = 0; a < 3; a++) su[a] = c1[a] - c0[a], sv[a] = c3[a] - c0[a];
+    for (int v = 0; v < seg; v++) {
+      for (int u = 0; u < seg; u++) {
+        int g[3];
+        for (int a = 0; a < 3; a++) g[a] = c0[a] * seg + su[a] * u + sv[a] * v;
+        auto at = [&](int du, int dv) { return vert_index(g[0] + su[0] * du + sv[0] * dv, g[1] + su[1] * du + sv[1] * dv, g[2] + su[2] * du + sv[2] * dv); };
+        const float u0 = kFaceUv[f][0] + uv_step * float(u), u1 = kFaceUv[f][0] + uv_step * float(u + 1);
+        const float v0 = kFaceUv[f][1] + uv_step * float(v), v1 = kFaceUv[f][1] + uv_step * float(v + 1);
+        uint32_t q[4] = {at(0, 0), at(1, 0), at(1, 1), at(0, 1)};
+        Vec2 t[4] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
+        /* Quads on two of the four corners swap their diagonal, so a triangulated sphere is rounder. */
+        if ((((u * 2) + 1) < seg) != (((v * 2) + 1) < seg)) {
+          std::rotate(q, q + 1, q + 4);
+          std::rotate(t, t + 1, t + 4);
+        }
+        m->add_face({q[0], q[1], q[2], q[3]});
+        uvs.insert(uvs.end(), t, t + 4);
+      }
+    }
+  }
+  m->uvs = std::move(uvs);
+  orient_outward(*m);  // (the UVs are set first: a flipped face takes its UVs along)
+  m->smooth = true;
+  m->touch();
+  return m;
+}
+
 MeshPtr capsule(float r, float height, int segments, int rings) {
   auto m = std::make_shared<Mesh>();
   m->name = "Capsule";

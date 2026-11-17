@@ -131,7 +131,7 @@ Mat4 Editor::transform_delta(const Recti &view) {
         else if (ray_plane({r0.origin, r0.dir * -1.0f}, t.pivot, n, s0) && ray_plane({r1.origin, r1.dir * -1.0f}, t.pivot, n, s1))
           move = ((r1.origin - r1.dir * s1) - (r0.origin - r0.dir * s0)) * fine;
       }
-      if (in.ctrl())
+      if (in.ctrl() && !modal_origin_snap(view, t.axis >= 0 ? axis_dir(t.axis) : Vec3(0.0f), move))  // (round 535: an origin under the mouse first, else the grid)
         for (int k = 0; k < 3; k++) move[k] = std::round(move[k] / snap_move_) * snap_move_;
     }
     t.current = move;

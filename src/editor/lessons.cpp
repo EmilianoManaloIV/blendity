@@ -238,6 +238,7 @@ A transform is an affine matrix built as Translate x Rotate x Scale (FoCG 7.3). 
 Every object rotates and scales around its origin, the point its Transform position names. Imported meshes often have it in an odd place. Set Origin (GameObject menu, or Inspector > Transform > Origin) moves it without moving anything on screen: the mesh shifts one way, the object the other, and children stay where they are. Bounds Center and Median are geometric middles. Center of Mass (Surface) weights each face by its area. Center of Mass (Volume) uses the enclosed volume, where a solid would balance. Bottom Center puts the pivot on the floor, the way Unity likes characters and props. Origin to Point takes coordinates you type, and Geometry to Origin moves the mesh instead of the pivot.
 @ blender/source/blender/editors/object/object_transform.cc  (object_origin_set_exec)
 ! cmd:select Cube; origin bottom | Put the Cube's origin at the centre of its base
+! cmd:create Quad Sphere; snap origins on | A Quad Sphere (a cube pushed onto a sphere, all quads; press F9 for its Subdivisions and Method) and Snap to Object Origins on: add a Cube, hold V and drag its Move gizmo to the sphere's origin and it lands exactly on it
 ? Why might rotating 90 degrees on X then 90 on Y give a different result from Y then X? | Matrix multiplication is not commutative. Order matters, which is why Unity documents its Z-X-Y order and Blender lets you choose a rotation mode.
 ! tool:Move | Move tool (W)
 ! tool:Rotate | Rotate tool (E)
