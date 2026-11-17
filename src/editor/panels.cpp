@@ -577,6 +577,20 @@ struct InspectorReflector : Reflector {
     const Recti own = lay.row();
     return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
   }
+  /* Round 559: where an enumeration's dropdown goes, so its longest word shows whole: beside the label when the field
+   * column holds it; else on a row of its own under the label, at the full width ("Gaussian Splats" at 1024 x 1.5, the
+   * camera's "Equirectangular" in a narrow Inspector). Sized by the longest word, not the chosen one, so picking
+   * another does not move the rows under it. */
+  Recti enum_rect(const Recti &row, const char *const *opts, int count) {
+    int widest = 0;
+    for (int i = 0; i < count; i++)
+      if (ui::Context::combo_choosable(opts[i])) widest = std::max(widest, u.font.text_width(opts[i]));  // (headings and separators never show)
+    const Recti f = field_rect(row);
+    const int need = widest + f.h + u.px(5);  // (the combo's text room is its width less its arrow column and margin)
+    if (f.w >= need) return f;
+    const Recti own = lay.row();
+    return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
+  }
   FieldEdit &record(FieldEdit::Kind k, const char *n) {
     edits.emplace_back();
     edits.back().kind = k;
@@ -746,15 +760,23 @@ struct InspectorReflector : Reflector {
   void field(const char *n, bool &v) override {
     if (skip()) return;
     Recti row = lay.row();
-    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
-    u.label(label_rect(row), n);
-    if (u.checkbox(field_rect(row), v) || field_menu(n, label_rect(row), defaults ? &defaults->b : nullptr, v)) {
+    /* Round 559: a box is small, so a name longer than the label column ("Front Faces Only" at 1024 x 1.5) takes the
+     * room it needs and the box moves after it, rather than the name ending in "...". */
+    Recti fr = field_rect(row), lr = label_rect(row);
+    const int need = u.font.text_width(n) + u.px(8);
+    if (need > lr.w && fr.w > u.px(24)) {
+      const int shift = std::min(need - lr.w, fr.w - u.px(24));
+      lr.w += shift, fr.x += shift, fr.w -= shift;
+    }
+    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = fr;  // (task 0251: found by label, as the int field is)
+    u.label(lr, n);
+    if (u.checkbox(fr, v) || field_menu(n, lr, defaults ? &defaults->b : nullptr, v)) {
       record(FieldEdit::Bool, n).b_new = v;
       changed = true;
     }
-    if (mixed && mixed->count(n) && !u.hovered(field_rect(row))) {  // the box as checkbox draws it, with a dash instead of a tick
+    if (mixed && mixed->count(n) && !u.hovered(fr)) {  // the box as checkbox draws it, with a dash instead of a tick
       const int sz = std::min(row.h, u.font.line_height()) - u.px(1);
-      const Recti box{field_rect(row).x, row.y + (row.h - sz) / 2, sz, sz};
+      const Recti box{fr.x, row.y + (row.h - sz) / 2, sz, sz};
       u.frame(box, u.theme.field, u.theme.field_border, u.px(2));
       u.label(box, "-", u.theme.text_dim, ui::Align::Center);
     }
@@ -873,14 +895,14 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     if (dim) {  // (a field with no effect now: its value shown, not editable; the help says why)
       u.label(label_rect(row), n, u.theme.text_dim);
-      const Recti f = field_rect(row);
+      const Recti f = enum_rect(row, opts, count);  // (round 559: placed as the editable one is, so greying it moves nothing)
       u.frame(f, u.theme.field, u.theme.field_border, u.px(2));
       u.label({f.x + u.px(5), f.y, f.w - u.px(8), f.h}, opts[std::max(0, std::min(count - 1, v))], u.theme.text_dim);
       if (u.record_buttons) u.button_rects["greyed:" + record_prefix + n] = f;
       return;
     }
     u.label(label_rect(row), n);
-    if (u.combo(fid(n), field_rect(row), v, opts, count) || field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
+    if (u.combo(fid(n), enum_rect(row, opts, count), v, opts, count) || field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
       record(FieldEdit::Enum, n).i_new = v;
       if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
@@ -2015,12 +2037,46 @@ void Editor::draw_inspector(const Recti &r) {
           Recti wrow = lay.row(u.row_h() + u.px(2));
           const size_t ng = mf->mesh->vertex_groups.size();
           const std::string label = ng ? strprintf("Vertex Groups (%zu), Weight Paint: Rigging...", ng) : std::string("Vertex Groups, Weight Paint: Rigging...");
-          /* Task 0525: Vertex Paint shares the row (the Inspector grows only while painting). */
-          const int vpw = std::min(u.px(120), (wrow.w - u.px(12)) / 3);
-          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - vpw - u.px(12), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
-            dock_open(WindowKind::Rigging);
+          /* Task 0525: Vertex Paint shares the row when both buttons' words fit it (round 559: else it takes the next row). */
+          /* Round 559: each button is as wide as its words (and icon) need; when the two don't fit one row (1024 x 1.5) the
+           * Vertex Paint toggle takes a row under the Rigging one, instead of both ending in "...". */
+          const int icon_room = wrow.h - u.px(6) + u.px(4) + u.px(8);  // (a button's icon, its gap and its margins)
+          const int vpw = std::max(u.px(120), u.font.text_width("Exit Vertex Paint") + icon_room);
+          const int rig_need = u.font.text_width(label) + icon_room;
+          const bool one_row = wrow.w - vpw - u.px(12) >= rig_need;
+          const int rigw = one_row ? wrow.w - vpw - u.px(12) : wrow.w - u.px(8);
+          /* Even a row to itself can be too narrow for the words (a 180 px Inspector at x1.5): the button then grows by the lines
+           * the words wrap to, and the words are drawn over it, centered. */
+          const std::vector<std::pair<size_t, size_t>> lines = u.wrap_lines(label, rigw - u.px(8));
+          const bool wrapped = !one_row && lines.size() > 1 && u.font.text_width(label) + icon_room > rigw;
+          const int lh = u.font.line_height();
+          Recti rig_r{wrow.x + u.px(4), wrow.y, rigw, wrow.h};
+          if (wrapped) {
+            rig_r.h += ((int)lines.size() - 1) * lh;
+            lay.space(((int)lines.size() - 1) * lh);
+          }
+          const bool rig_hit = u.button(rig_r, wrapped ? std::string() : label, weight_paint_ && wp_obj_ == g->id, wrapped ? Icon::None : Icon::Vertex);
+          if (wrapped) {
+            /* The button drew no words (they are drawn wrapped below), so its record is put back under its own name: the sweep
+             * and the tests read the label, and an unnamed "" entry would be left in button_rects. */
+            if (u.record_buttons) {
+              u.button_rects.erase(std::string());
+              u.button_rects[label] = rig_r;
+              if (!u.controls.empty() && u.controls.back().label.empty()) u.controls.back().label = label;
+            }
+            for (size_t i = 0; i < lines.size(); i++) {
+              std::string line = label.substr(lines[i].first, lines[i].second - lines[i].first);
+              while (!line.empty() && line.back() == ' ') line.pop_back();  // (the break's space, which would tip the centering)
+              u.label({rig_r.x + u.px(4), rig_r.y + u.px(3) + (int)i * lh, rig_r.w - u.px(8), lh}, line, u.theme.text_bright, ui::Align::Center);
+            }
+          }
+          if (rig_hit) dock_open(WindowKind::Rigging);
           u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
-          draw_vertex_paint_controls(g, mf, lay, {wrow.x + wrow.w - vpw - u.px(4), wrow.y, vpw, wrow.h});
+          if (one_row) draw_vertex_paint_controls(g, mf, lay, {wrow.x + wrow.w - vpw - u.px(4), wrow.y, vpw, wrow.h});
+          else {
+            const Recti vrow = lay.row(u.row_h() + u.px(2));
+            draw_vertex_paint_controls(g, mf, lay, {vrow.x + u.px(4), vrow.y, vrow.w - u.px(8), vrow.h});
+          }
         }
         Recti row = lay.row(u.row_h() + u.px(2));
         const bool edit_hit = u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex);
@@ -4097,13 +4153,13 @@ void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   br.field("Mirror X", vp_brush_.mirror_x);
   br.field("Front Faces Only", vp_brush_.front_only);
   reflect_automask(br, vp_brush_);
-  const int hw = (lay.area.w - u.px(16)) / 2;
-  Recti brow = lay.row(u.row_h() + u.px(2));
+  /* Round 559: two buttons side by side, or one under the other when a row cannot hold both words (1024 x 1.5). */
+  const std::vector<Recti> cells = u.button_cells(lay, {"New Point Layer", "New Corner Layer"}, u.row_h() + u.px(2), 2);
   int k = 1;
   while (m.find_color(strprintf("Color.%03d", k)) >= 0) k++;
-  if (u.button({brow.x + u.px(4), brow.y, hw, brow.h}, "New Point Layer")) command(strprintf("colorattr add Color.%03d point", k));
+  if (u.button(cells[0], "New Point Layer")) command(strprintf("colorattr add Color.%03d point", k));
   u.tooltip("A new white layer, one color per vertex.");
-  if (u.button({brow.x + u.px(8) + hw, brow.y, hw, brow.h}, "New Corner Layer")) command(strprintf("colorattr add Color.%03d corner", k));
+  if (u.button(cells[1], "New Corner Layer")) command(strprintf("colorattr add Color.%03d corner", k));
   u.tooltip("A new white layer, one color per face corner (sharp color changes across edges).");
 }
 

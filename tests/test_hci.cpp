@@ -334,6 +334,166 @@ void sweep_config(Sweep &sw, int w, int h, const char *theme, float scale, bool 
   }
 }
 
+/* ---- Round 559: the labels clipped on Pass 27's panels ---- */
+struct R559 {
+  struct Cfg { int w, h; float scale; };
+  static std::vector<Cfg> configs() { return {{1024, 768, 1.5f}, {1024, 768, 1.0f}, {1366, 768, 1.0f}}; }
+  static std::string cfg_name(const Cfg &c) { return strprintf("%dx%d x%.1f", c.w, c.h, c.scale); }
+  static void open(Editor &ed, const Cfg &c, const char *layout) {
+    ed.init_headless(c.w, c.h);
+    ed.set_guides_for_test(false);
+    ed.set_ui_scale_for_test(c.scale);
+    ed.record_buttons_for_test(true);
+    ed.command(std::string("layout ") + layout);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  }
+  static void settle(Editor &ed) {
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  }
+  /* A button's word fits whole: Context::button leaves 8 px of padding (and drops its icon when the word fits only without). */
+  static bool button_whole(Editor &ed, const std::string &key, const std::string &cfg) {
+    Recti r;
+    if (!ed.button_rect_for_test(key, r)) {
+      std::printf("      [%s] button '%s' is not drawn\n", cfg.c_str(), key.c_str());
+      return false;
+    }
+    const int tw = ed.text_width_for_test(key), room = r.w - ed.ui_for_test().px(8);
+    if (tw > room) std::printf("      [%s] '%s' is cut: %d px of text in %d px\n", cfg.c_str(), key.c_str(), tw, room);
+    return tw <= room;
+  }
+  /* A dropdown's shown word fits: Context::combo leaves its height (the arrow's column) and 5 px of margin. */
+  static bool combo_whole(Editor &ed, const std::string &shown, const std::string &cfg) {
+    for (const auto &c : ed.ui_for_test().controls) {
+      if (std::string(c.kind) != "combo" || c.label != shown || c.layer != 0) continue;
+      const int room = c.r.w - c.r.h - ed.ui_for_test().px(5), tw = ed.text_width_for_test(shown);
+      if (tw > room) std::printf("      [%s] dropdown '%s' is cut: %d px of text in %d px\n", cfg.c_str(), shown.c_str(), tw, room);
+      return tw <= room;
+    }
+    std::printf("      [%s] dropdown showing '%s' is not drawn\n", cfg.c_str(), shown.c_str());
+    return false;
+  }
+  /* A checkbox row's name fits: the box starts after the name, which starts 4 px in from the row (where a Radius name does). */
+  static bool checkbox_name_whole(Editor &ed, const char *name, const char *anchor, const std::string &cfg) {
+    Recti box, ref;
+    bool have_ref = false;
+    if (!ed.button_rect_for_test(std::string("field:") + name, box)) {
+      std::printf("      [%s] checkbox '%s' is not drawn\n", cfg.c_str(), name);
+      return false;
+    }
+    for (const auto &c : ed.ui_for_test().controls)
+      if (std::string(c.kind) == "draglabel" && c.label == anchor && !have_ref) ref = c.r, have_ref = true;
+    if (!have_ref) {
+      std::printf("      [%s] anchor row '%s' is not drawn\n", cfg.c_str(), anchor);
+      return false;
+    }
+    const int need = ref.x + ed.text_width_for_test(name), have = box.x - ed.ui_for_test().px(4);
+    if (need > have) std::printf("      [%s] '%s' is cut: its text ends at %d, the box starts at %d\n", cfg.c_str(), name, need, box.x);
+    return need <= have;
+  }
+};
+
+void tests_round559_layout() {
+  test("hci: a point cloud's Type shows \"Gaussian Splats\" whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Default");
+      ed.command("create Gaussian Splats");
+      R559::settle(ed);
+      CHECK(R559::combo_whole(ed, "Gaussian Splats", R559::cfg_name(c)));
+    }
+  });
+
+  test("hci: the camera's Panorama Type shows \"Equirectangular\" whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Default");
+      ed.command("select Main Camera");
+      GameObject *cam = ed.scene().find_by_name("Main Camera");
+      CHECK(cam && cam->get<Camera>());
+      if (!cam || !cam->get<Camera>()) return;
+      cam->get<Camera>()->panoramic_type = 1;
+      R559::settle(ed);
+      CHECK(R559::combo_whole(ed, "Equirectangular", R559::cfg_name(c)));
+    }
+  });
+
+  test("hci: Vertex Paint's mode row, Front Faces Only and the New Point / New Corner Layer buttons show their words whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Default");
+      ed.command("select Cube");
+      ed.command("vpaint on");
+      R559::settle(ed);
+      const std::string cfg = R559::cfg_name(c);
+      std::string rig;
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("Vertex Groups", 0) == 0) rig = kv.first;
+      /* The Rigging button: its words in one line, or wrapped over a button grown by the lines (a 180 px Inspector at x1.5). */
+      Recti rr;
+      CHECK(!rig.empty() && ed.button_rect_for_test(rig, rr));
+      const ui::Context &uc = ed.ui_for_test();
+      const bool one_line = ed.text_width_for_test(rig) + uc.px(8) <= rr.w;
+      if (!one_line) std::printf("      [%s] Rigging button wraps: %d px wide, %d px high\n", cfg.c_str(), rr.w, rr.h);
+      CHECK(one_line || rr.h > uc.row_h() + uc.px(2));  // (wrapped: a line more than a row)
+      Recti toggle;
+      CHECK(ed.button_rect_for_test("vp:Toggle", toggle));
+      CHECK(R559::button_whole(ed, "Exit Vertex Paint", cfg));
+      CHECK(R559::checkbox_name_whole(ed, "Front Faces Only", "Radius", cfg));
+      CHECK(R559::button_whole(ed, "New Point Layer", cfg) && R559::button_whole(ed, "New Corner Layer", cfg));
+    }
+  });
+
+  test("hci: Weight Paint's Brush, Unified Strength and Falloff show their words whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Rigging");
+      ed.command("select Cube");
+      ed.command("vgroup add R559");
+      ed.command("weightpaint on");
+      R559::settle(ed);
+      const std::string cfg = R559::cfg_name(c);
+      CHECK(R559::combo_whole(ed, "Add Weight", cfg));
+      CHECK(R559::checkbox_name_whole(ed, "Unified Strength", "Radius", cfg));
+      CHECK(R559::checkbox_name_whole(ed, "Front Faces Only", "Radius", cfg));
+      CHECK(R559::combo_whole(ed, "Smooth", cfg));  // (Falloff's default, Smooth: a listed control, so it must be found)
+    }
+  });
+
+  test("hci: the Animation window's toolbar keeps every button inside the window at 1024x768 x1.5, x1 and 1366x768 x1, AutoPosing whole and Ragdoll reachable when the build has one (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Animation");
+      std::remove(resolve_asset_path("Assets/Animations/R559Box.anim").c_str());
+      GameObject *box = ed.scene().create("R559Box");
+      GameObject *lid = ed.scene().create("Lid", box);
+      lid->set_local_position({0, 2, 0});
+      ed.command("select R559Box");
+      ed.mark_changed_for_test("R559 box");
+      ed.step_frame_headless();
+      ed.command("anim new");
+      ed.command("anim key Lid Position 1 10 0");
+      ed.command("window Animation");
+      R559::settle(ed);
+      const Recti win = ed.window_rect_for_test(WindowKind::Animation);
+      CHECK(!win.empty());
+      const std::string cfg = R559::cfg_name(c);
+      int drawn = 0;
+      for (const char *k : {"Preview", "Add Property", "Fit", "Key", "Wrap", "Puppet", "Retarget", "Dopesheet", "Curves", "Center of Mass", "Contacts",
+                            "Flight", "AutoPhysics", "AutoPosing", "Ragdoll"}) {
+        Recti r;
+        if (!ed.button_rect_for_test(k, r)) continue;
+        drawn++;
+        const bool in = inside(r, win);
+        if (!in) std::printf("      [%s] '%s' %s lies outside the window %s\n", cfg.c_str(), k, rect_str(r).c_str(), rect_str(win).c_str());
+        CHECK(in);
+      }
+      CHECK(drawn >= 12);
+      CHECK(R559::button_whole(ed, "AutoPosing", cfg));
+      std::remove(resolve_asset_path("Assets/Animations/R559Box.anim").c_str());
+    }
+  });
+}
+
 }  // namespace
 
 void run_hci_tests() {
@@ -3224,4 +3384,6 @@ void run_hci_tests() {
   /* Round 513 (task 0495): Draw Piece draws a door or a window. Run from here, in the hci group, because a new group needs the shard table: the tests are
    * this round's HCI conditions (the grouped Shape list, the keyboard, the preview, the refusals' words) and its behaviour. */
   run_blockout_openings_tests();
+
+  tests_round559_layout();
 }
