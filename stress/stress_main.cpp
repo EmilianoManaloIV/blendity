@@ -47,6 +47,7 @@
 #include "../src/scene/ragdoll.h"
 #include "../src/scene/pointcloud.h"
 #include "../src/render/gsplat_raster.h"
+#include "../src/editor/scene_splats.h"  // (round 557: splat_stats_text)
 #include "../tests/fixtures/synthetic_mmd.h"
 
 #include <algorithm>

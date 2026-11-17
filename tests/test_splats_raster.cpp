@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "../src/editor/scene_splats.h"
+#include "../src/render/gpu_device.h"
 #include "../src/render/gpu_raster.h"
 #include "../src/render/gsplat_raster.h"
 #include "../src/scene/pointcloud.h"
@@ -513,7 +514,8 @@ static void splat_raster_round532_test_pass() {
     a->position[1] = {0.5f, -0.2f, 1}, a->scale[1] = Vec3(0.3f), a->color[1] = {0.1f, 1, 0.1f}, a->opacity[1] = 0.8f;
     b->position[0] = {0, 0.4f, -1}, b->scale[0] = {0.2f, 0.4f, 0.2f}, b->color[0] = {0.2f, 0.2f, 1}, b->opacity[0] = 0.7f;
     SplatShot s;
-    s.draw({SplatDraw{a, Mat4::identity(), 7, false, 1}, SplatDraw{b, Mat4::identity(), 8, false, 2}});
+    const std::vector<SplatDraw> draws = {SplatDraw{a, Mat4::identity(), 7, false, 1}, SplatDraw{b, Mat4::identity(), 8, false, 2}};
+    s.draw(draws);
     CHECK(s.pass.screen().size() == 3);
     gpu::RasterFrame fr;
     fr.width = s.W, fr.height = s.H, fr.shadow_size = 0, fr.gouraud = true, fr.background = 0, fr.clear = 0xFF000000u;
@@ -521,8 +523,12 @@ static void splat_raster_round532_test_pass() {
     std::memcpy(fr.view_proj, vp.m, 64);
     std::memcpy(fr.sun_view_proj, vp.m, 64);
     fr.eye[0] = 0, fr.eye[1] = 0, fr.eye[2] = -5;
-    CHECK(scene_splats_to_card(s.pass, fr.splats, fr.splat_ids));
-    CHECK(fr.splats.size() == 3 && fr.splat_ids.size() == 2);
+    /* Round 557: the card projects the splats itself - its own pass and static set, the CPU's picture above as the reference. */
+    SplatPass card_pass;
+    CardSplats keep;
+    const SplatView sv{s.v, s.p, s.W, s.H, ViewTransform::Standard, 0.0f};
+    CHECK(scene_splats_to_card(draws, card_pass, sv, keep, *g, fr, false) == nullptr);
+    CHECK(fr.splat_order.size() == 3 && fr.splat_ids.size() == 2 && fr.splat_clouds.size() == 2 && fr.splat_src && fr.splat_src->size() == 3);
     g->set_instances({});
     std::vector<uint32_t> col((size_t)s.W * s.H), ids((size_t)s.W * s.H);
     CHECK(g->render_read(fr, col.data(), nullptr, ids.data(), &err));
@@ -647,8 +653,191 @@ static void splat_raster_round532_review() {
   });
 }
 
+/* ===================================================================== */
+/* Round 557 (task 0539): the card projects the splats itself            */
+/* ===================================================================== */
+namespace {
+
+/* The card, or null with a note when this machine has none (or a card without the splat pass). */
+std::unique_ptr<gpu::Raster> open_splat_card() {
+  if (!gpu::available()) {
+    std::printf("    no Vulkan GPU: skipped\n");
+    return nullptr;
+  }
+  std::string err;
+  std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+  if (!g || !g->can_draw_splats()) {
+    std::printf("    skipped: %s\n", g ? "this card draws no splats" : err.c_str());
+    return nullptr;
+  }
+  g->set_instances({});
+  return g;
+}
+
+/* A card frame over black for `view` (the same camera as SplatShot's), the exposure and view transform as given. */
+gpu::RasterFrame splat_card_frame(const SplatShot &s, int view_transform = 0, float exposure = 0.0f) {
+  gpu::RasterFrame fr;
+  fr.width = s.W, fr.height = s.H, fr.shadow_size = 0, fr.gouraud = true, fr.background = 0, fr.clear = 0xFF000000u;
+  fr.view_transform = view_transform, fr.exposure = exposure;
+  const Mat4 vp = s.p * s.v;
+  std::memcpy(fr.view_proj, vp.m, 64);
+  std::memcpy(fr.sun_view_proj, vp.m, 64);
+  fr.eye[0] = 0, fr.eye[1] = 0, fr.eye[2] = -5;
+  return fr;
+}
+
+/* The mean worst-channel difference over the whole picture, of 255. */
+double splat_picture_diff(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  double sum = 0;
+  for (size_t i = 0; i < a.size(); i++) {
+    int worst = 0;
+    for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+    sum += worst;
+  }
+  return sum / (double)a.size();
+}
+
+}  // namespace
+
+static void splat_raster_round557_tests() {
+  test("splats: a degree-3 cloud through the Filmic view transform and an exposure matches the CPU on the card (skipped without a card)", [] {
+    std::unique_ptr<gpu::Raster> g = open_splat_card();
+    if (!g) return;
+    auto pc = pointcloud_random(PointCloudType::GaussianSplats, 400, 3, 21, 1.2f);
+    CHECK(pc != nullptr);
+    if (!pc) return;
+    const std::vector<SplatDraw> draws = {SplatDraw{pc, Mat4::identity(), 7, false, 1}};
+    for (int vt = 0; vt <= 2; vt++) {
+      SplatShot s;
+      const SplatView sv{s.v, s.p, s.W, s.H, (ViewTransform)vt, 0.5f};
+      s.img.resize(s.W, s.H);
+      s.rt.attach(s.img, {0, 0, s.W, s.H});
+      RasterOptions opt;
+      opt.shade = ShadeMode::Gouraud;
+      LightingEnv env;
+      s.r.begin(&s.rt, s.v, s.p, env, opt);
+      s.r.clear(0xFF000000u);
+      s.pass.prepare(draws, sv, false);
+      s.r.set_splats(&s.pass);
+      s.r.flush();
+      gpu::RasterFrame fr = splat_card_frame(s, vt, 0.5f);
+      SplatPass card_pass;
+      CardSplats keep;
+      CHECK(scene_splats_to_card(draws, card_pass, sv, keep, *g, fr, false) == nullptr);
+      std::vector<uint32_t> col((size_t)s.W * s.H), ids((size_t)s.W * s.H);
+      std::string err;
+      CHECK(g->render_read(fr, col.data(), nullptr, ids.data(), &err));
+      const double diff = splat_picture_diff(s.img.pixels, col);
+      std::printf("    view transform %d: whole picture mean %.3f / 255\n", vt, diff);
+      CHECK(diff < 3.0);
+    }
+  });
+
+  test("splats: the card keeps a cloud between frames - a second frame sends no splats, an edit or a new cloud sends them again (skipped without a card)", [] {
+    std::unique_ptr<gpu::Raster> g = open_splat_card();
+    if (!g) return;
+    auto a = pointcloud_random(PointCloudType::GaussianSplats, 300, 1, 5, 1.0f);
+    CHECK(a != nullptr);
+    if (!a) return;
+    SplatShot s;
+    SplatPass pass;
+    CardSplats keep;
+    std::vector<uint32_t> col((size_t)s.W * s.H), ids((size_t)s.W * s.H);
+    std::string err;
+    auto frame = [&](const PointCloudPtr &cloud, const Mat4 &view) {
+      const std::vector<SplatDraw> draws = {SplatDraw{cloud, Mat4::identity(), 7, false, 1}};
+      gpu::RasterFrame fr = splat_card_frame(s);
+      const SplatView sv{view, s.p, s.W, s.H, ViewTransform::Standard, 0.0f};
+      CHECK(scene_splats_to_card(draws, pass, sv, keep, *g, fr, false) == nullptr);
+      const bool sent = fr.splat_src != nullptr;
+      CHECK(g->render_read(fr, col.data(), nullptr, ids.data(), &err));
+      return sent;
+    };
+    const uint64_t before = g->splat_uploads();
+    CHECK(frame(a, s.v));
+    CHECK(g->splat_uploads() == before + 1 && g->splat_set_key_held() != 0);
+    const uint64_t key = g->splat_set_key_held();
+    /* The same cloud from another side: only the order and the clouds' values go. */
+    CHECK(!frame(a, Mat4::look_at({4, 1, -2}, {0, 0, 0}, {0, 1, 0})));
+    CHECK(!frame(a, s.v));
+    CHECK(g->splat_uploads() == before + 1 && keep.src.empty() && keep.sh.empty());
+    /* An edit (a new version) sends it again. */
+    a->opacity[0] = 0.5f;
+    a->touch();
+    CHECK(frame(a, s.v));
+    CHECK(g->splat_uploads() == before + 2 && g->splat_set_key_held() != key);
+    CHECK(!frame(a, s.v));
+    /* So does another cloud (a new uid) - even a copy with the same numbers. */
+    auto copy = std::make_shared<PointCloud>(*a);
+    CHECK(frame(copy, s.v));
+    CHECK(g->splat_uploads() == before + 3);
+    /* Nothing left to draw: the card's copy goes. */
+    g->release_splats();
+    CHECK(g->splat_set_key_held() == 0);
+  });
+
+  test("splats: a set of 256 clouds is refused with a reason and nothing filled, 255 go (skipped without a card; the 512 MB budget is a stress row's size)", [] {
+    auto one = one_splat({0, 0, 0}, Vec3(0.1f), Quat(), {1, 1, 1}, 1.0f);
+    std::vector<SplatDraw> draws;
+    for (int i = 0; i < 256; i++) draws.push_back(SplatDraw{one, Mat4::identity(), (uint32_t)(100 + i), false, (uint64_t)(100 + i)});
+    SplatShot s;
+    SplatPass pass;
+    CardSplats keep;
+    gpu::RasterFrame fr;
+    std::unique_ptr<gpu::Raster> g = open_splat_card();  // (the function asks the card for the key it holds)
+    if (!g) return;
+    const SplatView sv{s.v, s.p, s.W, s.H, ViewTransform::Standard, 0.0f};
+    const char *why = scene_splats_to_card(draws, pass, sv, keep, *g, fr, false);
+    CHECK(why != nullptr && std::string(why).find("255") != std::string::npos);
+    CHECK(fr.splat_order.empty() && fr.splat_src == nullptr);
+    draws.resize(255);
+    CHECK(scene_splats_to_card(draws, pass, sv, keep, *g, fr, false) == nullptr);
+    CHECK(fr.splat_order.size() == 255 && fr.splat_ids.size() == 255);
+  });
+
+  test("splats: a second card opened after the first closed makes its pipelines from the cache file; a damaged file is ignored (skipped without a card)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    /* In a scratch cache folder, as tests/test_gpu.cpp does: never the user's. */
+    const char *old_env = std::getenv("BLENDITY_CACHE_DIR");
+    const std::string keep_env = old_env ? old_env : "";
+    set_env("BLENDITY_CACHE_DIR", fs::join(test_dir(), "raster_cache"));
+    const std::string path = gpu::raster_pipeline_cache_file(0);
+    CHECK(!path.empty() && path.find("raster_cache") != std::string::npos);
+    std::remove(path.c_str());
+    std::string err;
+    {
+      std::unique_ptr<gpu::Raster> first = gpu::Raster::create(0, &err);
+      CHECK(first != nullptr);
+      if (!first) {
+        set_env("BLENDITY_CACHE_DIR", keep_env);
+        return;
+      }
+      CHECK(!first->pipelines_from_cache());
+    }
+    CHECK(fs::exists(path));
+    {
+      std::unique_ptr<gpu::Raster> second = gpu::Raster::create(0, &err);
+      CHECK(second != nullptr && second->pipelines_from_cache());
+    }
+    std::string good;
+    CHECK(fs::read_file(path, good) && good.size() > 48);
+    /* Garbage in the file: ignored, the card opens and makes its pipelines itself. */
+    CHECK(fs::write_file(path, std::string(4096, 'x')));
+    {
+      std::unique_ptr<gpu::Raster> third = gpu::Raster::create(0, &err);
+      CHECK(third != nullptr && !third->pipelines_from_cache());
+    }
+    std::remove(path.c_str());
+    set_env("BLENDITY_CACHE_DIR", keep_env);
+  });
+}
+
 void run_splats_raster_tests() {
   splat_raster_round532_tests();
   splat_raster_round532_test_pass();
   splat_raster_round532_review();
+  splat_raster_round557_tests();
 }

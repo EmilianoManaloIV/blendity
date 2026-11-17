@@ -3,6 +3,7 @@
 #include "scene_splats.h"
 
 #include "../core/edit_epoch.h"
+#include "../core/jobs.h"
 #include "../render/raster.h"
 #include "../scene/pointcloud_object.h"
 #include "../scene/scene.h"
@@ -26,13 +27,38 @@ const PointCloudObject *drawn_cloud(const GameObject &g) {
   return pc;
 }
 
-/* The card's passes, by view slot (the CPU's travel with their renderer: Renderer3D::splat_pass). Never destroyed: a
- * worker sort still running at exit must not be joined into a job system already gone (review 532) - the process ends
- * them. */
+/* The card's passes and static sets, by view slot (the CPU's travel with their renderer: Renderer3D::splat_pass). Never
+ * destroyed: a worker sort still running at exit must not be joined into a job system already gone (review 532) - the
+ * process ends them. */
+struct SlotSplats {
+  SplatPass pass;
+  CardSplats keep;
+};
 std::mutex g_passes_mutex;
-std::map<int, std::unique_ptr<SplatPass>> &card_passes() {
-  static auto *m = new std::map<int, std::unique_ptr<SplatPass>>();
+std::map<int, std::unique_ptr<SlotSplats>> &card_passes() {
+  static auto *m = new std::map<int, std::unique_ptr<SlotSplats>>();
   return *m;
+}
+
+/* A cloud's centre of positions, kept by (uid, version): the farthest-first order of clouds reads it every frame and a
+ * million positions are not walked each time. */
+struct CenterKeep {
+  uint64_t version = 0;
+  Vec3 center{0, 0, 0};
+};
+std::mutex g_center_mutex;
+std::unordered_map<uint64_t, CenterKeep> g_centers;
+
+Vec3 cloud_center(const PointCloud &pc) {
+  std::lock_guard<std::mutex> lk(g_center_mutex);
+  auto it = g_centers.find(pc.uid.v);
+  if (it != g_centers.end() && it->second.version == pc.version) return it->second.center;
+  if (g_centers.size() > 256) g_centers.clear();  // (clouds long gone)
+  AABB b;
+  for (const Vec3 &p : pc.position) b.add(p);
+  const Vec3 c = b.valid() ? b.center() : Vec3(0, 0, 0);
+  g_centers[pc.uid.v] = CenterKeep{pc.version, c};
+  return c;
 }
 
 /* Whether a scene has a point cloud that draws, kept on the structure counter (review 532, ADR 0115): every view's
@@ -89,26 +115,14 @@ bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarge
   return true;
 }
 
-const SplatPass *scene_splats_prepare_pass(const Scene &scene, int owner_key, int width, int height, const Mat4 &v, const Mat4 &p,
-                                           ViewTransform vt, float exposure, bool async) {
-  std::vector<SplatDraw> draws = scene_splat_draws(scene);
-  if (draws.empty()) return nullptr;
-  SplatPass *pass;
-  {
-    std::lock_guard<std::mutex> lk(g_passes_mutex);
-    auto &slot = card_passes()[owner_key];
-    if (!slot) slot = std::make_unique<SplatPass>();
-    pass = slot.get();
-  }
-  pass->prepare(draws, SplatView{v, p, width, height, vt, exposure}, async);
-  return pass;
-}
-
 namespace {
 
-/* Round-to-nearest float to half bits, for the unit axis (|x| <= 1: no overflow; NaN goes to a zero). */
+/* Round-to-nearest float to half bits for a value of any size: clamped to the half range (+-65504), NaN to 0. */
 uint32_t half_bits(float f) {
   uint32_t b;
+  std::memcpy(&b, &f, 4);
+  if ((b & 0x7F800000u) == 0x7F800000u && (b & 0x7FFFFFu)) return 0u;  // NaN (read from its bits: a float compare is folded away under /fp:fast)
+  f = std::max(-65504.0f, std::min(65504.0f, f));
   std::memcpy(&b, &f, 4);
   const uint32_t sign = (b >> 16) & 0x8000u, m = b & 0x7FFFFFu;
   const int e = (int)((b >> 23) & 0xFF) - 127 + 15;
@@ -123,41 +137,128 @@ uint32_t half_bits(float f) {
   return sign | (((uint32_t)e << 10 | (m >> 13)) + ((m >> 12) & 1u));
 }
 
-uint32_t color_byte(float c) { return (uint32_t)std::lround(std::max(0.0f, std::min(1.0f, c)) * 255.0f); }
+/* Where one cloud's splats sit in the static set. */
+struct CloudSlice {
+  uint32_t first = 0;     // its first splat
+  uint32_t rest = 0;      // SH coefficients past the base (0 when the cloud has none, or fewer than it should)
+  uint32_t per = 0;       // uints of SH a splat takes
+  uint32_t sh_first = 0;  // its first uint in the SH array
+};
+
+/* One cloud's splats into the static set: the covariance, the base colour and the SH as packed halves. */
+void fill_cloud(const PointCloud &pc, uint32_t cloud, const CloudSlice &sl, gpu::RasterSplatSrc *src, uint32_t *sh) {
+  const bool splats = pc.is_splats();
+  JobSystem::global().parallel_for((int64_t)pc.count(), 8192, [&](int64_t b, int64_t e) {
+    for (int64_t k = b; k < e; k++) {
+      const size_t i = (size_t)k;
+      gpu::RasterSplatSrc &r = src[sl.first + i];
+      const Vec3 p = pc.position[i], c = i < pc.color.size() ? pc.color[i] : Vec3(1.0f);
+      r.pos[0] = p.x, r.pos[1] = p.y, r.pos[2] = p.z;
+      r.color[0] = c.x, r.color[1] = c.y, r.color[2] = c.z;
+      r.cloud = cloud;
+      if (!splats) {  // a Points cloud's dot: opaque, no covariance
+        r.opacity = 1.0f;
+        r.flags = 1u;
+        continue;
+      }
+      r.opacity = i < pc.opacity.size() ? pc.opacity[i] : 0.0f;
+      splat_covariance(pc, i, r.cov);
+      if (!sl.rest) continue;
+      const Vec3 *rest = &pc.sh_rest[i * sl.rest];
+      uint16_t *h = (uint16_t *)(sh + sl.sh_first + i * sl.per);  // (little endian: the first half is a uint's low bits, as unpackHalf2x16 takes it)
+      for (uint32_t j = 0; j < sl.rest; j++) {
+        h[3 * j] = (uint16_t)half_bits(rest[j].x);
+        h[3 * j + 1] = (uint16_t)half_bits(rest[j].y);
+        h[3 * j + 2] = (uint16_t)half_bits(rest[j].z);
+      }
+    }
+  });
+}
 
 }  // namespace
 
-bool scene_splats_to_card(const SplatPass &pass, std::vector<gpu::RasterSplat> &splats, std::vector<uint32_t> &ids) {
-  splats.clear();
-  ids.clear();
-  const std::vector<SplatScreen> &screen = pass.screen();
-  splats.reserve(screen.size());
-  std::unordered_map<uint32_t, uint32_t> index;  // pick id -> cloud index
-  uint32_t last_id = 0, last_cloud = 0;
-  bool have_last = false;
-  for (const SplatScreen &s : screen) {
-    if (!have_last || s.id != last_id) {
-      auto it = index.find(s.id);
-      if (it == index.end()) {
-        if (ids.size() >= kCardMaxSplatClouds) {
-          splats.clear();
-          ids.clear();
-          return false;
-        }
-        it = index.emplace(s.id, (uint32_t)ids.size()).first;
-        ids.push_back(s.id);
-      }
-      last_id = s.id, last_cloud = it->second, have_last = true;
-    }
-    gpu::RasterSplat r;
-    r.x = s.x, r.y = s.y, r.z = s.z, r.opacity = s.opacity;
-    r.inv0 = s.dot ? s.rx : s.inv0;  // (a dot: its radius, with inv1 = 0)
-    r.inv1 = s.dot ? 0.0f : s.inv1;
-    r.e0 = half_bits(s.e0x) | (half_bits(s.e0y) << 16);
-    r.rgbc = color_byte(s.r) | (color_byte(s.g) << 8) | (color_byte(s.b) << 16) | (last_cloud << 24);
-    splats.push_back(r);
+const char *scene_splats_to_card(const std::vector<SplatDraw> &draws, SplatPass &pass, const SplatView &view, CardSplats &keep, gpu::Raster &card,
+                                 gpu::RasterFrame &fr, bool async) {
+  fr.splat_set_key = 0, fr.splat_src = nullptr, fr.splat_sh = nullptr;
+  fr.splat_clouds.clear(), fr.splat_order.clear(), fr.splat_ids.clear();
+  const std::vector<SplatOrder> ords = pass.orders(draws, view, async);
+  if (ords.empty()) return nullptr;
+  if (ords.size() > kCardMaxSplatClouds) return "Gaussian splats in more than 255 clouds";
+
+  /* Where each cloud sits in the set, the set's size and its key (uid, version and place of every cloud). */
+  std::vector<CloudSlice> slices(ords.size());
+  uint64_t key = 0xcbf29ce484222325ull, total = 0, sh_total = 0;
+  for (size_t c = 0; c < ords.size(); c++) {
+    const PointCloud &pc = *ords[c].draw->cloud;
+    CloudSlice &sl = slices[c];
+    sl.first = (uint32_t)total;
+    sl.rest = (uint32_t)pc.sh_rest_per_point();
+    if (sl.rest && pc.sh_rest.size() < pc.count() * sl.rest) sl.rest = 0;
+    sl.per = sl.rest ? (3 * sl.rest + 1) / 2 : 0;
+    sl.sh_first = (uint32_t)sh_total;
+    total += pc.count();
+    sh_total += (uint64_t)pc.count() * sl.per;
+    for (uint64_t part : {pc.uid.v, pc.version, (uint64_t)c, (uint64_t)pc.count()}) key = (key ^ part) * 0x100000001b3ull, key ^= key >> 29;
   }
-  return true;
+  if (!key) key = 1;
+  if (total * sizeof(gpu::RasterSplatSrc) + sh_total * 4 > kCardMaxSplatBytes) return "a set of Gaussian splats over the card's memory (512 MB)";
+  fr.splat_set_key = key;
+
+  if (card.splat_set_key_held() != key) {  // the set isn't on the card: build it (once a version)
+    keep.src.assign((size_t)total, gpu::RasterSplatSrc{});
+    keep.sh.assign((size_t)sh_total, 0u);
+    for (size_t c = 0; c < ords.size(); c++) fill_cloud(*ords[c].draw->cloud, (uint32_t)c, slices[c], keep.src.data(), keep.sh.data());
+    fr.splat_src = &keep.src;
+    fr.splat_sh = &keep.sh;
+  } else {  // (held: what the last upload was built from is no longer needed)
+    std::vector<gpu::RasterSplatSrc>().swap(keep.src);
+    std::vector<uint32_t>().swap(keep.sh);
+  }
+
+  /* The clouds' values; the clouds drawn farthest first (their bounds' centre's depth), each in its own order. */
+  std::vector<float> depth(ords.size());
+  fr.splat_clouds.resize(ords.size());
+  fr.splat_ids.resize(ords.size());
+  for (size_t c = 0; c < ords.size(); c++) {
+    const SplatOrder &o = ords[c];
+    const Vec4 clip = o.dv.mvp * Vec4(cloud_center(*o.draw->cloud), 1.0f);
+    depth[c] = clip.w > 1e-6f ? clip.z / clip.w : 1e30f;  // (behind the camera: culled anyway; first)
+    gpu::RasterSplatCloud &rc = fr.splat_clouds[c];
+    std::memcpy(rc.mvp, o.dv.mvp.m, 64);
+    rc.cam_local[0] = o.dv.cam_local.x, rc.cam_local[1] = o.dv.cam_local.y, rc.cam_local[2] = o.dv.cam_local.z, rc.dot_px = o.dv.dot_px;
+    rc.ortho_dir[0] = o.dv.ortho_dir.x, rc.ortho_dir[1] = o.dv.ortho_dir.y, rc.ortho_dir[2] = o.dv.ortho_dir.z, rc.pad = 0.0f;
+    rc.first = slices[c].first, rc.sh_count = slices[c].rest, rc.sh_first = slices[c].sh_first, rc.pick_id = o.draw->id;
+    fr.splat_ids[c] = o.draw->id;
+  }
+  std::vector<size_t> by_depth(ords.size());
+  for (size_t c = 0; c < by_depth.size(); c++) by_depth[c] = c;
+  std::stable_sort(by_depth.begin(), by_depth.end(), [&](size_t a, size_t b) { return depth[a] > depth[b]; });
+  fr.splat_order.resize((size_t)total);
+  size_t at = 0;
+  for (size_t c : by_depth) {
+    const std::vector<uint32_t> &order = *ords[c].order;
+    uint32_t *out = fr.splat_order.data() + at;
+    const uint32_t first = slices[c].first;
+    JobSystem::global().parallel_for((int64_t)order.size(), 1 << 15, [&](int64_t b, int64_t e) {
+      for (int64_t k = b; k < e; k++) out[k] = first + order[(size_t)k];
+    });
+    at += order.size();
+  }
+  return nullptr;
+}
+
+const char *scene_splats_to_card(const Scene &scene, int slot, int width, int height, const Mat4 &v, const Mat4 &p, ViewTransform vt, float exposure,
+                                 gpu::Raster &card, gpu::RasterFrame &fr) {
+  const std::vector<SplatDraw> draws = scene_splat_draws(scene);
+  if (draws.empty()) return nullptr;
+  SlotSplats *s;
+  {
+    std::lock_guard<std::mutex> lk(g_passes_mutex);
+    auto &e = card_passes()[slot];
+    if (!e) e = std::make_unique<SlotSplats>();
+    s = e.get();
+  }
+  return scene_splats_to_card(draws, s->pass, SplatView{v, p, width, height, vt, exposure}, s->keep, card, fr);
 }
 
 std::string splat_stats_text() {

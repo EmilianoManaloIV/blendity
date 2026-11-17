@@ -309,73 +309,117 @@ SplatSorter &SplatPass::sorter(uint64_t key) {
   return *sorters_.back().second;
 }
 
+SplatDrawView gsplat_draw_view(const SplatDraw &d, const SplatView &v) {
+  SplatDrawView dv;
+  dv.mvp = v.proj * v.view * d.model;
+  const Vec3 cam_world = v.view.inverse().point(Vec3(0, 0, 0));
+  dv.cam_local = d.model.inverse().point(cam_world);
+  if (is_orthographic(v.proj)) {
+    /* Every splat is seen along the view's forward axis: the far point minus the near point through the inverse. */
+    const Mat4 inv_mvp = dv.mvp.inverse();
+    const Vec4 a = inv_mvp * Vec4(0, 0, 0, 1), b = inv_mvp * Vec4(0, 0, 1, 1);
+    dv.ortho_dir = b.xyz() * (1.0f / b.w) - a.xyz() * (1.0f / a.w);
+  }
+  /* A Points dot's radius in pixels times w: half the size, scaled by the placement (its mean axis) and the projection's
+   * vertical pixel scale. */
+  const float mscale = std::cbrt(std::fabs(length(d.model.dir(Vec3(1, 0, 0))) * length(d.model.dir(Vec3(0, 1, 0))) *
+                                           length(d.model.dir(Vec3(0, 0, 1)))));
+  dv.dot_px = 0.5f * d.point_size * mscale * std::fabs(v.proj.at(1, 1)) * 0.5f * (float)v.height;
+  return dv;
+}
+
+std::vector<SplatOrder> SplatPass::orders(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort) {
+  std::vector<SplatOrder> out;
+  stats_ = SplatStats{};
+  for (const SplatDraw &d : draws) {
+    if (!d.cloud || !d.cloud->count()) continue;
+    stats_.submitted += d.cloud->count();
+    SplatOrder o;
+    o.draw = &d;
+    o.dv = gsplat_draw_view(d, v);
+    ScopedTimer ts;
+    o.order = sorter(d.key).order(d, o.dv.mvp, async_sort);
+    stats_.ms_sort += ts.ms();
+    stats_.sort_async = stats_.sort_async || sorter(d.key).last_was_async();
+    if (!o.order || o.order->size() != d.cloud->count()) continue;
+    out.push_back(std::move(o));
+  }
+  stats_.drawn = stats_.submitted;  // (the card culls; counted as drawn here)
+  std::lock_guard<std::mutex> lk(g_stats_mutex);
+  g_last_stats = stats_;
+  return out;
+}
+
 void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort) {
   screen_.clear();
   stats_ = SplatStats{};
-  const Mat4 vp = v.proj * v.view;
-  const bool ortho = is_orthographic(v.proj);
-  const Mat4 inv_view = v.view.inverse();
-  const Vec3 cam_world = inv_view.point(Vec3(0, 0, 0));
-  std::vector<std::vector<SplatScreen>> lists;
-  lists.reserve(draws.size());
+  std::vector<std::vector<SplatScreen>> lists;  // (several clouds: each one's, merged below)
   for (const SplatDraw &d : draws) {
     if (!d.cloud || !d.cloud->count()) continue;
     const PointCloud &pc = *d.cloud;
     stats_.submitted += pc.count();
-    const Mat4 mvp = vp * d.model;
-    const Mat4 inv_model = d.model.inverse();
-    const Vec3 cam_local = inv_model.point(cam_world);
-    Vec3 ortho_dir{0, 0, 0};
-    if (ortho) {
-      /* Every splat is seen along the view's forward axis: the far point minus the near point through the inverse. */
-      const Mat4 inv_mvp = mvp.inverse();
-      const Vec4 a = inv_mvp * Vec4(0, 0, 0, 1), b = inv_mvp * Vec4(0, 0, 1, 1);
-      ortho_dir = b.xyz() * (1.0f / b.w) - a.xyz() * (1.0f / a.w);
-    }
-    /* A Points dot's radius in pixels times w: half the size, scaled by the placement (its mean axis) and the
-     * projection's vertical pixel scale. */
-    const float mscale = std::cbrt(std::fabs(length(d.model.dir(Vec3(1, 0, 0))) * length(d.model.dir(Vec3(0, 1, 0))) *
-                                             length(d.model.dir(Vec3(0, 0, 1)))));
-    const float dot_px = 0.5f * d.point_size * mscale * std::fabs(v.proj.at(1, 1)) * 0.5f * (float)v.height;
+    const SplatDrawView dv = gsplat_draw_view(d, v);
     ScopedTimer ts;
-    auto ord = sorter(d.key).order(d, mvp, async_sort);
+    auto ord = sorter(d.key).order(d, dv.mvp, async_sort);
     stats_.ms_sort += ts.ms();
     stats_.sort_async = stats_.sort_async || sorter(d.key).last_was_async();
     if (!ord || ord->size() != pc.count()) continue;
     ScopedTimer tp;
-    std::vector<SplatScreen> proj(pc.count());
-    JobSystem::global().parallel_for((int64_t)pc.count(), 4096, [&](int64_t b, int64_t e) {
-      for (int64_t k = b; k < e; k++) {
-        const uint32_t i = (*ord)[(size_t)k];
-        SplatScreen &s = proj[(size_t)k];
-        if (gsplat_project_one(pc, i, mvp, v.width, v.height, cam_local, ortho_dir, v.view_transform, v.exposure, s, dot_px)) s.id = d.id;
-      }
-    });
-    std::vector<SplatScreen> kept;
-    kept.reserve(proj.size());
-    for (const SplatScreen &s : proj)
-      if (s.visible) kept.push_back(s);
-    stats_.culled += pc.count() - kept.size();
+    project_cloud(pc, *ord, d.id, dv, v);
+    stats_.culled += pc.count() - kept_.size();
     stats_.ms_project += tp.ms();
-    lists.push_back(std::move(kept));
+    if (screen_.empty() && lists.empty()) screen_.swap(kept_);  // (one cloud: no copy; the buffers keep their room)
+    else lists.push_back(kept_);
   }
   /* Several clouds: their back-to-front lists merged by depth (a worker's slightly older order is near sorted; the
    * merge keeps each list's own order). */
   for (auto &l : lists) {
-    if (screen_.empty()) {
-      screen_ = std::move(l);
-      continue;
-    }
     std::vector<SplatScreen> merged;
     merged.reserve(screen_.size() + l.size());
     std::merge(screen_.begin(), screen_.end(), l.begin(), l.end(), std::back_inserter(merged),
-               [](const SplatScreen &a, const SplatScreen &b) { return a.z > b.z; });
+               [](const SplatScreen &x, const SplatScreen &y) { return x.z > y.z; });
     screen_.swap(merged);
   }
   limit_to_budget(v.width, v.height);
   stats_.drawn = screen_.size();
   std::lock_guard<std::mutex> lk(g_stats_mutex);
   g_last_stats = stats_;
+}
+
+/* One cloud projected in its order into kept_, the culled left out (round 557: 40 ms at 1M was half memory - a fresh
+ * 76 MB array zeroed every frame, then copied on one thread). The projections go into proj_, kept between frames, and
+ * are compacted in parallel: each chunk counts its visible splats, the counts are summed in chunk order (the order
+ * stays), then each chunk copies its own. */
+void SplatPass::project_cloud(const PointCloud &pc, const std::vector<uint32_t> &ord, uint32_t id, const SplatDrawView &dv, const SplatView &v) {
+  const size_t n = ord.size();
+  proj_.resize(n);
+  JobSystem &js = JobSystem::global();
+  const int64_t chunks = std::max<int64_t>(1, std::min<int64_t>(256, (int64_t)(n / 4096) + 1));
+  const size_t per = (n + (size_t)chunks - 1) / (size_t)chunks;
+  std::vector<size_t> counts((size_t)chunks + 1, 0);
+  js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
+    for (int64_t c = cb; c < ce; c++) {
+      const size_t b = (size_t)c * per, e = std::min(n, b + per);
+      size_t visible = 0;
+      for (size_t k = b; k < e; k++) {
+        SplatScreen &s = proj_[k];
+        if (!gsplat_project_one(pc, ord[k], dv.mvp, v.width, v.height, dv.cam_local, dv.ortho_dir, v.view_transform, v.exposure, s, dv.dot_px)) continue;
+        s.id = id;
+        visible++;
+      }
+      counts[(size_t)c + 1] = visible;
+    }
+  });
+  for (int64_t c = 0; c < chunks; c++) counts[(size_t)c + 1] += counts[(size_t)c];
+  kept_.resize(counts[(size_t)chunks]);
+  js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
+    for (int64_t c = cb; c < ce; c++) {
+      const size_t b = (size_t)c * per, e = std::min(n, b + per);
+      size_t at = counts[(size_t)c];
+      for (size_t k = b; k < e; k++)
+        if (proj_[k].visible) kept_[at++] = proj_[k];
+    }
+  });
 }
 
 /* Keeps the frame's work under kSplatPixelBudget: the boxes' on-screen areas in power-of-two classes, the largest classes
@@ -447,33 +491,40 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
     for (int y = y0; y <= y1; y++)
       for (int x = x0; x <= x1; x++) list[fill[(size_t)y * tx + x]++] = k;
   }
+  /* Each tile front to back (round 557, as the 3DGS reference composites): a pixel keeps what shows through it (T) and
+   * the colour gathered in front (C), and takes no more splats once T is under kSplatOpaqueT - the dense middle of a
+   * cloud stops after its first few layers instead of evaluating every splat behind them; a tile whose pixels are all
+   * covered stops. The same "over" as back to front; the pick id is the front-most splat at kSplatPickAlpha. */
+  constexpr float kSplatOpaqueT = 1.0f / 1024.0f;
   JobSystem::global().parallel_for(tiles, 1, [&](int64_t tb, int64_t te) {
-    float rgb[kTile * kTile * 3];
+    float acc[kTile * kTile * 3], trans[kTile * kTile];
     float zbuf[kTile * kTile];
     uint32_t idbuf[kTile * kTile];
-    uint8_t touched[kTile * kTile];
+    uint8_t touched[kTile * kTile], picked[kTile * kTile];
     for (int64_t ti = tb; ti < te; ti++) {
       const size_t first = offsets[(size_t)ti], last = offsets[(size_t)ti + 1];
       if (first == last) continue;
       std::memset(touched, 0, sizeof(touched));
+      std::memset(picked, 0, sizeof(picked));
+      std::memset(acc, 0, sizeof(acc));
       const int ox = (int)(ti % tx) * kTile, oy = (int)(ti / tx) * kTile;
       const int tw = std::min(kTile, W - ox), th = std::min(kTile, H - oy);
       for (int y = 0; y < th; y++)
         for (int x = 0; x < tw; x++) {
           const size_t pi = (size_t)(oy + y) * W + ox + x;
-          const uint32_t c = rt.color[(size_t)(oy + y) * rt.stride + ox + x];
-          float *o = &rgb[(y * kTile + x) * 3];
-          o[0] = ((c >> 16) & 255) / 255.0f, o[1] = ((c >> 8) & 255) / 255.0f, o[2] = (c & 255) / 255.0f;
+          trans[y * kTile + x] = 1.0f;
           zbuf[y * kTile + x] = has_depth ? rt.depth[pi] : 1.0f;
           idbuf[y * kTile + x] = has_ids ? rt.ids[pi] : 0u;
         }
-      for (size_t li = first; li < last; li++) {
+      int covered = 0;  // pixels whose T fell under kSplatOpaqueT
+      for (size_t li = last; li-- > first && covered < tw * th;) {
         const SplatScreen &s = screen_[list[li]];
         const int x0 = std::max(ox, (int)std::floor(s.x - s.rx)), x1 = std::min(ox + tw - 1, (int)std::floor(s.x + s.rx));
         const int y0 = std::max(oy, (int)std::floor(s.y - s.ry)), y1 = std::min(oy + th - 1, (int)std::floor(s.y + s.ry));
         for (int py = y0; py <= y1; py++)
           for (int px = x0; px <= x1; px++) {
             const int l = (py - oy) * kTile + (px - ox);
+            if (trans[l] < kSplatOpaqueT) continue;  // (covered by the splats in front)
             if (s.z > zbuf[l]) continue;  // a mesh is nearer than the splat's centre
             float a;
             if (s.dot) {
@@ -484,18 +535,24 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
             }
             if (a <= 0.0f) continue;
             touched[l] = 1;
-            float *o = &rgb[l * 3];
-            o[0] += (s.r - o[0]) * a, o[1] += (s.g - o[1]) * a, o[2] += (s.b - o[2]) * a;
-            if (a >= kSplatPickAlpha) idbuf[l] = s.id;
+            float *o = &acc[l * 3];
+            const float w = trans[l] * a;
+            o[0] += s.r * w, o[1] += s.g * w, o[2] += s.b * w;
+            trans[l] -= w;  // T (1 - a)
+            if (trans[l] < kSplatOpaqueT) covered++;
+            if (a >= kSplatPickAlpha && !picked[l]) idbuf[l] = s.id, picked[l] = 1;  // (the front-most)
           }
       }
       for (int y = 0; y < th; y++)
         for (int x = 0; x < tw; x++) {
           const size_t pi = (size_t)(oy + y) * W + ox + x;
           uint32_t &c = rt.color[(size_t)(oy + y) * rt.stride + ox + x];
-          const float *o = &rgb[(y * kTile + x) * 3];
+          if (!touched[y * kTile + x]) continue;  // (untouched: the picture, ids and planes as they were)
+          const float *o = &acc[(y * kTile + x) * 3];
+          const float t = trans[y * kTile + x];
+          const float bg[3] = {((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f};
           auto q = [](float v) { return (uint32_t)std::lround(std::max(0.0f, std::min(1.0f, v)) * 255.0f); };
-          c = (c & 0xFF000000u) | (q(o[0]) << 16) | (q(o[1]) << 8) | q(o[2]);
+          c = (c & 0xFF000000u) | (q(o[0] + bg[0] * t) << 16) | (q(o[1] + bg[1] * t) << 8) | q(o[2] + bg[2] * t);
           /* The linear light under a splat is gone (as under a see-through surface): bloom skips it. */
           if (has_hdr && touched[y * kTile + x]) rt.hdr[pi] = Vec3(-1.0f, 0.0f, 0.0f);
           if (has_ids) rt.ids[pi] = idbuf[y * kTile + x];
