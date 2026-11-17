@@ -1586,7 +1586,7 @@ static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const Ga
   if (!shapes) row("Bevel and the others do nothing on a styled door or window yet: they reshape a plain opening's hole.", true,
                    "A styled opening's hole is made of several pieces; it takes them once its frame and glass are objects of their own.");
   row("Width, Head and Sill are one opening's size, before its modifiers.", false,
-      "The handles, F9 and the console set the first opening's size; the copies follow it.");
+      "Its handles and F9 set the first opening's size; the copies follow it.");
   if (repeat_above) row("Array and Mirror run after the others, whatever their order here.", true, "The hole is reshaped first, then repeated.");
   if (!why.empty()) row("Its copies: " + why + ".", true, "The Blockout's status says the same.");
 }
