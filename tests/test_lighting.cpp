@@ -12420,6 +12420,30 @@ static void tests_round542() {
     CHECK(pt.samples() >= 16);
     CHECK(raster > 20.0 && traced > 20.0);
     CHECK(std::fabs(raster - traced) < 0.25 * std::max(raster, traced));
+/* Round 549 (task 0529): on CI's ubuntu-26.04 runners "GI on but adding nothing" was not the plain picture - a realtime lightmap
+ * pass published while Sky Occlusion was on still shaded the Game view's objects until the next pass landed (a slow machine is
+ * still there when the picture is taken). The views read no published maps while GI adds nothing. */
+static void tests_round549() {
+  test("voxel GI: with realtime lightmaps published, turning Sky Occlusion and Bounce off gives GI off's picture at once - no pass made with them on is read", [] {
+    Editor ed;
+    r36_editor_scene(ed);
+    const std::vector<uint32_t> off = r35_game(ed);
+    r36_raw(ed, "set Lighting.RealtimeGI true");
+    int frames = -1;
+    for (int i = 0; i < 300 && frames < 0; i++) {
+      ed.step_frame_headless();
+      if (ed.realtime_lightmaps_for_test(true).passes > 0 && !ed.realtime_lightmaps_busy_for_test()) frames = i + 1;
+    }
+    const std::vector<uint32_t> on = r35_game(ed);
+    /* Both off in one frame, the picture taken at once: the published maps (made with them on) are still the shown ones. */
+    ed.command("set Lighting.Bounce false");
+    ed.command("set Lighting.SkyOcclusion false");
+    ed.step_frame_headless();
+    const std::vector<uint32_t> nothing = r35_game(ed);
+    std::printf("    realtime lightmaps published after %d frames (%llu passes); GI on differs from off in %zu pixels; adding nothing: %zu\n", frames,
+                (unsigned long long)ed.realtime_lightmaps_for_test(true).passes, r35_diff_count(on, off), r35_diff_count(nothing, off));
+    CHECK(frames > 0);  // (a pass was published: the case this test is about)
+    CHECK(nothing == off);
   });
 }
 
@@ -12470,4 +12494,5 @@ void run_lighting_tests() {
   tests_round507_te();
   tests_round508();
   tests_round542();
+  tests_round549();
 }
