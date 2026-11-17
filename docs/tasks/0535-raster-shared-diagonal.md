@@ -1,6 +1,6 @@
 # 0535: The CPU rasterizer covers a shared edge exactly once, on every compiler
 
-- **Status:** in progress (the hub's round 554, Pass 27)
+- **Status:** done (round 554)
 - **Requirements:** found by round 538 (M1's #439, "Found on the way"); CLAUDE.md "keep geometry robust"
 - **Decisions:** an ADR if the coverage rule changes the documented rasterizer conventions (sub-pixel snapping)
 - **Model:** main session (Opus)

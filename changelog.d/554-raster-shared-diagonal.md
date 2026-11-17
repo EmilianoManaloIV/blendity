@@ -17,4 +17,6 @@ through - where its diagonal ran exactly through pixel centres; the Windows buil
 
 **Checked:** new tests - a quad's two triangles at 5 angles x 4 sub-pixel offsets (20 squares; their diagonals and edges
 through pixel centres at 0 and 45 degrees) and a fan of 8 triangles about a pixel centre and about a pixel corner: no
-pixel missed, none covered twice (each triangle's pixels alone add up to their union's). CHECKS_W; Linux CHECKS_L.
+pixel missed, none covered twice (each triangle's pixels alone add up to their union's); after review, a quad split along a horizontal line through pixel centres with uneven ends, flat and tilted by 1e-5 pixel, and a see-through quad whose diagonal blends once. Windows (Blender's libraries): the round's tests 116 checks and the panoramic tests 37,681, 0 failed; Linux (dependency-free): render 40,272 checks, 0 failed - with round 538's walls back on the axis, where GCC left the crack. The editor raster rows (stress) are in the hub's timed batch.
+
+**Review (code-reviewer):** changes needed, all made - the row span solved in float now widened by each edge's rounding band in x (a nearly horizontal shared edge cracked where the float crossing was far from the true one), a horizontal edge's row skipped only when clearly outside (its two triangles' rounded row values both left it), the two products compared instead of subtracted (nothing for Apple clang to fuse), a band ~40x tighter (a rounding a setup step and a row step, twice over), the see-through band scaled to a sliver's rounding.
