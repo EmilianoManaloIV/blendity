@@ -430,8 +430,11 @@ static void first_tests() {
     frame([](ui::Input &in) {
       in.key_pressed[platform::KEY_TAB] = true;
       in.mods = platform::MOD_SHIFT;
+      /* Round 548: a key's chord is read from the modifiers held as it went down (Input::key_mods, which a KeyDown event
+       * fills) - this test writes the Input directly, so it fills them as the event would. */
+      in.key_mods[platform::KEY_TAB] = platform::MOD_SHIFT;
     });
-    frame([](ui::Input &in) { in.mods = 0; });
+    frame([](ui::Input &in) { in.mods = 0, in.key_mods[platform::KEY_TAB] = 0; });
     CHECK_NEAR(c, 10.0f, 1e-6f);
     frame([](ui::Input &in) { in.text = "-1"; });
     frame([](ui::Input &in) { in.key_pressed[platform::KEY_ENTER] = true; });

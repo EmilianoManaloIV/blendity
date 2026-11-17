@@ -96,6 +96,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "brush_slots.h"
 #include "view_keeps.h"
 
 namespace bl {
@@ -568,6 +569,7 @@ struct AnimEditorState {
   uint64_t other_layout = 0;
   size_t other_count = 0;
   int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
+  bool scrub_resume = false;  // (round 541: playback was running when the ruler was pressed - it starts again on release)
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
   float view_start = 0.0f, view_span = 0.0f;  // (task 0267: the frames the sheet shows; span 0: the whole clip)
@@ -770,6 +772,10 @@ struct PaintBrush {
   float wet = 0.0f;        // how much of the colour picked up under the last dab the brush carries
   float jitter_h = 0.0f, jitter_s = 0.0f, jitter_v = 0.0f;
   float grain_scale = 1.0f;
+  /* Round 540 (Blender 5.3's curve_hardness / curve_spacing): off at first, so nothing changes until they are turned on. On,
+   * a dab's hardness is hardness * curve(pressure) and the step between dabs spacing * (1.5 - curve(pressure)). */
+  bool hardness_pressure = false, spacing_pressure = false;
+  std::vector<Vec2> hardness_curve{Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f)}, spacing_curve{Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f)};
 };
 
 bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p);
@@ -1471,6 +1477,16 @@ class Editor {
     return n;
   }
   int sculpt_brush_kind_for_test() const { return sculpt_brush_.kind; }
+  /* Round 540: the per-brush banks (brush_slots.cpp). */
+  BrushBank &sculpt_bank_for_test() { return sculpt_bank_; }
+  BrushBank &weight_bank_for_test() { return wp_bank_; }
+  BrushBank &paint_bank_for_test() { return paint_bank_; }
+  void brush_banks_sync_for_test() { brush_banks_sync(); }
+  std::string brushes_path_for_test() const { return brushes_path(); }
+  std::string brushes_text_for_test() { return brushes_text(); }
+  void brushes_load_text_for_test(const std::string &s) { brushes_load_text(s); }
+  float paint_last_dab_hardness_for_test() const { return paint_last_dab_hardness_; }
+  float paint_spacing_for_test(float pressure) { return paint_spacing_now(pressure); }
   const std::vector<Vec2> &sculpt_dab_px_for_test() const { return sculpt_dab_px_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
@@ -2034,6 +2050,10 @@ class Editor {
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
+  /* Round 541 (task 0521): Wrap Playhead on / off, what Copy Pose and Copy World-Space Animation hold. */
+  bool anim_wrap_for_test() const { return anim_wrap_; }
+  size_t pose_clip_size_for_test() const { return pose_clip_.size(); }
+  const WorldCopy &world_clip_for_test() const { return world_clip_; }
   /* Round 406: the Animation window's rows as drawn - a single row's value field by its label, and typing into it. */
   const std::map<std::string, float> &anim_row_values_for_test() const { return anim_row_values_for_test_; }
   bool anim_set_row_value_for_test(const std::string &label, float v) {
@@ -3196,6 +3216,7 @@ class Editor {
   bool anim_changed(uint64_t id, const std::string &property, int axis, float v) const;
   bool anim_record_vector(AnimationClip &clip, const std::string &path, int prop, const float *shown, const float *now, float frame);
   bool anim_record_object(AnimationClip &clip, GameObject &root, GameObject &g, const float *shown, const float *now);  // (round 472)
+  bool anim_record_quat(AnimationClip &clip, const std::string &path, const GameObject &g, const float *shown, const float *now, float frame);  // (round 541: a "RotationQ" path)
   void anim_snapshot_others(GameObject &root, const AnimationClip *clip, const std::vector<GameObject *> &walk);  // (round 472)
   const std::vector<uint32_t> &anim_other_tracks(const AnimationClip &clip);  // (round 472)
   uint64_t record_reads_last_ = 0;  // (round 472: the objects Record read the numbers of in its last pass)
@@ -3236,6 +3257,31 @@ class Editor {
   void anim_key_all();  // (task 0258: a key at the playhead on every track)
   void anim_toggle_play();
   void anim_toggle_record();
+  /* ---- Round 541 (task 0521, ADR 0148): Blender 5.3's animation tools (pose_clipboard.cpp, animation_window.cpp) ---- */
+  bool anim_wrap_ = false;  // Wrap Playhead: frame steps and key jumps wrap inside the clip (a session setting; off by default)
+  void anim_step_frame(int delta);  // a frame step: clamps at 0, or wraps in 0..end when Wrap Playhead is on
+  void anim_scrub_begin();          // the ruler pressed: playback that runs is paused (and remembered)
+  void anim_scrub_end();            // released (or Esc): it runs again from the scrubbed frame
+  /* Convert Rotation: the selected objects' paths. `mode` 0: each path the other way round (Euler to quaternion, quaternion to
+   * Euler), 1 to quaternion, 2 to Euler. One undo step; refuses with a message when nothing converts. */
+  void anim_rotation_convert(int mode, bool bake);
+  /* Copy / Paste World-Space Animation; Paste at the playhead (Offset Start) or the original frames (None). */
+  WorldCopy world_clip_;
+  void anim_world_copy(bool custom, float start, float end);
+  void anim_world_paste(bool from_playhead);
+  /* Pose clipboard: the selected bones' local transforms by name (Copy Pose), Paste Pose with an influence, flipped or not. */
+  struct PoseClipBone {
+    std::string name;
+    Transform local;
+  };
+  std::vector<PoseClipBone> pose_clip_;
+  bool pose_context() const;  // the Scene view with only bones selected (and not in Edit Mode)
+  void pose_copy();
+  bool pose_paste(const std::vector<PoseClipBone> &clip, float influence, bool flipped, bool selected_only, std::vector<std::pair<uint64_t, Transform>> *before = nullptr);
+  void pose_paste_step(float influence, bool flipped, bool selected_only);  // (pose_paste with its undo step and F9's panel)
+  void pose_align(int orientation = -1);  // (0 Global, 1 Local, else the current transform orientation, left as it is)
+  void pose_command(const std::vector<std::string> &t);
+  void draw_anim_key_menu();
   bool anim_shortcuts_stand_down() const;  // (a window with arrow keys of its own has the keyboard, or the view is flown)
   bool action_asked_for_ = false;  // (task 0260: the palette or the Wheel named the action - no stand-down)
   const std::vector<std::string> &anim_clip_paths();
@@ -3918,6 +3964,7 @@ class Editor {
   public:
   FixModelOptions &fix_model_options_for_test() { return fix_model_options_; }
   private:
+  int action_mods_ = -1;  // (round 548: the modifiers as the shortcut's key went down while handle_shortcuts runs an action; -1 from a menu)
   const std::vector<AvatarCheck> &avatar_checklist(GameObject &root);
   void run_avatar_fix(const AvatarCheck &c);  // (its object selected by id first)
   /* The checklist kept half a second for the window (review 356: humanoid::map, gait::analyse and the budget every frame). */
@@ -5302,6 +5349,18 @@ class Editor {
   float paint_grain_at(int x, int y) const;
   void paint_dab_begin(float pressure);
   void paint_dab_finish();
+  float paint_dab_hardness_ = -1.0f;       // (round 540: this dab's hardness through the pressure curve; -1 outside a dab: the field's)
+  float paint_last_dab_hardness_ = 1.0f;   // (the last dab's, for tests)
+  float paint_spacing_now(float pressure);  // (the step between dabs in radii: spacing, through the curve when Spacing Pressure is on)
+  /* Round 540: size, strength and colour per brush (brush_slots.cpp). */
+  BrushBank sculpt_bank_, wp_bank_, paint_bank_;
+  void brush_banks_sync();
+  std::string brushes_text();
+  void brushes_load_text(const std::string &text);
+  std::string brushes_path() const;
+  void brushes_save();
+  void brushes_load();
+  void brush_command(const std::vector<std::string> &t);
   Vec3 paint_dab_colour() const;
   Bitmap paint_stencil_;
   Vec2 paint_stencil_offset_;
@@ -6147,6 +6206,10 @@ class Editor {
     int opening = 0, hinge = 0, slide = 0;
     bool leaf = true, wings = false;
     float leaf_thickness = 0.04f, open_amount = 0.0f, drum_radius = 1.0f;
+    /* Paste Pose (round 541, kind "pose"): `a` is the influence, `flag` Flipped, `m` Selected Only; the transforms of the bones
+     * it can touch before the paste, put back before each re-run. */
+    std::vector<std::pair<uint64_t, Transform>> pose_before;
+    std::vector<PoseClipBone> pose_clip;  // the pose it pasted: a later Copy Pose does not change what F9 pastes again
   };
   bool obj_last_valid() const;
   const ObjLastOp &obj_last_for_test() const { return obj_last_; }
@@ -6158,6 +6221,8 @@ class Editor {
   void record_primitive_last(GameObject *g, const std::string &kind);
   void record_uv_last(uint64_t obj, const std::string &op, MeshPtr before, const std::vector<uint8_t> *mask);
   void record_draw_last(uint64_t obj, MeshPtr before, const Mat4 &before_xf);
+  void record_pose_last(std::vector<std::pair<uint64_t, Transform>> before, std::vector<PoseClipBone> clip, float influence, bool flipped, bool selected_only);  // (round 541: Paste Pose's F9)
+  void pose_last_rerun();
   void amend_last_step();
   void obj_last_note_result();
   void obj_last_end() { obj_last_ = ObjLastOp{}; }

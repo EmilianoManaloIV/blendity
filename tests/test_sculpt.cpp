@@ -10,6 +10,7 @@
 #include "../src/render/canvas.h"
 
 #include <chrono>
+#include <functional>
 #include <thread>
 #include <cmath>
 #include <cstdio>
@@ -1094,6 +1095,10 @@ static void tests_round258() {
     const size_t steps_dot = ed.undo_steps_for_test();
     ed.command("sculpt stroke dot");
     ed.command("sculpt brush draw");  // (Ctrl makes it a mask stroke anyway)
+    /* Round 540: each brush keeps its own size and strength, so Draw has not the Mask brush's the lines above set: the same
+     * numbers are given to it (the check is the Drag Dot mask stroke, not which brush's size it ran at). */
+    ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.25f)));
+    ed.command("sculpt strength 1");
     const int ax = wx - dx, bx = wx + dx;
     step(ed, {mouse(EventType::MouseMove, ax, wy, platform::MOD_CTRL | platform::MOD_ALT)});
     step(ed, {mouse(EventType::MouseDown, ax, wy, platform::MOD_CTRL | platform::MOD_ALT)});
@@ -2736,6 +2741,709 @@ static void tests_round508_te() {
   });
 }
 
+static void tests_round540() {
+  test("per brush settings (round 540): Draw keeps its size and strength while Smooth has its own - through the console, and a brush used for the first time starts with the size you had", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 0.2");
+    ed.command("sculpt brush smooth");
+    CHECK(b.radius == 30.0f);  // (never used: the size carries over)
+    ed.command("sculpt size 90");
+    ed.command("sculpt strength 0.8");
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 30.0f && b.strength == 0.2f);
+    ed.command("sculpt brush smooth");
+    CHECK(b.radius == 90.0f && b.strength == 0.8f);
+    /* Weight Paint's brushes the same way. */
+    ed.command("wpbrush add 40");
+    ed.command("wpbrush subtract 70");
+    ed.command("wpbrush add");
+    CHECK(ed.wp_brush_for_test().radius == 40.0f);
+    ed.command("wpbrush subtract");
+    CHECK(ed.wp_brush_for_test().radius == 70.0f);
+  });
+
+  test("per brush settings (round 540): Unified Size shares one size between the brushes while the strength stays per brush", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    ed.command("brush unified sculpt size on");
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 0.2");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt size 90");
+    ed.command("sculpt strength 0.8");
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 90.0f);
+    CHECK(b.strength == 0.2f);
+  });
+
+  test("per brush settings (round 540): Paint's Smudge has its own size and colour; Spacing Pressure packs the dabs closer for a firm press", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    PaintBrush &p = ed.paint_brush_for_test();
+    ed.command("paint size 40");
+    ed.command("paint color 1 0 0");
+    ed.command("paint brush smudge");
+    ed.command("paint size 80");
+    ed.command("paint color 0 0 1");
+    ed.command("paint brush paint");
+    CHECK(p.radius == 40.0f && p.color.x == 1.0f && p.color.z == 0.0f);
+    ed.command("paint brush smudge");
+    CHECK(p.radius == 80.0f && p.color.z == 1.0f);
+    /* Spacing: off, the field's; on, a firm press packs the dabs closer (1.5 - curve(pressure)). */
+    ed.command("paint spacing 0.4");
+    CHECK(ed.paint_spacing_for_test(1.0f) == 0.4f && ed.paint_spacing_for_test(0.25f) == 0.4f);
+    ed.command("brush curve spacing on");
+    CHECK(ed.paint_spacing_for_test(1.0f) < ed.paint_spacing_for_test(0.25f));
+    ed.command("brush curve spacing on 0 1 1 1");  // (a flat curve: 1.5 - 1 of the field everywhere)
+    CHECK(std::fabs(ed.paint_spacing_for_test(0.25f) - 0.2f) < 1e-4f);
+  });
+
+  test("per brush settings (round 540): the banks save to brushes.txt and load back; garbage loads what it can, NaN comes back clamped", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const std::string dir = fs::join(test_dir(), "r540_prefs_impl");
+    fs::make_dirs(dir);
+    ed.prefs_for_test(fs::join(dir, "prefs.txt"));
+    ed.command("sculpt size 30");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt size 90");
+    ed.command("brush unified paint colour on");
+    ed.command("brush curve hardness on 0 1 1 1");
+    ed.command("brush save");
+    ed.sculpt_bank_for_test() = BrushBank();
+    ed.command("sculpt size 5");
+    ed.command("brush curve hardness off 0 0 1 1");
+    ed.command("brush load");
+    CHECK(ed.sculpt_brush_for_test().kind == 1 && ed.sculpt_brush_for_test().radius == 90.0f);
+    ed.command("sculpt brush draw");
+    CHECK(ed.sculpt_brush_for_test().radius == 30.0f);
+    CHECK(ed.paint_bank_for_test().unified_color);
+    CHECK(ed.paint_brush_for_test().hardness_pressure && ed.paint_brush_for_test().hardness_curve[0].y == 1.0f);
+    /* Garbage and NaN. */
+    ed.brushes_load_text_for_test("bank sculpt 0 0 0 0\nslot sculpt 0 nan 2 \nslot sculpt 99 5 5\nslot sculpt x\n\x01\x02 junk\npaint_hardness_curve 1 1\nslot sculpt 0 1e30 0.5\nslot sculpt 1");
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    CHECK(std::isfinite(b.radius) && b.radius >= 1.0f && b.radius <= 500.0f);
+    CHECK(b.strength >= 0.0f && b.strength <= 1.0f);
+    ed.brushes_load_text_for_test("");
+    ed.brushes_load_text_for_test(std::string(300, '\0'));
+  });
+
+  test("per brush settings (round 540): brushes.txt of a headless Editor is inside the scratch folder, never the user's preferences folder; with no scratch preferences Save and Load refuse", [] {
+    const std::string dir = fs::join(test_dir(), "r540_prefs_path");
+    fs::make_dirs(dir);
+    const char *had = std::getenv("BLENDITY_PREFS_DIR");
+    const std::string before = had ? had : "";
+    set_env("BLENDITY_PREFS_DIR", dir);  // (what a scratch run gives: set before the Editor works out its preferences folder)
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      const std::string path = fs::normalize(ed.brushes_path_for_test());
+      std::printf("    brushes.txt: %s\n", path.c_str());
+      CHECK(!path.empty());
+      CHECK(path.rfind(fs::normalize(test_dir()), 0) == 0);
+      CHECK(path.rfind(fs::normalize(fs::join(fs::home_dir(), ".blendity")), 0) != 0);
+    }
+    /* An empty variable is no folder (Linux keeps it set after set_env(k, "")): no path, and Save writes nothing. */
+    set_env("BLENDITY_PREFS_DIR", "");
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      CHECK(ed.brushes_path_for_test().empty());
+      ed.command("brush save");
+      ed.command("brush load");  // (a refusal, not a crash)
+    }
+    set_env("BLENDITY_PREFS_DIR", before);
+  });
+
+  test("per brush settings (round 540): Unified Size writes the shared size, not the brushes' own: Draw 30, Smooth 90, Unified on, 55 set and brushes switched, Unified off gives Draw 30 and Smooth 90 again", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    ed.command("sculpt size 30");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt size 90");
+    ed.command("brush unified sculpt size on");
+    ed.command("sculpt size 55");
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 55.0f);
+    ed.command("sculpt brush grab");
+    ed.command("sculpt brush smooth");
+    CHECK(b.radius == 55.0f);
+    ed.command("brush unified sculpt size off");
+    CHECK(b.radius == 90.0f);  // (the active brush shows its own at once)
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 30.0f);
+    ed.command("sculpt brush smooth");
+    CHECK(b.radius == 90.0f);
+    /* The same through a ticked box seen only by the frame's sync: the flag written, no command. */
+    ed.sculpt_bank_for_test().unified_strength = true;
+    ed.brush_banks_sync_for_test();
+    ed.command("sculpt strength 0.9");
+    ed.command("sculpt brush draw");
+    CHECK(std::fabs(b.strength - 0.9f) < 1e-5f);
+    ed.sculpt_bank_for_test().unified_strength = false;
+    ed.brush_banks_sync_for_test();
+    CHECK(std::fabs(b.strength - 0.5f) < 1e-5f);  // (Draw's own, never changed from the start)
+  });
+}
+
+/* ---- round 540 (task 0520), the test engineer's tests: size / strength / colour per brush, the pressure curves, brushes.txt ---- */
+
+static platform::Event r540_ev(platform::EventType t, int x, int y, float pressure = 1.0f) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y, e.pressure = pressure;
+  return e;
+}
+
+static platform::Event r540_key(int key, int mods = 0) {
+  platform::Event e;
+  e.type = platform::EventType::KeyDown, e.key = key, e.mods = mods;
+  return e;
+}
+
+/* The Modeling Tools window open with Sculpt on over the sample scene's Cube, buttons recorded. */
+static void r540_sculpt_window(Editor &ed) {
+  ed.init_headless(1600, 1000);
+  ed.set_clock_for_test(100.0);
+  ed.command("layout Default");
+  ed.command("window Modeling Tools");
+  ed.command("alltools on");
+  ed.command("select Cube");
+  ed.command("sculpt on");
+  ed.record_buttons_for_test(true);
+  for (int i = 0; i < 4; i++) step(ed);
+}
+
+/* The Tools window's content is longer than the window (alltools): wheel it until the control `find` locates is inside the window
+ * (a field below the screen takes no click; that is why the first version of these tests typed into nothing). */
+static void r540_scroll_to(Editor &ed, const std::function<bool(Recti &)> &find) {
+  for (int i = 0; i < 80; i++) {
+    Recti r;
+    if (!find(r)) {
+      step(ed);
+      continue;
+    }
+    const Recti w = ed.window_rect_for_test(WindowKind::Tools);
+    if (r.y >= w.y + 24 && r.y + r.h <= w.y + w.h - 4) return;
+    platform::Event e = r540_ev(platform::EventType::Wheel, w.x + w.w / 2, w.y + w.h / 2);
+    e.wheel_y = r.y > w.y ? -1.0f : 1.0f;
+    step(ed, {r540_ev(platform::EventType::MouseMove, w.x + w.w / 2, w.y + w.h / 2)});
+    step(ed, {e});
+  }
+}
+
+static bool r540_click(Editor &ed, const std::string &key, int clicks = 1) {
+  Recti r;
+  for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) step(ed);
+  if (!ed.button_rect_for_test(key, r)) return false;
+  r540_scroll_to(ed, [&](Recti &o) { return ed.button_rect_for_test(key, o); });
+  if (!ed.button_rect_for_test(key, r)) return false;
+  /* A tick box's recorded rectangle is its whole value column: the box itself is at its left end. */
+  const bool tick = key.rfind("field:Unified", 0) == 0;
+  const int x = tick ? r.x + 6 : r.x + r.w / 2, y = r.y + r.h / 2;
+  if (std::getenv("R540_DEBUG")) {
+    const Recti w = ed.window_rect_for_test(WindowKind::Tools);
+    std::printf("    [r540] %s at %d,%d %dx%d; Tools window %d,%d %dx%d\n", key.c_str(), r.x, r.y, r.w, r.h, w.x, w.y, w.w, w.h);
+  }
+  step(ed, {r540_ev(platform::EventType::MouseMove, x, y)});
+  for (int c = 0; c < clicks; c++) {
+    step(ed, {r540_ev(platform::EventType::MouseDown, x, y)});
+    step(ed, {r540_ev(platform::EventType::MouseUp, x, y)});
+  }
+  step(ed);
+  step(ed);
+  return true;
+}
+
+/* A number typed into the Inspector-style field `key` ("field:Size"): double click, select all, type, Enter. */
+static bool r540_type(Editor &ed, const std::string &key, const std::string &text) {
+  if (!r540_click(ed, key, 2)) return false;
+  step(ed, {r540_key(platform::KEY_A, platform::MOD_CTRL)});
+  for (char c : text) {
+    platform::Event e;
+    e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+    step(ed, {e});
+  }
+  step(ed, {r540_key(platform::KEY_ENTER)});
+  step(ed);
+  step(ed);
+  return true;
+}
+
+/* A dropdown opened by the option it shows now and one of its items clicked. */
+static bool r540_pick(Editor &ed, const char *shown, const char *item) {
+  step(ed);
+  auto find = [&](Recti &o) {
+    for (const ui::Context::ControlRec &k : ed.ui_for_test().controls)
+      if (std::string(k.kind) == "combo" && k.label == shown && k.r.w > 0) {
+        o = k.r;
+        return true;
+      }
+    return false;
+  };
+  r540_scroll_to(ed, find);
+  Recti c;
+  if (!find(c)) return false;
+  for (platform::EventType t : {platform::EventType::MouseMove, platform::EventType::MouseDown, platform::EventType::MouseUp})
+    step(ed, {r540_ev(t, c.x + c.w / 2, c.y + c.h / 2)});
+  step(ed);
+  return r540_click(ed, std::string("menu:") + item);
+}
+
+static std::string r540_scratch_prefs_dir(const char *name) {
+  const std::string d = fs::join(test_dir(), name);
+  fs::make_dirs(d);
+  return d;
+}
+
+/* The Cube with a surface, Paint on, a frame drawn: the view-relative pixel of the Cube's middle. */
+static Vec2 r540_paint_scene(Editor &ed) {
+  ed.init_headless(1400, 900);
+  ed.set_clock_for_test(100.0);
+  for (int i = 0; i < 5; i++) step(ed);
+  ed.command("select Cube");
+  ed.command("surface new R540Surf");
+  ed.command("paint on");
+  for (int i = 0; i < 4; i++) step(ed);
+  const Recti v = ed.scene_view_rect();
+  return Vec2((float)v.w * 0.5f, (float)v.h * 0.5f);
+}
+
+static void tests_round540_te() {
+  test("per brush settings (round 540, te): choosing Draw, Smooth, Draw in the Brush box and typing a Size and a Strength each time gives every brush its own, by real clicks", [] {
+    Editor ed;
+    r540_sculpt_window(ed);
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    CHECK(b.kind == 0);
+    const bool size_draw = r540_type(ed, "field:Size", "30");
+    const bool str_draw = r540_type(ed, "field:Strength", "0.2");
+    CHECK(size_draw && str_draw);
+    CHECK(b.radius == 30.0f && std::fabs(b.strength - 0.2f) < 1e-5f);
+    CHECK(r540_pick(ed, "Draw", "Smooth"));
+    CHECK(b.kind == 1);
+    CHECK(b.radius == 30.0f);  // (Smooth was never used: it starts with the size in hand)
+    CHECK(r540_type(ed, "field:Size", "90"));
+    CHECK(r540_type(ed, "field:Strength", "0.8"));
+    CHECK(b.radius == 90.0f && std::fabs(b.strength - 0.8f) < 1e-5f);
+    CHECK(r540_pick(ed, "Smooth", "Draw"));
+    std::printf("    back on Draw: size %g strength %g\n", b.radius, b.strength);
+    CHECK(b.kind == 0 && b.radius == 30.0f && std::fabs(b.strength - 0.2f) < 1e-5f);
+    /* The Inspector shows the brush's own values too, not only the struct. */
+    ed.step_frame_headless();
+    CHECK(r540_pick(ed, "Draw", "Smooth"));
+    CHECK(b.radius == 90.0f && std::fabs(b.strength - 0.8f) < 1e-5f);
+    /* The tick box: Unified Size by a click, then a size typed on Smooth is Draw's too. */
+    CHECK(r540_click(ed, "field:Unified Size"));
+    CHECK(ed.sculpt_bank_for_test().unified_size);
+    CHECK(r540_type(ed, "field:Size", "55"));
+    CHECK(r540_pick(ed, "Smooth", "Draw"));
+    CHECK(b.radius == 55.0f && std::fabs(b.strength - 0.2f) < 1e-5f);
+  });
+
+  test("per brush settings (round 540, te): Weight Paint's Add, Subtract, Draw and Blur each keep their Radius and Strength through the console, and an unused one starts with the last", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const WeightBrush &w = ed.wp_brush_for_test();
+    ed.command("wpbrush add 40");
+    ed.command("wpbrush blur 70");
+    CHECK(w.radius == 70.0f);
+    ed.command("wpbrush add");
+    CHECK(w.radius == 40.0f);
+    ed.command("wpbrush blur");
+    CHECK(w.radius == 70.0f);
+    ed.command("wpbrush draw");  // (never used: the size in hand, 70, carries over)
+    CHECK(w.radius == 70.0f);
+    ed.command("wpbrush add");
+    CHECK(w.radius == 40.0f);
+    /* The strength through the Weight Paint bank: the live brush's strength is switched along with the size. */
+    ed.command("wpbrush add 40 0.9");
+    ed.command("wpbrush blur 70 0.1");
+    ed.command("wpbrush add");
+    std::printf("    Add: radius %g strength %g\n", w.radius, w.strength);
+    CHECK(w.radius == 40.0f && std::fabs(w.strength - 0.9f) < 1e-5f);
+    ed.command("wpbrush blur");
+    CHECK(w.radius == 70.0f && std::fabs(w.strength - 0.1f) < 1e-5f);
+  });
+
+  test("per brush settings (round 540, te): Paint, Smudge and Blend keep their own size, opacity and colour; the colour is shared when Unified Colour is on", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const PaintBrush &p = ed.paint_brush_for_test();
+    ed.command("paint size 40");
+    ed.command("paint opacity 0.3");
+    ed.command("paint color 1 0 0");
+    ed.command("paint brush smudge");
+    CHECK(p.radius == 40.0f && p.color.x == 1.0f);  // (first use: what was in hand)
+    ed.command("paint size 80");
+    ed.command("paint opacity 0.9");
+    ed.command("paint color 0 0 1");
+    ed.command("paint brush blend");
+    CHECK(p.radius == 80.0f);  // (Blend never used: Smudge's size carries over)
+    ed.command("paint size 120");
+    ed.command("paint color 0 1 0");
+    ed.command("paint brush paint");
+    CHECK(p.radius == 40.0f && std::fabs(p.opacity - 0.3f) < 1e-5f && p.color.x == 1.0f && p.color.y == 0.0f && p.color.z == 0.0f);
+    ed.command("paint brush smudge");
+    CHECK(p.radius == 80.0f && std::fabs(p.opacity - 0.9f) < 1e-5f && p.color.z == 1.0f && p.color.x == 0.0f);
+    ed.command("paint brush blend");
+    CHECK(p.radius == 120.0f && p.color.y == 1.0f);
+    /* Unified Colour: one colour for all three, sizes still apart. */
+    ed.command("brush unified paint colour on");
+    ed.command("paint color 0.5 0.5 0.5");
+    ed.command("paint brush paint");
+    CHECK(p.radius == 40.0f && p.color.x == 0.5f && p.color.y == 0.5f && p.color.z == 0.5f);
+    ed.command("paint brush smudge");
+    CHECK(p.radius == 80.0f && p.color.x == 0.5f);
+  });
+
+  test("per brush settings (round 540, te): with Unified Size and Unified Strength both on, every brush shows the one size and strength; a tip change (round, flat) is not a brush switch", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 0.2");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt size 90");
+    ed.command("sculpt strength 0.8");
+    ed.command("brush unified sculpt size on");
+    ed.command("brush unified sculpt strength on");
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 90.0f && std::fabs(b.strength - 0.8f) < 1e-5f);
+    ed.command("sculpt size 10");
+    ed.command("sculpt brush clay");
+    CHECK(b.radius == 10.0f && std::fabs(b.strength - 0.8f) < 1e-5f);
+    /* Paint's round / flat / bristle tips are the same brush Mode: size and colour stay. */
+    ed.command("paint size 33");
+    ed.command("paint color 0.2 0.4 0.6");
+    ed.command("paint brush flat");
+    ed.command("paint brush bristle");
+    ed.command("paint brush round");
+    CHECK(ed.paint_brush_for_test().radius == 33.0f && ed.paint_brush_for_test().color.y == 0.4f);
+  });
+
+  test("per brush settings (round 540, te): a brush used for the first time starts with the size and strength you had, in all three modes, and the brushes already used keep theirs", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    ed.command("sculpt size 77");
+    ed.command("sculpt strength 0.35");
+    for (const char *name : {"smooth", "grab", "clay", "inflate", "flatten"}) {
+      ed.command(std::string("sculpt brush ") + name);
+      CHECK(b.radius == 77.0f && std::fabs(b.strength - 0.35f) < 1e-5f);  // (no jump to a default)
+    }
+    ed.command("sculpt size 12");
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 77.0f);  // (Draw was never touched after its first use)
+    ed.command("sculpt brush flatten");
+    CHECK(b.radius == 12.0f);
+    ed.command("wpbrush add 61");
+    ed.command("wpbrush draw");
+    CHECK(ed.wp_brush_for_test().radius == 61.0f);
+    ed.command("paint size 27");
+    ed.command("paint brush blend");
+    CHECK(ed.paint_brush_for_test().radius == 27.0f);
+  });
+
+  test("per brush settings (round 540, te): Hardness Pressure off leaves a dab's hardness at the field's whatever the pressure; on, half the pressure gives half the hardness; a flat curve keeps it full", [] {
+    Editor ed;
+    const Vec2 c = r540_paint_scene(ed);
+    CHECK(ed.paint_for_test());
+    ed.command("paint hardness 0.8");
+    ed.command("paint size 12");
+    auto dab = [&](float pressure) {
+      ed.command(strprintf("paint dab %g %g %g", c.x, c.y, pressure));
+      return ed.paint_last_dab_hardness_for_test();
+    };
+    /* Off (the default). */
+    CHECK(!ed.paint_brush_for_test().hardness_pressure);
+    const float off_low = dab(0.25f), off_high = dab(1.0f);
+    std::printf("    off: pressure 0.25 -> %.3f, pressure 1 -> %.3f\n", off_low, off_high);
+    CHECK(std::fabs(off_low - 0.8f) < 1e-5f && std::fabs(off_high - 0.8f) < 1e-5f);
+    /* On, the default straight curve. */
+    ed.command("brush curve hardness on");
+    const float half = dab(0.5f), full = dab(1.0f), none = dab(0.0f), quarter = dab(0.25f);
+    std::printf("    on: pressure 0.5 -> %.3f, 1 -> %.3f, 0 -> %.3f, 0.25 -> %.3f\n", half, full, none, quarter);
+    CHECK(std::fabs(half - 0.4f) < 1e-4f && std::fabs(full - 0.8f) < 1e-4f && none < 1e-4f && std::fabs(quarter - 0.2f) < 1e-4f);
+    /* A flat curve at the top: the full hardness at any pressure. */
+    ed.command("brush curve hardness on 0 1 1 1");
+    CHECK(std::fabs(dab(0.5f) - 0.8f) < 1e-4f && std::fabs(dab(0.05f) - 0.8f) < 1e-4f);
+    /* Out-of-range and NaN pressure give a hardness in 0..1, never NaN. */
+    ed.command("brush curve hardness on 0 0 1 1");
+    const float over = dab(7.0f), neg = dab(-3.0f), nan = dab(std::numeric_limits<float>::quiet_NaN());
+    CHECK(std::isfinite(over) && std::isfinite(neg) && std::isfinite(nan));
+    CHECK(over >= 0.0f && over <= 1.0f && neg >= 0.0f && neg <= 1.0f && nan >= 0.0f && nan <= 1.0f);
+    /* Off again: the field's. */
+    ed.command("brush curve hardness off");
+    CHECK(std::fabs(dab(0.3f) - 0.8f) < 1e-5f);
+  });
+
+  test("per brush settings (round 540, te): a pen stroke pressing at half pressure with Hardness Pressure on paints at half the Hardness field, through real mouse events", [] {
+    Editor ed;
+    const Vec2 c = r540_paint_scene(ed);
+    CHECK(ed.paint_for_test());
+    ed.command("paint hardness 0.6");
+    ed.command("paint size 10");
+    ed.command("brush curve hardness on");
+    const Recti v = ed.scene_view_rect();
+    const int x = v.x + (int)c.x, y = v.y + (int)c.y;
+    step(ed, {r540_ev(platform::EventType::MouseMove, x, y, 0.5f)});
+    step(ed, {r540_ev(platform::EventType::MouseDown, x, y, 0.5f)});
+    step(ed, {r540_ev(platform::EventType::MouseMove, x + 14, y, 0.5f)});
+    step(ed, {r540_ev(platform::EventType::MouseMove, x + 30, y, 0.5f)});
+    step(ed, {r540_ev(platform::EventType::MouseUp, x + 30, y, 0.5f)});
+    step(ed);
+    std::printf("    last dab hardness at pen pressure 0.5: %.3f (the field 0.6)\n", ed.paint_last_dab_hardness_for_test());
+    CHECK(std::fabs(ed.paint_last_dab_hardness_for_test() - 0.3f) < 1e-3f);
+  });
+
+  test("per brush settings (round 540, te): Spacing Pressure packs the dabs closer as the pen presses harder, never below 5 percent of the radius, and a missing or NaN pressure is full pressure", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("paint spacing 0.5");
+    ed.command("brush curve spacing on");
+    float last = 1e9f;
+    for (float p : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+      const float s = ed.paint_spacing_for_test(p);
+      std::printf("    spacing at pressure %.2f: %.3f\n", p, s);
+      CHECK(s < last);  // (a firmer press, closer dabs)
+      last = s;
+    }
+    CHECK(std::fabs(ed.paint_spacing_for_test(1.0f) - 0.25f) < 1e-4f);  // (0.5 * (1.5 - 1))
+    CHECK(std::fabs(ed.paint_spacing_for_test(0.0f) - 0.75f) < 1e-4f);  // (0.5 * 1.5)
+    CHECK(std::fabs(ed.paint_spacing_for_test(std::numeric_limits<float>::quiet_NaN()) - ed.paint_spacing_for_test(1.0f)) < 1e-4f);
+    CHECK(ed.paint_spacing_for_test(50.0f) == ed.paint_spacing_for_test(1.0f) && ed.paint_spacing_for_test(-4.0f) == ed.paint_spacing_for_test(0.0f));
+    /* The floor, with the smallest field spacing. */
+    ed.command("paint spacing 0.05");
+    CHECK(ed.paint_spacing_for_test(1.0f) >= 0.05f && ed.paint_spacing_for_test(0.0f) >= 0.05f);
+    /* A curve the other way round: a firm press spreads the dabs. */
+    ed.command("paint spacing 0.5");
+    ed.command("brush curve spacing on 0 1 1 0");
+    CHECK(ed.paint_spacing_for_test(1.0f) > ed.paint_spacing_for_test(0.0f));
+    /* Off: the field's at any pressure, and hardness pressure alone does not touch it. */
+    ed.command("brush curve spacing off");
+    ed.command("brush curve hardness on");
+    CHECK(ed.paint_spacing_for_test(0.1f) == 0.5f && ed.paint_spacing_for_test(1.0f) == 0.5f);
+  });
+
+  test("per brush settings (round 540, te): sizes on two brushes, two curves and the switches survive Save, a reset of the banks and Load, and a new Editor on the same preferences folder", [] {
+    const std::string dir = r540_scratch_prefs_dir("r540_prefs_a");
+    std::filesystem::remove(fs::join(dir, "brushes.txt"));
+    std::string text;
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.prefs_for_test(fs::join(dir, "prefs.txt"));
+      const std::string path = fs::normalize(ed.brushes_path_for_test());
+      CHECK(path.rfind(fs::normalize(test_dir()), 0) == 0);  // (never the user's folder: checked before anything is written)
+      if (path.rfind(fs::normalize(test_dir()), 0) != 0) return;
+      CHECK(path.size() > 11 && path.substr(path.size() - 11) == "brushes.txt");
+      ed.command("sculpt size 31");
+      ed.command("sculpt strength 0.25");
+      ed.command("sculpt brush smooth");
+      ed.command("sculpt size 92");
+      ed.command("wpbrush add 44");
+      ed.command("wpbrush blur 66");
+      ed.command("paint size 21");
+      ed.command("paint color 1 0.5 0.25");
+      ed.command("paint brush smudge");
+      ed.command("paint size 99");
+      ed.command("paint color 0 0 1");
+      ed.command("brush unified sculpt strength on");
+      ed.command("brush unified paint colour on");
+      ed.command("brush curve hardness on 0 0 0.5 0.9 1 1");
+      ed.command("brush curve spacing on 0 1 1 0");
+      ed.command("brush save");
+      CHECK(fs::read_file(path, text) && text.size() > 50);
+      std::printf("    brushes.txt: %zu bytes\n", text.size());
+    }
+    /* Reset the banks (sizes back to a fresh editor's), then Load. */
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.prefs_for_test(fs::join(dir, "prefs.txt"));
+      CHECK(ed.sculpt_brush_for_test().radius != 31.0f);
+      ed.command("brush load");
+      const SculptBrush &s = ed.sculpt_brush_for_test();
+      CHECK(s.kind == 1 && s.radius == 92.0f);
+      ed.command("sculpt brush draw");
+      CHECK(s.radius == 31.0f);
+      CHECK(ed.sculpt_bank_for_test().unified_strength && !ed.sculpt_bank_for_test().unified_size);
+      CHECK(ed.wp_brush_for_test().mode == 3);  // (the last `wpbrush blur 66`)
+      CHECK(ed.wp_brush_for_test().radius == 66.0f);
+      ed.command("wpbrush add");
+      CHECK(ed.wp_brush_for_test().radius == 44.0f);
+      ed.command("wpbrush blur");
+      CHECK(ed.wp_brush_for_test().radius == 66.0f);
+      const PaintBrush &p = ed.paint_brush_for_test();
+      CHECK(p.mode == 1 && p.radius == 99.0f && p.color.z == 1.0f);
+      CHECK(ed.paint_bank_for_test().unified_color);
+      CHECK(p.hardness_pressure && p.spacing_pressure);
+      CHECK(p.hardness_curve.size() == 3 && std::fabs(p.hardness_curve[1].x - 0.5f) < 1e-5f && std::fabs(p.hardness_curve[1].y - 0.9f) < 1e-5f);
+      CHECK(p.spacing_curve.size() == 2 && p.spacing_curve[0].y == 1.0f && p.spacing_curve[1].y == 0.0f);
+      /* The loaded spacing curve (1 at pressure 0, 0 at 1) is in use: the field times 1.5 minus it, so a firm press spaces wider here. */
+      CHECK(ed.paint_spacing_for_test(1.0f) > ed.paint_spacing_for_test(0.0f));
+    }
+    /* The preferences saving writes it beside prefs.txt too. */
+    {
+      Editor ed;
+      ed.init_headless(1400, 900);
+      ed.prefs_for_test(fs::join(dir, "prefs.txt"));
+      std::filesystem::remove(fs::join(dir, "brushes.txt"));
+      ed.command("sculpt size 17");
+      ed.save_prefs_for_test();
+      std::string t2;
+      CHECK(fs::read_file(fs::join(dir, "brushes.txt"), t2) && t2.find("slot sculpt 0 17") != std::string::npos);
+    }
+    std::filesystem::remove(fs::join(dir, "brushes.txt"));
+    std::filesystem::remove(fs::join(dir, "prefs.txt"));
+  });
+
+  test("per brush settings (round 540, te): a truncated, garbage, huge, negative or NaN brushes.txt loads what it can with every size and strength inside its Inspector range", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    auto in_range = [&] {
+      const SculptBrush &s = ed.sculpt_brush_for_test();
+      const WeightBrush &w = ed.wp_brush_for_test();
+      const PaintBrush &p = ed.paint_brush_for_test();
+      bool ok = std::isfinite(s.radius) && s.radius >= 1.0f && s.radius <= 500.0f && std::isfinite(s.strength) && s.strength >= 0.0f && s.strength <= 1.0f;
+      ok = ok && std::isfinite(w.radius) && w.radius >= 1.0f && w.radius <= 1000.0f && std::isfinite(w.strength) && w.strength >= 0.0f && w.strength <= 1.0f;
+      ok = ok && std::isfinite(p.radius) && p.radius >= 1.0f && p.radius <= 500.0f && std::isfinite(p.opacity) && p.opacity >= 0.0f && p.opacity <= 1.0f;
+      ok = ok && std::isfinite(p.color.x) && std::isfinite(p.color.y) && std::isfinite(p.color.z);
+      return ok && s.kind >= 0 && s.kind < 11 && w.mode >= 0 && w.mode < 4 && p.mode >= 0 && p.mode < 3;
+    };
+    ed.command("sculpt size 40");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt size 60");
+    ed.command("paint brush smudge");
+    ed.command("paint size 50");
+    ed.command("brush curve hardness on 0 0.2 1 1");
+    const std::string good = ed.brushes_text_for_test();
+    CHECK(good.size() > 100);
+    /* Every truncation of a real file (stepping by 7 bytes), and the file with a byte flipped now and then. */
+    int bad_loads = 0;
+    for (size_t n = 0; n <= good.size(); n += 7) {
+      ed.brushes_load_text_for_test(good.substr(0, n));
+      if (!in_range()) bad_loads++;
+    }
+    uint32_t seed = 12345u;
+    for (int round = 0; round < 60; round++) {
+      std::string t = good;
+      for (int k = 0; k < 6; k++) {
+        seed = seed * 1664525u + 1013904223u;
+        t[(seed >> 8) % t.size()] = (char)(seed >> 24);
+      }
+      ed.brushes_load_text_for_test(t);
+      if (!in_range()) bad_loads++;
+    }
+    CHECK(bad_loads == 0);
+    /* Hand-made bad lines: every one a slot of the brush that is live. */
+    const char *bad[] = {
+        "bank sculpt 1 0 0 0\nslot sculpt 1 nan 0.5\n",
+        "bank sculpt 1 0 0 0\nslot sculpt 1 inf -inf\n",
+        "bank sculpt 1 0 0 0\nslot sculpt 1 -5 7\n",
+        "bank sculpt 1 0 0 0\nslot sculpt 1 1e30 1e30\n",
+        "bank sculpt 1 0 0 0\nslot sculpt 1 1e999 0.5\n",
+        "bank paint 1 0 0 1\nslot paint 1 20 2 nan nan nan\n",
+        "bank paint 1 0 0 1\nslot paint 1 20 -3 1e30 -1e30 0\n",
+        "bank weight -4 1 1 1\nslot weight -1 5 5\n",
+        "bank sculpt 999999999999 1 1 1\n",
+        "bank sculpt\nslot\nslot sculpt\nbank\n   \n\t\r\n",
+        "paint_hardness_curve nan nan\npaint_spacing_curve 0 0\npaint_hardness_curve 0 0 1\n",
+        "paint_hardness_curve 1 1 0 0\npaint_hardness_curve 0 1 0 1 0 1\n",
+    };
+    for (const char *t : bad) {
+      ed.brushes_load_text_for_test(t);
+      const bool ok = in_range();
+      if (!ok) std::printf("    out of range after loading: %s\n", t);
+      CHECK(ok);
+    }
+    /* A clamped value, exactly: 1e30 -> 500, -5 -> 1, strength 7 -> 1. */
+    ed.brushes_load_text_for_test("bank sculpt 2 0 0 0\nslot sculpt 2 1e30 7\n");
+    CHECK(ed.sculpt_brush_for_test().kind == 2 && ed.sculpt_brush_for_test().radius == 500.0f && ed.sculpt_brush_for_test().strength == 1.0f);
+    ed.brushes_load_text_for_test("bank sculpt 2 0 0 0\nslot sculpt 2 -5 -1\n");
+    CHECK(ed.sculpt_brush_for_test().radius == 1.0f && ed.sculpt_brush_for_test().strength == 0.0f);
+    /* The editor goes on working after garbage: a switch and a size still land on the right brush. */
+    ed.command("sculpt brush draw");
+    ed.command("sculpt size 33");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt brush draw");
+    CHECK(ed.sculpt_brush_for_test().radius == 33.0f);
+  });
+
+  test("per brush settings (round 540, te): a sculpt size typed as NaN or a brush saved while its size is NaN never writes a number the next start cannot read back inside the range", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("sculpt size nan");
+    ed.command("sculpt strength nan");
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    std::printf("    after 'sculpt size nan': radius %g strength %g\n", b.radius, b.strength);
+    CHECK(std::isfinite(b.radius) && std::isfinite(b.strength));
+    const std::string t = ed.brushes_text_for_test();
+    CHECK(t.find("nan") == std::string::npos && t.find("inf") == std::string::npos);
+    ed.brushes_load_text_for_test(t);
+    CHECK(std::isfinite(b.radius) && b.radius >= 1.0f && b.radius <= 500.0f);
+  });
+
+  test("per brush settings (round 540, te): a Spray stroke scatters smaller dabs without leaving its temporary size or strength in any brush's slot", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed);
+    CHECK(g != nullptr);
+    if (!g) return;
+    ed.command("sculpt size 30");
+    ed.command("sculpt strength 0.2");
+    ed.command("sculpt brush smooth");
+    ed.command("sculpt size 70");
+    ed.command("sculpt strength 0.9");
+    ed.command("sculpt brush draw");
+    ed.command("sculpt stroke spray");
+    const SculptBrush &b = ed.sculpt_brush_for_test();
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const Recti sr = ed.scene_rect_for_test();
+    const int ix = sr.x + (int)px.x, iy = sr.y + (int)px.y;
+    const double v0 = volume(*g->mesh_filter()->mesh);
+    auto drag = [&] {
+      step(ed, {r540_ev(platform::EventType::MouseMove, ix, iy)});
+      step(ed, {r540_ev(platform::EventType::MouseDown, ix, iy)});
+      for (int i = 1; i <= 6; i++) step(ed, {r540_ev(platform::EventType::MouseMove, ix + 6 * i, iy + 2 * i)});
+      step(ed, {r540_ev(platform::EventType::MouseUp, ix + 36, iy + 12)});
+      step(ed);
+    };
+    drag();
+    std::printf("    after a Spray drag on Draw: size %g strength %g (volume change %.5f)\n", b.radius, b.strength, volume(*g->mesh_filter()->mesh) - v0);
+    CHECK(std::fabs(volume(*g->mesh_filter()->mesh) - v0) > 0.0);  // (the stroke did something)
+    CHECK(b.kind == 0 && b.radius == 30.0f && std::fabs(b.strength - 0.2f) < 1e-6f);
+    ed.command("sculpt brush smooth");
+    CHECK(b.radius == 70.0f && std::fabs(b.strength - 0.9f) < 1e-6f);
+    drag();  // (a Spray stroke with Smooth live)
+    CHECK(b.kind == 1 && b.radius == 70.0f && std::fabs(b.strength - 0.9f) < 1e-6f);
+    ed.command("sculpt brush draw");
+    CHECK(b.radius == 30.0f && std::fabs(b.strength - 0.2f) < 1e-6f);
+    for (const auto &kv : ed.sculpt_bank_for_test().slots) std::printf("    slot %d: size %g strength %g\n", kv.first, kv.second.size, kv.second.strength);
+  });
+
+  test("per brush settings (round 540, te): a brushes.txt naming Weight Paint mode 9 (past the list) is ignored - no slot, no crash, the brush stays one of the four", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("wpbrush add 40");
+    ed.command("wpbrush blur 70");
+    ed.brushes_load_text_for_test("bank weight 9 0 0 0\nslot weight 9 5 0.5\nslot weight 4 6 0.6\nslot weight 3 88 0.4\n");
+    const WeightBrush &w = ed.wp_brush_for_test();
+    std::printf("    mode %d radius %g after a file naming mode 9\n", w.mode, w.radius);
+    CHECK(w.mode >= 0 && w.mode < 4);
+    CHECK(ed.weight_bank_for_test().slots.count(9) == 0 && ed.weight_bank_for_test().slots.count(4) == 0);
+    CHECK(ed.weight_bank_for_test().slots.count(3) == 1);
+    ed.command("wpbrush add");
+    ed.command("wpbrush blur");
+    CHECK(w.mode == 3 && w.radius == 88.0f);
+    const std::string t = ed.brushes_text_for_test();
+    CHECK(t.find("slot weight 9") == std::string::npos);
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -2748,4 +3456,6 @@ void run_sculpt_tests() {
   tests_round368();
   tests_round508();
   tests_round508_te();
+  tests_round540();
+  tests_round540_te();
 }
