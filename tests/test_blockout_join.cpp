@@ -2487,8 +2487,40 @@ static void tests_round501_second() {
   });
 }
 
+/* Round 552 (task 0532): the other Blockouts' corners a drag snaps to are kept for the drag, keyed on the scene - by its
+ * address, until this round. A scene opened where the closed one was, with as many objects, kept the closed scene's corners. */
+static void tests_round552_join() {
+  test("blockout join (552): a scene opened where the closed one was (the same address, as many objects) gives the snaps its own Blockouts' corners, not the closed scene's", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    r501_empty(ed);
+    r501e_slab(ed, "Near", {0.0f, 0.0f, 0.0f});
+    const std::string text = save_scene_text(ed.scene());  // (the slab at the world's middle)
+    GameObject *near = ed.scene().find_by_name("Near");
+    CHECK(near != nullptr);
+    if (!near) return;
+    near->set_world_position({40.0f, 0.0f, 0.0f});
+    const std::vector<Vec3> before = ed.blockout_targets({});
+    Scene loaded;
+    std::string error;
+    CHECK(load_scene_text(text, loaded, error));
+    const Scene *place = &ed.scene();
+    ed.scene() = std::move(loaded);  // (the same address, the same object count - asked in the same frame, no press)
+    CHECK(&ed.scene() == place);
+    const std::vector<Vec3> after = ed.blockout_targets({});
+    float far_before = 0.0f, far_after = 0.0f;
+    for (const Vec3 &p : before) far_before = std::max(far_before, std::fabs(p.x));
+    for (const Vec3 &p : after) far_after = std::max(far_after, std::fabs(p.x));
+    std::printf("    corners %zu -> %zu, the farthest x %.2f -> %.2f\n", before.size(), after.size(), far_before, far_after);
+    CHECK(!before.empty() && far_before > 30.0f);
+    CHECK(after.size() == before.size());
+    CHECK(far_after < 5.0f);  // (the opened scene's slab, at the middle)
+  });
+}
+
 void run_blockout_join_tests() {
   tests_round501();
   tests_round501_engineer();
   tests_round501_second();
+  tests_round552_join();
 }
