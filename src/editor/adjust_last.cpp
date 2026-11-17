@@ -245,6 +245,20 @@ void Editor::blockout_last_rerun() {
   amend_last_step();
 }
 
+/* Round 560 (task 0542): a panel taller than the Scene view grew up over the view's toolbar and under the tab strip, and
+ * its rows could not be reached. It now stays inside the view; the header stays put and the rows below it scroll. */
+Editor::AdjustPanelPlace Editor::adjust_panel_place(const Recti &view, int w, int head_h, int body_h) {
+  auto &u = ui_;
+  const int margin = u.px(10);
+  const int room = std::max(head_h, view.h - 2 * margin);
+  const int h = std::min(head_h + body_h, room);
+  AdjustPanelPlace p;
+  p.r = {view.x + margin, std::max(view.y, view.bottom() - h - margin), w, h};
+  p.body = {p.r.x, p.r.y + head_h, w, h - head_h};
+  p.scrolls = body_h > p.body.h && p.body.h > 0;
+  return p;
+}
+
 /* The panel, at the bottom left of the Scene view as Edit Mode's is: a title, then the operation's numbers. */
 void Editor::draw_obj_last_panel(const Recti &view) {
   auto &u = ui_;
@@ -379,8 +393,10 @@ void Editor::draw_obj_last_panel(const Recti &view) {
   }
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   const int nrows = obj_last_open_ ? (int)rows.size() : 0;
-  const int h = rh + u.px(6) + nrows * (rh + u.px(2)) + (nrows ? pad : 0);
-  const Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
+  const int head_h = u.px(3) + rh + u.px(2);  // (the first row starts here: hr's bottom and 2 px)
+  const int body_h = rh + u.px(6) + nrows * (rh + u.px(2)) + (nrows ? pad : 0) - head_h;  // (the panel's height as before, less the header)
+  const AdjustPanelPlace place = adjust_panel_place(view, w, head_h, body_h);
+  const Recti r = place.r;
   obj_last_rect_ = r;
   u.frame(r, (u.theme.popup & 0x00FFFFFFu) | (235u << 24), u.theme.border, u.px(4));
   const Recti hr{r.x + pad, r.y + u.px(3), r.w - pad * 2, rh};
@@ -394,10 +410,12 @@ void Editor::draw_obj_last_panel(const Recti &view) {
   }
   bool changed = false;
   const int style_was = o.style;
-  int y = hr.bottom() + u.px(2);
+  const int off = place.scrolls ? u.begin_scroll(u.id("objlast_scroll_" + o.kind + o.what), place.body, body_h) : 0;  // (each operation opens at its first row)
+  const int rw = r.w - (place.scrolls ? u.px(10) : 0);  // (the rows leave the scrollbar its strip)
+  int y = hr.bottom() + u.px(2) - off;
   for (size_t k = 0; k < (size_t)nrows; k++, y += rh + u.px(2)) {
     const Row &row = rows[k];
-    const Recti lr{r.x + pad, y, u.px(110), rh}, fr{r.x + pad + u.px(112), y, r.w - pad * 2 - u.px(112), rh};
+    const Recti lr{r.x + pad, y, u.px(110), rh}, fr{r.x + pad + u.px(112), y, rw - pad * 2 - u.px(112), rh};
     u.label(lr, row.label);
     if (u.record_buttons) u.button_rects[std::string("adjust:") + row.label] = fr;
     const ui::Id id = u.id(std::string("objlast_") + row.label);
@@ -406,6 +424,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     else if (row.i) changed |= u.int_field(id, fr, *row.i, row.imn, row.imx);
     else if (row.b) changed |= u.checkbox({fr.x, fr.y + u.px(2), rh - u.px(4), rh - u.px(4)}, *row.b);
   }
+  if (place.scrolls) u.end_scroll();
   if (changed && o.kind == "blockout" && o.n == 3 && o.opening != 0 && style_was >= 0 && o.style >= 0 && o.style != style_was && !(o.opening == 2 && style_was == kWindowRound)) {  // (a new style's preset size, over the old style's only; a Round window keeps its size)
     float ow, oh, nw, nh;
     blockout_opening_preset(o.opening, style_was, ow, oh);

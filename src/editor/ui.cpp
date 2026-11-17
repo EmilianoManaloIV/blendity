@@ -118,6 +118,7 @@ void Context::begin_frame(Image *target, double now) {
   elided_key_ = 0, elided_label_.clear();  // (task 0293: a cut label belongs to the frame that drew it)
   if (!in.down[0] && !in.released[0]) touch_candidate_ = touch_scroll_id_ = 0, finger_widget_drag_ = false;  // (task 0215)
   if (in.pressed[0]) touch_scrolled_ = finger_widget_drag_ = false, finger_press_y_ = in.my;
+  if (popups_.empty() || (!in.down[0] && !in.released[0])) popup_bar_drag_ = false;  // (round 560: a drag whose popup closed, or whose release went unseen, ends)
   canvas.begin(target);
   frame_++;
   order_last_ = 0;
@@ -182,6 +183,7 @@ bool Context::covered(int x, int y) const {
 
 bool Context::hovered(const Recti &r) const {
   if (in.cancelled) return false;  // (a press taken back: task 0213)
+  if (popup_bar_drag_) return false;  // (round 560: a popup's scrollbar is being dragged - no row under the pointer lights, opens or takes the release)
   return r.contains(in.mx, in.my) && canvas.clip().contains(in.mx, in.my) && !covered(in.mx, in.my) &&
          (active_ == 0 || current_layer_ > 0 || true);
 }
@@ -440,6 +442,9 @@ void Context::label(const Recti &r, const std::string &text, uint32_t color, Ali
   int ty = r.y + (r.h - font.line_height()) / 2;
   int tw = font.text_width(text);
   int tx = r.x;
+  /* Round 560 (task 0542): centred or right-aligned text wider than its room started left of it and lost its first letters
+   * (a disabled "Add Spring Bones" in a narrow Rigging window): it is drawn from the left and ends in "..." instead. */
+  if (tw > r.w) align = Align::Left;
   if (align == Align::Center) tx = r.x + (r.w - tw) / 2;
   else if (align == Align::Right) tx = r.right() - tw;
   canvas.push_clip(r);
@@ -581,14 +586,19 @@ bool Context::icon_button(const Recti &r, Icon icon, bool selected, const char *
 bool Context::checkbox(const Recti &r, bool &v) { return checkbox_impl(r, nullptr, nullptr, v); }
 
 /* `row`: the rectangle the whole row takes (toggle_row), for the focus and its ring; `text`: the row's label, its name. */
+/* Round 560 (task 0542): the box drawn. It was the font's line less a pixel - 12-13 px, a small mark to aim at; it is now at
+ * least 16 px (scaled) where the rectangle given is that tall. */
+int Context::checkbox_side(const Recti &r) const { return std::min(r.h, std::max(font.line_height() - px(1), px(16))); }
+
 bool Context::checkbox_impl(const Recti &r, const Recti *row, const std::string *text, bool &v) {
-  int s = std::min(r.h, font.line_height()) - px(1);
+  int s = checkbox_side(r);
   Recti box{r.x, r.y + (r.h - s) / 2, s, s};
   /* What a click reaches is at least a row wide and tall (round 509: it was the box and 2 px, 15 px wide); the box drawn stays. */
   const int reach_w = std::max(s + px(2), row_h()), reach_h = std::max(r.h, row_h());
   const Recti reach{r.x, r.y + (r.h - reach_h) / 2, reach_w, reach_h};
   bool hot = hovered(box.intersect(r).empty() ? r : reach);
   record_control("checkbox", reach, {}, true);  // (what a click reaches; toggle_row widens it to its row)
+  if (record_buttons && !controls.empty()) controls.back().mark = box;
   const Id base = text ? id(*text) ^ 0xCB : id((uint64_t)(uint32_t)r.x << 32 | (uint32_t)r.w) ^ 0xCB;
   const bool pressed = focus_stop(stop_id(base), row ? *row : reach) == kActivated;
   frame(box, theme.field, hot ? theme.field_hover : theme.field_border, px(2));
@@ -609,7 +619,7 @@ bool Context::checkbox_impl(const Recti &r, const Recti *row, const std::string 
 bool Context::toggle_row(const Recti &r, const std::string &text, bool &v) {
   bool changed = checkbox_impl(r, &r, &text, v);
   if (record_buttons && !controls.empty()) controls.back().r = r, controls.back().label = text;  // (the whole row takes the click)
-  int s = std::min(r.h, font.line_height());
+  int s = checkbox_side(r) + px(1);
   label({r.x + s + px(5), r.y, r.w - s - px(5), r.h}, text);
   if (!changed && hovered(r) && in.pressed[0]) {
     v = !v;
@@ -2004,6 +2014,47 @@ Recti Context::floating_panel(Id i, Recti &r, const Recti &bounds, const std::st
   return {r.x, r.y + th, r.w, r.h - th};
 }
 
+/* Round 560 (task 0542): a popup taller than its room - Preferences on a small window - scrolled by the wheel alone and showed
+ * no sign there was more. Its scrollbar is the scroll areas' (begin_scroll's): a thumb as tall as the share shown, dragged,
+ * and a press on the track takes the thumb's middle there. A popup under another takes the press where the other does not
+ * cover it, as its rows do. While the bar is dragged nothing else hovers (hovered), and the release that ends the drag is
+ * the bar's: dropped over a list's row it picked the row and closed the list. */
+Recti Context::popup_scrollbar_thumb(const Recti &r, int content_h, int scroll_max, int scroll) const {
+  const int bw = px(10);
+  const int th = std::max(px(24), (int)((int64_t)r.h * r.h / std::max(1, content_h)));
+  const int ty = r.y + (int)((int64_t)(r.h - th) * scroll / std::max(1, scroll_max));
+  return {r.right() - bw + px(2), ty, bw - px(4), th};
+}
+
+void Context::popup_scrollbar_drag(size_t k, const Recti &r, int content_h, int scroll_max) {
+  const Recti track{r.right() - px(10), r.y, px(10), r.h};
+  const Recti thumb = popup_scrollbar_thumb(r, content_h, scroll_max, popups_[k].scroll);
+  const Id sid = popups_[k].id ^ 0x5C0B0ull;
+  bool above = false;  // (a higher popup over the bar, as last drawn)
+  for (size_t j = k + 1; j < popup_rects_prev_.size(); j++) above = above || popup_rects_prev_[j].contains(in.mx, in.my);
+  if (!above && track.contains(in.mx, in.my) && in.pressed[0]) {
+    active_ = sid;
+    scroll_drag_offset_ = thumb.contains(in.mx, in.my) ? in.my - thumb.y : thumb.h / 2;
+    /* (The press is not taken: the rows leave the bar its strip, so nothing under it is pressed, and a field being
+     * edited still sees a press away from it and lets go - not left editing while the drag scrolls it away.) */
+  }
+  popup_bar_drag_ = active_ == sid;
+  if (!popup_bar_drag_) return;
+  popups_[k].scroll = (int)((int64_t)(in.my - scroll_drag_offset_ - r.y) * scroll_max / std::max(1, r.h - thumb.h));
+  redraw = true;
+  if (!in.released[0] && in.down[0]) return;
+  active_ = 0;
+  in.released[0] = false;  // (the release ends the drag: no row under it takes it)
+  popup_bar_drag_ = false;
+}
+
+void Context::popup_scrollbar_draw(Id popup, const Recti &r, int content_h, int scroll_max, int scroll) {
+  const Recti thumb = popup_scrollbar_thumb(r, content_h, scroll_max, scroll);
+  canvas.fill_rect({r.right() - px(10), r.y + 1, px(10) - 1, r.h - 2}, theme.scroll_track);
+  canvas.fill_round_rect(thumb, px(3), active_ == (popup ^ 0x5C0B0ull) ? theme.button_hover : theme.scroll_thumb);
+  if (record_buttons) button_rects["popup:scrollbar"] = thumb;  // (tests drag the thumb)
+}
+
 Recti Context::popup_row(int h) {
   if (h < 0) h = row_h();
   Recti r{popup_area_.x, popup_cursor_y_, popup_area_.w, h};
@@ -2041,6 +2092,8 @@ void Context::draw_popups() {
       in.wheel_y = 0.0f;
       redraw = true;
     }
+    const int bar_w = scroll_max > 0 ? px(10) : 0;
+    if (bar_w) popup_scrollbar_drag(k, r, h, scroll_max);
     popups_[k].scroll = std::max(0, std::min(scroll_max, popups_[k].scroll));
     p.scroll = popups_[k].scroll;
     canvas.push_clip({0, 0, canvas.width(), canvas.height()});
@@ -2048,11 +2101,12 @@ void Context::draw_popups() {
     canvas.fill_rect(r, theme.popup);
     canvas.rect_outline(r, theme.border);
     current_layer_ = (int)k + 1;
-    popup_area_ = {r.x + 1, r.y + px(4), r.w - 2, r.h - px(8)};
+    popup_area_ = {r.x + 1, r.y + px(4), r.w - 2 - bar_w, r.h - px(8)};  // (round 560: the rows leave the scrollbar its strip)
     popup_cursor_y_ = r.y + px(4) - p.scroll;
     canvas.push_clip(r.shrink(1));
     if (p.body) p.body();
     canvas.pop_clip();
+    if (bar_w) popup_scrollbar_draw(p.id, r, h, scroll_max, p.scroll);  // (after the rows: nothing they draw covers it)
     canvas.pop_clip();
     if (k >= popups_.size() || popups_[k].id != p.id) break;  // closed by a click inside
     int content = popup_cursor_y_ - r.y + px(4) + p.scroll;  // (the whole list's height, scrolled or not)

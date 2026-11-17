@@ -300,6 +300,7 @@ class Lightmapper {
   std::atomic<uint64_t> pick_texels_{0}, chance_kept_{0}, chance_dropped_{0};  // (round 484)
   std::unique_ptr<class PathTracer> pt_;
   std::vector<PTObject> pt_objects_;
+  std::vector<std::vector<Vec4>> pt_colors_;  // (task 0537) a Vertex Color material's colours, per object (PTObject::colors)
   LightingData out_;
   std::vector<std::vector<uint8_t>> covered_;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner_;    // per page: the object owning a texel (-1 none)

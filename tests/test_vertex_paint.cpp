@@ -1151,6 +1151,80 @@ static void vertex_colour_input_tests() {
   });
 }
 
+/* ================================================================ round 545b2 (task 0537): what goes to the card, pinned.
+ * The card's own pictures are in test_gpu.cpp (group gpu); this one needs no card. */
+static void vertex_colour_card_packing_tests() {
+  test("vertex colour on the card (task 0537): the path tracer's vertex list carries the colour in the spare lanes - r p.w, g n.w, b uv.z, a uv.w; white without colours, with a layer that doesn't fit, and a NaN or HDR value clamped", [] {
+    MeshPtr pad = vci_pad(false);
+    const RenderMesh &rm = pad->render_mesh_tangents();
+    std::vector<Vec4> cols;
+    CHECK(render_vertex_colors_into(*pad, rm, cols) && cols.size() == rm.positions.size());
+    std::vector<MaterialPtr> mats{vci_mat(true)};
+    Environment e;
+    e.mode = Environment::Color;
+    e.color = {0.5f, 0.5f, 0.5f};
+    /* The scene the card is sent, built with `c` as the object's colours. */
+    auto sent = [&](const std::vector<Vec4> *c) {
+      PTObject o;
+      o.mesh = &rm;
+      o.model = Mat4::identity();
+      o.materials = &mats;
+      o.colors = c;
+      PathTracer pt;
+      pt.build({o}, {}, e);
+      gpu::Scene s;
+      CHECK(pt.build_gpu_scene_fit(s, 0, nullptr, false));
+      return s.verts;
+    };
+    const std::vector<gpu::GVertex> good = sent(&cols);
+    CHECK(good.size() == rm.positions.size());
+    size_t wrong = 0, moved = 0;
+    for (size_t v = 0; v < good.size() && v < cols.size(); v++) {
+      const gpu::GVertex &g = good[v];
+      wrong += g.p[3] != cols[v].x || g.n[3] != cols[v].y || g.uv[2] != cols[v].z || g.uv[3] != cols[v].w;
+      moved += g.p[0] != rm.positions[v].x || g.p[1] != rm.positions[v].y || g.p[2] != rm.positions[v].z || g.n[0] != rm.normals[v].x ||
+               g.n[1] != rm.normals[v].y || g.n[2] != rm.normals[v].z || (v < rm.uvs.size() && (g.uv[0] != rm.uvs[v].x || g.uv[1] != rm.uvs[v].y));
+    }
+    std::printf("    %zu vertices: %zu with the wrong colour lanes, %zu with a position / normal / uv changed\n", good.size(), wrong, moved);
+    CHECK(wrong == 0 && moved == 0);
+    bool both = false, red = false, blue = false;  // (the pad really has both colours in the lanes)
+    for (const gpu::GVertex &g : good) red = red || (g.p[3] == 1 && g.uv[2] == 0), blue = blue || (g.p[3] == 0 && g.uv[2] == 1);
+    both = red && blue;
+    CHECK(both);
+    /* Without colours, and with a list of the wrong size: every vertex white. */
+    std::vector<Vec4> short_list(cols.begin(), cols.end() - 1);
+    for (const std::vector<gpu::GVertex> &v : {sent(nullptr), sent(&short_list)}) {
+      size_t not_white = 0;
+      for (const gpu::GVertex &g : v) not_white += g.p[3] != 1 || g.n[3] != 1 || g.uv[2] != 1 || g.uv[3] != 1;
+      CHECK(v.size() == good.size() && not_white == 0);
+    }
+    /* NaN (-> white lane) and out-of-range values (clamped to 0..1). */
+    std::vector<Vec4> odd = cols;
+    odd[0] = Vec4(std::numeric_limits<float>::quiet_NaN(), 2.0f, -1.0f, 0.5f);
+    const std::vector<gpu::GVertex> o = sent(&odd);
+    std::printf("    NaN / 2 / -1 / 0.5 in the lanes: %g %g %g %g\n", o[0].p[3], o[0].n[3], o[0].uv[2], o[0].uv[3]);
+    CHECK(o[0].p[3] == 1.0f && o[0].n[3] == 1.0f && o[0].uv[2] == 0.0f && o[0].uv[3] == 0.5f);
+    CHECK(std::isfinite(o[0].p[3] + o[0].n[3] + o[0].uv[2] + o[0].uv[3]));
+    /* Two objects sharing the mesh, the plain one (no colours) first: the mesh's one vertex block still carries the
+     * colours the Vertex Color object has (review of round 545b2: the first object's had left the second white). */
+    {
+      std::vector<MaterialPtr> plain{vci_mat(false)};
+      PTObject a, b;
+      a.mesh = b.mesh = &rm;
+      a.model = Mat4::identity(), b.model = Mat4::translate({3, 0, 0});
+      a.materials = &plain, b.materials = &mats;
+      b.colors = &cols;
+      PathTracer pt;
+      pt.build({a, b}, {}, e);
+      gpu::Scene s;
+      CHECK(pt.build_gpu_scene_fit(s, 0, nullptr, false));
+      size_t wrong_shared = 0;
+      for (size_t v = 0; v < s.verts.size() && v < cols.size(); v++) wrong_shared += s.verts[v].p[3] != cols[v].x || s.verts[v].uv[2] != cols[v].z;
+      std::printf("    shared mesh, plain object first: %zu vertices in the block, %zu with the wrong colour\n", s.verts.size(), wrong_shared);
+      CHECK(s.verts.size() == rm.positions.size() && wrong_shared == 0);
+    }
+  });
+}
 
 void run_vertex_paint_tests() {
   /* ================================================================ 1. the operator table */
@@ -2444,4 +2518,5 @@ void run_vertex_paint_tests() {
 
 
   vertex_colour_input_tests();
+  vertex_colour_card_packing_tests();
 }

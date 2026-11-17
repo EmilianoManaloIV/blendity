@@ -58,6 +58,9 @@ uint64_t Editor::lightmap_scene_key() {
       mix(lightmap_hash_of(g, *m));
       mixf(&mr->scale_in_lightmap, 1);
       mix(mr->generate_lightmap_uvs);
+      bool reads_colours = false;  // (task 0537: a Vertex Color material bakes the colours: they and the flag key the bake)
+      for (const MaterialPtr &mp : mr->materials) reads_colours = reads_colours || (mp && mp->vertex_color);
+      if (reads_colours) mix(0x9e3779b9u ^ m->version);  // (only then: the keys saved with bakes before stay valid)
       for (const MaterialPtr &mp : mr->materials)
         if (mp) {
           mixf(&mp->base_color.x, 3);
@@ -603,6 +606,7 @@ void Editor::bake_job_run(BakeJob &j) {
   if (j.probe_box_ok || grouped) {
     std::vector<AABB> tris;
     std::vector<PTObject> objs;
+    std::vector<std::vector<Vec4>> colours(j.objects.size());  // (task 0537: a Vertex Color material's colours, as the render sees them)
     for (const BakeObject &o : j.objects) {
       const RenderMesh &rm = o.mesh->render_mesh_tangents();
       for (size_t k = 0; k < rm.tri_count(); k++) {
@@ -611,6 +615,9 @@ void Editor::bake_job_run(BakeJob &j) {
         tris.push_back(b);
       }
       objs.push_back({&rm, o.model, &o.materials});
+      std::vector<Vec4> &c = colours[objs.size() - 1];
+      pt_object_colors(*o.mesh, rm, o.materials, c);
+      if (!c.empty()) objs.back().colors = &c;
     }
     /* Round 455: with Light Probe Groups the probes are theirs, where they were put (Unity moves none); baked as a list,
      * then a grid over their tetrahedra (probe_volume_from_points) is what the views read. */
