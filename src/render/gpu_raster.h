@@ -197,6 +197,20 @@ struct RtShadowStats {
   double last_build_ms = 0;  // the last frame's recording of its builds, on the host
 };
 
+/* Round 532 (task 0512): a Gaussian splat the CPU already projected (gsplat_raster.h's SplatScreen), 32 bytes. x, y are
+ * the centre in pixels, y counted down from the top as the picture's rows are; z the depth 0..1. The ellipse: the first
+ * axis's unit direction `e0` (two halves, packHalf2x16(e0x, e0y)), inv0 / inv1 the 1 / axis lengths in pixels. A dot (a
+ * Points cloud's point, a hard disc) has inv1 = 0 and inv0 = the disc's radius in pixels (a real axis has a positive
+ * inv1). rgbc: red | green << 8 | blue << 16 (the display colour as bytes) | cloud index << 24 (the
+ * index into RasterFrame::splat_ids). */
+struct RasterSplat {
+  float x, y, z, opacity;
+  float inv0, inv1;
+  uint32_t e0;
+  uint32_t rgbc;
+};
+static_assert(sizeof(RasterSplat) == 32, "RasterSplat: the shaders' layout");
+
 struct RasterFrame {
   int slot = 0;               // which view (0-3): its own targets
   int width = 0, height = 0;
@@ -222,6 +236,10 @@ struct RasterFrame {
   /* Task 0195: the see-through surfaces' triangles back to front, three corners each (Renderer3D::draw_see_through's
    * order), drawn after the lighting. */
   std::vector<SeeCorner> see_through;
+  /* Round 532 (task 0512): Gaussian splats, back to front (the draw order), blended over the lit picture before the
+   * see-through surfaces; splat_ids: cloud index (RasterSplat::rgbc >> 24) -> the object's pick id. At most 255 clouds. */
+  std::vector<RasterSplat> splats;
+  std::vector<uint32_t> splat_ids;
   /* Task 0197: the baked-lit triangles' corners, two vec4 each - (local position, lightmap u), (lightmap v, realtime
    * u, v, 0) - three a triangle, in the card's triangle order; the probe volume's settings; realtime GI's specular
    * occlusion. */
@@ -325,7 +343,8 @@ class Raster {
   /* Task 0192: whether RasterFrame's overlays are drawn (else the caller draws them itself). */
   virtual bool can_draw_overlays() const { return false; }
   virtual bool can_draw_see_through() const { return false; }  // task 0195: Transparent and Glass (dual-source blending)
-  virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
+  virtual bool can_draw_splats() const { return false; }        // round 532: RasterFrame::splats (Gaussian splats)
+  virtual bool can_draw_toon_maps() const { return false; }   // task 0196: toon materials' painted maps (the toon pass)
   virtual bool can_draw_baked() const { return false; }         // task 0197: lightmaps and probes (the baked pass)
   virtual bool can_draw_hdr() const { return false; }           // task 0197: the picture in linear light
   virtual bool can_draw_see_through_hdr() const { return false; }  // round 414: see-through surfaces over it (their pixels marked "none", as the CPU's)

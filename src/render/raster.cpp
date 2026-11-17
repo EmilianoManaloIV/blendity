@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raster.h"
+#include "gsplat_raster.h"
 #include "voxel_gi.h"
 #include "probe_volume.h"
 #include "light_volume_bake.h"
@@ -566,6 +567,11 @@ static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, c
   sp.has_probe = true;
 }
 
+SplatPass &Renderer3D::splat_pass() {
+  if (!own_splats_) own_splats_ = std::make_shared<SplatPass>();
+  return *own_splats_;
+}
+
 void Renderer3D::flush() {
   uses_++;  // (task 0421)
   ScopedTimer total;
@@ -574,7 +580,7 @@ void Renderer3D::flush() {
   if (!opt_.multithreaded) js.set_max_threads(1);
 
   const int W = rt_->width, H = rt_->height;
-  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; js.set_max_threads(saved_threads); return; }
+  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; splats_ = nullptr; js.set_max_threads(saved_threads); return; }
   if (!(rt_->want_hdr && opt_.shade == ShadeMode::Deferred) || rt_->hdr.size() != (size_t)W * H) rt_->hdr.clear();  // begin() allocates it
   const int T = opt_.tile_size;
   tiles_x_ = (W + T - 1) / T;
@@ -944,6 +950,13 @@ void Renderer3D::flush() {
     shade_deferred();
     stats_.ms_shade = tsh.ms();
   }
+  if (splats_ && !depth_only && rt_->color) {
+    /* Round 532: Gaussian splats over the opaque surfaces, under the see-through ones (gsplat_raster.h). */
+    ScopedTimer tsp;
+    splats_->draw_cpu(*rt_);
+    stats_.ms_shade += tsp.ms();
+  }
+  splats_ = nullptr;
   if (any_see_through && !depth_only && rt_->color) {
     ScopedTimer tst;
     draw_see_through(see_through);
@@ -983,9 +996,12 @@ Vec3 Lightmap::sample(Vec2 uv) const {
 }
 
 static inline uint32_t pack_rgb(float r, float g, float b) {
+  /* Clamped as a float before the cast (round 539): a NaN or infinite shade - a mesh with NaN positions lit through
+   * its NaN normals - would overflow the int (UBSan: "nan is outside the range of representable values"). NaN is 0. */
   auto c = [](float v) {
-    int i = (int)(v * 255.0f + 0.5f);
-    return (uint32_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
+    if (!(v == v)) v = 0.0f;
+    v = std::max(0.0f, std::min(v, 1.0f));
+    return (uint32_t)(int)(v * 255.0f + 0.5f);
   };
   return 0xFF000000u | (c(r) << 16) | (c(g) << 8) | c(b);
 }
