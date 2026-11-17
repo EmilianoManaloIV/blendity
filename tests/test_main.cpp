@@ -173,6 +173,12 @@ int main(int argc, char **argv) {
   /* Scenes default to Automatic lighting updates here (the behaviour the tests before task 0020 were written
    * for); Manual's own tests ask for it. */
   if (!std::getenv("BLENDITY_LIGHTING_UPDATES")) set_env("BLENDITY_LIGHTING_UPDATES", "automatic");
+  /* Round 557: the cards' caches (the compiled kernels, the tracer's and the rasterizer's pipeline caches) in a folder of
+   * the test programs' own, never the user's ~/.blendity/cache. One that stays between runs: a folder per run would
+   * build every pipeline again (minutes of a card's first open). 557b: one per build - named by the folder the program
+   * runs from - so two sessions' test runs (two worktrees, two builds) never share it. */
+  if (!std::getenv("BLENDITY_CACHE_DIR"))
+    set_env("BLENDITY_CACHE_DIR", fs::join(fs::temp_dir(), strprintf("blendity_test_cache_%016llx", (unsigned long long)std::hash<std::string>{}(fs::executable_dir()))));
 
   std::string group;
   for (int a = 1; a < argc; a++) {

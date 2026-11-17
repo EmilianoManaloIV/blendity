@@ -52,6 +52,9 @@ std::string status(bool) { return "GPU rendering: not built (needs Blender's vul
 void prewarm(bool, bool) {}
 bool compile_kernels(bool, std::string *) { return false; }
 std::string pipeline_cache_file(int, bool) { return ""; }
+std::string raster_pipeline_cache_file(int) { return ""; }
+bool pipeline_cache_load(int, const std::string &, std::string &blob) { return blob.clear(), false; }
+void pipeline_cache_store(const std::string &, std::string) {}
 std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
@@ -986,7 +989,7 @@ class VulkanRenderer final : public Renderer {
      * even when the driver's own cache is cold. A file from another GPU or driver is ignored (its header). */
     const std::string cache_path = pipeline_cache_file(index_, rt_);
     std::string blob;
-    if (!fs::read_file(cache_path, blob) || !strip_pipeline_trailer(blob) || !pipeline_cache_matches(blob)) blob.clear();
+    if (!pipeline_cache_load(index_, cache_path, blob)) blob.clear();
     VkPipelineCache pcache = VK_NULL_HANDLE;
     VkPipelineCacheCreateInfo pcci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     pcci.initialDataSize = blob.size();
@@ -1252,55 +1255,14 @@ class VulkanRenderer final : public Renderer {
     as_buffers_.clear();
   }
 
-  /* A VkPipelineCache's header (Vulkan spec, VkPipelineCacheHeaderVersionOne): it must name this GPU. */
-  bool pipeline_cache_matches(const std::string &blob) const {
-    if (blob.size() < 32) return false;
-    uint32_t hsize, version, vendor, device;
-    std::memcpy(&hsize, blob.data(), 4);
-    std::memcpy(&version, blob.data() + 4, 4);
-    std::memcpy(&vendor, blob.data() + 8, 4);
-    std::memcpy(&device, blob.data() + 12, 4);
-    VkPhysicalDeviceProperties props;
-    G().f.vkGetPhysicalDeviceProperties(pd_, &props);
-    return hsize >= 32 && hsize <= blob.size() && version == 1 && vendor == props.vendorID && device == props.deviceID &&
-           std::memcmp(blob.data() + 16, props.pipelineCacheUUID, 16) == 0;
-  }
-
-  /* The file is the driver's data, then its length, an FNV-1a hash and a tag: a torn or truncated file (the
-   * driver must get exactly what it gave) is ignored. True with the trailer removed. */
-  static uint64_t fnv64(const char *p, size_t n) { return fnv1a(p, n); }
-  static bool strip_pipeline_trailer(std::string &blob) {
-    if (blob.size() < 16) return false;
-    const size_t body = blob.size() - 16;
-    uint64_t len, hash;
-    std::memcpy(&len, blob.data() + body, 4 + 4);  // length (u32) + tag (u32)
-    std::memcpy(&hash, blob.data() + body + 8, 8);
-    const uint32_t n = (uint32_t)(len & 0xFFFFFFFFu), tag = (uint32_t)(len >> 32);
-    if (tag != 0x43504C42u || n != body || hash != fnv64(blob.data(), body)) return false;  // "BLPC"
-    blob.resize(body);
-    return true;
-  }
-
-  /* Written when it grew, to a temporary file of this process and thread, then renamed over the old one in one
-   * step (another Blendity may be reading it). */
+  /* Written when it grew (pipeline_cache_store: the file's trailer, the atomic rename). */
   void save_pipeline_cache(VkPipelineCache pc, const std::string &path, size_t had) const {
     size_t n = 0;
     if (f_.vkGetPipelineCacheData(dev_, pc, &n, nullptr) != VK_SUCCESS || n == 0 || n == had || n > ((size_t)256 << 20)) return;
     std::string data(n, '\0');
     if (f_.vkGetPipelineCacheData(dev_, pc, &n, &data[0]) != VK_SUCCESS) return;
     data.resize(n);
-    const uint32_t len = (uint32_t)n, tag = 0x43504C42u;
-    const uint64_t hash = fnv64(data.data(), n);
-    data.append(reinterpret_cast<const char *>(&len), 4);
-    data.append(reinterpret_cast<const char *>(&tag), 4);
-    data.append(reinterpret_cast<const char *>(&hash), 8);
-    const uint64_t unique = (uint64_t)std::hash<std::thread::id>{}(std::this_thread::get_id()) ^
-                            (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t)(uintptr_t)this;
-    const std::string tmp = path + strprintf(".%016llx.tmp", (unsigned long long)unique);
-    if (!fs::write_file(tmp, data)) return;
-    std::error_code ec;
-    std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);  // replaces the old file
-    if (ec) std::remove(tmp.c_str());
+    pipeline_cache_store(path, std::move(data));
   }
 
   void destroy() {
@@ -1371,6 +1333,58 @@ void prewarm(bool open_devices, bool hardware_rt) {
         if (std::unique_ptr<Renderer> r = take_renderer(d.index, hardware_rt, &pending)) return_renderer(std::move(r), d.index, hardware_rt);
       }
   }).detach();
+}
+
+/* A VkPipelineCache's header (Vulkan spec, VkPipelineCacheHeaderVersionOne) must name this GPU, and the file's trailer -
+ * the driver's data, then its length, a tag and an FNV-1a hash - must be whole: a torn or truncated file, or one from
+ * another card or driver, is ignored (the driver must get exactly what it gave). Round 557: shared with the rasterizer. */
+bool pipeline_cache_load(int index, const std::string &path, std::string &blob) {
+  blob.clear();
+  if (!available() || index < 0 || index >= (int)G().infos.size() || path.empty()) return false;
+  if (!fs::read_file(path, blob) || blob.size() < 16 + 32) return blob.clear(), false;
+  const size_t body = blob.size() - 16;
+  uint64_t len, hash;
+  std::memcpy(&len, blob.data() + body, 4 + 4);  // length (u32) + tag (u32)
+  std::memcpy(&hash, blob.data() + body + 8, 8);
+  const uint32_t n = (uint32_t)(len & 0xFFFFFFFFu), tag = (uint32_t)(len >> 32);
+  if (tag != 0x43504C42u || n != body || hash != fnv1a(blob.data(), body)) return blob.clear(), false;  // "BLPC"
+  blob.resize(body);
+  uint32_t hsize, version, vendor, device;
+  std::memcpy(&hsize, blob.data(), 4);
+  std::memcpy(&version, blob.data() + 4, 4);
+  std::memcpy(&vendor, blob.data() + 8, 4);
+  std::memcpy(&device, blob.data() + 12, 4);
+  VkPhysicalDeviceProperties props;
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  const bool ok = hsize >= 32 && hsize <= blob.size() && version == 1 && vendor == props.vendorID && device == props.deviceID &&
+                  std::memcmp(blob.data() + 16, props.pipelineCacheUUID, 16) == 0;
+  if (!ok) blob.clear();
+  return ok;
+}
+
+/* Written to a temporary file of this process and thread, then renamed over the old one in one step (another Blendity
+ * may be reading it). */
+void pipeline_cache_store(const std::string &path, std::string data) {
+  if (path.empty() || data.empty()) return;
+  const uint32_t len = (uint32_t)data.size(), tag = 0x43504C42u;
+  const uint64_t hash = fnv1a(data.data(), data.size());
+  data.append(reinterpret_cast<const char *>(&len), 4);
+  data.append(reinterpret_cast<const char *>(&tag), 4);
+  data.append(reinterpret_cast<const char *>(&hash), 8);
+  const uint64_t unique = (uint64_t)std::hash<std::thread::id>{}(std::this_thread::get_id()) ^
+                          (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t)(uintptr_t)&data;
+  const std::string tmp = path + strprintf(".%016llx.tmp", (unsigned long long)unique);
+  if (!fs::write_file(tmp, data)) return;
+  std::error_code ec;
+  std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);  // replaces the old file
+  if (ec) std::remove(tmp.c_str());
+}
+
+std::string raster_pipeline_cache_file(int index) {
+  if (!available() || index < 0 || index >= (int)G().infos.size()) return "";
+  VkPhysicalDeviceProperties props;
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  return fs::join(cache_dir(), strprintf("raster_pipelines_%04x_%04x.bin", props.vendorID, props.deviceID));
 }
 
 std::string pipeline_cache_file(int index, bool hardware_rt) {

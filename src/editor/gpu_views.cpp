@@ -1534,7 +1534,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.gpu_fallbacks++;
     return false;
   }
-  /* Round 532: Gaussian splats go to the card as the CPU's projected, ordered splats (scene_splats_to_card); a card
+  /* Round 532, 557: Gaussian splats go to the card as its own static set and each frame's order (scene_splats_to_card); a card
    * without the pass, more clouds than it numbers, or a picture kept in linear light (the splats' pixels would need the
    * "none" mark in it) draw such a view on the CPU. */
   /* (Wireframe draws no splats, as on the CPU: render_solid gathers none there.) */
@@ -2061,10 +2061,10 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.slot = slot;
   fr.width = rt.width;
   fr.height = rt.height;
-  if (splats) {  // (round 532: this slot's own pass, so each view keeps its sorted orders)
-    const SplatPass *pass = scene_splats_prepare_pass(*scene_, slot, rt.width, rt.height, v, p, env.view_transform, env.exposure);
-    if (pass) scene_splats_to_card(*pass, fr.splats, fr.splat_ids);
-  }
+  if (splats) {  // (rounds 532, 557: this slot's own pass, so each view keeps its sorted orders; the card holds the splats and projects them)
+    if (const char *why = scene_splats_to_card(*scene_, slot, rt.width, rt.height, v, p, env.view_transform, env.exposure, *g, fr))
+      return gpu_view_refuse(slot, why);
+  } else if (g->splat_set_key_held() && !scene_has_splats(*scene_)) g->release_splats();  // (the scene has none left: its card memory goes)
   std::memcpy(fr.view_proj, vp.m, 64);
   set3(fr.eye, eye);
   fr.shadow_size = env.shadow && env.shadow_light >= 0 ? env.shadow->size : 0;
@@ -2147,6 +2147,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     else ok = g->render_read(fr, color, depth, ids, &err);
     prof_.ms_gpu_render += render_timer.ms();
   }
+  if (splats) scene_splats_release_keep(slot);  // (the frame is written: the static set's host copy is no longer needed)
   if (ok && rows.valid && !fr.see_through.empty()) rows.see_frame = std::move(fr.see_through), rows.see_frame_ok = true;  // (round 471)
   if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
   if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)
