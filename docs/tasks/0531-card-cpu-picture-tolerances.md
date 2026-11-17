@@ -1,6 +1,6 @@
 # 0531: The card's pictures against the CPU's - three tests that fail on a real card
 
-- **Status:** in progress
+- **Status:** done (round 551)
 - **Requirements:** the hub's round 551 (Pass 27); found by the HCI worker and round 542's card runs
 - **Decisions:** none needed (a test's bound or a renderer's fix, each with its measured reason)
 - **Model:** main session (Opus)
