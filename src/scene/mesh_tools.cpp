@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -319,16 +320,28 @@ bool bridged_ring(const Mesh &m, const std::vector<uint32_t> &O, const std::vect
       if (proper(a, b, P(I[k]), P(I[(k + 1) % ni]))) return false;
     return true;
   };
+  /* Indices 0..n-1 by key, each key worked out once - so every comparison sees the same value - a NaN key last and equal keys
+   * in index order: a strict ordering whatever the positions hold. (Round 549: the lengths were worked out again at every
+   * comparison, in two inlined copies the compiler may round apart, and a NaN compares false both ways; either made
+   * std::sort's ordering inconsistent - undefined behaviour, which GCC 15's library turned into a read before the array.) */
+  auto order_by = [](size_t n, auto key) {
+    std::vector<std::pair<float, size_t>> keyed(n);
+    for (size_t k = 0; k < n; k++) {
+      const float v = key(k);
+      keyed[k] = {std::isnan(v) ? std::numeric_limits<float>::infinity() : v, k};
+    }
+    std::sort(keyed.begin(), keyed.end());
+    std::vector<size_t> out(n);
+    for (size_t k = 0; k < n; k++) out[k] = keyed[k].second;
+    return out;
+  };
   /* Inner vertices in order of how far out they lie along u (both extremes first). */
-  std::vector<size_t> order(ni);
-  for (size_t i = 0; i < ni; i++) order[i] = i;
-  std::sort(order.begin(), order.end(), [&](size_t x, size_t y) { return P(I[x]).x < P(I[y]).x; });
+  const std::vector<size_t> order = order_by(ni, [&](size_t i) { return P(I[i]).x; });
   std::vector<size_t> tries;
   for (size_t k = 0; k < ni; k++) tries.push_back(k % 2 ? order[ni - 1 - k / 2] : order[k / 2]);
   auto nearest_visible = [&](size_t ii, size_t avoid) {
-    std::vector<size_t> os(no);
-    for (size_t k = 0; k < no; k++) os[k] = k;
-    std::sort(os.begin(), os.end(), [&](size_t x, size_t y) { return length(P(O[x]) - P(I[ii])) < length(P(O[y]) - P(I[ii])); });
+    const Vec2 at = P(I[ii]);
+    const std::vector<size_t> os = order_by(no, [&](size_t k) { return length(P(O[k]) - at); });
     for (size_t o : os)
       if (o != avoid && visible(o, ii)) return o;
     return SIZE_MAX;
