@@ -44,7 +44,7 @@ bool scene_raycast(const Scene &scene, Vec3 origin, Vec3 dir, float max_distance
     const float enter = ray_aabb(ray, g.world_bounds());
     if (enter < 0.0f || enter > hit.distance) continue;
     for_each_triangle(g, [&](Vec3 a, Vec3 b, Vec3 c) {
-      const float t = ray_triangle(ray, a, b, c);
+      const float t = ray_triangle_tolerant(ray, a, b, c);  // (round 549: a ray along the edge two triangles share lands - see the function)
       if (t < 0.0f || t >= hit.distance) return;
       hit.distance = t, hit.point = origin + dir * t, hit.normal = facing(a, b, c, dir), hit.object = &g, found = true;
     });
@@ -96,7 +96,7 @@ bool ground_at(const GroundGrid &g, Vec3 p, float up, float down, Vec3 &point, V
   bool found = false;
   for (uint32_t t : g.cells[(size_t)z * g.nx + x]) {
     const Vec3 &a = g.tris[(size_t)t * 3], &b = g.tris[(size_t)t * 3 + 1], &c = g.tris[(size_t)t * 3 + 2];
-    const float d = ray_triangle(ray, a, b, c);
+    const float d = ray_triangle_tolerant(ray, a, b, c);
     if (d < 0.0f || d > best) continue;
     best = d, point = ray.origin + ray.dir * d, normal = facing(a, b, c, ray.dir), found = true;
   }
