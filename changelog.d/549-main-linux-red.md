@@ -17,7 +17,10 @@ memory never written. Each failure was code that a difference of a unit in the l
   Its keys are now worked out once, NaN last, equal keys in index order.
 - **Realtime GI with Sky Occlusion and Bounce both off changed a pixel.** It still traced: the blur's and the upsampling's means
   of a sky of 1 came out a rounding off 1, and a traced pass shades pixel by pixel instead of eight at a time. Nothing is traced
-  now when GI adds nothing - the same picture as GI off, and the gather's time saved.
+  now when GI adds nothing - the same picture as GI off, and the gather's time saved. And the views no longer hand the objects
+  the realtime lightmaps a pass published while Sky Occlusion or Bounce was still on: until the next pass landed they shaded
+  the picture (a slow machine took it before then - #431's first CI run). A new test waits for a published pass, turns both
+  off and compares at once: 0 pixels differ, 43,839 with the second fix taken out.
 - **A click or ray exactly on the edge two triangles share fell through.** `scene_raycast` and `ground_at` use the tolerant
   ray-triangle test task 0437 made for this (the window test's ray met the far wall's face exactly on its diagonal).
 - Round 513's window test waits for the Blockout's build after a drag instead of four frames.

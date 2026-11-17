@@ -25,6 +25,8 @@ required `linux` check was blocked. Find the cause, fix it in the code, and keep
   2. **The GI picture.** With sky occlusion and bounce both off, Realtime GI still traced: the blur's and the
      upsampling's weighted means of a sky of 1 came out a rounding away from 1, and a traced pass leaves the 8-pixel
      (AVX2) shading for the scalar one - one pixel differed by 2 levels of 255.
+     And (found by this PR's first CI run): with GI on, the views handed the objects the realtime lightmaps a pass had
+     published while Sky Occlusion was still on, until the next pass landed - a slow runner took the picture before then.
   3. **The window test.** The ray in through the window's middle (1.5 m up) runs on to the far wall's face exactly at its
      middle - on the diagonal between the face's two triangles - and the plain ray-triangle test missed both (no hit at
      all). The test also raycast after four frames while the cut is built on a worker.
@@ -37,7 +39,7 @@ required `linux` check was blocked. Find the cause, fix it in the code, and keep
 1. `bridged_ring`: both sorts order keys worked out once - NaN last, equal keys by index - a strict ordering whatever the
    positions hold.
 2. `Rasterizer` (`src/render/raster.cpp`): no GI traced when it adds nothing (sky occlusion and bounce both off): the same
-   path as GI off, and the gather's time saved.
+   path as GI off, and the gather's time saved. `render_view.cpp`: no published realtime lightmaps read while GI adds nothing.
 3. `scene_raycast` and `ground_at` (`src/scene/raycast.cpp`): `ray_triangle_tolerant` (task 0437 made it for a ray along a
    shared edge) instead of the plain test.
 4. `tests/test_blockout_openings.cpp` `oo_drag`: waits for the Blockout's build (`blockout wait`) instead of four frames.
