@@ -51,6 +51,9 @@ the round-557 exe before the merge - 0 pixels differ in each. Seen on P1's merge
 the pre-557 exe and on 557b, 0 pixels each); the likely cause is round 508's recorded starvation follow-up (HCI, round 555). The tests'
 card cache is now per build (the one folder every session's test run had shared).
 
+**Round 557b, M3's run:** the cache test no longer asks for the runner's own folder name - a run that sets
+BLENDITY_CACHE_DIR itself passes; it checks that the cache lands inside the folder in effect and never in the user's.
+
 **Checked:** on #443's head (27a16b4a) with the review's fixes: Windows with Blender's libraries, `splats_raster`, `splats`,
 `splats_trace`, `gpu` and `editor`, 9,197 checks, none failed; Linux (WSL, with the libraries) `splats_raster` and `editor`,
 3,585 checks, none failed; the full suite on CI. The card against the CPU on the small splat scene through Standard, Filmic and ACES:
@@ -68,8 +71,18 @@ append:
 
 | Row | Before (round 544's window) | After |
 |---|---|---|
-| Orbit, 1M splats, card, median frame | 93.7 ms | measured in the timed batch |
-| Orbit, 1M splats, CPU, median frame | 108.4 ms | measured in the timed batch |
-| CPU project, 1M | 40.5 ms | measured in the timed batch |
-| CPU draw, 1M | 45.1 ms | measured in the timed batch |
-| Card first open, empty pipeline cache / written | 92.5 s / - | measured in the timed batch |
+| Orbit, 1M splats, card, median / longest frame | 93.7 ms | **6.2 / 6.8 ms** |
+| Orbit, 1M splats, CPU, median / longest frame | 108.4 ms | 86.8 / 91.3 ms |
+| Orbit, 100k splats, card / CPU, median frame | 16.0 / 15.7 ms | 7.8 / 15.4 ms |
+| CPU project, 1M (in the orbit's last frame) | 40.5 ms | 41.0 ms |
+| CPU draw, 1M (in the orbit's last frame) | 45.1 ms | 36.9 ms |
+| Sort, 1M (a worker's; what the frame waits) | 0.05 ms | 0.05 ms |
+| Card first open, empty pipeline cache / written | 92.5 s / 0.16 s | **0.54 s / 0.16 s** |
+
+The timed batch of 2026-11-17 (the hub's, normal priority, a quiet machine; RTX 4070 SUPER, 32 threads), on round 557's
+exe. The card meets ADR 0105's 50 ms with room to spare. **The CPU at 1M still misses it (86.8 ms), named:** a
+degree-3 splat costs its EWA projection and 48 SH terms every frame, and the 1M array read and written is most of the
+41 ms; the compositing's 37 ms is a million alpha-blended ellipses, front to back. The CPU draws the views only when there
+is no card (or the card refuses a frame: too close, too big); at 100k the CPU is within budget (15.4 ms). What would move
+it further: SH evaluated once per sort (the view direction barely changes while orbiting), and a coarser tile pass for
+splats under a pixel.

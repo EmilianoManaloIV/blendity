@@ -81,6 +81,15 @@ The kernel (`gpu_kernel.h`, `optix_kernel.cu`) is not changed, so the PTX stays 
    destructors (`renderers_opening` counts it), and the statics the thread reads are never freed.
 6. The full suite passes on Windows and Linux (CI); `splats_gpu` and `gpu` locally.
 
+## Outcome (the hub's timed window, empty caches)
+- OptiX's kernel compile: cold 19.3 s (RTX 4070 SUPER) / 19.1 s (RTX 3060 Ti), warm 6.6 / 6.8 ms.
+- The first OptiX splat build at 100k: 148.5 ms (4070 SUPER), 132.7 ms (3060 Ti), from 29.9 s.
+- Seen in the same table: the Vulkan devices' first 100k build, 13.3-16.9 s, then 0.29-0.37 s at 1M. That is the
+  path tracer's pipeline compiling cold for new SPIR-V. The stress run pays it because it opens its cards itself
+  with empty caches. The editor already warms it: `gpu::prewarm` (called each frame, once a run, when the scene
+  renders on a card) compiles the kernel and opens a renderer per card off the UI thread, and a view traces on the
+  CPU meanwhile (task 0037). So no follow-up round; the write-up names it.
+
 ## Risks
 - Two compiles at once (prewarm and a real open on the same card) would double the CPU cost: the per-card lock
   prevents it.

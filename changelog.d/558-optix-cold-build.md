@@ -32,6 +32,19 @@ scratch folder: a cold kernel compile 62 s (a busy machine), the warm module 33-
 waited for it and then loaded the module in 51 ms (one compile, not two); `set_backend(2)` returned in 0.1 ms. Linux
 `splats_gpu` and `render`; the full suite on CI.
 
+**Measured (the hub's timed window, `blendity_stress --only splats_gpu`, empty caches):** OptiX's kernel compile cold
+19.3 s (RTX 4070 SUPER) / 19.1 s (RTX 3060 Ti), warm 6.6 / 6.8 ms. The first OptiX splat build at 100k splats
+**148.5 ms** (4070 SUPER) and **132.7 ms** (3060 Ti), from 29.9 s.
+
+**A cold first-use cost the same table shows, already warmed in the editor:** the Vulkan devices' first 100k build is
+16.6 s (4070 SUPER ray queries), 16.9 s (4070 SUPER BVH walk), 13.3 s (3060 Ti BVH walk), the 1M builds after them
+0.29-0.37 s - the path tracer's pipeline compiling cold in the driver for new SPIR-V with no pipeline cache. The
+stress run opens its cards itself with empty caches, so it pays it. The editor does not: every frame it calls
+`gpu::prewarm` (once a run) as soon as the scene renders on a card - at startup, or the frame the GPU is picked -
+which compiles the kernel and opens a renderer per card off the UI thread (the pipeline cache written to disk, task
+0037), and a view traces on the CPU meanwhile. So no follow-up round: the write-up names it as the stress run's cold
+cost, which the editor hides.
+
 <!-- docs/ARCHITECTURE.md -->
 after: | `PTLens`, thin-lens primary rays
 | `gpu::optix_prewarm()`, `optix_kernel_ms()`, `optix_compile_kernel()` (`render/optix_device.*`, round 558) | OptiX's kernel compiled for each card on a background thread before the first render (OptiX caches it on disk); opens wait on the card's compile instead of compiling twice | `intern/cycles/device/optix/device_impl.cpp` (Cycles loads its kernels when the device opens) |
