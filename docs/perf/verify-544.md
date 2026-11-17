@@ -7,30 +7,43 @@ settings, world-space animation copy / paste and rotation modes, the sky's sun d
 saved images, and ray-traced shadows in the Scene view. This page holds what the pass measured: the timed rows, the HCI
 sweep over the new panels and the Learn lessons, on one tree holding every round.
 
-**State (2026-11-16):** the frame and the plans. Cells reading TBD fill in the hub's timed window, once most rounds are in.
+**State (2026-11-17):** every published Pass 27 round joined; the timed window, the HCI sweep and the Learn walk done.
 
 ## The tree
 
 A local merge of every Pass 27 stack's top (CLAUDE.md item 7: nothing waits on a merge). This round's PR is the single top
 of all of them.
 
-| Round | Worker | What | PR / head | In the tree |
-|---|---|---|---|---|
-| 530 | S1 | the point cloud object: Points or Gaussian Splats (ADR 0147) | #420 `5d077641` | yes |
-| 531 | S1 | splat import: PLY auto-detected, SPZ v1-4, glTF's Gaussian-splat extension | #423 `2fea5ef0` (on #420) | yes |
-| 532 | S2 | splats in the Scene view and the rasterizers (CPU, Vulkan) | - | TBD |
-| 533 | S3 | splats in the CPU path tracer (Embree user geometry, `gsplat_math.h`) | - | TBD |
-| 534 | S4 | splats on the card (Vulkan ray queries, OptiX) | - | TBD |
-| 535 | M1 | Quad Sphere, snapping to object origins | - | TBD |
-| 536 | M2 | Edit Mode selection dimensions | - | TBD |
-| 537 | M3 | LoopTools: Relax, Space, To Circle, Flatten, Curve | #422 `d8ce88e5` | yes |
-| 538 | M1 | panoramic cameras in the rasterizer | - | TBD |
-| 539 | P1 | Weight Paint automasking, Add / Set Weight | #421 `0686403c` | yes |
-| 540 | P2 | size, strength and colour per brush | - | TBD |
-| 541 | P2 | world-space animation copy / paste, rotation modes (ADR 0148) | - | TBD |
-| 542 | R1 | the sky's sun disc lights the scene; ICC profiles in saved sRGB images | - | TBD |
-| 543 | M2 | ray-traced shadows in the Scene view (ADR 0151) | - | TBD |
-| 545 | P1 | colour attributes and Vertex Paint (ADR 0152) | - | TBD |
+| Round | Worker | What | PR / head in the tree |
+|---|---|---|---|
+| 530 | S1 | the point cloud object: Points or Gaussian Splats (ADR 0147) | #420 `5d077641` |
+| 531 | S1 | splat import: PLY auto-detected, SPZ v1-4, glTF's Gaussian-splat extension | #423 `2fea5ef0` |
+| 532 | S2 | splats in the Scene view and the rasterizers (CPU, Vulkan) | #427 `19aab8a4` |
+| 533 | S3 | splats in the CPU path tracer (Embree user geometry, `gsplat_math.h`) | #424 `f66e1a5c` |
+| 534 | S4 | splats on the card (Vulkan ray queries, OptiX) | #428 `07c09520` |
+| 535 | M1 | Quad Sphere, snapping to object origins | #430 `de9f7d1f` |
+| 536 | M2 | Edit Mode selection dimensions | #429 `1ec1374f` |
+| 537 | M3 | LoopTools: Relax, Space, To Circle, Flatten, Curve | #422 `d8ce88e5` |
+| 538 | M1 | panoramic cameras in the rasterizer and the CPU path tracer | #439 `fe37de33` |
+| 539 | P1 | Weight Paint automasking, Add / Set Weight | #421 `0686403c` |
+| 540 | P2 | size, strength and colour per brush; pressure curves | #432 `eca54ea1` |
+| 541 | P2 | Convert Rotation, world-space copy / paste, Paste Pose influence, Align, scrubbing (ADR 0148) | #438 `812ad600` |
+| 542 | R1 | the sky's sun lights the scene; ICC profiles in saved sRGB images | #425 `e9468eb1` |
+| 543 | M2 | ray-traced shadows in the Scene view (ADR 0151) | #442 `de3631c1` |
+| 545 | P1 | colour attributes and Vertex Paint (ADR 0152) | #435 `8fa3e970` |
+| 545b1 | P1 | a material's Vertex Color; importers read vertex colours | #440 `4f284d4e` |
+| 547 | - | a door's and a window's parts take modifiers (ADR 0149) | #441 `e46d782f` |
+| 548 | HCI | Shift+R and every chord read as its key went down | #426 `baaaf50f` |
+| 549 | - | main green on Linux again | #431, merged: main `c842763d` |
+| 550 | HCI | a test run's own scratch folder | #433 `0b8507c1` |
+| 551 | R1 | the card's albedo plane in half floats; card-vs-CPU tests measured | #436 `99b63c97` |
+| 552 | - | a reopened door keeps its Leaf (scenes by serial) | #437 `369355cd` |
+| 553 | - | toon at a distance counts the sphere | #443 `b73f0624` |
+| 555 | - | card tests that failed only in a slow group run wait for the card | #444 `f644fda5` |
+
+To come, on the Pass 27 top (the hub, 2026-11-17): 557 (S2, the 1M-splat orbit and the cold open), 558 (S4, the cold
+OptiX build), 559 (P2, the audits' and the panels' labels), 560 (HCI, the F9 panel's clamp and scroll, Preferences'
+scroll bar), 561 (S1, the splats' Try-it steps).
 
 Joining so far: #420 and #421 met in `licenses/README.md` (a row each) and the console list (`pointcloud`, `wpautomask`);
 #421 and #422 in `licenses/README.md` and `run_modeling_tests` (a call each); #423 in `licenses/README.md`. All kept
