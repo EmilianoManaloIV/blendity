@@ -50,6 +50,7 @@ struct PTObject {
   uint32_t id = 0;  // the object's id, for the first-hit id plane (camera filters outline by it)
   bool flattened = false;  // (round 334: Camera Flatten - placed by model, shaded by shade_model, the true placement)
   Mat4 shade_model;
+  const std::vector<Vec4> *colors = nullptr;  // (task 0533) the render colour layer per render vertex (DrawItem::material_colors)
 };
 
 /* A thin lens for depth of field (Cycles: kernel/camera/camera.h). */

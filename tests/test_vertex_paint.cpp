@@ -4,7 +4,10 @@
 #include "test_common.h"
 
 #include <cmath>
+#include <array>
 #include <cstring>
+#include <fstream>
+#include <limits>
 
 #include "../src/core/json.h"
 #include "../src/scene/dyntopo.h"
@@ -367,7 +370,787 @@ MeshPtr vpt_two_quads() {
   return m;
 }
 
+/* ================================================================ round 545b (task 0533): a material's Vertex Color input and
+ * importers that read colours. Helpers first, then the tests. */
+
+/* A scratch folder for the files these tests write (inside the scratch project, never Assets/). */
+std::string vci_dir() {
+  const std::string d = fs::join(scratch_project(), "vci");
+  fs::make_dirs(d);
+  return d;
+}
+
+void vci_write(const std::string &path, const std::string &bytes) {
+  std::ofstream f(path, std::ios::binary);
+  f.write(bytes.data(), (std::streamsize)bytes.size());
+}
+
+template <class T> void vci_put(std::string &s, T v) { s.append(reinterpret_cast<const char *>(&v), sizeof(T)); }
+
+long vci_q(float v) { return std::lround(v * 1000.0f); }
+bool vci_less(const Vec4 &a, const Vec4 &b) {
+  if (vci_q(a.x) != vci_q(b.x)) return vci_q(a.x) < vci_q(b.x);
+  if (vci_q(a.y) != vci_q(b.y)) return vci_q(a.y) < vci_q(b.y);
+  if (vci_q(a.z) != vci_q(b.z)) return vci_q(a.z) < vci_q(b.z);
+  return vci_q(a.w) < vci_q(b.w);
+}
+
+/* The worst channel difference between two colour sets, as sets (an importer may reorder vertices); 1e9 when the sizes differ. */
+float vci_set_error(std::vector<Vec4> got, std::vector<Vec4> want) {
+  if (got.size() != want.size()) return 1e9f;
+  std::sort(got.begin(), got.end(), vci_less);
+  std::sort(want.begin(), want.end(), vci_less);
+  float worst = 0.0f;
+  for (size_t i = 0; i < got.size(); i++)
+    worst = std::max(worst, std::max(std::max(std::fabs(got[i].x - want[i].x), std::fabs(got[i].y - want[i].y)),
+                                     std::max(std::fabs(got[i].z - want[i].z), std::fabs(got[i].w - want[i].w))));
+  return worst;
+}
+
+Vec4 vci_encode(Vec4 c) { return Vec4(linear_to_srgb(c.x), linear_to_srgb(c.y), linear_to_srgb(c.z), c.w); }
+std::vector<Vec4> vci_encode(std::vector<Vec4> v) {
+  for (Vec4 &c : v) c = vci_encode(c);
+  return v;
+}
+
+const Mesh *vci_first_mesh(const ImportResult &r) {
+  for (const ImportedNode &n : r.nodes)
+    if (n.mesh) return n.mesh.get();
+  return nullptr;
+}
+
+/* A grid whose left half (x < 0) is red and right half blue - per vertex (Point) or per face (Corner, by the face's centre).
+ * `alpha_left` is the red half's alpha. */
+MeshPtr vci_pad(bool corner, float alpha_left = 1.0f, int n = 8) {
+  MeshPtr m = primitives::grid(2.0f, n, n);
+  ColorAttribute c = m->make_color("Col", corner ? Dom::Corner : Dom::Point, Vec4(1, 1, 1, 1));
+  auto col = [&](float x) { return x < 0.0f ? Vec4(1, 0, 0, alpha_left) : Vec4(0, 0, 1, 1); };
+  if (!corner) {
+    for (size_t v = 0; v < m->vert_count(); v++) c.rgba[v] = col(m->positions[v].x);
+  }
+  else {
+    for (size_t f = 0; f < m->face_count(); f++) {
+      float cx = 0.0f;
+      for (uint32_t k = m->face_offsets[f]; k < m->face_offsets[f + 1]; k++) cx += m->positions[m->corner_verts[k]].x;
+      cx /= (float)(m->face_offsets[f + 1] - m->face_offsets[f]);
+      for (uint32_t k = m->face_offsets[f]; k < m->face_offsets[f + 1]; k++) c.rgba[k] = col(cx);
+    }
+  }
+  m->color_attributes.push_back(std::move(c));
+  m->active_color = m->render_color = 0;
+  return m;
+}
+
+MaterialPtr vci_mat(bool on, bool cutout = false) {
+  MaterialPtr m = make_material("VC", Vec3(1, 1, 1));
+  m->vertex_color = on;
+  m->specular = 0.0f;
+  m->roughness = 1.0f;
+  if (cutout) m->surface = (int)MaterialSurface::Cutout, m->alpha_clip = 0.5f;
+  return m;
+}
+
+/* The Shaded view of one pad (the "Pad" of VPad) with a material. */
+struct VciView {
+  VPad t;
+  VciView(MeshPtr mesh, MaterialPtr mat) : t(mesh, false, false) {
+    t.pad->get<MeshRenderer>()->materials = {mat};
+    t.ed.command("shading shaded");
+    t.ed.mark_changed_for_test("VCI view");
+    for (int i = 0; i < 4; i++) t.ed.step_frame_headless();
+  }
+  /* The pixel over a local point of the pad (x, z on y = 0). */
+  std::array<int, 3> px(float x, float z) {
+    int sx = 0, sy = 0;
+    CHECK(t.ed.project_to_window(t.pad->world_matrix().point(Vec3(x, 0, z)), sx, sy));
+    const Image &fb = t.ed.main_fb_for_test();
+    if (sx < 0 || sy < 0 || sx >= fb.width || sy >= fb.height) return {0, 0, 0};
+    const uint32_t p = fb.pixels[(size_t)sy * (size_t)fb.width + (size_t)sx];
+    return {(int)((p >> 16) & 255), (int)((p >> 8) & 255), (int)(p & 255)};
+  }
+  void frames(int n = 3) {
+    for (int i = 0; i < n; i++) t.ed.step_frame_headless();
+  }
+};
+
+bool vci_red(const std::array<int, 3> &p) { return p[0] > 50 && p[1] * 10 < p[0] * 6 && p[2] * 10 < p[0] * 6; }
+bool vci_blue(const std::array<int, 3> &p) { return p[2] > 50 && p[0] * 10 < p[2] * 6 && p[1] * 10 < p[2] * 6; }
+bool vci_greenish(const std::array<int, 3> &p) { return p[1] > 50 && p[0] * 10 < p[1] * 6 && p[2] * 10 < p[1] * 6; }
+bool vci_grey(const std::array<int, 3> &p) { return p[0] > 50 && std::abs(p[0] - p[1]) < 45 && std::abs(p[0] - p[2]) < 45; }
+bool vci_same_px(const std::array<int, 3> &a, const std::array<int, 3> &b, int tol = 3) {
+  return std::abs(a[0] - b[0]) <= tol && std::abs(a[1] - b[1]) <= tol && std::abs(a[2] - b[2]) <= tol;
+}
+
+/* The CPU path tracer on `mesh` seen from above through a uniform environment `env`: linear RGB per pixel (3 floats), the
+ * pad's left / right halves at columns 7 / 25 of 32 (the camera's up is +z, so world -x is the right of the picture). */
+const int kVciW = 32;
+std::vector<float> vci_pt(const MeshPtr &mesh, const MaterialPtr &mat, bool give_colours, float env = 0.5f) {
+  const RenderMesh &rm = mesh->render_mesh_tangents();
+  std::vector<Vec4> cols;
+  const bool have = render_vertex_colors_into(*mesh, rm, cols);
+  std::vector<MaterialPtr> mats{mat};
+  PTObject o;
+  o.mesh = &rm;
+  o.model = Mat4::identity();
+  o.materials = &mats;
+  o.colors = give_colours && have ? &cols : nullptr;
+  Environment e;
+  e.mode = Environment::Color;
+  e.color = {env, env, env};
+  PathTracer pt;
+  pt.build({o}, {}, e);
+  PTSettings st;
+  st.max_bounces = 4;
+  st.clamp_indirect = 0;
+  st.denoise = false;
+  pt.set_settings(st);
+  pt.set_camera(Mat4::look_at({0, 3, 0}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 10), kVciW, kVciW);
+  pt.render(1e9, 32);
+  return pt.linear_rgb(false);
+}
+
+Vec3 vci_pix(const std::vector<float> &rgb, int x, int y = kVciW / 2) {
+  const size_t i = ((size_t)y * kVciW + (size_t)x) * 3;
+  return i + 2 < rgb.size() ? Vec3(rgb[i], rgb[i + 1], rgb[i + 2]) : Vec3(-1, -1, -1);
+}
+bool vci_pt_red(Vec3 c, float lit) { return c.x > 0.6f * lit && c.y < 0.2f * lit && c.z < 0.2f * lit; }
+bool vci_pt_blue(Vec3 c, float lit) { return c.z > 0.6f * lit && c.x < 0.2f * lit && c.y < 0.2f * lit; }
+bool vci_pt_white(Vec3 c, float lit) { return c.x > 0.8f * lit && c.y > 0.8f * lit && c.z > 0.8f * lit; }
+bool vci_finite_all(const std::vector<float> &v) {
+  for (float f : v)
+    if (!std::isfinite(f)) return false;
+  return !v.empty();
+}
+
+/* ---- file fixtures */
+
+/* The four colours every importer test uses: bytes (sRGB for PLY / FBX) and their linear floats. */
+const int kVciBytes[4][4] = {{255, 0, 0, 255}, {0, 0, 255, 255}, {0, 255, 0, 128}, {64, 128, 192, 255}};
+const float kVciFloats[4][4] = {{1, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 0, 0.5f}, {0.25f, 0.5f, 0.75f, 1}};
+
+/* A 4-vertex, 2-triangle PLY with colours: binary or ASCII, uchar or float channels, with or without alpha. */
+std::string vci_ply(bool binary, bool uchar, bool alpha, int count = 4, const char *only = nullptr) {
+  std::string s = "ply\nformat ";
+  s += binary ? "binary_little_endian" : "ascii";
+  s += " 1.0\nelement vertex " + std::to_string(count) + "\nproperty float x\nproperty float y\nproperty float z\n";
+  const char *ty = uchar ? "uchar" : "float";
+  const char *names[4] = {"red", "green", "blue", "alpha"};
+  const int nch = alpha ? 4 : 3;
+  for (int k = 0; k < nch; k++)
+    if (!only || std::strstr(only, names[k])) s += std::string("property ") + ty + " " + names[k] + "\n";
+  s += "element face 2\nproperty list uchar int vertex_indices\nend_header\n";
+  const float pos[4][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+  for (int v = 0; v < 4 && v < count; v++) {
+    if (binary) {
+      for (int k = 0; k < 3; k++) vci_put<float>(s, pos[v][k]);
+    }
+    else s += std::to_string(pos[v][0]) + " " + std::to_string(pos[v][1]) + " " + std::to_string(pos[v][2]);
+    for (int k = 0; k < nch; k++) {
+      if (only && !std::strstr(only, names[k])) continue;
+      if (binary) {
+        if (uchar) vci_put<uint8_t>(s, (uint8_t)kVciBytes[v][k]);
+        else vci_put<float>(s, kVciFloats[v][k]);
+      }
+      else s += " " + (uchar ? std::to_string(kVciBytes[v][k]) : std::to_string(kVciFloats[v][k]));
+    }
+    if (!binary) s += "\n";
+  }
+  const int tris[2][3] = {{0, 1, 2}, {0, 2, 3}};
+  for (int f = 0; f < 2; f++) {
+    if (binary) {
+      vci_put<uint8_t>(s, 3);
+      for (int k = 0; k < 3; k++) vci_put<int32_t>(s, tris[f][k]);
+    }
+    else s += "3 " + std::to_string(tris[f][0]) + " " + std::to_string(tris[f][1]) + " " + std::to_string(tris[f][2]) + "\n";
+  }
+  return s;
+}
+
+std::vector<Vec4> vci_ply_expected(bool uchar, bool alpha) {
+  std::vector<Vec4> w;
+  for (int v = 0; v < 4; v++) {
+    if (uchar)
+      w.push_back(Vec4(srgb_to_linear(kVciBytes[v][0] / 255.0f), srgb_to_linear(kVciBytes[v][1] / 255.0f), srgb_to_linear(kVciBytes[v][2] / 255.0f),
+                       alpha ? kVciBytes[v][3] / 255.0f : 1.0f));
+    else w.push_back(Vec4(kVciFloats[v][0], kVciFloats[v][1], kVciFloats[v][2], alpha ? kVciFloats[v][3] : 1.0f));
+  }
+  return w;
+}
+
+/* A glTF (JSON + .bin beside it): `pos` / `idx` as given, COLOR_0 of component type `ct` (5126 float, 5121 u8, 5123 u16) with
+ * `comps` (3 or 4) values per element in `colour` (`ccount` elements; empty: no COLOR_0). */
+std::string vci_gltf_file(const std::string &name, const std::vector<Vec3> &pos, const std::vector<uint16_t> &idx, int ct, int comps, bool normalized,
+                          const std::string &colour, size_t ccount) {
+  std::string bin;
+  for (const Vec3 &p : pos) {
+    vci_put<float>(bin, p.x);
+    vci_put<float>(bin, p.y);
+    vci_put<float>(bin, p.z);
+  }
+  const size_t ioff = bin.size();
+  for (uint16_t i : idx) vci_put<uint16_t>(bin, i);
+  while (bin.size() % 4) bin.push_back('\0');
+  const size_t coff = bin.size();
+  bin += colour;
+  const std::string dir = vci_dir();
+  vci_write(fs::join(dir, name + ".bin"), bin);
+  const bool has_col = !colour.empty();
+  std::string j = R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0)";
+  if (has_col) j += R"(,"COLOR_0":2)";
+  j += R"(},"indices":1}]}],"buffers":[{"uri":")" + name + R"(.bin","byteLength":)" + std::to_string(bin.size()) + "}],";
+  j += R"("bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":)" + std::to_string(ioff) + R"(},{"buffer":0,"byteOffset":)" + std::to_string(ioff) +
+       R"(,"byteLength":)" + std::to_string(idx.size() * 2) + "}";
+  if (has_col) j += R"(,{"buffer":0,"byteOffset":)" + std::to_string(coff) + R"(,"byteLength":)" + std::to_string(colour.size()) + "}";
+  j += R"(],"accessors":[{"bufferView":0,"componentType":5126,"count":)" + std::to_string(pos.size()) + R"(,"type":"VEC3","min":[0,0,0],"max":[1,1,1]},)";
+  j += R"({"bufferView":1,"componentType":5123,"count":)" + std::to_string(idx.size()) + R"(,"type":"SCALAR"})";
+  if (has_col)
+    j += std::string(R"(,{"bufferView":2,"componentType":)") + std::to_string(ct) + (normalized ? R"(,"normalized":true)" : "") + R"(,"count":)" +
+         std::to_string(ccount) + R"(,"type":")" + (comps == 4 ? "VEC4" : "VEC3") + R"("})";
+  j += "]}";
+  const std::string path = fs::join(dir, name + ".gltf");
+  vci_write(path, j);
+  return path;
+}
+
+const std::vector<Vec3> kVciQuadPos = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+const std::vector<uint16_t> kVciQuadIdx = {0, 1, 2, 0, 2, 3};
+
+/* The four colours as glTF bytes of one component type: float (VEC3 / VEC4), normalized u8 (VEC4), normalized u16 (VEC3 / VEC4);
+ * `want` is what an importer must give back (linear, nothing decoded). */
+std::string vci_gltf_colours(int ct, int comps, std::vector<Vec4> &want) {
+  std::string s;
+  want.clear();
+  for (int v = 0; v < 4; v++) {
+    Vec4 w(kVciFloats[v][0], kVciFloats[v][1], kVciFloats[v][2], comps == 4 ? kVciFloats[v][3] : 1.0f);
+    for (int k = 0; k < comps; k++) {
+      const float f = kVciFloats[v][k];
+      if (ct == 5126) vci_put<float>(s, f);
+      else if (ct == 5121) {
+        const uint8_t b = (uint8_t)std::lround(f * 255.0f);
+        vci_put<uint8_t>(s, b);
+        (k == 0 ? w.x : k == 1 ? w.y : k == 2 ? w.z : w.w) = b / 255.0f;
+      }
+      else {
+        const uint16_t b = (uint16_t)std::lround(f * 65535.0f);
+        vci_put<uint16_t>(s, b);
+        (k == 0 ? w.x : k == 1 ? w.y : k == 2 ? w.z : w.w) = b / 65535.0f;
+      }
+    }
+    want.push_back(w);
+  }
+  return s;
+}
+
+/* An ASCII FBX with one quad and a per-corner colour set (sRGB doubles, as FBX keeps them). */
+std::string vci_fbx() {
+  std::string s =
+      "; FBX 7.4.0 project file\nFBXHeaderExtension:  {\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}\nObjects:  {\n"
+      "\tGeometry: 100, \"Geometry::Quad\", \"Mesh\" {\n\t\tVertices: *12 {\n\t\t\ta: 0,0,0,1,0,0,1,1,0,0,1,0\n\t\t}\n"
+      "\t\tPolygonVertexIndex: *4 {\n\t\t\ta: 0,1,2,-4\n\t\t}\n\t\tGeometryVersion: 124\n"
+      "\t\tLayerElementColor: 0 {\n\t\t\tVersion: 101\n\t\t\tName: \"Col\"\n\t\t\tMappingInformationType: \"ByPolygonVertex\"\n"
+      "\t\t\tReferenceInformationType: \"Direct\"\n\t\t\tColors: *16 {\n\t\t\t\ta: ";
+  for (int v = 0; v < 4; v++)
+    for (int k = 0; k < 4; k++) {
+      char b[32];
+      std::snprintf(b, sizeof b, "%s%.6f", (v || k) ? "," : "", kVciBytes[v][k] / 255.0);
+      s += b;
+    }
+  s +=
+      "\n\t\t\t}\n\t\t}\n\t\tLayer: 0 {\n\t\t\tVersion: 100\n\t\t\tLayerElement:  {\n\t\t\t\tType: \"LayerElementColor\"\n\t\t\t\tTypedIndex: 0\n\t\t\t}\n\t\t}\n"
+      "\t}\n\tModel: 200, \"Model::Quad\", \"Mesh\" {\n\t\tVersion: 232\n\t}\n}\nConnections:  {\n\tC: \"OO\",100,200\n\tC: \"OO\",200,0\n}\n";
+  return s;
+}
+
 }  // namespace
+
+static void vertex_colour_input_tests() {
+  /* ---------------------------------------------------------------- criterion 1: the colours show */
+  test("vertex colour input: a white material with Vertex Color on shows a red / blue Point layer red and blue in the Shaded view; off, white", [] {
+    VciView on(vci_pad(false), vci_mat(true));
+    const auto l = on.px(-0.6f, 0.6f), r = on.px(0.6f, 0.6f);
+    std::printf("    on: left %d %d %d, right %d %d %d\n", l[0], l[1], l[2], r[0], r[1], r[2]);
+    CHECK(vci_red(l) && vci_blue(r));
+    VciView off(vci_pad(false), vci_mat(false));
+    const auto ol = off.px(-0.6f, 0.6f), orr = off.px(0.6f, 0.6f);
+    std::printf("    off: left %d %d %d, right %d %d %d\n", ol[0], ol[1], ol[2], orr[0], orr[1], orr[2]);
+    CHECK(vci_grey(ol) && vci_grey(orr) && vci_same_px(ol, orr, 12));
+  });
+
+  test("vertex colour input: the path tracer (F12) renders the same red / blue pad with Vertex Color on, white with it off or without the colours handed over", [] {
+    MeshPtr pad = vci_pad(false);
+    const std::vector<float> on = vci_pt(pad, vci_mat(true), true);
+    const Vec3 a = vci_pix(on, 7), b = vci_pix(on, 25);
+    std::printf("    on: col 7 %.3f %.3f %.3f, col 25 %.3f %.3f %.3f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    CHECK((vci_pt_red(a, 0.5f) && vci_pt_blue(b, 0.5f)) || (vci_pt_blue(a, 0.5f) && vci_pt_red(b, 0.5f)));
+    const std::vector<float> off = vci_pt(pad, vci_mat(false), true);
+    const Vec3 c = vci_pix(off, 7), d = vci_pix(off, 25);
+    std::printf("    flag off: %.3f %.3f %.3f | %.3f %.3f %.3f\n", c.x, c.y, c.z, d.x, d.y, d.z);
+    CHECK(vci_pt_white(c, 0.5f) && vci_pt_white(d, 0.5f));
+    const std::vector<float> none = vci_pt(pad, vci_mat(true), false);
+    const Vec3 e = vci_pix(none, 7), f = vci_pix(none, 25);
+    std::printf("    flag on, no colours in the PTObject: %.3f %.3f %.3f | %.3f %.3f %.3f\n", e.x, e.y, e.z, f.x, f.y, f.z);
+    CHECK(vci_pt_white(e, 0.5f) && vci_pt_white(f, 0.5f));
+  });
+
+  test("vertex colour input: alpha under the cutout discards in the Shaded view and the path tracer (a Cutout material)", [] {
+    /* Shaded: the red half has alpha 0; its pixel is the background (the same pixel with the pad switched off). */
+    VciView on(vci_pad(false, 0.0f), vci_mat(true, true));
+    const auto kept = on.px(0.6f, 0.6f), gone = on.px(-0.6f, 0.6f);
+    on.t.pad->active = false;
+    on.t.ed.mark_changed_for_test("VCI hide");
+    on.frames(4);
+    const auto bg = on.px(-0.6f, 0.6f);
+    std::printf("    cutout alpha 0 half %d %d %d vs background %d %d %d; kept half %d %d %d\n", gone[0], gone[1], gone[2], bg[0], bg[1], bg[2], kept[0], kept[1],
+                kept[2]);
+    CHECK(vci_same_px(gone, bg, 4) && vci_blue(kept) && !vci_same_px(kept, bg, 20));
+    /* Path tracer in a white world: the alpha-0 half shows the world (white), the blue half is blue; with the flag off both are white. */
+    MeshPtr pad = vci_pad(false, 0.0f);
+    const std::vector<float> pt = vci_pt(pad, vci_mat(true, true), true, 1.0f);
+    const Vec3 a = vci_pix(pt, 7), b = vci_pix(pt, 25);
+    std::printf("    PT cutout: col 7 %.3f %.3f %.3f, col 25 %.3f %.3f %.3f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    CHECK((vci_pt_white(a, 1.0f) && vci_pt_blue(b, 1.0f)) || (vci_pt_blue(a, 1.0f) && vci_pt_white(b, 1.0f)));
+    const std::vector<float> off = vci_pt(pad, vci_mat(false, true), true, 1.0f);
+    CHECK(vci_pt_white(vci_pix(off, 7), 1.0f) && vci_pt_white(vci_pix(off, 25), 1.0f));
+  });
+
+  /* ---------------------------------------------------------------- criterion 2: a Corner layer's faces */
+  test("vertex colour input: a Corner layer's two halves render their own colours in the Shaded view and the path tracer, away from the seam", [] {
+    VciView v(vci_pad(true), vci_mat(true));
+    const auto l = v.px(-0.6f, 0.6f), r = v.px(0.6f, 0.6f);
+    std::printf("    Shaded: left %d %d %d, right %d %d %d\n", l[0], l[1], l[2], r[0], r[1], r[2]);
+    CHECK(vci_red(l) && vci_blue(r));
+    MeshPtr pad = vci_pad(true);
+    const std::vector<float> pt = vci_pt(pad, vci_mat(true), true);
+    const Vec3 a = vci_pix(pt, 7), b = vci_pix(pt, 25);
+    std::printf("    PT: col 7 %.3f %.3f %.3f, col 25 %.3f %.3f %.3f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+    CHECK((vci_pt_red(a, 0.5f) && vci_pt_blue(b, 0.5f)) || (vci_pt_blue(a, 0.5f) && vci_pt_red(b, 0.5f)));
+  });
+
+  test("vertex colour input: a cube's six Corner-layer face colours give each render vertex its own face's colour; a seam inside a render vertex is the mean", [] {
+    MeshPtr cube = primitives::cube();
+    Mesh &m = *mesh_make_mutable(cube);
+    ColorAttribute c = m.make_color("Faces", Dom::Corner, Vec4(1, 1, 1, 1));
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) c.rgba[k] = Vec4((float)(f + 1) / 8.0f, (float)(6 - f) / 8.0f, 0.25f, 1.0f);
+    m.color_attributes.push_back(std::move(c));
+    m.active_color = m.render_color = 0;
+    m.touch();
+    const RenderMesh &rm = m.render_mesh();
+    const std::vector<Vec4> *cols = m.render_vertex_colors(rm);
+    CHECK(cols && cols->size() == rm.positions.size());
+    int wrong = 0, checked = 0;
+    for (size_t k = 0; cols && k < rm.indices.size() && k < rm.tri_corner.size(); k++) {
+      const uint32_t cn = rm.tri_corner[k];
+      const Vec4 want = m.color_attributes[0].rgba[cn];
+      const Vec4 got = (*cols)[rm.indices[k]];
+      checked++;
+      wrong += !vpt_near(got, want, 1e-5f);
+    }
+    std::printf("    cube: %zu render vertices, %d of %d triangle corners differ from their face's colour\n", rm.positions.size(), wrong, checked);
+    CHECK(checked > 0 && wrong == 0);
+    /* Two quads sharing a render vertex (flat, planar): the shared vertices get the mean of the two faces' colours. */
+    MeshPtr two = vpt_two_quads();
+    Mesh &t = *mesh_make_mutable(two);
+    ColorAttribute tc = t.make_color("C", Dom::Corner, Vec4(1, 1, 1, 1));
+    for (size_t f = 0; f < t.face_count(); f++)
+      for (uint32_t k = t.face_offsets[f]; k < t.face_offsets[f + 1]; k++) tc.rgba[k] = f == 0 ? Vec4(1, 0, 0, 1) : Vec4(0, 0, 1, 1);
+    t.color_attributes.push_back(std::move(tc));
+    t.active_color = t.render_color = 0;
+    t.touch();
+    std::vector<Vec4> out;
+    CHECK(render_vertex_colors_into(t, t.render_mesh(), out));
+    int purple = 0, red = 0, blue = 0;
+    for (const Vec4 &o : out) {
+      purple += vpt_near(o, Vec4(0.5f, 0, 0.5f, 1), 1e-5f);
+      red += vpt_near(o, Vec4(1, 0, 0, 1), 1e-5f);
+      blue += vpt_near(o, Vec4(0, 0, 1, 1), 1e-5f);
+    }
+    std::printf("    two quads: %zu render vertices: %d red, %d blue, %d mean\n", out.size(), red, blue, purple);
+    for (const Vec4 &o : out) std::printf("      render vertex colour %.3f %.3f %.3f %.3f\n", o.x, o.y, o.z, o.w);
+    CHECK(out.size() == 6 && red == 2 && blue == 2 && purple == 2);
+  });
+
+  /* ---------------------------------------------------------------- criterion 3: no render mesh rebuild */
+  test("vertex colour input: colorattr fill shows on the next frame and the render mesh is not rebuilt", [] {
+    VciView v(vci_pad(false), vci_mat(true));
+    CHECK(vci_red(v.px(-0.6f, 0.6f)));
+    v.frames(3);
+    const MeshCounts c0 = mesh_counts();
+    v.t.ed.command("colorattr fill 0 1 0 1");
+    v.t.ed.step_frame_headless();
+    const MeshCounts d = mesh_counts() - c0;
+    const auto l = v.px(-0.6f, 0.6f), r = v.px(0.6f, 0.6f);
+    std::printf("    after fill: left %d %d %d, right %d %d %d; render meshes built whole %llu, moved in place %llu\n", l[0], l[1], l[2], r[0], r[1], r[2],
+                (unsigned long long)d.full_builds, (unsigned long long)d.in_place);
+    CHECK(vci_greenish(l) && vci_greenish(r));
+    CHECK(d.full_builds == 0);  // (round 545b review: the in-place move of the render mesh is counted and printed above, not forbidden: only a whole rebuild is what the spec rules out)
+  });
+
+  test("vertex colour input: a Vertex Paint stroke shows on the next frame on a Vertex Color material and rebuilds no render mesh", [] {
+    VPad t;  // Vertex Paint on, the layer white
+    t.pad->get<MeshRenderer>()->materials = {vci_mat(true)};
+    t.ed.command("shading shaded");
+    t.ed.mark_changed_for_test("VCI stroke");
+    for (int i = 0; i < 4; i++) t.ed.step_frame_headless();
+    auto px = [&](float x, float z) {
+      int sx = 0, sy = 0;
+      CHECK(t.ed.project_to_window(t.pad->world_matrix().point(Vec3(x, 0, z)), sx, sy));
+      const Image &fb = t.ed.main_fb_for_test();
+      const uint32_t p = fb.pixels[(size_t)sy * (size_t)fb.width + (size_t)sx];
+      return std::array<int, 3>{(int)((p >> 16) & 255), (int)((p >> 8) & 255), (int)(p & 255)};
+    };
+    const auto before = px(-0.5f, 0.5f);
+    t.flat(0.25f, "draw", 1.0f);
+    const MeshCounts c0 = mesh_counts();
+    t.drag({Vec3(-0.5f, 0, 0.5f)});
+    const MeshCounts d = mesh_counts() - c0;
+    const auto after = px(-0.5f, 0.5f);
+    std::printf("    before %d %d %d, after %d %d %d; render meshes built whole during the stroke: %llu\n", before[0], before[1], before[2], after[0], after[1],
+                after[2], (unsigned long long)d.full_builds);
+    CHECK(vci_grey(before) && vci_red(after) && d.full_builds == 0);
+  });
+
+  /* ---------------------------------------------------------------- criterion 4: the bake */
+  test("vertex colour input: a texture bake's albedo carries the vertex colours (and stays white with the flag off)", [] {
+    auto sample = [](const Mesh &m, const TextureBakeResult &r, size_t f) {
+      Vec2 uv(0, 0);
+      const float n = (float)(m.face_offsets[f + 1] - m.face_offsets[f]);
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) uv = uv + r.uvs[k] * (1.0f / n);
+      const int x = std::max(0, std::min(r.size - 1, (int)(uv.x * (float)r.size))), y = std::max(0, std::min(r.size - 1, (int)((1.0f - uv.y) * (float)r.size)));
+      return r.albedo[(size_t)y * (size_t)r.size + (size_t)x];
+    };
+    for (bool on : {true, false}) {
+      MeshPtr pad = vci_pad(false);
+      TextureBakeSettings s;
+      s.size = 128;
+      const TextureBakeResult r = bake_textures(*pad, Mat4::identity(), {vci_mat(on)}, s);
+      int red = 0, blue = 0, white = 0, left = 0, right = 0;
+      for (size_t f = 0; f < pad->face_count() && r.albedo.size() == (size_t)r.size * (size_t)r.size; f++) {
+        float cx = 0.0f;
+        for (uint32_t k = pad->face_offsets[f]; k < pad->face_offsets[f + 1]; k++) cx += pad->positions[pad->corner_verts[k]].x;
+        cx /= (float)(pad->face_offsets[f + 1] - pad->face_offsets[f]);
+        if (std::fabs(cx) < 0.3f) continue;
+        const uint32_t p = sample(*pad, r, f);
+        const int pr = (int)((p >> 16) & 255), pg = (int)((p >> 8) & 255), pb = (int)(p & 255);
+        (cx < 0 ? left : right)++;
+        red += pr > 245 && pg < 10 && pb < 10;
+        blue += pb > 245 && pr < 10 && pg < 10;
+        white += pr > 245 && pg > 245 && pb > 245;
+      }
+      std::printf("    flag %s: %d of %d left faces red, %d of %d right faces blue, %d white\n", on ? "on" : "off", red, left, blue, right, white);
+      CHECK(r.size == 128 && left >= 10 && right >= 10);
+      if (on) CHECK(red == left && blue == right);
+      else CHECK(white == left + right);
+    }
+  });
+
+  /* ---------------------------------------------------------------- criterion 5: the importers */
+  test("vertex colour input: a PLY with uchar or float colours, ASCII or binary, imports them as the Col layer (bytes sRGB-decoded, alpha and floats as stored)", [] {
+    int n = 0;
+    for (bool binary : {false, true})
+      for (bool uchar : {true, false})
+        for (bool alpha : {true, false}) {
+          const std::string path = fs::join(vci_dir(), "c" + std::to_string(n++) + ".ply");
+          vci_write(path, vci_ply(binary, uchar, alpha));
+          ImportResult res;
+          const bool ok = import_ply_file(path, res);
+          const Mesh *m = ok ? vci_first_mesh(res) : nullptr;
+          const ColorAttribute *c = m ? vpt_find(*m, "Col") : nullptr;
+          const float err = c ? vci_set_error(c->rgba, vci_ply_expected(uchar, alpha)) : 1e9f;
+          std::printf("    %s %s%s: %s, worst colour error %.2g\n", binary ? "binary" : "ASCII", uchar ? "uchar" : "float", alpha ? "+alpha" : "", ok ? "imported" : res.error.c_str(),
+                      err);
+          CHECK(ok && m && c && c->domain == Dom::Point && m->color_fits(*c) && m->active_color == m->find_color("Col") && m->render_color == m->active_color);
+          CHECK(err < 1e-4f);
+        }
+    /* A PLY without colours gets no layer. */
+    const std::string path = fs::join(vci_dir(), "plain.ply");
+    vci_write(path, vci_ply(false, true, false, 4, "none"));
+    ImportResult res;
+    CHECK(import_ply_file(path, res) && vci_first_mesh(res) && vci_first_mesh(res)->color_attributes.empty());
+  });
+
+  test("vertex colour input: glTF COLOR_0 as VEC3 or VEC4 float, normalized u8 and u16 imports as the Color layer, linear, as stored", [] {
+    struct V {
+      const char *name;
+      int ct, comps;
+      bool norm;
+    };
+    for (const V &v : {V{"f3", 5126, 3, false}, V{"f4", 5126, 4, false}, V{"u8", 5121, 4, true}, V{"u16_3", 5123, 3, true}, V{"u16_4", 5123, 4, true}}) {
+      std::vector<Vec4> want;
+      const std::string bytes = vci_gltf_colours(v.ct, v.comps, want);
+      const std::string path = vci_gltf_file(std::string("col_") + v.name, kVciQuadPos, kVciQuadIdx, v.ct, v.comps, v.norm, bytes, 4);
+      ImportResult res;
+      const bool ok = import_gltf_file(path, res);
+      const Mesh *m = ok ? vci_first_mesh(res) : nullptr;
+      const ColorAttribute *c = m ? vpt_find(*m, "Color") : nullptr;
+      const float err = c ? vci_set_error(c->rgba, want) : 1e9f;
+      std::printf("    %s: %s, %zu colours, worst error %.2g\n", v.name, ok ? "imported" : res.error.c_str(), c ? c->rgba.size() : (size_t)0, err);
+      CHECK(ok && m && c && c->domain == Dom::Point && m->color_fits(*c) && m->render_color == m->find_color("Color") && m->active_color == m->render_color);
+      CHECK(err < 1e-5f);
+    }
+    ImportResult res;
+    CHECK(import_gltf_file(vci_gltf_file("col_none", kVciQuadPos, kVciQuadIdx, 5126, 4, false, "", 0), res) && vci_first_mesh(res) &&
+          vci_first_mesh(res)->color_attributes.empty());
+  });
+
+  test("vertex colour input: an FBX's first colour set imports as the Corner layer Col, sRGB-decoded (skipped when the importer doesn't read the hand-written file)", [] {
+    const std::string path = fs::join(vci_dir(), "col.fbx");
+    vci_write(path, vci_fbx());
+    ImportResult res;
+    const bool ok = import_fbx_file(path, res);
+    const Mesh *m = ok ? vci_first_mesh(res) : nullptr;
+    if (!m) {
+      std::printf("    the hand-written ASCII FBX did not import (%s): fixture not accepted, FBX colours untested\n", res.error.c_str());
+      return;
+    }
+    const ColorAttribute *c = vpt_find(*m, "Col");
+    std::vector<Vec4> want = vci_ply_expected(true, true);  // the same four colours: sRGB -> linear, alpha as is
+    const float err = c ? vci_set_error(c->rgba, want) : 1e9f;
+    std::printf("    FBX: %zu corners, layer %s, worst error %.2g\n", m->corner_count(), c ? "Col" : "missing", err);
+    CHECK(c && c->domain == Dom::Corner && m->color_fits(*c) && m->render_color == m->find_color("Col") && err < 1e-3f);
+  });
+
+  test("vertex colour input: colours round trip through Blendity's glTF (exactly) and PLY (within one byte step) exporters", [] {
+    MeshPtr quads = vpt_two_quads();
+    Mesh &m = *mesh_make_mutable(quads);
+    const std::vector<Vec4> cols = {Vec4(0.1f, 0.2f, 0.3f, 1), Vec4(0.9f, 0.5f, 0.1f, 0.8f), Vec4(0, 0, 1, 1), Vec4(0.5f, 0.5f, 0.5f, 0.25f), Vec4(1, 1, 0, 1), Vec4(0.3f, 0.6f, 0.9f, 0.5f)};
+    ColorAttribute c = m.make_color("Color", Dom::Point, Vec4(1, 1, 1, 1));
+    c.rgba = cols;
+    m.color_attributes.push_back(std::move(c));
+    m.active_color = m.render_color = 0;
+    m.touch();
+    ExportItem it;
+    it.name = "M";
+    it.mesh = &m;
+    it.world = Mat4::identity();
+    {
+      const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+      const std::string path = fs::join(vci_dir(), "round.glb");
+      vci_write(path, glb);
+      ImportResult res;
+      const bool ok = import_gltf_file(path, res);
+      const Mesh *im = ok ? vci_first_mesh(res) : nullptr;
+      const ColorAttribute *ic = im ? vpt_find(*im, "Color") : nullptr;
+      const float err = ic ? vci_set_error(ic->rgba, cols) : 1e9f;
+      std::printf("    glTF: %s, %zu colours, worst error %.3g\n", ok ? "imported" : res.error.c_str(), ic ? ic->rgba.size() : (size_t)0, err);
+      CHECK(ic && err <= 1.0f / 255.0f);
+    }
+    for (bool ascii : {true, false}) {
+      ExportOptions o = export_defaults((int)ExportFormat::PLY);
+      o.ascii = ascii;
+      const std::string ply = export_ply({it}, o);
+      const std::string path = fs::join(vci_dir(), ascii ? "round_a.ply" : "round_b.ply");
+      vci_write(path, ply);
+      ImportResult res;
+      const bool ok = import_ply_file(path, res);
+      const Mesh *im = ok ? vci_first_mesh(res) : nullptr;
+      const ColorAttribute *ic = im ? vpt_find(*im, "Col") : nullptr;
+      const float err = ic ? vci_set_error(vci_encode(ic->rgba), vci_encode(cols)) : 1e9f;  // compared as stored: sRGB bytes
+      std::printf("    PLY %s: %s, %zu colours, worst error (sRGB) %.3g (one step %.3g)\n", ascii ? "ASCII" : "binary", ok ? "imported" : res.error.c_str(),
+                  ic ? ic->rgba.size() : (size_t)0, err, 1.0f / 255.0f);
+      CHECK(ic && err <= 1.0f / 255.0f + 1e-3f);
+    }
+  });
+
+  /* ---------------------------------------------------------------- criterion 6: weld_exact */
+  test("vertex colour input: a PLY with doubled positions welds the vertices of one colour and keeps apart those of two colours", [] {
+    /* Triangles (A B C) and (A' C' D): A = A' (red), C and C' coincide but are yellow and cyan -> 5 vertices, not 4 or 6. */
+    std::string s = "ply\nformat ascii 1.0\nelement vertex 6\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n"
+                    "element face 2\nproperty list uchar int vertex_indices\nend_header\n"
+                    "0 0 0 255 0 0\n1 0 0 0 255 0\n1 1 0 255 255 0\n0 0 0 255 0 0\n1 1 0 0 255 255\n0 1 0 0 0 255\n3 0 1 2\n3 3 4 5\n";
+    const std::string path = fs::join(vci_dir(), "weld.ply");
+    vci_write(path, s);
+    ImportResult res;
+    const bool ok = import_ply_file(path, res);
+    const Mesh *m = ok ? vci_first_mesh(res) : nullptr;
+    const ColorAttribute *c = m ? vpt_find(*m, "Col") : nullptr;
+    std::vector<Vec4> want;
+    for (int k = 0; k < 6; k++) {
+      const int rgb[6][3] = {{255, 0, 0}, {0, 255, 0}, {255, 255, 0}, {255, 0, 0}, {0, 255, 255}, {0, 0, 255}};
+      if (k == 3) continue;  // the welded copy
+      want.push_back(Vec4(srgb_to_linear(rgb[k][0] / 255.0f), srgb_to_linear(rgb[k][1] / 255.0f), srgb_to_linear(rgb[k][2] / 255.0f), 1.0f));
+    }
+    std::printf("    PLY: %zu vertices (want 5), layer %s, error %.2g\n", m ? m->vert_count() : (size_t)0, c ? "kept" : "missing", c ? vci_set_error(c->rgba, want) : -1.0f);
+    CHECK(m && c && m->vert_count() == 5 && m->color_fits(*c) && vci_set_error(c->rgba, want) < 1e-4f && vpt_valid(*m));
+    /* The same through glTF (COLOR_0 per vertex, six vertices). */
+    const std::vector<Vec3> pos = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    std::string bytes;
+    for (int k = 0; k < 6; k++) {
+      const float rgb[6][3] = {{1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}, {0, 1, 1}, {0, 0, 1}};
+      for (int j = 0; j < 3; j++) vci_put<float>(bytes, rgb[k][j]);
+    }
+    ImportResult gr;
+    const bool gok = import_gltf_file(vci_gltf_file("weld", pos, {0, 1, 2, 3, 4, 5}, 5126, 3, false, bytes, 6), gr);
+    const Mesh *gm = gok ? vci_first_mesh(gr) : nullptr;
+    const ColorAttribute *gc = gm ? vpt_find(*gm, "Color") : nullptr;
+    std::printf("    glTF: %zu vertices (want 5)\n", gm ? gm->vert_count() : (size_t)0);
+    CHECK(gm && gc && gm->vert_count() == 5 && gm->color_fits(*gc) && vpt_valid(*gm));
+    /* weld_exact on a mesh directly: the layer renumbers with the vertices; active / render keep their layer by name. */
+    Mesh d;
+    for (const Vec3 &p : pos) d.add_vert(p);
+    d.add_face({0, 1, 2});
+    d.add_face({3, 4, 5});
+    ColorAttribute other = d.make_color("Other", Dom::Point, Vec4(1, 1, 1, 1));
+    ColorAttribute dc = d.make_color("Second", Dom::Point, Vec4(1, 1, 1, 1));
+    const Vec4 cc[6] = {Vec4(1, 0, 0, 1), Vec4(0, 1, 0, 1), Vec4(1, 1, 0, 1), Vec4(1, 0, 0, 1), Vec4(0, 1, 1, 1), Vec4(0, 0, 1, 1)};
+    for (int k = 0; k < 6; k++) dc.rgba[(size_t)k] = cc[k];  // ("Other" stays white: it welds both pairs)
+    d.color_attributes.push_back(std::move(other));
+    d.color_attributes.push_back(std::move(dc));
+    d.active_color = 1, d.render_color = 1;
+    weld_exact(d);
+    std::printf("    weld_exact: %zu vertices, layers %zu, render layer %d\n", d.vert_count(), d.color_attributes.size(), d.render_color);
+    CHECK(d.vert_count() == 5 && d.color_attributes.size() == 2 && d.color_fits(d.color_attributes[0]) && d.color_fits(d.color_attributes[1]) &&
+          d.render_color >= 0 && d.color_attributes[(size_t)d.render_color].name == "Second" && d.active_color == d.render_color);
+  });
+
+  /* ---------------------------------------------------------------- criterion 7: robustness */
+  test("vertex colour input: NaN, infinite and out-of-range colours render finite in the Shaded view and the path tracer", [] {
+    MeshPtr pad = vci_pad(false);
+    Mesh &m = *mesh_make_mutable(pad);
+    ColorAttribute &c = m.color_attributes[0];
+    const float nan = std::nanf(""), inf = std::numeric_limits<float>::infinity();
+    c.rgba[3] = Vec4(nan, 0.5f, 0.5f, 1);
+    c.rgba[10] = Vec4(0.5f, inf, nan, nan);
+    c.rgba[20] = Vec4(-5, 1e6f, 2, -1);
+    c.rgba[30] = Vec4(1e6f, 1e6f, 1e6f, 7);
+    c.rgba[40] = Vec4(-inf, 0, 0, inf);
+    m.touch();
+    std::vector<Vec4> out;
+    CHECK(render_vertex_colors_into(m, m.render_mesh(), out));
+    bool finite = !out.empty();
+    for (const Vec4 &o : out) finite = finite && vpt_finite4(o);
+    std::printf("    render colours finite: %d (%zu render vertices)\n", (int)finite, out.size());
+    CHECK(finite);
+    for (bool cut : {false, true}) {
+      const std::vector<float> pt = vci_pt(pad, vci_mat(true, cut), true);
+      std::printf("    path tracer%s: %zu values, all finite %d\n", cut ? " (Cutout)" : "", pt.size(), (int)vci_finite_all(pt));
+      CHECK(vci_finite_all(pt));
+    }
+    VciView v(pad, vci_mat(true));  // (a frame renders without a crash; the clean sides stay red and blue)
+    CHECK(vci_red(v.px(-0.6f, 0.6f)) && vci_blue(v.px(0.6f, 0.6f)));
+    VciView cutv(pad, vci_mat(true, true));
+    cutv.frames(2);
+    CHECK(cutv.t.ed.main_fb_for_test().pixels.size() > 0);
+  });
+
+  test("vertex colour input: a colour layer that no longer fits, and a mesh without colours, render white under a Vertex Color material", [] {
+    MeshPtr short_layer = vci_pad(false);
+    Mesh &m = *mesh_make_mutable(short_layer);
+    m.color_attributes[0].rgba.resize(m.vert_count() - 5);  // a short array
+    m.touch();
+    std::vector<Vec4> out;
+    CHECK(!render_vertex_colors_into(m, m.render_mesh(), out) && out.empty());
+    MeshPtr bare = primitives::grid(2.0f, 8, 8);
+    for (const MeshPtr &mesh : {short_layer, bare}) {
+      const std::vector<float> pt = vci_pt(mesh, vci_mat(true), true);
+      const Vec3 a = vci_pix(pt, 7), b = vci_pix(pt, 25);
+      std::printf("    PT: %.3f %.3f %.3f | %.3f %.3f %.3f\n", a.x, a.y, a.z, b.x, b.y, b.z);
+      CHECK(vci_pt_white(a, 0.5f) && vci_pt_white(b, 0.5f));
+      VciView on(mesh, vci_mat(true)), off(mesh, vci_mat(false));
+      const auto p = on.px(-0.6f, 0.6f), q = off.px(-0.6f, 0.6f);
+      std::printf("    Shaded flag on %d %d %d, flag off %d %d %d\n", p[0], p[1], p[2], q[0], q[1], q[2]);
+      CHECK(vci_grey(p) && vci_same_px(p, q, 3));
+    }
+    /* No render layer chosen (the colours turned off): white as well. */
+    MeshPtr off_layer = vci_pad(false);
+    mesh_make_mutable(off_layer)->render_color = -1;
+    const std::vector<float> pt = vci_pt(off_layer, vci_mat(true), true);
+    CHECK(vci_pt_white(vci_pix(pt, 7), 0.5f) && vci_pt_white(vci_pix(pt, 25), 0.5f));
+  });
+
+  test("vertex colour input: PLY and glTF colours that are NaN, out of range, short or half there import cleanly (or refuse), never a broken layer", [] {
+    auto check_import = [](const char *what, bool ok, const ImportResult &res, bool expect_layer) {
+      const Mesh *m = ok ? vci_first_mesh(res) : nullptr;
+      std::printf("    %s: %s%s\n", what, ok ? "imported" : "refused: ", ok ? "" : res.error.c_str());
+      if (!ok) {
+        CHECK(!res.error.empty());
+        return;
+      }
+      CHECK(m && m->vert_count() > 0 && vpt_valid(*m));
+      for (const ColorAttribute &c : m ? m->color_attributes : std::vector<ColorAttribute>()) {
+        bool good = true;
+        for (const Vec4 &v : c.rgba) good = good && vpt_finite4(v) && v.x >= 0 && v.y >= 0 && v.z >= 0 && v.w >= 0 && v.w <= 1.0f;
+        CHECK(good);
+      }
+      if (expect_layer) CHECK(m && !m->color_attributes.empty());
+    };
+    /* ASCII floats: nan, inf, negative, huge, alpha above 1. */
+    {
+      const std::string path = fs::join(vci_dir(), "wild.ply");
+      vci_write(path, "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty float red\nproperty float green\nproperty float blue\nproperty float alpha\n"
+                      "element face 2\nproperty list uchar int vertex_indices\nend_header\n"
+                      "0 0 0 nan 0.5 0.5 1\n1 0 0 inf -inf 0 nan\n1 1 0 -3 1e30 2 9\n0 1 0 0.5 0.5 0.5 -1\n3 0 1 2\n3 0 2 3\n");
+      ImportResult res;
+      check_import("PLY NaN / inf / out of range", import_ply_file(path, res), res, false);
+    }
+    /* A colour property list that stops short: the last vertex line has only three of the seven values. */
+    {
+      const std::string path = fs::join(vci_dir(), "short.ply");
+      vci_write(path, "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n"
+                      "element face 2\nproperty list uchar int vertex_indices\nend_header\n0 0 0 255 0 0\n1 0 0 0 255 0\n1 1 0 0 0 255\n0 1 0 255\n3 0 1 2\n3 0 2 3\n");
+      ImportResult res;
+      check_import("PLY last vertex short of values", import_ply_file(path, res), res, false);
+    }
+    /* A binary file cut off inside the colour bytes. */
+    {
+      std::string full = vci_ply(true, true, true);
+      const std::string path = fs::join(vci_dir(), "cut.ply");
+      vci_write(path, full.substr(0, full.size() - 30));
+      ImportResult res;
+      check_import("PLY binary cut short", import_ply_file(path, res), res, false);
+    }
+    /* Only red and green (no blue): no colour layer, the mesh still imports. */
+    {
+      const std::string path = fs::join(vci_dir(), "rg.ply");
+      vci_write(path, vci_ply(false, true, false, 4, "red green"));
+      ImportResult res;
+      const bool ok = import_ply_file(path, res);
+      check_import("PLY with red and green only", ok, res, false);
+      CHECK(ok && vci_first_mesh(res) && vci_first_mesh(res)->color_attributes.empty());
+    }
+    /* glTF: COLOR_0 with fewer elements than POSITION. */
+    {
+      std::vector<Vec4> want;
+      const std::string bytes = vci_gltf_colours(5126, 4, want).substr(0, 2 * 16);
+      ImportResult res;
+      check_import("glTF COLOR_0 with 2 of 4 elements", import_gltf_file(vci_gltf_file("short", kVciQuadPos, kVciQuadIdx, 5126, 4, false, bytes, 2), res), res, false);
+    }
+    /* glTF: NaN and huge floats. */
+    {
+      std::string bytes;
+      const float nan = std::nanf("");
+      for (int v = 0; v < 4; v++)
+        for (int k = 0; k < 4; k++) vci_put<float>(bytes, (v + k) % 3 == 0 ? nan : (v + k) % 3 == 1 ? 1e30f : -4.0f);
+      ImportResult res;
+      check_import("glTF COLOR_0 NaN / huge / negative", import_gltf_file(vci_gltf_file("wild", kVciQuadPos, kVciQuadIdx, 5126, 4, false, bytes, 4), res), res, true);
+    }
+  });
+
+  test("vertex colour input: the flat (Edit Mode) and the shaded render meshes keep their own colours - asking for one leaves the other's alone", [] {
+    /* The review of round 545b: one cache for both variants refilled the vector a render job was reading. A smooth sphere
+     * has fewer shaded render vertices than flat ones, so the two lists differ in size. */
+    MeshPtr sphere = primitives::uv_sphere(0.5f, 12, 8);
+    Mesh &m = *sphere;
+    m.smooth = true;
+    ColorAttribute c = m.make_color("Color", ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
+    for (size_t v = 0; v < m.vert_count(); v++) c.rgba[v] = Vec4(m.positions[v].y + 0.5f, 0.2f, 0.3f, 1.0f);
+    m.color_attributes.push_back(std::move(c));
+    m.active_color = m.render_color = 0;
+    m.touch();
+    const RenderMesh &shaded = m.render_mesh(false), &flat = m.render_mesh(true);
+    const std::vector<Vec4> *a = m.render_vertex_colors(shaded);
+    CHECK(a != nullptr);
+    if (!a) return;
+    const std::vector<Vec4> before = *a;
+    const std::vector<Vec4> *b = m.render_vertex_colors(flat);
+    std::printf("    shaded %zu render vertices, flat %zu; the shaded list kept: %d, at its own address: %d\n", shaded.positions.size(), flat.positions.size(),
+                (int)(a->size() == before.size() && std::memcmp(a->data(), before.data(), before.size() * sizeof(Vec4)) == 0), (int)(a != b));
+    CHECK(b != nullptr && a != b && a->size() == shaded.positions.size() && b->size() == flat.positions.size());
+    CHECK(std::memcmp(a->data(), before.data(), before.size() * sizeof(Vec4)) == 0);
+    CHECK(m.render_vertex_colors(shaded) == a);  // (a hit: the same list, not refilled)
+  });
+}
+
 
 void run_vertex_paint_tests() {
   /* ================================================================ 1. the operator table */
@@ -1659,4 +2442,6 @@ void run_vertex_paint_tests() {
     }
   });
 
+
+  vertex_colour_input_tests();
 }

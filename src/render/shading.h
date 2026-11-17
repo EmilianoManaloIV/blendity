@@ -37,6 +37,7 @@ struct SurfacePoint {
   Vec3 normal;         // interpolated shading normal (normalized)
   Vec3 geo_normal;     // true face normal
   Vec4 tangent{1, 0, 0, 1};
+  Vec4 vertex_color{1, 1, 1, 1};  // (task 0533) the mesh's render colour layer here: what a Vertex Color material multiplies in
   Vec2 uv;
   Vec2 duvdx, duvdy;   // screen-space UV derivatives (0 for ray tracing)
   Vec3 local_position; // object space (Box / Generated / procedural mapping)

@@ -63,6 +63,7 @@ static float procedural_cells(const Material &m, const SurfacePoint &sp, Vec2 dd
 }
 
 bool material_uniform(const Material &m, const Material::Resolved &tx) {
+  if (m.vertex_color) return false;  // (task 0533: the colours vary over the surface)
   if (m.axis_mode != 0 || m.procedural == (int)Procedural::Checker || m.procedural == (int)Procedural::Noise) return false;
   /* The painted toon maps and the hair's strands vary over the surface too (task 0148); the ramp alone doesn't. */
   if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight)) return false;
@@ -609,6 +610,13 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     Vec4 c = sample_slot(0, tx.base);
     s.albedo = s.albedo * c.xyz();
     s.alpha *= c.w;
+  }
+  if (m.vertex_color) {  // (task 0533) the vertex colours, after the base map and before any cutout test reads the alpha
+    const Vec4 vc = sp.vertex_color;
+    /* (Capped at 1: a reflectance can't exceed it - an HDR layer would add light in the path tracer.) */
+    auto f = [](float v) { return std::max(0.0f, std::min(v, 1.0f)); };
+    if (finite_bits(vc.x) && finite_bits(vc.y) && finite_bits(vc.z)) s.albedo = s.albedo * Vec3(f(vc.x), f(vc.y), f(vc.z));
+    if (finite_bits(vc.w)) s.alpha *= std::max(0.0f, std::min(vc.w, 1.0f));
   }
   if (tx.metallic) s.metallic *= sample_slot(1, tx.metallic).x;
   if (tx.roughness) s.roughness *= sample_slot(2, tx.roughness).x;

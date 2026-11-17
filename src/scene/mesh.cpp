@@ -145,6 +145,43 @@ const ColorAttribute *Mesh::render_colors() const {
   return color_fits(c) ? &c : nullptr;
 }
 
+bool render_vertex_colors_into(const Mesh &m, const RenderMesh &rm, std::vector<Vec4> &out) {
+  out.clear();
+  const ColorAttribute *c = m.render_colors();
+  if (!c) return false;
+  const bool corner = c->domain == ColorAttribute::Domain::Corner;
+  const size_t nv = rm.positions.size();
+  out.assign(nv, Vec4(0, 0, 0, 0));
+  std::vector<float> n(nv, 0.0f);
+  /* Each triangle corner names its render vertex and its mesh corner: the colour goes where the render vertex is, each
+   * mesh corner once (a quad's corner sits in one or two of its triangles: counted per triangle, a seam's mean would
+   * lean with the triangulation). */
+  std::vector<uint8_t> seen(m.corner_verts.size(), 0);
+  for (size_t k = 0; k < rm.indices.size() && k < rm.tri_corner.size(); k++) {
+    const uint32_t v = rm.indices[k], cn = rm.tri_corner[k];
+    if (v >= nv || cn >= m.corner_verts.size() || seen[cn]) continue;
+    seen[cn] = 1;
+    const size_t e = corner ? cn : m.corner_verts[cn];
+    if (e >= c->rgba.size()) continue;
+    Vec4 col = c->rgba[e];
+    if (!finite_bits(col.x) || !finite_bits(col.y) || !finite_bits(col.z) || !finite_bits(col.w)) col = Vec4(1, 1, 1, 1);
+    out[v] = out[v] + col;
+    n[v] += 1.0f;
+  }
+  for (size_t v = 0; v < nv; v++) out[v] = n[v] > 0.0f ? out[v] * (1.0f / n[v]) : Vec4(1, 1, 1, 1);
+  return true;
+}
+
+const std::vector<Vec4> *Mesh::render_vertex_colors(const RenderMesh &rm) const {
+  const uint64_t build = rm.build_serial ? rm.build_serial : rm.serial;
+  ColourCache &cc = colour_cache_[&rm == &cache_[1] ? 1 : 0];  // (the variant's own slot)
+  if (cc.build == build && build != 0 && cc.version == version && cc.layer == render_color && cc.rgba.size() == rm.positions.size())
+    return cc.rgba.empty() ? nullptr : &cc.rgba;
+  if (!render_vertex_colors_into(*this, rm, cc.rgba)) std::vector<Vec4>().swap(cc.rgba);
+  cc.build = build, cc.version = version, cc.layer = render_color;
+  return cc.rgba.empty() ? nullptr : &cc.rgba;
+}
+
 /* A layer that no longer fits has had its elements renumbered by an operator that didn't carry it: it goes whole
  * rather than colour the wrong vertices or corners. The active and render choices follow the layers that stay. */
 void Mesh::prune_colors(bool points_too) {

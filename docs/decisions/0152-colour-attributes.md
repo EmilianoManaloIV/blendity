@@ -59,9 +59,13 @@ Blendity's `Mesh` has no colour data. It does have two ways per-element data alr
    Blender's brushes (Draw with its blend modes, Blur, Average, Smear) and the automasking of task 0519, shared with
    Weight Paint in one file.
 5. **Shown** in the Scene view through the colours path Weight Paint already uses (`RasterFrame::vertex_colors`);
-   **exported** as glTF `COLOR_0` and PLY colours (round 545a). **Materials reading the colour** (a Vertex Color
-   input in the three renderers) and **importers reading it** come in round 545b, once the rounds that hold those files
-   have published.
+   **exported** as glTF `COLOR_0` and PLY colours (round 545a). **A material's Vertex Color** multiplies the render
+   layer into Base Color and Alpha (round 545b1: the CPU rasterizer, the CPU path tracer for the gathered objects, the
+   texture bake; 545b2: the card). The colours reach a renderer per render vertex from a cache on the mesh, one slot per
+   render cache variant, keyed on the render mesh's build and the mesh's version - never part of the render mesh's
+   topology, so a paint stroke doesn't rebuild it. A Corner layer's corners that share a render vertex give it their
+   mean (each mesh corner once): a colour seam inside one render vertex softens there. **Importers** read PLY's
+   colours and glTF's `COLOR_0` as a Point layer, FBX's first colour set as a Corner layer (round 545b1).
 
 ## Consequences
 - Every renderer and exporter reads one layer (`render_color`), so a mesh with several layers behaves predictably.

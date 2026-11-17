@@ -49,6 +49,9 @@ struct ColorAttribute {
 };
 
 struct MeshRenderer;
+/* Task 0533: Mesh::render_vertex_colors without the cache (any thread). False, `out` empty, without a render layer. */
+bool render_vertex_colors_into(const struct Mesh &m, const RenderMesh &rm, std::vector<Vec4> &out);
+
 /* Round 406: the mesh as it would be with its open shape edit folded - the basis as the positions, the edited key's
  * delta what the positions hold over it; the mesh itself when no shape is open. Exporters and Live Link read this, so
  * a file never carries a shape half folded. */
@@ -183,6 +186,23 @@ struct MeshCacheFields {
     }
   };
   mutable MovedLog moved_log_;
+  /* Task 0533: the render colour layer per render vertex (Mesh::render_vertex_colors), keyed on the render mesh's
+   * build, the mesh's version and the layer - one slot per render cache variant, as cache_[2], so a renderer holding
+   * one variant's colours never sees them refilled for the other (review of round 545b: the flat Edit Mode variant and
+   * the shaded one took turns in one vector under a render job's reads). A copy starts empty, as NormalState does. */
+  struct ColourCache {
+    std::vector<Vec4> rgba;
+    uint64_t build = 0, version = ~0ull;
+    int layer = -2;
+    ColourCache() = default;
+    ColourCache(const ColourCache &) {}
+    ColourCache &operator=(const ColourCache &) {
+      std::vector<Vec4>().swap(rgba);
+      build = 0, version = ~0ull, layer = -2;
+      return *this;
+    }
+  };
+  mutable ColourCache colour_cache_[2];
 };
 
 /* While one is open on this thread, a copied Mesh starts with empty caches (see MeshCacheFields). */
@@ -277,6 +297,11 @@ struct Mesh : MeshCaches {
   int find_color(const std::string &name) const;
   /* The layer to render or export, when it fits (nullptr: none). */
   const ColorAttribute *render_colors() const;
+  /* Task 0533: the render layer per render vertex of `rm` (one of this mesh's render meshes) - a Point layer's colour, a
+   * Corner layer's mean over the corners that share the render vertex; nullptr without a render layer. Kept while the
+   * build, the version and the layer stay. Not for worker threads (it fills a cache): they use
+   * render_vertex_colors_into. */
+  const std::vector<Vec4> *render_vertex_colors(const RenderMesh &rm) const;
   /* Drops layers that no longer fit their domain (Corner ones only, unless points_too) and keeps active / render in
    * range. */
   void prune_colors(bool points_too = true);
