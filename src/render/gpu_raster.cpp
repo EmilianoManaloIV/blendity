@@ -4903,8 +4903,9 @@ class VulkanRaster final : public Raster {
     rp_shadow_ = make_pass({}, true, false);
     /* Round 551 (task 0531): the albedo plane in half floats, as the normal, geometry and emission planes beside it. In
      * linear 8-bit a step was 0.0039 of light - a third of a dark albedo - and sRGB 8-bit, tried next, is coarser in the
-     * brights (0.0062 at 0.8: a flat grey moved a level, the toon ball's tones and the camera filters' picture with it);
-     * the CPU keeps the albedo in float, and a half float is within 0.05 % of it everywhere. 8 bytes a pixel, not 4. */
+     * brights (0.0078 at 0.8: a flat grey moved a level, the toon ball's tones and the camera filters' picture with it);
+     * the CPU keeps the albedo in float, and a half float is within 0.05 % of it over 0..1 (and above 1 no longer clamps,
+     * as the CPU doesn't). 8 bytes a pixel, not 4. */
     rp_gbuf_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
                           VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT},
                          true, false);
