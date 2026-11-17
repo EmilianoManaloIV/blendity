@@ -69,7 +69,39 @@ static void test_splat_raster(Report &rep, const Options &o) {
       std::sort(sorted.begin(), sorted.end());
       rep.row({"orbit", std::to_string(n), device == 2 ? (ed->gpu_view_reason().empty() ? "card" : "card refused: " + ed->gpu_view_reason()) : "CPU",
                f1(sorted[sorted.size() / 2]), f1(sorted.back()), std::to_string(ms.size())});
+      rep.note(strprintf("%s, %zu splats, the last frame's parts: %s", device == 2 ? "card" : "CPU", n, splat_stats_text().c_str()));
     }
+  }
+  /* Round 557: the card's first open - its pipelines - with an empty pipeline cache folder, then again from the cache that
+   * open wrote (the driver's own per-program cache is the same in both: what differs is Blendity's file). */
+  if (gpu::available() && !gpu::devices().empty()) {
+    rep.table({"card open", "pipeline cache", "ms", "from the cache"});
+    const std::string dir = fs::join(fs::temp_dir(), strprintf("blendity_stress_pcache_%llu", (unsigned long long)now_seconds()));
+    fs::make_dirs(dir);
+    const char *old = std::getenv("BLENDITY_CACHE_DIR");
+    const std::string keep = old ? old : "";
+#ifdef _WIN32
+    _putenv_s("BLENDITY_CACHE_DIR", dir.c_str());
+#else
+    setenv("BLENDITY_CACHE_DIR", dir.c_str(), 1);
+#endif
+    for (const char *label : {"empty folder", "written by the first open"}) {
+      std::string err;
+      ScopedTimer t;
+      std::unique_ptr<gpu::Raster> r = gpu::Raster::create(gpu::devices()[0].index, &err);
+      const double open_ms = t.ms();
+      rep.row({r ? r->info().name : "failed: " + err, label, f1(open_ms), r && r->pipelines_from_cache() ? "yes" : "no"});
+    }
+#ifdef _WIN32
+    _putenv_s("BLENDITY_CACHE_DIR", keep.c_str());
+#else
+    if (old) setenv("BLENDITY_CACHE_DIR", keep.c_str(), 1);
+    else unsetenv("BLENDITY_CACHE_DIR");
+#endif
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(dir), ec);
+    rep.note("The SPIR-V is shipped with the build (`shaders/`) and the driver keeps its own cache per program; the first row is a "
+             "new build's first open on a machine whose Blendity cache doesn't have this card's pipelines yet.");
   }
   rep.note("ADR 0105: a frame over 50 ms while work runs is a miss; the write-up (round 544) names any with its cause.");
 }

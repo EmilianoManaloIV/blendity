@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "../core/jobs.h"
 #include "gpu_raster.h"
+#include "gpu_device.h"  // (round 557: the pipeline cache files)
 
 #include "../core/core.h"
 #include "../image/image.h"
@@ -118,7 +119,8 @@ namespace {
   X(vkCmdDraw) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdCopyBuffer) X(vkCmdCopyImageToBuffer)                           \
   X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool)          \
   X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkGetQueryPoolResults) X(vkQueueSubmit) X(vkCreateFence) X(vkDestroyFence)    \
-  X(vkWaitForFences) X(vkResetFences) X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkDeviceWaitIdle)
+  X(vkWaitForFences) X(vkResetFences) X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkDeviceWaitIdle)                 \
+  X(vkCreatePipelineCache) X(vkDestroyPipelineCache) X(vkGetPipelineCacheData)
 #define BL_RV_SWAPCHAIN(X)                                                                                                  \
   X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR)
 
@@ -817,43 +819,214 @@ void main() {
 }
 )";
 
-/* Round 532 (task 0512): Gaussian splats (RasterSplat), the CPU's gsplat_alpha_at per pixel. One instance a splat, a
- * quad over its pixel box; the vertex shader takes the pixels as they are (the splat's y counts rows from the top, as
- * gl_FragCoord's do, so no flip). The colour pass blends premultiplied over the lit picture, hidden where the mesh depth
- * is nearer than the splat's centre (the CPU's s.z > depth), writing no depth; BL_SPLAT_IDS: the ids pass, a splat with
- * alpha 0.1 or more writes its object's pick id and the instance plane a flagged cloud index (the outline pass reads it
- * back through the id table, binding 41). Draw order is the array's order (back to front). */
+/* Round 532 (task 0512), round 557 (task 0539): Gaussian splats, the card projecting them itself. One instance an entry
+ * of the frame's order (binding 43: global indices into the static splats, back to front), six vertices a quad over the
+ * splat's pixel box. The vertex shader is gsplat_project_one and gsplat_radiance in GLSL (gsplat_raster.cpp, gsplat_math.h:
+ * keep each step in the order the CPU has it): the cull, the EWA 2 x 2 covariance, its eigen axes, the SH colour. It works
+ * in the CPU's own screen space (pixels, rows from the top, as gl_FragCoord's) from the CPU-convention matrix, so no y
+ * flip enters. The fragment shader is round 532's: alpha = the CPU's gsplat_alpha_at per pixel, hidden where the mesh
+ * depth is nearer than the splat's centre (the CPU's s.z > depth), no depth written. The colour pass takes the linear
+ * colour to display as the lighting pass does and rounds it to 8 bits as the CPU's to_display_pixel does, then blends
+ * premultiplied over the lit picture; BL_SPLAT_IDS: the ids pass, a splat with alpha 0.1 or more writes its object's pick
+ * id and the instance plane a flagged cloud index (the outline pass reads it back through the id table, binding 41). */
 const char *kSplatCommon = R"(
-struct SplatG { vec4 a; vec2 inv; uint e0; uint rgbc; };  // x, y, z, opacity; 1 / axis lengths (a dot: radius, 0); the first axis (two halves); colour bytes | cloud << 24
-layout(std430, set = 0, binding = 40) readonly buffer Splats { SplatG sp[]; };
+struct SplatSrc { vec4 a; vec4 c0; float c_yz; float c_zz; float r; float g; float b; uint cloud; uint flags; uint pad_; };  // centre, opacity; covariance xx xy xz yy | yz zz; base colour; cloud index; flags (1: a dot)
+struct SplatCloud { mat4 mvp; vec4 cam_dot; vec4 ortho; uvec4 info; };  // proj x view x model (the CPU's); camera in the cloud's space, a dot's radius x w; the ortho direction; first splat, SH count, SH first uint, pick id
+layout(std430, set = 0, binding = 40) readonly buffer SplatSrcB { SplatSrc ssrc[]; };
 layout(std430, set = 0, binding = 41) readonly buffer SplatIds { uint sid[]; };
+layout(std430, set = 0, binding = 42) readonly buffer SplatShB { uint ssh[]; };
+layout(std430, set = 0, binding = 43) readonly buffer SplatOrderB { uint sord[]; };
+layout(std430, set = 0, binding = 44) readonly buffer SplatCloudB { SplatCloud scl[]; };
 layout(set = 0, binding = 4) uniform sampler2D g_depth;
-vec2 splat_axis(uint bits) {
-  vec2 e = unpackHalf2x16(bits);
-  float l = dot(e, e);
-  return l > 0.0 ? e * inversesqrt(l) : vec2(1.0, 0.0);
+#ifdef BL_SPLAT_COLOR
+/* The lighting pass's display() (the exposure, the view transform, the sRGB curve - or the OpenColorIO LUT, binding 8),
+ * copied so the splat pass needn't include the lighting chunk: keep it as that is. */
+float hable(float x) {
+  const float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
+  return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
 }
+float aces(float x) {
+  x *= 0.6;
+  return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+}
+float aces_full(float v) {
+  return clamp((v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081), 0.0, 1.0);
+}
+vec3 tonemap(vec3 c) {
+  c *= exp2(env.w);
+  int vt = int(env.z);
+  if (vt == 1) {
+    float wscale = 1.0 / hable(11.2);
+    return vec3(hable(c.r * 2.0), hable(c.g * 2.0), hable(c.b * 2.0)) * wscale;
+  }
+  if (vt == 2) return vec3(aces(c.r), aces(c.g), aces(c.b));
+  if (vt == 4) return vec3(aces_full(c.r), aces_full(c.g), aces_full(c.b));
+  return c;
+}
+float srgb(float c) {
+  c = clamp(c, 0.0, 1.0);
+  return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+layout(std430, set = 0, binding = 8) readonly buffer Lut { vec4 lut_data[]; };
+float shaper(float x) { return x > 0.0 ? clamp((log2(x) - lut.y) / (lut.z - lut.y), 0.0, 1.0) : 0.0; }
+vec3 lut_at(ivec3 i, int r, int g, int b) {
+  int N = int(lut.x);
+  return lut_data[((i.z + b) * N + (i.y + g)) * N + (i.x + r)].rgb;
+}
+vec3 ocio(vec3 c) {
+  int N = int(lut.x);
+  vec3 f = vec3(shaper(c.r), shaper(c.g), shaper(c.b)) * float(N - 1);
+  ivec3 i = min(ivec3(f), ivec3(N - 2));
+  vec3 t = f - vec3(i);
+  float fr = t.x, fg = t.y, fb = t.z;
+  vec3 c000 = lut_at(i, 0, 0, 0), c111 = lut_at(i, 1, 1, 1);
+  if (fr > fg) {
+    if (fg > fb) return c000 + (lut_at(i, 1, 0, 0) - c000) * fr + (lut_at(i, 1, 1, 0) - lut_at(i, 1, 0, 0)) * fg + (c111 - lut_at(i, 1, 1, 0)) * fb;
+    if (fr > fb) return c000 + (lut_at(i, 1, 0, 0) - c000) * fr + (c111 - lut_at(i, 1, 0, 1)) * fg + (lut_at(i, 1, 0, 1) - lut_at(i, 1, 0, 0)) * fb;
+    return c000 + (lut_at(i, 1, 0, 1) - lut_at(i, 0, 0, 1)) * fr + (c111 - lut_at(i, 1, 0, 1)) * fg + (lut_at(i, 0, 0, 1) - c000) * fb;
+  }
+  if (fb > fg) return c000 + (c111 - lut_at(i, 0, 1, 1)) * fr + (lut_at(i, 0, 1, 1) - lut_at(i, 0, 0, 1)) * fg + (lut_at(i, 0, 0, 1) - c000) * fb;
+  if (fb > fr) return c000 + (c111 - lut_at(i, 0, 1, 1)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (lut_at(i, 0, 1, 1) - lut_at(i, 0, 1, 0)) * fb;
+  return c000 + (lut_at(i, 1, 1, 0) - lut_at(i, 0, 1, 0)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (c111 - lut_at(i, 1, 1, 0)) * fb;
+}
+/* A linear colour as the picture shows it, 0..1 (display() without its alpha). */
+vec3 splat_display(vec3 hdr) {
+  if (int(env.z) == 3) return clamp(ocio(hdr * exp2(env.w)), 0.0, 1.0);
+  vec3 t = tonemap(hdr);
+  return vec3(srgb(t.r), srgb(t.g), srgb(t.b));
+}
+#endif
 )";
 const char *kSplatVert = R"(
 const vec2 kCorner[6] = vec2[](vec2(0, 0), vec2(1, 0), vec2(1, 1), vec2(0, 0), vec2(1, 1), vec2(0, 1));
-layout(location = 0) flat out uint sidx;
-void main() {
-  SplatG s = sp[gl_InstanceIndex];
-  sidx = uint(gl_InstanceIndex);
-  vec2 half_px;
-  if (s.inv.y == 0.0) half_px = vec2(abs(s.inv.x));  // a dot: its radius
-  else {  // the billboard's +-2 axes: |e0| 2 L0 + |e1| 2 L1 across each axis of the screen
-    vec2 e = abs(splat_axis(s.e0));
-    float l0 = 1.0 / s.inv.x, l1 = 1.0 / s.inv.y;
-    half_px = 2.0 * vec2(e.x * l0 + e.y * l1, e.y * l0 + e.x * l1);
+layout(location = 0) flat out vec4 v_a;  // centre x, y (pixels, from the top), depth 0..1, opacity
+layout(location = 1) flat out vec4 v_b;  // the first axis's unit direction, 1 / its length, 1 / the second's (a dot: its radius, 0)
+layout(location = 2) flat out vec4 v_c;  // linear colour
+layout(location = 3) flat out uint v_cloud;
+bool bad(float x) { return isnan(x) || isinf(x); }
+void splat_cull() {  // (a degenerate quad outside the clip volume, as the cage shaders' left_out)
+  gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  v_a = vec4(0.0);
+  v_b = vec4(0.0);
+  v_c = vec4(0.0);
+  v_cloud = 0u;
+}
+/* gsplat_math.h sh_basis: the real SH basis of the 3DGS reference to degree 3, a unit direction. */
+void sh_basis(vec3 d, out float o[16]) {
+  float x = d.x, y = d.y, z = d.z;
+  float xx = x * x, yy = y * y, zz = z * z, xy = x * y, yz = y * z, xz = x * z;
+  o[0] = 0.28209479177387814;
+  o[1] = -0.4886025119029199 * y;
+  o[2] = 0.4886025119029199 * z;
+  o[3] = -0.4886025119029199 * x;
+  o[4] = 1.0925484305920792 * xy;
+  o[5] = -1.0925484305920792 * yz;
+  o[6] = 0.31539156525252005 * (2.0 * zz - xx - yy);
+  o[7] = -1.0925484305920792 * xz;
+  o[8] = 0.5462742152960396 * (xx - yy);
+  o[9] = -0.5900435899266435 * y * (3.0 * xx - yy);
+  o[10] = 2.890611442640554 * xy * z;
+  o[11] = -0.4570457994644658 * y * (4.0 * zz - xx - yy);
+  o[12] = 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy);
+  o[13] = -0.4570457994644658 * x * (4.0 * zz - xx - yy);
+  o[14] = 1.445305721320277 * z * (xx - yy);
+  o[15] = -0.5900435899266435 * x * (xx - 3.0 * yy);
+}
+float sh_half(uint base, uint j) {
+  vec2 v = unpackHalf2x16(ssh[base + (j >> 1u)]);
+  return (j & 1u) != 0u ? v.y : v.x;
+}
+float srgb_to_linear(float c) {
+  if (c < 0.04045) return c < 0.0 ? 0.0 : c * (1.0 / 12.92);
+  return pow((c + 0.055) * (1.0 / 1.055), 2.4);
+}
+/* gsplat_radiance: sh_color (the base plus the bands, clamped at 0, non-finite to 0), then radiance_linear. */
+vec3 splat_radiance(SplatSrc s, SplatCloud c, uint gi, vec3 dir) {
+  vec3 col = vec3(s.r, s.g, s.b);
+  uint n = min(c.info.y, 15u);
+  float l2 = dot(dir, dir);
+  if (n > 0u && l2 > 1e-30 && !bad(l2)) {
+    float basis[16];
+    sh_basis(dir * (1.0 / sqrt(l2)), basis);
+    uint base = c.info.z + (gi - c.info.x) * ((3u * n + 1u) / 2u);
+    for (uint k = 0u; k < n; k++) col += vec3(sh_half(base, 3u * k), sh_half(base, 3u * k + 1u), sh_half(base, 3u * k + 2u)) * basis[k + 1u];
   }
-  half_px += 1.0;  // (a pixel of margin: the fragment shader decides the coverage)
-  vec2 px = s.a.xy + (kCorner[gl_VertexIndex] * 2.0 - 1.0) * half_px;
+  col = vec3(bad(col.x) ? 0.0 : max(col.x, 0.0), bad(col.y) ? 0.0 : max(col.y, 0.0), bad(col.z) ? 0.0 : max(col.z, 0.0));
+  return vec3(srgb_to_linear(col.x), srgb_to_linear(col.y), srgb_to_linear(col.z));
+}
+void main() {
+  uint gi = sord[gl_InstanceIndex];
+  SplatSrc s = ssrc[gi];
+  SplatCloud c = scl[s.cloud];
+  bool dot_splat = (s.flags & 1u) != 0u;
+  float opacity = dot_splat ? 1.0 : s.a.w;
+  if (!(opacity >= 1.0 / 255.0)) { splat_cull(); return; }  // (NaN too)
+  vec3 p = s.a.xyz;
+  vec4 cc = c.mvp * vec4(p, 1.0);
+  if (!(cc.w > 1e-6) || bad(cc.x) || bad(cc.y) || bad(cc.z)) { splat_cull(); return; }
+  float iw = 1.0 / cc.w;
+  float ndc_x = cc.x * iw, ndc_y = cc.y * iw, ndc_z = cc.z * iw;
+  if (!(ndc_z >= 0.0) || ndc_z > 1.0) { splat_cull(); return; }
+  float W = view.x, H = view.y;
+  vec2 ctr = vec2((ndc_x * 0.5 + 0.5) * W, (0.5 - ndc_y * 0.5) * H);
+  vec2 e0, box;  // the first axis; the box's half-size in pixels
+  float inv0, inv1;
+  if (dot_splat) {  // a Points cloud's dot: a round disc of fixed size
+    float r = max(1.0, min(1024.0, c.cam_dot.w * iw));
+    if (bad(r)) { splat_cull(); return; }
+    e0 = vec2(1.0, 0.0);
+    inv0 = r;
+    inv1 = 0.0;
+    box = vec2(r);
+  } else {
+    /* EWA (Zwicker et al. 2002), the Jacobian from the whole matrix at the centre clamped to 1.3 x the field of view. */
+    float cx = clamp(ndc_x, -1.3, 1.3) * cc.w, cy = clamp(ndc_y, -1.3, 1.3) * cc.w;
+    vec3 j0, j1;
+    for (int k = 0; k < 3; k++) {
+      float r0 = c.mvp[k][0], r1 = c.mvp[k][1], r3 = c.mvp[k][3];
+      j0[k] = (r0 * cc.w - cx * r3) * iw * iw * (0.5 * W);
+      j1[k] = -(r1 * cc.w - cy * r3) * iw * iw * (0.5 * H);  // screen y grows downward
+    }
+    mat3 Sm = mat3(s.c0.x, s.c0.y, s.c0.z, s.c0.y, s.c0.w, s.c_yz, s.c0.z, s.c_yz, s.c_zz);
+    vec3 t0 = Sm * j0, t1 = Sm * j1;  // (Sigma is symmetric: J Sigma's rows)
+    float a = dot(t0, j0), b = dot(t0, j1), d = dot(t1, j1);
+    if (bad(a) || bad(b) || bad(d)) { splat_cull(); return; }
+    float mid = 0.5 * (a + d);
+    float rad = sqrt(0.25 * (a - d) * (a - d) + b * b);
+    float l1 = mid + rad, l2 = max(mid - rad, 0.001);  // kSplatMinEigen
+    if (!(l1 > 0.0)) { splat_cull(); return; }
+    /* The first axis from the row that keeps its precision (review 532). */
+    float ex = a >= d ? l1 - d : b, ey = a >= d ? b : l1 - a;
+    float el = sqrt(ex * ex + ey * ey);
+    if (!(el > 1e-20) || abs(b) <= 1e-7 * (abs(a) + abs(d))) {  // diagonal to float precision: the larger of a and d leads
+      ex = a >= d ? 1.0 : 0.0, ey = a >= d ? 0.0 : 1.0, el = 1.0;
+    }
+    e0 = vec2(ex / el, ey / el);
+    float len0 = min(sqrt(2.0 * l1), 1024.0), len1 = min(sqrt(2.0 * l2), 1024.0);
+    if (!(len0 > 0.0) || !(len1 > 0.0)) { splat_cull(); return; }
+    inv0 = 1.0 / len0;
+    inv1 = 1.0 / len1;
+    vec2 ea = abs(e0);  // the billboard's +-2 axes: |e0| 2 L0 + |e1| 2 L1 across each axis of the screen
+    box = 2.0 * vec2(ea.x * len0 + ea.y * len1, ea.y * len0 + ea.x * len1);
+  }
+  if (ctr.x + box.x < 0.0 || ctr.y + box.y < 0.0 || ctr.x - box.x > W || ctr.y - box.y > H) { splat_cull(); return; }
+  /* The colour along the view: from the camera toward the splat, in the cloud's own space. */
+  vec3 od = c.ortho.xyz;
+  vec3 dir = (od.x != 0.0 || od.y != 0.0 || od.z != 0.0) ? od : p - c.cam_dot.xyz;
+  vec3 lin = dot_splat ? vec3(s.r, s.g, s.b) : splat_radiance(s, c, gi, dir);
+  v_a = vec4(ctr, ndc_z, opacity);
+  v_b = vec4(e0, inv0, inv1);
+  v_c = vec4(lin, 1.0);
+  v_cloud = s.cloud;
+  vec2 px = ctr + (kCorner[gl_VertexIndex] * 2.0 - 1.0) * (box + 1.0);  // (a pixel of margin: the fragment shader decides the coverage)
   gl_Position = vec4(px / view.xy * 2.0 - 1.0, 0.0, 1.0);
 }
 )";
 const char *kSplatFrag = R"(
-layout(location = 0) flat in uint sidx;
+layout(location = 0) flat in vec4 v_a;
+layout(location = 1) flat in vec4 v_b;
+layout(location = 2) flat in vec4 v_c;
+layout(location = 3) flat in uint v_cloud;
 #ifdef BL_SPLAT_IDS
 layout(location = 0) out uint o_id;
 layout(location = 1) out uint o_inst;
@@ -861,26 +1034,24 @@ layout(location = 1) out uint o_inst;
 layout(location = 0) out vec4 o_color;
 #endif
 void main() {
-  SplatG s = sp[sidx];
   ivec2 p = ivec2(gl_FragCoord.xy);
-  if (s.a.z > texelFetch(g_depth, p, 0).r) discard;  // a mesh is nearer than the splat's centre
-  vec2 d = gl_FragCoord.xy - s.a.xy;
+  if (v_a.z > texelFetch(g_depth, p, 0).r) discard;  // a mesh is nearer than the splat's centre
+  vec2 d = gl_FragCoord.xy - v_a.xy;
   float a;
-  if (s.inv.y == 0.0) a = dot(d, d) <= s.inv.x * s.inv.x ? 1.0 : 0.0;
+  if (v_b.w == 0.0) a = dot(d, d) <= v_b.z * v_b.z ? 1.0 : 0.0;  // a dot: v_b.z its radius
   else {
-    vec2 e = splat_axis(s.e0);
-    float u0 = (d.x * e.x + d.y * e.y) * s.inv.x, u1 = (-d.x * e.y + d.y * e.x) * s.inv.y;
+    vec2 e = v_b.xy;
+    float u0 = (d.x * e.x + d.y * e.y) * v_b.z, u1 = (-d.x * e.y + d.y * e.x) * v_b.w;
     if (abs(u0) > 2.0 || abs(u1) > 2.0) discard;
-    a = min(1.0, s.a.w * exp(-(u0 * u0 + u1 * u1)));
+    a = min(1.0, v_a.w * exp(-(u0 * u0 + u1 * u1)));
   }
   if (a <= 0.0) discard;
 #ifdef BL_SPLAT_IDS
   if (a < 0.1) discard;  // kSplatPickAlpha
-  uint cloud = s.rgbc >> 24;
-  o_id = sid[cloud];
-  o_inst = 0x80000000u | cloud;
+  o_id = sid[v_cloud];
+  o_inst = 0x80000000u | v_cloud;
 #else
-  vec3 c = vec3(float(s.rgbc & 255u), float((s.rgbc >> 8) & 255u), float((s.rgbc >> 16) & 255u)) / 255.0;
+  vec3 c = floor(splat_display(v_c.rgb) * 255.0 + 0.5) / 255.0;  // (the CPU's 8-bit pixel, then blended)
   o_color = vec4(c * a, a);
 #endif
 }
@@ -2883,7 +3054,7 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
-    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_buf_, &splat_ids_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532)
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532, 557)
       if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
@@ -2892,8 +3063,38 @@ class VulkanRaster final : public Raster {
       if (!make_buffer(*b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
         return fail(err, "out of memory");
-    return make_layout(err) && make_render_passes(err) && make_pipelines(err) && make_compose(err);
+    open_pipeline_cache(index);
+    const bool ok = make_layout(err) && make_render_passes(err) && make_pipelines(err) && make_compose(err);
+    if (ok) save_pipeline_cache();
+    return ok;
   }
+
+  /* Round 557: the pipelines through a cache kept on disk, as the path tracer's (task 0037). A new build is a new
+   * program to the driver, whose own per-program cache then starts cold: every pipeline was built from scratch, one after
+   * another (92 s on an RTX 4070 SUPER the first time, 0.16 s the second). From this file a new build's first open takes
+   * them as a second one does. A file from another card or driver, or a torn one, is ignored. */
+  void open_pipeline_cache(int index) {
+    pcache_path_ = raster_pipeline_cache_file(index);
+    std::string blob;
+    pcache_hit_ = pipeline_cache_load(index, pcache_path_, blob);
+    pcache_had_ = blob.size();
+    VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    ci.initialDataSize = blob.size();
+    ci.pInitialData = blob.empty() ? nullptr : blob.data();
+    if (f_.vkCreatePipelineCache(dev_, &ci, nullptr, &pcache_) != VK_SUCCESS) pcache_ = VK_NULL_HANDLE, pcache_hit_ = false;
+  }
+  /* Written when it grew (pipelines made later - a filter's pass, the traced shadows - grow it too: saved again at close). */
+  void save_pipeline_cache() {
+    if (!pcache_) return;
+    size_t n = 0;
+    if (f_.vkGetPipelineCacheData(dev_, pcache_, &n, nullptr) != VK_SUCCESS || n == 0 || n == pcache_had_ || n > ((size_t)256 << 20)) return;
+    std::string data(n, '\0');
+    if (f_.vkGetPipelineCacheData(dev_, pcache_, &n, &data[0]) != VK_SUCCESS) return;
+    data.resize(n);
+    pcache_had_ = n;
+    pipeline_cache_store(pcache_path_, std::move(data));
+  }
+  bool pipelines_from_cache() const override { return pcache_hit_; }
 
   int add_mesh(const std::vector<RasterVertex> &v, const std::vector<uint32_t> &idx, std::string *err) override {
     if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
@@ -2992,6 +3193,20 @@ class VulkanRaster final : public Raster {
   bool can_draw_overlays() const override { return pl_ov_line_ && pl_ov_point_ && pl_outline_; }
   bool can_draw_see_through() const override { return pl_see_ && pl_see_ids_; }
   bool can_draw_splats() const override { return pl_splat_ && pl_splat_ids_; }  // round 532
+  uint64_t splat_set_key_held() const override { return splat_key_; }
+  uint64_t splat_uploads() const override { return splat_uploads_; }
+  uint64_t splat_set_key_failed() const override { return splat_failed_key_; }
+  uint64_t max_storage_buffer_bytes() const override { return max_storage_; }
+  /* Frees the static splats (the scene has none left); the placeholders go back in the sets. */
+  void release_splats() override {
+    if (!splat_key_ || !settle()) return;
+    for (Buf *b : {&splat_src_buf_, &splat_sh_buf_}) {
+      free_buffer(*b);
+      make_buffer(*b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props());
+    }
+    splat_key_ = 0;
+    for (Slot &sl : slots_) bind_buffers(sl.set);
+  }
   bool can_draw_toon_maps() const override { return pl_toon_[0] && pl_toon_[1] && pl_toon_[2]; }
   bool can_draw_baked() const override { return pl_baked_[0] && pl_baked_[1] && pl_baked_[2]; }
   bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
@@ -3299,7 +3514,7 @@ class VulkanRaster final : public Raster {
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced ? pl_light_rt_ : pl_light_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
-    if (!fr.splats.empty() && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
+    if (splat_drawn_ && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
     if (!fr.see_through.empty() && can_draw_see_through()) draw_see_through(fr, sl);
     if (can_draw_overlays()) draw_overlays(fr);
     if (fr.cage && can_draw_cage()) draw_cage(fr);
@@ -3956,6 +4171,10 @@ class VulkanRaster final : public Raster {
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  VkPipelineCache pcache_ = VK_NULL_HANDLE;  // (round 557)
+  std::string pcache_path_;
+  size_t pcache_had_ = 0;
+  bool pcache_hit_ = false;
   bool in_flight_ = false;  // (task 0204: a frame submitted by render_async and not yet waited for)
   bool lost_ = false;       // (its wait failed: the card stopped responding)
   RasterTimes async_done_;  // (the finished async frames' passes, not yet taken)
@@ -3979,7 +4198,11 @@ class VulkanRaster final : public Raster {
   Buf light_buf_;                            // task 0195: the frame's lights, as many as there are
   Buf vcol_buf_;                             // task 0195: Weight Paint's vertex colours (RasterFrame::vertex_colors)
   Buf see_buf_;                              // task 0195: the see-through triangles' corners (RasterFrame::see_through)
-  Buf splat_buf_, splat_ids_buf_;            // round 532: the Gaussian splats and their clouds' pick ids (RasterFrame::splats, splat_ids)
+  /* Round 532, 557: the Gaussian splats - bindings 40 the static splats and 42 their SH (device-local, kept while
+   * splat_key_ holds), 41 the clouds' pick ids, 43 the frame's order, 44 the clouds' values (host-visible, written each frame). */
+  Buf splat_src_buf_, splat_ids_buf_, splat_sh_buf_, splat_ord_buf_, splat_cl_buf_;
+  uint64_t splat_key_ = 0, splat_uploads_ = 0, splat_failed_key_ = 0;
+  bool splat_drawn_ = false;  // this frame's splats are on the card (write_splats)
   /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
    * another; the tables of textures and levels mirrored here and sent when they change. */
   struct TexSlot {
@@ -4389,7 +4612,7 @@ class VulkanRaster final : public Raster {
   /* Round 532: the Gaussian splats over the lit picture (in the lighting's pass, begun), their ids in a pass of their own,
    * then the lighting's pass again, keeping the picture - as draw_see_through does. */
   void draw_splats(const RasterFrame &fr, const Slot &sl) {
-    const uint32_t n = (uint32_t)fr.splats.size();
+    const uint32_t n = (uint32_t)fr.splat_order.size();
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_splat_);
     f_.vkCmdDraw(cmd_, 6, n, 0, 0);
     f_.vkCmdEndRenderPass(cmd_);
@@ -4752,6 +4975,66 @@ class VulkanRaster final : public Raster {
     if (data && bytes) std::memcpy(b.mapped, data, bytes);
     return true;
   }
+  /* A static splat array on the card, device-local, sent through the staging buffer in chunks (a million splats is 64 MB
+   * of splats and as much of SH: one staging buffer that size would stay as large as the biggest set ever sent). */
+  bool make_static(Buf &b, const void *data, size_t bytes, std::string *err) {
+    if (make_static_try(b, data, bytes, err)) return true;
+    free_buffer(b);  // (a placeholder back: no binding is ever left with a null descriptor)
+    make_buffer(b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props());
+    return false;
+  }
+  bool make_static_try(Buf &b, const void *data, size_t bytes, std::string *err) {
+    if (bytes > max_storage_) return fail(err, info_.name + ": a splat set over the card's storage buffer limit");
+    free_buffer(b);
+    if (!make_buffer(b, std::max<size_t>(bytes, 16), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+      return fail(err, info_.name + ": out of memory for the splats");
+    const size_t chunk = (size_t)32 << 20;
+    for (size_t at = 0; at < bytes; at += chunk) {
+      const size_t n = std::min(chunk, bytes - at);
+      if (!staging_.buf || staging_.size < n) {
+        free_buffer(staging_);
+        if (!make_buffer(staging_, std::max<size_t>(n, (size_t)4 << 20), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props())) return fail(err, info_.name + ": out of memory for an upload");
+      }
+      std::memcpy(staging_.mapped, (const uint8_t *)data + at, n);
+      begin();
+      const VkBufferCopy c{0, at, n};
+      f_.vkCmdCopyBuffer(cmd_, staging_.buf, b.buf, 1, &c);
+      uploaded();
+      if (!submit_wait(err)) return false;
+    }
+    return true;
+  }
+  /* Round 557: the splats. The static set (centres, covariances, colours, SH) goes up once - when its key is not the one the
+   * card holds - and stays; each frame sends the clouds' values, the order and the pick ids. */
+  bool write_splats(const RasterFrame &fr, std::string *err) {
+    splat_drawn_ = false;
+    if (fr.splat_src) {
+      static const std::vector<uint32_t> no_sh;
+      const std::vector<uint32_t> &sh = fr.splat_sh ? *fr.splat_sh : no_sh;
+      f_.vkDeviceWaitIdle(dev_);  // (a frame in flight may still read the old set)
+      splat_key_ = 0;
+      if (!make_static(splat_src_buf_, fr.splat_src->data(), fr.splat_src->size() * sizeof(RasterSplatSrc), err) ||
+          !make_static(splat_sh_buf_, sh.data(), sh.size() * 4, err)) {
+        for (Slot &sl : slots_) bind_buffers(sl.set);
+        if (lost_) return false;  // (the card stopped responding: the frame fails as any would)
+        /* A set that doesn't fit: this frame goes without its splats and the key is remembered, so the editor refuses it
+         * (the CPU draws the view) instead of losing the card's views for the session. */
+        splat_failed_key_ = fr.splat_set_key;
+        Log::warn("The GPU view couldn't hold a Gaussian splat set (%s): the CPU draws those views", err && !err->empty() ? err->c_str() : "?");
+        if (err) err->clear();
+        return true;
+      }
+      splat_key_ = fr.splat_set_key;
+      splat_failed_key_ = 0;
+      splat_uploads_++;
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    if (!fr.splat_order.empty() && (!splat_key_ || splat_key_ != fr.splat_set_key)) return fail(err, "the frame's splats aren't on the card");
+    splat_drawn_ = !fr.splat_order.empty();
+    return write_array(splat_ord_buf_, fr.splat_order.data(), fr.splat_order.size() * 4, err) &&
+           write_array(splat_cl_buf_, fr.splat_clouds.data(), fr.splat_clouds.size() * sizeof(RasterSplatCloud), err) &&
+           write_array(splat_ids_buf_, fr.splat_ids.data(), fr.splat_ids.size() * 4, err);
+  }
   bool write_points(const RasterFrame &fr, std::string *err) {  // the overlays' dots, then the cage's (task 0192)
     const size_t a = fr.overlay_points.size() * sizeof(OverlayPoint), b = fr.cage_dots.size() * sizeof(OverlayPoint);
     if (!fit_array(ov_points_, a + b, err)) return false;
@@ -4820,8 +5103,7 @@ class VulkanRaster final : public Raster {
     if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
-    if (!write_array(splat_buf_, fr.splats.data(), fr.splats.size() * sizeof(RasterSplat), err)) return false;  // (round 532)
-    if (!write_array(splat_ids_buf_, fr.splat_ids.data(), fr.splat_ids.size() * 4, err)) return false;
+    if (!write_splats(fr, err)) return false;  // (rounds 532, 557)
     if (!write_toon_table(err) || !write_baked_table(err) || !write_lil_tables(err)) return false;
     /* (Round 415: the corners live in blocks on the card; a frame's own array - a card without blocks - is written over
      * the buffer only while no block is held.) */
@@ -4918,7 +5200,7 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 34; i <= 36; i++)  // round 416: lilToon's planes
       b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({37, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // round 454: the baked pass's shadowmask plane
-    for (uint32_t i = 40; i <= 41; i++)  // round 532: the Gaussian splats and their clouds' pick ids
+    for (uint32_t i = 40; i <= 44; i++)  // round 532, 557: the Gaussian splats, their clouds' pick ids, their SH, the frame's order, the clouds' values
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 28; i <= 30; i++)  // task 0197: the baked table, the corners, the probe volume
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
@@ -4975,8 +5257,9 @@ class VulkanRaster final : public Raster {
                                            {toon_buf_.buf, 0, VK_WHOLE_SIZE}, {baked_buf_.buf, 0, VK_WHOLE_SIZE}, {corner_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {probe_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo lil2[2] = {{lil_buf_.buf, 0, VK_WHOLE_SIZE}, {lilmap_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 416: bindings 32, 33)
-    const VkDescriptorBufferInfo splat2[2] = {{splat_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_ids_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 532: bindings 40, 41)
-    VkWriteDescriptorSet w[24];
+    const VkDescriptorBufferInfo splat5[5] = {{splat_src_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_ids_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_sh_buf_.buf, 0, VK_WHOLE_SIZE},
+                                              {splat_ord_buf_.buf, 0, VK_WHOLE_SIZE}, {splat_cl_buf_.buf, 0, VK_WHOLE_SIZE}};  // (rounds 532, 557: bindings 40-44)
+    VkWriteDescriptorSet w[27];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -5019,13 +5302,13 @@ class VulkanRaster final : public Raster {
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &lil2[i - 20];
     }
-    for (int i = 22; i < 24; i++) {  // (round 532: bindings 40, 41)
+    for (int i = 22; i < 27; i++) {  // (rounds 532, 557: bindings 40-44)
       w[i].dstBinding = (uint32_t)(40 + i - 22);
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-      w[i].pBufferInfo = &splat2[i - 22];
+      w[i].pBufferInfo = &splat5[i - 22];
     }
-    f_.vkUpdateDescriptorSets(dev_, 24, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 27, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const bool toon = sl.fb_toon != VK_NULL_HANDLE, baked = sl.fb_baked != VK_NULL_HANDLE;
@@ -5230,7 +5513,7 @@ class VulkanRaster final : public Raster {
     pi.layout = layout ? layout : layout_;
     pi.renderPass = rp;
     VkPipeline p = VK_NULL_HANDLE;
-    f_.vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &pi, nullptr, &p);
+    f_.vkCreateGraphicsPipelines(dev_, pcache_, 1, &pi, nullptr, &p);  // (round 557: through the disk cache)
     return p;
   }
   /* Task 0195: the see-through pass's pipelines - the colour (dual-source blending: src0 + dst * src1, alpha 1 as the
@@ -5259,7 +5542,7 @@ class VulkanRaster final : public Raster {
   void make_splat_pipelines() {
     std::string serr;
     const std::string cc = kSplatCommon;
-    VkShaderModule vs = module(cc + kSplatVert, shaderc_vertex_shader, &serr), cf = module(cc + kSplatFrag, shaderc_fragment_shader, &serr),
+    VkShaderModule vs = module(cc + kSplatVert, shaderc_vertex_shader, &serr), cf = module("#define BL_SPLAT_COLOR 1\n" + cc + kSplatFrag, shaderc_fragment_shader, &serr),
                    idf = module("#define BL_SPLAT_IDS 1\n" + cc + kSplatFrag, shaderc_fragment_shader, &serr);
     if (vs && cf && idf) {
       pl_splat_ = make_pipeline(rp_light_, vs, cf, 1, false, VK_CULL_MODE_NONE, true);
@@ -5512,7 +5795,7 @@ class VulkanRaster final : public Raster {
     if (dual_src_) srcs.push_back({see + kSeeFrag, shaderc_fragment_shader}), srcs.push_back({"#define BL_SEE_IDS 1\n" + see + kSeeFrag, shaderc_fragment_shader});
     if (dual_src_) srcs.push_back({"#define BL_SEE_HDR 1\n" + see + kSeeFrag, shaderc_fragment_shader});  // (round 414)
     srcs.push_back({std::string(kSplatCommon) + kSplatVert, shaderc_vertex_shader});  // (round 532)
-    srcs.push_back({std::string(kSplatCommon) + kSplatFrag, shaderc_fragment_shader});
+    srcs.push_back({"#define BL_SPLAT_COLOR 1\n" + std::string(kSplatCommon) + kSplatFrag, shaderc_fragment_shader});
     srcs.push_back({"#define BL_SPLAT_IDS 1\n" + std::string(kSplatCommon) + kSplatFrag, shaderc_fragment_shader});
     for (const char *d : {"#define BL_POST_VIGNETTE 1\n", "#define BL_POST_GRADE 1\n", "#define BL_POST_CHROMA 1\n", "#define BL_POST_GRAIN 1\n", "#define BL_POST_BRIGHT 1\n",
                           "#define BL_POST_BASE 1\n", "#define BL_POST_DOWN 1\n", "#define BL_POST_UP 1\n", "#define BL_POST_ADD 1\n"})  // (round 416: the filters' passes)
@@ -5666,6 +5949,9 @@ class VulkanRaster final : public Raster {
     settle();
     if (!dev_) return;
     f_.vkDeviceWaitIdle(dev_);
+    save_pipeline_cache();  // (round 557: with the pipelines made since the open)
+    if (pcache_) f_.vkDestroyPipelineCache(dev_, pcache_, nullptr);
+    pcache_ = VK_NULL_HANDLE;
     rt_.destroy();  // (round 543)
     for (size_t i = 0; i < wins_.size(); i++) detach_window((int)i);
     free_offscreen();
@@ -5694,7 +5980,7 @@ class VulkanRaster final : public Raster {
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_buf_, &splat_ids_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
