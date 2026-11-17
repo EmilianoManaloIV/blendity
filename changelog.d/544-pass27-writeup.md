@@ -65,7 +65,11 @@ elided labels on the point cloud Type, Vertex Paint, Weight Paint's brush rows a
 **Known flakes** (each once in a group run, passing alone; `docs/perf/verify-544.md`): round 355's "Decimate to Good"
 (assets) and round 507's "Save As ... the moment a bake lands" (lighting).
 
-**Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux).
+**Checked:** both suites - with Blender's libraries CHECKS_LIBS; dependency-free CHECKS_W (Windows) and CHECKS_L (Linux),
+0 failed, on the tree joining every Pass 27 round (the card groups in the hub's card slot); the audits (console 6, label
+0, consistency 0, the coverage map 398 entries, none empty; the live sweep at its baseline); untimed stress on that tree -
+`pushpull` 26,620 / 0 problems / 394 newly on top of each other (unchanged), `modifiers_ngon` 11,514 / 0, `curved`
+5,032 / 6 / 67 (main's since round 549: no rise), `looptools`, `splats` and `blockout_opening_modifiers` 0 problems.
 
 <!-- docs/USABILITY.md -->
 after: | With AutoPosing on: a Puppet handle dragged, Ctrl+Z
