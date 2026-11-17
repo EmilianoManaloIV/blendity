@@ -67,10 +67,11 @@ without end; the barrier after the pass lacked the next write; Edit Mode's reaso
 meshes skinned on the CPU, a palette a pose, and with its outlines off 0 meshes sent; its picture against the CPU's
 99.4 % of 561,946 pixels within 3 / 255 (ADR 0108's approximations aside); a skin never stale through two characters
 of one mesh, a re-pose, the rest position, a re-bind, Max Influences, a bone's Deform, a shape key held and a Skin put back
-- round 519's gpu tests 238 checks, 0 failed. With Blender's libraries the animation, render and editor groups ANIM_TBD /
-2,639 / 3,230 checks; dependency-free animation 4,558 on Windows and 4,562 on Linux; the only failures those of "assets:
-Ctrl and Shift click select several materials" (21 on Windows, 4 on Linux), which every run on this machine fails while it
-shares one default test project with other sessions - with a test folder of its own it passes (#433). The three gpu picture tests
+- round 519's gpu tests 238 checks, 0 failed. With Blender's libraries, merged with main c842763d and run with a test,
+prefs and cache folder of their own, the animation, render and editor groups 4,560 / 2,639 / 3,214 checks, 0 failed;
+dependency-free animation 4,558 on Windows and 4,562 on Linux (before the merge), whose only failures were those of
+"assets: Ctrl and Shift click select several materials" (21 on Windows, 4 on Linux): every run on this machine fails it
+while it shares one default test project with other sessions, and passes it with a folder of its own (#433). The three gpu picture tests
 that fail on this machine (textured materials, overlays, the Lanczos probe ball) fail on main too and #436 fixes them;
 two more that failed in one full run only pass alone (a starved run: round 555). CI runs the whole suite.
 
