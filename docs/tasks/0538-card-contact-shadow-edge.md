@@ -28,20 +28,24 @@ the sun's angle, the cascade at that distance), make the other match, and add a 
 ## Tests and checks to run
 - The new test and `--group gpu` in a CARD window; render on Windows (libraries) and Linux.
 
-## Also in this round: a test run never reads the user's preferences
-Found while bisecting a card test's 2.281 / 255 (round 551's follow-ups): every test's editor read the user's
-`~/.blendity/prefs.txt` when `BLENDITY_PREFS_DIR` was unset - the runner set the project and trash to scratch folders but
-not the preferences (writes were redirected already). P1's A/B: the same exe reads 0.203 with scratch preferences. The
-runner (`tests/test_main.cpp`) now points `BLENDITY_PREFS_DIR` at the run's own folder unless a caller set one, and
-`set_env("BLENDITY_PREFS_DIR", "")` means that folder (before, an empty path: a prefs.txt in the working folder). Built on
-round 550 (#433), which gives each run its own folder. Test: an editor in a run reads its preferences from the run's
-folder, never the user's.
+## Also in this round: a test run's preferences folder is its own
+Raised while bisecting a card test's 2.281 / 255 (round 551's follow-ups). A headless test editor reads no preferences, but
+it made the preferences folder and put its livelink.json and brushes.txt there: the user's `~/.blendity` on Windows when
+`BLENDITY_PREFS_DIR` was unset, a relative folder once a test had emptied it. The runner (`tests/test_main.cpp`) now points
+`BLENDITY_PREFS_DIR` at the run's own folder unless a caller set one, and `set_env("BLENDITY_PREFS_DIR", "")` means that
+folder; `clear_env` removes a variable outright. Built on round 550 (#433), which gives each run its own folder. Test: a
+test editor's preferences path is in the run's folder, never the user's. (This does not explain the 2.281 - see Outcome.)
 
 ## Outcome (round 556)
-- The contact-shadow difference was not a shadow: the sphere's shadow on the floor at 20 m is the same pixels on the CPU and
-  the card; round 553's extra "edge" pixels were the grid's X axis line over the floor. The test measures the shadow with
-  the grid off and pins CPU = card within 2 pixels. No shadow code changed.
-- The prefs isolation fix and its test (above).
+- No harder edge on the card: round 553's view was level and saw the floor edge-on, so the sphere's whole shadow was one
+  or two rows and a pixel at their end (CPU 15, card 13) read as a harder edge. Looking down 30 degrees the shadow is the
+  same pixels on both (156 fully + 7 partly shadowed, core 43; RTX 4070 SUPER, three runs). The test takes the sphere from
+  a picture of it casting no shadow and counts the darkened part nearest it, the grid off: within one pixel, and a partly
+  lit edge on the card wherever the CPU has one. No shadow code changed.
+- The preferences: hardening, not the 2.281 fix it was raised for - headless test editors read no preferences; the runner's
+  default folder and the "" mapping keep their folder, livelink.json and brushes.txt in the run's folder. `clear_env` for a
+  test of no variable at all (round 540's brushes test). The 2.281 is not isolated: the runs that read it had both the
+  user's preferences folder and the shared test folder; scratch versions of both read 0.203.
 - Added at the hub's request: round 554's span guarded - no pixel covered outside the triangles' union, and a dense sphere's
-  depth on its surface. Both pass with the shipped and with the review's wide margin, so #448's sculpt failures with the wide
-  margin were not coverage or depth (likely the frame's cost; not proven).
+  depth on its surface. Both pass with the shipped and with the review's wide margin, so they don't show what #448's sculpt
+  strokes tripped on with the wide margin (not proven: the frame's cost is one guess).

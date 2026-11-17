@@ -15718,7 +15718,7 @@ static void tests_round549() {
 
 /* ---------------------------------------------------------------- round 556 (task 0538): a test run never reads the user's preferences */
 static void tests_round556() {
-  test("test runs (round 556): with BLENDITY_PREFS_DIR unset or empty every editor reads its preferences from the run's own folder, never the user's ~/.blendity/prefs.txt", [] {
+  test("test runs (round 556): a test editor's preferences path is in the run's own folder - the runner's default, and set_env's \"\" - never the user's ~/.blendity", [] {
     const std::string user_prefs = fs::normalize(fs::join(fs::join(fs::home_dir(), ".blendity"), "prefs.txt"));
     const std::string run = fs::normalize(test_dir());
     auto under_run = [&](const std::string &p) {

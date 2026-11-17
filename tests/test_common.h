@@ -177,6 +177,15 @@ inline std::string scratch_project() {
   return p;
 }
 
+/* Removes a variable (set_env(k, "") means the run's own folder for BLENDITY_PROJECT, BLENDITY_TRASH and, since round 556,
+ * BLENDITY_PREFS_DIR - this is for a test of what no variable at all does). */
+inline void clear_env(const char *k) {
+#ifdef _WIN32
+  _putenv_s(k, "");
+#else
+  unsetenv(k);
+#endif
+}
 inline void set_env(const char *k, const std::string &v_in) {
   std::string v = v_in;
   if (v.empty() && std::string(k) == "BLENDITY_PROJECT") v = scratch_project();

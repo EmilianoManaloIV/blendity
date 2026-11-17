@@ -148,9 +148,9 @@ int main(int argc, char **argv) {
   Log::echo_stdout = false;
   set_env("BLENDITY_PROJECT", "");  // the scratch project
   set_env("BLENDITY_TRASH", "");
-  /* Round 556 (task 0538): the run's own preferences unless the caller chose a folder. Every test's editor read the user's
-   * ~/.blendity/prefs.txt otherwise (writes were redirected, reads were not): a card test read 2.281 / 255 against the CPU
-   * where it reads 0.203 with scratch preferences (P1's A/B, round 556). */
+  /* Round 556 (task 0538): the run's own preferences folder unless the caller chose one. A headless editor reads no
+   * preferences, but it made the folder, and its livelink.json and brushes.txt went there: the user's ~/.blendity on
+   * Windows when the variable was unset, a relative folder on Linux when a test had emptied it. */
   if (!std::getenv("BLENDITY_PREFS_DIR") || !*std::getenv("BLENDITY_PREFS_DIR")) set_env("BLENDITY_PREFS_DIR", "");
   set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));  // (never the user's AI download: task 0129)
   /* Assets a test makes before any editor exists (clips, materials) go into the scratch project too: with no asset

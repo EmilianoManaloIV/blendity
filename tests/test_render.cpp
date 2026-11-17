@@ -10365,85 +10365,6 @@ static void tests_round184() {
       ed.viewport_device_for_test(1);
     }
   });
-  /* Round 556 (task 0538): the same sphere's shadow on the floor at 20 m, on the CPU and the card - the pixels it darkens
-   * fully and partly (the 3 x 3 filter's penumbra), the same on both. Round 553 had seen the CPU's "shadow edge" mid-grey
-   * where the card's was dark; measured here, the sphere's shadow is the same pixels on both (49 fully, 2 partly on an RTX
-   * 4070 SUPER with the grid on), and the difference was the grid's red X axis line drawn over the floor: where the
-   * shadow falls under it the line darkens, and elsewhere its depth test against the floor is decided at the knife's edge
-   * on both renderers (round 551's horizon band). So the grid is off here: the shadow alone. */
-  test("shadows at a distance (round 556): a sphere's shadow on the floor seen from 20 m has the same partly-lit edge on the card as on the CPU", [&] {
-    long cpu_partial = -1, cpu_full = -1;
-    for (int device : {1, 2}) {
-      if (device == 2 && !gpu::available()) continue;
-      Editor ed;
-      r34_open(ed);
-      ed.command("select Main Camera");
-      ed.command("select Cube");
-      ed.command("delete");
-      GameObject *ball = ed.scene().create("Ball");
-      ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 64, 32);
-      ball->add<MeshRenderer>()->materials = {make_material("grey", Vec3(0.6f, 0.6f, 0.6f))};
-      ed.command("set Directional Light.Transform.rotation 30 -60 0");
-      ed.command("overlay grid off");  // (the axis lines over the floor are not the shadow: see above)
-      ed.viewport_device_for_test(device);
-      ed.command("camera 0 0 20 0 1 0");
-      ball->set_local_position({1000.0f, 1.0f, 0.0f});
-      r34_steps(ed, 3);
-      const Recti rect = ed.scene_view_rect();
-      const std::vector<uint32_t> empty = r34_crop(ed, rect);
-      ball->set_local_position({0.0f, 1.0f, 0.0f});
-      r34_steps(ed, 3);
-      const std::vector<uint32_t> px = r34_crop(ed, rect);
-      const int W = rect.w, H = W > 0 ? (int)(px.size() / (size_t)W) : 0;
-      /* The sphere: the changed pixels' part at the view's centre (the camera's pivot is the sphere); the rest that got darker
-       * is its shadow. */
-      std::vector<int> comp(px.size(), -1);
-      auto changed = [&](size_t i) { return i < empty.size() && px[i] != empty[i]; };
-      const size_t centre = (size_t)(H / 2) * W + (size_t)(W / 2);
-      if (changed(centre)) {
-        std::vector<size_t> stack = {centre};
-        comp[centre] = 1;
-        while (!stack.empty()) {
-          const size_t i = stack.back();
-          stack.pop_back();
-          const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
-          const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
-          for (int k = 0; k < 4; k++) {
-            if (nx[k] < 0 || ny[k] < 0 || nx[k] >= W || ny[k] >= H) continue;
-            const size_t j = (size_t)ny[k] * W + nx[k];
-            if (changed(j) && comp[j] < 0) comp[j] = 1, stack.push_back(j);
-          }
-        }
-      }
-      float core = 0.0f;
-      std::vector<float> dark(px.size(), 0.0f);
-      for (size_t i = 0; i < px.size(); i++) {
-        if (comp[i] > 0 || !changed(i)) continue;
-        dark[i] = luma(empty[i]) - luma(px[i]);
-        core = std::max(core, dark[i]);
-      }
-      long partial = 0, full = 0;
-      for (float d : dark) {
-        if (d >= 0.75f * core) full++;
-        else if (d > 0.25f * core) partial++;
-      }
-      if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {
-        fs::make_dirs(dir);
-        const std::string base = fs::join(dir, device == 2 ? "shadow20_card" : "shadow20_cpu");
-        write_png(base + ".png", px.data(), W, H, W);
-        write_png(base + "_empty.png", empty.data(), W, H, W);
-      }
-      std::printf("    %s: the shadow's core %.0f grey levels darker; %ld pixels fully shadowed, %ld partly (its edge)\n",
-                  device == 2 ? "the card" : "the CPU", core, full, partial);
-      CHECK(core > 5.0f && full > 0);
-      if (device == 1) cpu_partial = partial, cpu_full = full;
-      else if (cpu_partial >= 0) {
-        std::printf("    card - CPU: %+ld fully, %+ld partly\n", full - cpu_full, partial - cpu_partial);
-        CHECK(std::labs(full - cpu_full) <= 2 && std::labs(partial - cpu_partial) <= 2);  // (a pixel's rounding either way)
-      }
-      ed.viewport_device_for_test(1);
-    }
-  });
 
   test("outlines at a distance: an outlined sphere at 60 m keeps a one-pixel silhouette (Min Pixels 1 for a new outline), and a scene saved before the field loads with 0", [&] {
     Editor ed;
@@ -13097,7 +13018,7 @@ static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float p
 static void tests_round554() {
   test("rasterizer (round 554): a quad's two triangles cover every pixel on their shared diagonal exactly once - the diagonal through pixel centres, at sub-pixel offsets and turned - on every compiler", [] {
     const R554View view;
-    size_t worst_gaps = 0, worst_doubles = 0, cases = 0;
+    size_t worst_gaps = 0, worst_doubles = 0, worst_outside = 0, cases = 0;
     for (float turn : {0.0f, 45.0f, 30.0f, 60.0f, 17.0f})
       for (float off : {0.0f, 0.25f, 0.5f, 1.0f / 3.0f}) {
         /* A square 36 pixels across about (32 + off, 32 + off), its corners turned by `turn`: at 0 and 45 its diagonal and
@@ -13111,11 +13032,11 @@ static void tests_round554() {
         const Vec3 A = view.at(sq[0].x, sq[0].y), B = view.at(sq[1].x, sq[1].y), C = view.at(sq[2].x, sq[2].y), D = view.at(sq[3].x, sq[3].y);
         size_t gaps = 0, doubles = 0, outside = 0;
         r554_check(view, {{A, B, C}, {A, C, D}}, {A, B, C, D}, gaps, doubles, &outside);
-        worst_gaps = std::max(worst_gaps, gaps), worst_doubles = std::max(worst_doubles, doubles + outside), cases++;
-        if (gaps || doubles) std::printf("    turned %.0f, offset %.2f: %zu missed, %zu twice\n", turn, off, gaps, doubles);
+        worst_gaps = std::max(worst_gaps, gaps), worst_doubles = std::max(worst_doubles, doubles), worst_outside = std::max(worst_outside, outside), cases++;
+        if (gaps || doubles || outside) std::printf("    turned %.0f, offset %.2f: %zu missed, %zu twice, %zu outside\n", turn, off, gaps, doubles, outside);
       }
-    std::printf("    %zu squares: at worst %zu pixels missed, %zu covered twice\n", cases, worst_gaps, worst_doubles);
-    CHECK(worst_gaps == 0 && worst_doubles == 0);
+    std::printf("    %zu squares: at worst %zu pixels missed, %zu covered twice, %zu outside\n", cases, worst_gaps, worst_doubles, worst_outside);
+    CHECK(worst_gaps == 0 && worst_doubles == 0 && worst_outside == 0);
   });
   test("rasterizer (round 554, review): a quad split along a horizontal line through pixel centres, its ends between pixels, and the same line tilted a hair, covers the line's pixels once", [] {
     const R554View view;
@@ -13137,8 +13058,9 @@ static void tests_round554() {
      * "outside" counts) guard that a span wider than needed still draws only the triangles' pixels at their depths: a sphere
      * of 20 pixels' radius, orthographic (one world unit a pixel), 48 x 24 segments - each covered pixel's depth against the
      * sphere's front surface there, within the facets' chord error, and no pixel covered off its disc. Measured on Windows:
-     * it passes with the shipped 1e-4 pixel margin and with the review's wide one alike (1,264 pixels, worst 0.124) - so the
-     * sculpt strokes' trouble was not coverage or depth (see raster_tile's note). */
+     * it passes with the shipped 1e-4 pixel margin and with the review's wide one alike (1,264 pixels, worst 0.124) - so these
+     * checks don't show what the sculpt strokes tripped on (one orthographic sphere; the strokes' perspective pick path and
+     * rim pixels aren't covered here; see raster_tile's note). */
     const R554View view;
     const float radius = 20.0f;
     CfScene sc;
@@ -13149,9 +13071,11 @@ static void tests_round554() {
     RenderTarget rt;
     cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc);
     /* The camera at z = -10 looking down +z, near 0.1, far 100: a world z gives the depth (z + 10 - 0.1) / 99.9. */
-    /* (A facet lies behind the sphere by its sag, 0.04 here, times the surface's slope - at most 1.33 within 0.8 of the
-     * radius, where the depth is checked: at the rim the surface turns edge-on and its depth changes without bound. A
-     * depth carried a pixel past a triangle's edge is off by up to the slope, a pixel and more.) */
+    /* (A facet lies behind the sphere by its sag, 0.04 here, along the view by sag x sqrt(1 + slope^2) - 1.67 times within
+     * 0.8 of the radius, where the depth is checked: at the rim the surface turns edge-on. So a facet is behind the surface
+     * by at most ~0.07; a triangle's plane carried past its edge on this convex sphere comes in FRONT of the surface, which
+     * the -0.02 bound catches. The disc check uses the circle, not the 48-gon: pixels between them aren't policed, and the
+     * check is symmetric, so a mirrored mapping would pass it too.) */
     const float chord = 0.3f;
     size_t covered = 0, outside = 0, off_depth = 0;
     float worst = 0.0f;
@@ -13225,6 +13149,103 @@ static void tests_round554() {
   });
 }
 
+/* ---------------------------------------------------------------- round 556 (task 0538): shadows at a distance, CPU and card */
+static void tests_round556() {
+  /* Round 556 (task 0538): the same sphere's shadow on the floor at 20 m, on the CPU and the card - the pixels it darkens
+   * fully and partly (the 3 x 3 filter's penumbra), the same on both. Round 553 had seen the CPU's "shadow edge" mid-grey
+   * where the card's was dark - with a level camera, which sees the floor edge-on: the whole shadow was one or two rows,
+   * and a pixel at their end (CPU 15, card 13 on an RTX 4070 SUPER) read as a harder edge. Looking down 30 degrees the
+   * shadow lies on the floor, and dumps of both show it the same pixels (156 fully, 7 partly, its core 43 grey levels).
+   * The sphere is taken from a picture of it casting no shadow (its shaded side touches its contact shadow), the grid is
+   * off (its X axis line lies over the floor) and only the darkened part nearest the sphere counts: the shadow alone. */
+  test("shadows at a distance (round 556): a sphere's shadow on the floor seen from 20 m has the same fully and partly shadowed pixels on the card as on the CPU - and a partly lit edge wherever the CPU's has one", [] {
+    auto luma = [](uint32_t p) { return 0.2126f * ((p >> 16) & 255) + 0.7152f * ((p >> 8) & 255) + 0.0722f * (p & 255); };
+    long cpu_partial = -1, cpu_full = -1;
+    for (int device : {1, 2}) {
+      if (device == 2 && !gpu::available()) continue;
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Main Camera");
+      ed.command("select Cube");
+      ed.command("delete");
+      GameObject *ball = ed.scene().create("Ball");
+      ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 64, 32);
+      ball->add<MeshRenderer>()->materials = {make_material("grey", Vec3(0.6f, 0.6f, 0.6f))};
+      ed.command("set Directional Light.Transform.rotation 30 -60 0");
+      ed.command("overlay grid off");  // (the axis lines over the floor are not the shadow: see above)
+      ed.viewport_device_for_test(device);
+      ed.command("camera 0 30 20 0 1 0");  // (looking down 30 degrees: at 0 the floor is edge-on and the shadow one row)
+      ball->set_local_position({1000.0f, 1.0f, 0.0f});
+      r34_steps(ed, 3);
+      const Recti rect = ed.scene_view_rect();
+      const std::vector<uint32_t> empty = r34_crop(ed, rect);
+      ball->set_local_position({0.0f, 1.0f, 0.0f});
+      ball->get<MeshRenderer>()->cast_shadows = false;
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> lit = r34_crop(ed, rect);
+      ball->get<MeshRenderer>()->cast_shadows = true;
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> px = r34_crop(ed, rect);
+      const int W = rect.w, H = W > 0 ? (int)(px.size() / (size_t)W) : 0;
+      /* The sphere: what it changes casting no shadow. (A flood fill from the centre is not it: the sphere's shaded side
+       * touches its contact shadow in the picture, and took the shadow with it.) The shadow: what casting darkens off the
+       * sphere. */
+      std::vector<float> dark(px.size(), 0.0f);
+      for (size_t i = 0; i < px.size() && i < lit.size() && i < empty.size(); i++)
+        if (lit[i] == empty[i]) dark[i] = luma(lit[i]) - luma(px[i]);
+      /* The sphere's own shadow: the darkened part nearest the view's centre (the sphere's). */
+      std::vector<int> part(px.size(), -1);
+      int best = -1;
+      double best_d = 1e30;
+      for (size_t start = 0; start < px.size(); start++) {
+        if (dark[start] <= 3.0f || part[start] >= 0) continue;
+        std::vector<size_t> stack = {start};
+        part[start] = (int)start;
+        double nearest = 1e30;
+        while (!stack.empty()) {
+          const size_t i = stack.back();
+          stack.pop_back();
+          const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
+          nearest = std::min(nearest, std::hypot((double)x - W / 2, (double)y - H / 2));
+          const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
+          for (int k = 0; k < 4; k++) {
+            if (nx[k] < 0 || ny[k] < 0 || nx[k] >= W || ny[k] >= H) continue;
+            const size_t j = (size_t)ny[k] * W + nx[k];
+            if (dark[j] > 3.0f && part[j] < 0) part[j] = (int)start, stack.push_back(j);
+          }
+        }
+        if (nearest < best_d) best_d = nearest, best = (int)start;
+      }
+      float core = 0.0f;  // (the shadow's own darkest: the view's text overlay changes between frames too)
+      for (size_t i = 0; i < dark.size(); i++)
+        if (part[i] == best && best >= 0) core = std::max(core, dark[i]);
+      long partial = 0, full = 0;
+      for (size_t i = 0; i < dark.size(); i++) {
+        if (part[i] != best || best < 0) continue;
+        if (dark[i] >= 0.75f * core) full++;
+        else if (dark[i] > 0.25f * core) partial++;
+      }
+      if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {
+        fs::make_dirs(dir);
+        const std::string base = fs::join(dir, device == 2 ? "shadow20_card" : "shadow20_cpu");
+        write_png(base + ".png", px.data(), W, H, W);
+        write_png(base + "_empty.png", empty.data(), W, H, W);
+        write_png(base + "_nocast.png", lit.data(), W, H, W);
+      }
+      std::printf("    %s: the shadow's core %.0f grey levels darker; %ld pixels fully shadowed, %ld partly (its edge)\n",
+                  device == 2 ? "the card" : "the CPU", core, full, partial);
+      CHECK(core > 5.0f && full > 0);
+      if (device == 1) cpu_partial = partial, cpu_full = full;
+      else if (cpu_partial >= 0) {
+        std::printf("    card - CPU: %+ld fully, %+ld partly\n", full - cpu_full, partial - cpu_partial);
+        CHECK(std::labs(full - cpu_full) <= 1 && std::labs(partial - cpu_partial) <= 1);  // (the same pixels measured; a pixel's rounding)
+        CHECK(cpu_partial == 0 || partial > 0);  // (a hard edge on the card - round 553's worry - fails even where the counts are small)
+      }
+      ed.viewport_device_for_test(1);
+    }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13281,4 +13302,5 @@ void run_render_tests() {
   tests_round462();
   tests_round538();
   tests_round554();
+  tests_round556();
 }

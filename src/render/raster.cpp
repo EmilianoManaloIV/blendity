@@ -1093,10 +1093,10 @@ void Renderer3D::raster_tile(int tile_index) {
        * single rounding), so its crossing is a hair from the true one and the old 1e-4 pixel margin brings a centre on the
        * crossing to tri_covers. (The review's margin of the float band over |A| - tens of pixels for a nearly horizontal
        * edge - and even a whole pixel of margin made two sculpt tests' strokes find no surface under the mouse on #448's CI,
-       * though their pixels kept the sphere's id; the old margin passes them. Round 556: not coverage or depth - its checks
-       * (no pixel outside the triangles, a dense sphere's every depth on its surface) pass with the wide margin too. A wide
-       * span sends many more pixels through tri_covers; the strokes' dependence on that is likely the frame's cost, not
-       * proven.) */
+       * though their pixels kept the sphere's id; the old margin passes them. Round 556's checks (no pixel outside the
+       * triangles, a dense orthographic sphere's depths on its surface) pass with the wide margin too, so they don't show
+       * what the strokes tripped on; a wide span sends many more pixels through tri_covers, and the frame's cost is one
+       * guess - not proven.) */
       double Ad[3], Bd[3], Cd[3];  // (A and B too: the float ones are differences rounded to float - 50.3 - 10.1 isn't exact)
       for (int q = 0; q < 3; q++) {
         const int a = (q + 1) % 3, b = (q + 2) % 3;
