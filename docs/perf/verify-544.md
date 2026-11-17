@@ -82,7 +82,16 @@ On the joined tree's exe, a scratch project:
 | Kind | Baseline | Joined tree | Pass 27 panels |
 |---|---|---|---|
 | all kinds (#420, #421, #422 joined, 2026-11-16) | elided 7, small-handle 3 | elided 7, small-handle 3 (at the baseline) | none new |
-| the same, every Pass 27 round joined | elided 7, small-handle 3 | TBD | TBD |
+| the same, every Pass 27 round joined (`96b8cbc4`, 2026-11-17) | elided 7, small-handle 3 | elided 7, small-handle 3 (at the baseline); `hci_console_audit --check` 6 | see the audits below |
+
+The audits on the joined tree against main (`068207d9`), every Pass 27 round joined:
+
+| Audit | main | Joined tree | New, with the round that wrote it |
+|---|---|---|---|
+| `hci_consistency_audit --check` (spelling: the UI says "color") | 0 | 11 | "colour" in UI text: 530 (`editor.cpp` 1227; `pointcloud_object.cpp` 19, 35), 545 (`panels.cpp` 4121, 4125, 4140, 4149, 4164, 4166), 540 (`panels.cpp` 4741), 545b1 (`material.cpp` 175) |
+| `hci_label_audit` (a shortcut in a label the keymap does not produce) | 1 | 4 | 541 (`animation_window.cpp` 1680 "Ctrl+R ... turns each the other way", 1697 "F9 afterwards: Influence"), 536 (`panels.cpp` 3105 "Adjust Last Operation (F9)") |
+| `hci_console_audit --check` | 6 | 6 | none (#420's two and #441's one were reworded before they joined) |
+| `hci_fitts_audit` | - | - | needs a `fitts-*.json` run: not part of this sweep |
 
 ## The Learn check list
 
