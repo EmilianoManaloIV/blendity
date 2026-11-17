@@ -36,7 +36,9 @@ folded, published as the single top of every Pass 27 stack (CLAUDE.md item 7: no
 - **`docs/perf/verify-544.md`**: the tree, the timed rows, the HCI sweep, the Learn check list.
 - **Two tooltips name Adjust Last's chord from the keymap** (the label audit after round 559): the Inspector's Dimensions
   (round 536) and a repeated door's or window's rows (round 546) wrote "F9" by hand - Ctrl+F9 in Maya's preset. The
-  label audit is at 0 (one test: both tooltips in Unity's and Maya's presets).
+  label audit (tooltips and labels) is at 0; one test reads both tooltips in Unity's and Maya's presets and with the
+  action unbound. Still written by hand, in messages the label audit does not read: two Scene view toasts
+  (`scene_view.cpp` 3470, 3838) and three in Sketch's build (`sketch_build.cpp` 198, 258, 489) - a follow-up.
 
 **Numbers** (the hub's batched timed window, 2026-11-17 06:31 - 06:43, normal priority, a quiet machine; logs in the
 notes folder's `pass27-timed/`; printed, never asserted - ADR 0056):

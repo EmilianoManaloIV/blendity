@@ -16693,7 +16693,7 @@ static void tests_round544() {
   });
   /* The label audit (Pass 27's HCI sweep): two tooltips wrote F9 by hand, wrong in Maya's preset, whose Adjust Last is
    * Ctrl+F9 (round 559 fixed the Animation window's). The Inspector drawn, each tooltip found by its words. */
-  test("the Inspector's Dimensions and a repeated window's tooltips name Adjust Last's chord from the keymap: F9 in Unity's preset, Ctrl+F9 in Maya's (round 544)", [] {
+  test("the Inspector's Dimensions and a repeated window's tooltips name Adjust Last's chord from the keymap: F9 in Unity's preset, Ctrl+F9 in Maya's, none when it is unbound (round 544)", [] {
     auto tip_with = [](Editor &ed, const char *words) {
       ed.record_buttons_for_test(true);
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
@@ -16701,15 +16701,18 @@ static void tests_round544() {
         if (kv.second.find(words) != std::string::npos) return kv.second;
       return std::string("(none)");
     };
-    for (const char *preset : {"Unity", "Maya"}) {
-      const std::string chord = std::string(preset) == "Maya" ? "Ctrl+F9" : "F9";
+    for (const char *preset : {"Unity", "Maya", "unbound"}) {
+      const bool unbound = std::string(preset) == "unbound";
+      const std::string chord = std::string(preset) == "Maya" ? "Ctrl+F9" : unbound ? "" : "F9";
       Editor ed;
       ed.init_headless(1400, 2400);  // (tall: the Dimensions rows sit far down the Inspector)
-      ed.command(std::string("keymap ") + preset);
+      ed.command(std::string("keymap ") + (unbound ? "Unity" : preset));
+      if (unbound) ed.set_binding("edit.adjust_last", {});  // (no chord: the tooltips say nothing of one)
       r536_cube(ed, "R544Dims", 2.0f);
       const std::string dims = tip_with(ed, "re-runs it");
       std::printf("    %s, Dimensions: '...%s'\n", preset, dims.substr(dims.size() > 60 ? dims.size() - 60 : 0).c_str());
-      CHECK(dims.find("Adjust Last Operation (" + chord + ") re-runs it") != std::string::npos);
+      CHECK(dims.find(unbound ? std::string("Adjust Last Operation re-runs it") : "Adjust Last Operation (" + chord + ") re-runs it") != std::string::npos);
+      CHECK(chord == "Ctrl+F9" || dims.find("Ctrl+F9") == std::string::npos);
       ed.command("edit off");
       ed.command("newscene");
       ed.command("blockout draw room auto at 0 0 0 normal 0 1 0 size 4 8 2.6");
@@ -16717,7 +16720,7 @@ static void tests_round544() {
       for (const char *c : {"component ArrayModifier", "set ArrayModifier.Count 3"}) ed.command(c);  // (round 546's lesson: the window selected)
       const std::string win = tip_with(ed, "set the first opening's size");
       std::printf("    %s, a repeated window: '%s'\n", preset, win.c_str());
-      CHECK(win.find("Its handles and " + chord + " set the first opening's size") != std::string::npos);
+      CHECK(win.find(unbound ? std::string("Its handles set the first opening's size") : "Its handles and " + chord + " set the first opening's size") != std::string::npos);
       CHECK(chord == "Ctrl+F9" || win.find("Ctrl+F9") == std::string::npos);
     }
   });
