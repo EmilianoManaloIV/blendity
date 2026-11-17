@@ -1,6 +1,6 @@
 # 0527: Modifiers on a door's and a window's parts - the leaf, the frame, the glass (round 547, Pass 27)
 
-- **Status:** approved 2026-11-15 (the owner, through the hub: "Yes, just option A. for the modifiers"); B, C and D are
+- **Status:** in review (round 547, implemented 2026-11-16; approved 2026-11-15 by the owner, through the hub: "Yes, just option A. for the modifiers"); B, C and D are
   the recommended defaults (the owner did not weigh them and may change them)
 - **Requirements:** R-02 (modeling), U-01, C-02, R-09 (export to engines)
 - **Decisions:** ADR 0149 (new: a styled opening's frame and glass are objects, like its leaf); amends ADR 0129 and
@@ -123,8 +123,8 @@ swing, Bake / Unbake, save and open, and export.
 - **Many objects:** a building of 50 windows gets 100 more objects (folded under their openings); the sync's cost per
   walk (round 515's early return for openings with nothing to do).
 - **A part renamed, moved out, copied, deleted by hand:** as round 515's leaf (ADR 0136 decision 5 and its fixes): moved
-  out or copied - an ordinary object; deleted - the opening makes it again (a Frame cannot be "turned off": Frame Width 0
-  makes none).
+  out or copied - an ordinary object; deleted - the opening makes it again (a Frame cannot be "turned off": Frame Width
+  is held at its least, 1 mm).
 - **Round 546's opening stack** works on the opening's cut; this round makes the cut a plain hole - the two compose (546's
   stack on the hole, this round's on the parts). Sequencing: whichever lands second merges the other.
 - **Scale** (ADR 0135): parts follow the numbers, their object scale stays 1.

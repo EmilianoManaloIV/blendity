@@ -415,7 +415,12 @@ uint64_t blockout_at_surface(const Scene &scene, Vec3 point, Vec3 normal) {
   SceneHit hit;
   /* A short ray back onto the face from just before it. */
   if (!scene_raycast(scene, point + n * 0.02f, n * -1.0f, 0.05f, hit) || !hit.object) return 0;
-  return hit.object->get<Blockout>() ? hit.object->id : 0;
+  if (hit.object->get<Blockout>()) return hit.object->id;
+  /* Round 547: a window's or door's Frame and Glass are objects of their own; a face of one is the surface of the Blockout its opening stands in. */
+  const BlockoutLeaf *part = hit.object->get<BlockoutLeaf>();
+  const GameObject *opening = part && hit.object->parent && hit.object->parent->get<BlockoutPiece>() ? hit.object->parent : nullptr;
+  const GameObject *owner = opening ? blockout_of_piece(*opening) : nullptr;
+  return owner ? owner->id : 0;
 }
 
 void Editor::set_room_tool(bool on) {

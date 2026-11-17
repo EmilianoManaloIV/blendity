@@ -45,7 +45,7 @@ merging - round 503 had to style only twelve of the bench's 51 openings, because
 6. **The opening owns its parts:** they follow it (its wall, room, Blockout), are duplicated, deleted and undone with it,
    go with Bake (separate objects at the same world place) and come back with Unbake, as ADR 0136 decision 5 and round
    515's fixes (a part moved out or copied becomes an ordinary object; a part the opening did not make is never
-   destroyed). A deleted Frame or Glass is made again (Frame Width 0 makes no Frame; a window's Glass off makes none).
+   destroyed). A deleted Frame or Glass is made again (a styled opening always has a Frame: Frame Width is held at its least, 1 mm; a window's Glass off makes none).
 7. **Materials:** a part takes its class's material - Frame the Solid class, Glass the Glass class, Leaf the Leaf class -
    the opening's override first, then the Blockout's; a material the user dropped on a part object is kept.
 8. **Light and collision:** Frame static (Contribute GI on, its own lightmap UVs), no collider (choice C1: the wall's hole

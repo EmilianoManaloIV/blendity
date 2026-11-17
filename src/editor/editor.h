@@ -2001,6 +2001,7 @@ class Editor {
   void dock_reset_for_test(const std::string &preset) { dock_reset(preset); }
   void load_prefs_for_test() { load_prefs(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
+  void blockout_sync_leaves_for_test() { blockout_sync_leaves(); }  // (round 547: what the part sync costs a walk)
   void boolean_for_test(int op, bool apply, uint64_t kept) { boolean_selected(op, apply, kept); }  // (task 0255)
   void project_open_folder_for_test(const std::string &dir, const std::string &search = "") { project_dir_ = dir; project_search_ = search; project_listed_ = -100; }
   std::vector<std::string> button_labels_for_test() const {
@@ -4254,7 +4255,15 @@ class Editor {
   void blockout_sync_door(GameObject &door);
   void blockout_leaf_made(GameObject &leaf, const BlockoutLeafPlan &plan, const std::string &material, float texture_scale, uint64_t key);  // (mesh, collider, materials, key)
   void blockout_leaf_command(const std::vector<std::string> &t);  // (blockout leaf select)
+  uint64_t pick_part_target(uint64_t hit, int mx, int my);  // (round 547: a click on a Frame or Glass selects its opening, a second click on the same spot the part)
+  struct PickPartSpot {
+    uint64_t part = 0;
+    int x = 0, y = 0;
+  } pick_part_spot_;
+  void blockout_part_command(const std::vector<std::string> &t);  // (round 547: blockout part select [frame|glass|leaf] | opening)
+  void blockout_parts_select(bool to_parts, int kind, const char *command);
   void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
+  std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_fixed_seen_;  // (round 547: the same for an opening's Frame and Glass - kept apart, since one gone is made again and turns nothing off)
   std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_leaves_seen_;  // (door id -> its leaf objects' ids as the last walk left them: one gone with the door still there was deleted by hand)
   const Scene *blockout_leaves_scene_ = nullptr;  // (the scene those ids are of: another scene - a load, an undo - starts them again; the address can repeat, the ids are checked against the scene too)
   std::vector<uint64_t> blockout_sync_doors_, blockout_sync_strays_;  // (the walk's scratch: not allocated again for a scene whose doors did not change)
