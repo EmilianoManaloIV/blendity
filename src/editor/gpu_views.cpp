@@ -293,6 +293,7 @@ gpu::RasterLight raster_light(const RenderLight &l) {
   g.height = l.height;
   g.disk = l.disk;
   g.bake_mode = l.bake_mode;  // (task 0197)
+  g.shadows = l.shadows;      // (round 543: whether it casts traced shadows)
   return g;
 }
 
@@ -2063,6 +2064,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.cull_backfaces = opt.backface_culling;
   fr.shadowmask_distance = env.shadowmask_mode == 1 ? std::max(env.shadow_distance, 1e-3f) : 0.0f;  // (round 454)
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
+  fr.rt_shadows = rt_shadows_ && rt_shadows_available();  // (round 543)
   raster_world(fr, env, cam, scene_lights);
   if (render_clear_override_on_) fr.background = 0, fr.clear = render_clear_override_;  // (a transparent render's black / white pass: task 0195)
   if (gouraud) {  // (shade()'s ambient: the LightingEnv's own colours, whatever the world)
@@ -2477,6 +2479,23 @@ bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
   fr.cage_point_radius = dots ? cage_dot_radius() : face_dots ? ui_.px(ngon_mode_ ? 2.5f : 2.0f) : 0.0f;  // (edit_face_dots' radii, at this frame's scale)
   fr.cage_point_first = face_dots ? (uint32_t)m.vert_count() : 0u;
   return true;
+}
+
+/* Round 543 (task 0523): the views can trace their shadows - the card is open and its device has ray queries. */
+bool Editor::rt_shadows_available() const { return gpu_view_ && gpu_view_->can_trace_shadows(); }
+/* Round 543: for the windowed check's rows - how many structures the traced shadows built so far, and the host's time to
+ * record the last frame's builds (the card's time to run them is inside the frame's own). */
+void Editor::print_rt_shadow_stats() const {
+  if (!rt_shadows_ || !gpu_view_) return;
+  const gpu::RtShadowStats s = gpu_view_->rt_shadow_stats();
+  std::printf("    traced shadows: %s; %llu top-level and %llu bottom-level builds so far, the last frame's recorded in %.3f ms\n",
+              gpu_view_->can_trace_shadows() ? "on" : "not available (the shadow map)", (unsigned long long)s.tlas_builds,
+              (unsigned long long)s.blas_builds, s.last_build_ms);
+}
+void Editor::set_rt_shadows(bool on) {
+  rt_shadows_ = on;
+  save_prefs();
+  scene_cache_.key = game_cache_.key = 0;  // (the views' kept pictures had the other shadows)
 }
 
 }  // namespace bl
