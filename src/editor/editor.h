@@ -2034,6 +2034,7 @@ class Editor {
     prefs_for_test_ = true;
   }
   void save_prefs_for_test() { save_prefs(); }
+  const std::string &prefs_path_for_test() const { return prefs_path_; }  // (round 556: where this editor reads its preferences)
   void dock_reset_for_test(const std::string &preset) { dock_reset(preset); }
   void load_prefs_for_test() { load_prefs(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }

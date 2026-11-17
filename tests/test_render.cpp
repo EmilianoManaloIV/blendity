@@ -10365,6 +10365,85 @@ static void tests_round184() {
       ed.viewport_device_for_test(1);
     }
   });
+  /* Round 556 (task 0538): the same sphere's shadow on the floor at 20 m, on the CPU and the card - the pixels it darkens
+   * fully and partly (the 3 x 3 filter's penumbra), the same on both. Round 553 had seen the CPU's "shadow edge" mid-grey
+   * where the card's was dark; measured here, the sphere's shadow is the same pixels on both (49 fully, 2 partly on an RTX
+   * 4070 SUPER with the grid on), and the difference was the grid's red X axis line drawn over the floor: where the
+   * shadow falls under it the line darkens, and elsewhere its depth test against the floor is decided at the knife's edge
+   * on both renderers (round 551's horizon band). So the grid is off here: the shadow alone. */
+  test("shadows at a distance (round 556): a sphere's shadow on the floor seen from 20 m has the same partly-lit edge on the card as on the CPU", [&] {
+    long cpu_partial = -1, cpu_full = -1;
+    for (int device : {1, 2}) {
+      if (device == 2 && !gpu::available()) continue;
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Main Camera");
+      ed.command("select Cube");
+      ed.command("delete");
+      GameObject *ball = ed.scene().create("Ball");
+      ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 64, 32);
+      ball->add<MeshRenderer>()->materials = {make_material("grey", Vec3(0.6f, 0.6f, 0.6f))};
+      ed.command("set Directional Light.Transform.rotation 30 -60 0");
+      ed.command("overlay grid off");  // (the axis lines over the floor are not the shadow: see above)
+      ed.viewport_device_for_test(device);
+      ed.command("camera 0 0 20 0 1 0");
+      ball->set_local_position({1000.0f, 1.0f, 0.0f});
+      r34_steps(ed, 3);
+      const Recti rect = ed.scene_view_rect();
+      const std::vector<uint32_t> empty = r34_crop(ed, rect);
+      ball->set_local_position({0.0f, 1.0f, 0.0f});
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> px = r34_crop(ed, rect);
+      const int W = rect.w, H = W > 0 ? (int)(px.size() / (size_t)W) : 0;
+      /* The sphere: the changed pixels' part at the view's centre (the camera's pivot is the sphere); the rest that got darker
+       * is its shadow. */
+      std::vector<int> comp(px.size(), -1);
+      auto changed = [&](size_t i) { return i < empty.size() && px[i] != empty[i]; };
+      const size_t centre = (size_t)(H / 2) * W + (size_t)(W / 2);
+      if (changed(centre)) {
+        std::vector<size_t> stack = {centre};
+        comp[centre] = 1;
+        while (!stack.empty()) {
+          const size_t i = stack.back();
+          stack.pop_back();
+          const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
+          const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
+          for (int k = 0; k < 4; k++) {
+            if (nx[k] < 0 || ny[k] < 0 || nx[k] >= W || ny[k] >= H) continue;
+            const size_t j = (size_t)ny[k] * W + nx[k];
+            if (changed(j) && comp[j] < 0) comp[j] = 1, stack.push_back(j);
+          }
+        }
+      }
+      float core = 0.0f;
+      std::vector<float> dark(px.size(), 0.0f);
+      for (size_t i = 0; i < px.size(); i++) {
+        if (comp[i] > 0 || !changed(i)) continue;
+        dark[i] = luma(empty[i]) - luma(px[i]);
+        core = std::max(core, dark[i]);
+      }
+      long partial = 0, full = 0;
+      for (float d : dark) {
+        if (d >= 0.75f * core) full++;
+        else if (d > 0.25f * core) partial++;
+      }
+      if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {
+        fs::make_dirs(dir);
+        const std::string base = fs::join(dir, device == 2 ? "shadow20_card" : "shadow20_cpu");
+        write_png(base + ".png", px.data(), W, H, W);
+        write_png(base + "_empty.png", empty.data(), W, H, W);
+      }
+      std::printf("    %s: the shadow's core %.0f grey levels darker; %ld pixels fully shadowed, %ld partly (its edge)\n",
+                  device == 2 ? "the card" : "the CPU", core, full, partial);
+      CHECK(core > 5.0f && full > 0);
+      if (device == 1) cpu_partial = partial, cpu_full = full;
+      else if (cpu_partial >= 0) {
+        std::printf("    card - CPU: %+ld fully, %+ld partly\n", full - cpu_full, partial - cpu_partial);
+        CHECK(std::labs(full - cpu_full) <= 2 && std::labs(partial - cpu_partial) <= 2);  // (a pixel's rounding either way)
+      }
+      ed.viewport_device_for_test(1);
+    }
+  });
 
   test("outlines at a distance: an outlined sphere at 60 m keeps a one-pixel silhouette (Min Pixels 1 for a new outline), and a scene saved before the field loads with 0", [&] {
     Editor ed;
