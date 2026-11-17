@@ -1882,6 +1882,7 @@ std::unique_ptr<Renderer> open_renderer(int index, bool hardware_rt, std::string
 uint64_t renderers_generation() { return pool().generation.load(); }
 
 bool renderers_opening() {
+  if (optix_prewarm_state() == 1) return true;  // (round 558: OptiX's kernel compiling for a card is inside the driver too)
   RendererPool &p = pool();
   std::lock_guard<std::mutex> lock(p.m);
   return !p.opening.empty();

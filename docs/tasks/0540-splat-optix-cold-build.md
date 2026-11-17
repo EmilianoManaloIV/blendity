@@ -1,6 +1,6 @@
 # 0540: OptiX's cold kernel compile, found and warmed - round 558
 
-- **Status:** in progress (the hub's assignment, 2026-11-17; Pass 27, after round 534)
+- **Status:** done (2026-11-17; the hub's assignment, Pass 27, after round 534)
 - **Requirements:** Q-06 responsiveness (ADR 0105; the user's rule: measure cold first-use costs, no long stalls)
 - **Decisions:** none needed (a warm-up thread in the OptiX device, no data or layout change)
 - **Model:** main session (Opus); code-reviewer agent
@@ -66,8 +66,11 @@ The kernel (`gpu_kernel.h`, `optix_kernel.cu`) is not changed, so the PTX stays 
 3. An OptiX open that starts while the prewarm compiles the same card waits for it: one compile, not two. The
    test records the opens' module times; the waiting open's own compile is short.
 4. Stress `splats_gpu` prints OptiX's cold and warm kernel compile a card (a measurement, never a check).
-5. The editor with OptiX chosen starts the warm-up at startup: `prewarm` -> `optix_prewarm`. A test drives
-   `gpu::prewarm` with backend 2 and checks the warm-up started.
+5. The editor with OptiX chosen starts the warm-up at startup. The editor calls `set_backend(scene's backend)`
+   before `prewarm` (editor.cpp), so the test drives `set_backend(2)` and checks the warm-up started; `prewarm`'s
+   own call is the same function behind a once-a-run flag a test can't reset.
+7. A run that quits (or a headless screenshot that ends) while the warm-up compiles leaves without static
+   destructors (`renderers_opening` counts it), and the statics the thread reads are never freed.
 6. The full suite passes on Windows and Linux (CI); `splats_gpu` and `gpu` locally.
 
 ## Risks
@@ -77,3 +80,8 @@ The kernel (`gpu_kernel.h`, `optix_kernel.cu`) is not changed, so the PTX stays 
   would retain anyway, and it is released after the compile.
 - OptiX's cache can be off or full (`OPTIX_CACHE_MAXSIZE`): then every open still compiles. The log line names
   the time, so a user can see why.
+- An open that waits for the warm-up waits on a below-normal-priority thread: with the CPU busy it can wait longer
+  than a compile of its own. Accepted: the warm-up normally ends long before the first render.
+- A scene saved with OptiX but rendering on the CPU still warms OptiX once a run (a background compile), and a
+  Turing card without RT cores (which `use_optix` never opens) is compiled for too. Both cost one background
+  compile; neither stalls anything. Follow-ups if they matter.

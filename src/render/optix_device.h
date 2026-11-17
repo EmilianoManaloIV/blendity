@@ -43,8 +43,11 @@ std::unique_ptr<Renderer> create_optix_renderer(int index, std::string *error);
  * OptiX render finds it cached; an open meanwhile waits for that card's compile instead of compiling again. It
  * returns at once and does nothing without OptiX. prewarm() calls it when OptiX is the backend, set_backend(2) too. */
 void optix_prewarm();
-/* 0 not started, 1 compiling, 2 done (each card warm, or no OptiX here). */
+/* 0 not started, 1 compiling, 2 done (each card warm, or no OptiX here). renderers_opening() counts 1 as opening:
+ * the program leaves without its static destructors while a compile is inside the driver. */
 int optix_prewarm_state();
+/* A kernel compile holds that card now (the warm-up's, an open's or optix_compile_kernel's). */
+bool optix_compiling(int index);
 /* The last kernel compile's time on the Vulkan device `index`'s card (the prewarm's or an open's), -1 if none yet. */
 double optix_kernel_ms(int index);
 /* One kernel compile on that card now, with OptiX's disk cache on or off (`use_cache` false: the cold cost), its time

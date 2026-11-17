@@ -22,6 +22,10 @@
 #  include "optix_params.h"
 #  if defined(_WIN32)
 #    include <windows.h>  // (SetThreadPriority: the prewarm's thread, round 558)
+#  elif defined(__linux__)
+#    include <sys/resource.h>
+#    include <sys/syscall.h>
+#    include <unistd.h>
 #  endif
 /* The host headers must be the OptiX the PTX was built against (task 0169): another SDK's function table and structs
  * with this PTX would fail at run time, or worse. */
@@ -43,7 +47,7 @@ void set_backend(int b) {
   b = std::max(0, std::min(2, b));
   const int was = g_backend.exchange(b);
   if ((was == 2) != (b == 2)) drop_ready_renderers();  // (the pool held renderers for the old choice; Auto and Vulkan are the same)
-  if (b == 2 && was != 2) optix_prewarm();  // (round 558: OptiX chosen - its kernel compiles now, not at the first render)
+  if (b == 2 && was != 2 && backend() == 2) optix_prewarm();  // (round 558: OptiX chosen - its kernel compiles now, not at the first render; not when the environment pins another)
 }
 /* BLENDITY_GPU_BACKEND (auto | vulkan | optix) wins over the setting: the tests and the stress run pin GPU Compute so
  * their numbers don't change with the card's driver, and a test asks for OptiX by name. */
@@ -97,6 +101,7 @@ std::unique_ptr<Renderer> create_optix_renderer(int, std::string *error) {
 }
 void optix_prewarm() {}
 int optix_prewarm_state() { return 2; }
+bool optix_compiling(int) { return false; }
 double optix_kernel_ms(int) { return -1.0; }
 double optix_compile_kernel(int, bool, std::string *error) {
   if (error) *error = "this build has no OptiX";
@@ -124,12 +129,12 @@ bool optix_ready(std::string *error) {
 }
 /* The committed PTX's pieces as one text (MSVC limits a string literal; the header splits it). */
 const std::string &ptx_text() {
-  static const std::string s = [] {
+  static const std::string &s = *new std::string([] {  // (leaked: the warm-up's thread may read it while the program quits)
     std::string t;
     t.reserve(BL_OPTIX_PTX_BYTES);
     for (const char *part : optix_kernel_ptx_parts) t += part;
     return t;
-  }();
+  }());
   return s;
 }
 
@@ -158,10 +163,11 @@ void module_options(OptixModuleCompileOptions &mco, OptixPipelineCompileOptions 
 struct CardWarm {
   std::mutex m;                       // held for a compile
   std::atomic<bool> warm{false};      // compiled once this run
+  std::atomic<bool> compiling{false}; // a compile holds `m` now (tests order themselves on it)
   std::atomic<double> last_ms{-1.0};  // (read without the lock: a caller never waits on a compile to ask)
 };
 CardWarm &card_warm(int cuda_device) {
-  static CardWarm w[16];
+  static CardWarm *w = new CardWarm[16];  // (leaked: the warm-up's thread may hold one while the program quits)
   return w[std::max(0, std::min(15, cuda_device))];
 }
 /* A compile that took long is said once a card, with why (the user waited for it, or the prewarm did). */
@@ -190,8 +196,10 @@ class OptixRenderer final : public Renderer {
     if (!ox(optixDeviceContextCreate(ctx_, &o, &octx_), "optixDeviceContextCreate", err)) return false;
     /* Round 558: after the card's prewarm (or with it: this waits for its compile, then OptiX's cache answers). */
     std::lock_guard<std::mutex> lock(card_warm(cuda_device).m);
+    card_warm(cuda_device).compiling = true;
     ScopedTimer t;
     const bool ok = make_pipeline(err);
+    card_warm(cuda_device).compiling = false;
     stats_.pipeline_ms = t.ms();
     if (ok) note_compile(cuda_device, info_.name, stats_.pipeline_ms);
     return ok;
@@ -542,7 +550,7 @@ std::string optix_status() {
 
 /* The CUDA devices that can run the kernel (compute 7.5+), by name; listed once. */
 const std::vector<std::string> &optix_cards() {
-  static const std::vector<std::string> cards = [] {
+  static const std::vector<std::string> &cards = *new std::vector<std::string>([] {  // (leaked: the warm-up's thread reads it, maybe while the program quits)
     std::vector<std::string> out;
     const std::vector<std::string> names = optix_devices(nullptr);
     for (size_t i = 0; i < names.size(); i++) {
@@ -555,7 +563,7 @@ const std::vector<std::string> &optix_cards() {
       out.push_back(major * 10 + minor >= 75 ? names[i] : std::string());  // (an older card: listed empty, never matched)
     }
     return out;
-  }();
+  }());
   return cards;
 }
 
@@ -564,6 +572,8 @@ const std::vector<std::string> &optix_cards() {
 static void lower_this_thread() {
 #  if defined(_WIN32)
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#  elif defined(__linux__)
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);  // (this thread only: Linux's nice is per thread)
 #  endif
 }
 static std::atomic<int> g_prewarm{0};
@@ -577,7 +587,9 @@ static double compile_on(int c, bool use_cache, std::string *err) {
     if (err) *err = "the card's CUDA context didn't open";
     return -1.0;
   }
-  cuCtxSetCurrent(ctx);
+  cuCtxPushCurrent(ctx);  // (the caller's own context back after: a test or the stress may have one)
+  CardWarm &w = card_warm(c);
+  w.compiling = true;
   double ms = -1.0;
   OptixDeviceContextOptions o{};
   OptixDeviceContext octx = nullptr;
@@ -598,6 +610,9 @@ static double compile_on(int c, bool use_cache, std::string *err) {
     optixDeviceContextDestroy(octx);
   }
   else if (err) *err = "optixDeviceContextCreate failed";
+  w.compiling = false;
+  CUcontext popped = nullptr;
+  cuCtxPopCurrent(&popped);
   cuDevicePrimaryCtxRelease(dev);
   return ms;
 }
@@ -646,6 +661,11 @@ void optix_prewarm() {
   }).detach();
 }
 int optix_prewarm_state() { return optix_compiled_in() ? g_prewarm.load() : 2; }
+bool optix_compiling(int index) {
+  if (!optix_compiled_in() || g_listed.load() != 2) return false;  // (never lists the devices itself: a quick poll)
+  const int c = optix_device_of(index);
+  return c >= 0 && card_warm(c).compiling.load();
+}
 double optix_kernel_ms(int index) {
   if (!optix_compiled_in()) return -1.0;
   const int c = optix_device_of(index);

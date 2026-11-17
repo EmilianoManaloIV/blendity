@@ -19,6 +19,12 @@ change (round 534 changed it). The 4070 SUPER had compiled this PTX in round 534
 - An OptiX open during it waits for that card's compile, then finds the kernel in the cache (one compile, not
   two). A compile over 2 s is said once in the log, with why.
 - `blendity_stress --only splats_gpu` measures OptiX's kernel compile per card, cold (cache off) and warm.
+- Quitting, or a headless run ending, while it compiles leaves at once (as with a GPU still opening): the statics
+  the thread reads are never freed.
 
 **Checked:** `--group splats_gpu` (the warm-up's tests: no OptiX, choosing OptiX, an open during a compile) on
 Windows with both cards and on Linux; CHECKS_W / CHECKS_L on CI.
+
+<!-- docs/ARCHITECTURE.md -->
+after: | `PTLens`, thin-lens primary rays
+| `gpu::optix_prewarm()`, `optix_kernel_ms()`, `optix_compile_kernel()` (`render/optix_device.*`, round 558) | OptiX's kernel compiled for each card on a background thread before the first render (OptiX caches it on disk); opens wait on the card's compile instead of compiling twice | `intern/cycles/device/optix/device_impl.cpp` (Cycles loads its kernels when the device opens) |

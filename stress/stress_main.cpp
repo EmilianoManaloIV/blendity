@@ -5777,14 +5777,16 @@ static void test_splats_gpu(Report &rep, const Options &o) {
   const char *user_backend = std::getenv("BLENDITY_GPU_BACKEND");
   const std::string restore = user_backend ? user_backend : "vulkan";
   /* Round 558 (task 0540): OptiX's kernel compile a card - cold (OptiX's disk cache off: the first render after an
-   * update) and warm (the cache answering: every later open). The first OptiX build below pays the cold one unless
-   * the cache already holds this PTX for the card. */
+   * update) and warm (the cache answering: every later open; measured on the second cached compile, since the first
+   * fills the cache when it is empty). */
   if (gpu::optix_compiled_in()) {
     rep.table({"card", "OptiX kernel compile, cold ms", "warm ms"});
     for (const gpu::DeviceInfo &d : gpu::devices()) {
       if (gpu::optix_device_of(d.index) < 0) continue;
       std::string err;
-      const double cold = gpu::optix_compile_kernel(d.index, false, &err), warm = gpu::optix_compile_kernel(d.index, true, &err);
+      const double cold = gpu::optix_compile_kernel(d.index, false, &err);
+      gpu::optix_compile_kernel(d.index, true, &err);  // (fills the cache if it was empty)
+      const double warm = gpu::optix_compile_kernel(d.index, true, &err);
       rep.row({d.name, cold < 0 ? err : f1(cold), warm < 0 ? err : f1(warm)});
     }
   }
