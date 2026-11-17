@@ -6,6 +6,8 @@
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
 #include "view_keeps.h"
+#include "scene_splats.h"
+#include "../scene/pointcloud_object.h"
 #include "../core/view_perf.h"
 #include "../core/profiling.h"
 #include "../render/dof.h"
@@ -937,7 +939,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   Component *outline = nullptr, *flatten = nullptr, *vshapes = nullptr;
   bool bone = false;
   const LightProbeGroupComponent *pgroup = nullptr;
+  const PointCloudObject *cloud = nullptr;  // (round 532: the views draw its splats)
+  Component *pcloud = nullptr;  // (round 533: the path tracers trace splat clouds)
   for (auto &c : g.components) switch (c->render_role()) {
+      case Component::RenderRole::PointCloud:
+        if (!cloud) cloud = static_cast<const PointCloudObject *>(c.get()), pcloud = c.get();
+        break;
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
       case Component::RenderRole::ViewShapes: if (!vshapes) vshapes = c.get(); break;
@@ -971,6 +978,21 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
       const Mat4 w = g.world_matrix();
       mix(w.m, sizeof(w.m));
+    }
+    if (cloud) {  // (round 532: the views draw its splats - where it is, which cloud and its version, how)
+      const Mat4 w = g.world_matrix();
+      const PointCloud *d = cloud->data.get();
+      const uint64_t key[4] = {d ? d->uid.v : 0, d ? d->version : 0,
+                               (uint64_t)cloud->enabled | (uint64_t)g.active_in_hierarchy() << 1 | (uint64_t)(d ? (int)d->type : 0) << 2,
+                               (uint64_t)std::hash<float>()(cloud->point_size)};
+      mix(w.m, sizeof(w.m));
+      mix(key, sizeof(key));
+    }
+    if (pcloud) {  // (round 533: a splat cloud moved or edited is a new traced picture and a new bake - its cloud's pointer and version)
+      const Mat4 w = g.world_matrix();
+      const uint64_t key = hash_component(*pcloud) ^ (uint64_t)pcloud->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+      mix(w.m, sizeof(w.m));
+      mix(&key, 8);
     }
     if (pgroup) {  // (round 455: a probe moved - or the group - is a new bake: the lighting's out-of-date check re-runs; the Scene view draws them)
       const Mat4 w = g.world_matrix();
@@ -1127,6 +1149,10 @@ uint64_t Editor::scene_hash_tail() {
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
+  /* Round 532 (review): a worker's splat order landed - here, not in an object's part, which the scene hash reuses while
+   * the edit counter holds (a landing sort moves no counter: it would be a change the counter missed). */
+  const uint64_t splat_gen = gsplat_sort_generation();
+  mix(&splat_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
   mix(&scene_->lighting.shadowmask_mode, sizeof(int));  // (round 454: Distance Shadowmask redraws without a rebake)
   mix(&scene_->lighting.shadow_distance, sizeof(float));
@@ -1432,6 +1458,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     r3d.clear_sky(inv, {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   else r3d.clear_environment(inv, env_, env.view_transform, env.exposure);
   for (const DrawItem &it : items) r3d.add(it);
+  scene_splats_prepare(*scene_, r3d, rt, v, p, env.view_transform, env.exposure);  // (round 532: blended in by flush())
   r3d.flush();
 }
 
@@ -1683,6 +1710,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   s.use_guiding = rs.path_guiding;
   s.view_transform = view_transform_from_setting(rs.view_transform);
   s.exposure = rs.exposure;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the Gaussian splat objects, traced after the meshes)
   return s;
 }
 
@@ -1968,6 +1996,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   }
   collect_hold_ = &j->meshes;  // (the outline shells the items point at are held with the meshes)
   j->items = collect_items(true, true);
+  j->splats = scene_splat_draws(*scene_);  // (round 532)
   collect_hold_ = nullptr;
   outline_view_.on = false;
   flatten_view_.on = false;
@@ -2193,6 +2222,11 @@ void Editor::raster_picture(RenderJob &j) {
     else if (j.clear_mode == 1) r3d.clear(j.clear_color);
     else r3d.clear_environment(inv, j.environment, j.env.view_transform, j.env.exposure);
     for (const DrawItem &it : j.items) r3d.add(it);
+    SplatPass splats;  // (round 532: sorted in the frame - a final picture waits for its order)
+    if (!j.splats.empty()) {
+      splats.prepare(j.splats, SplatView{j.view, p, rt.width, rt.height, j.env.view_transform, j.env.exposure}, false);
+      r3d.set_splats(&splats);
+    }
     r3d.flush();
   };
   auto once = [&](bool override_on, uint32_t override_color) {

@@ -4,6 +4,7 @@
 #include "../scene/budget.h"
 #include "editor.h"
 #include "../scene/blockout_piece_stack.h"  // (round 514)
+#include "../scene/pointcloud_object.h"     // (round 530: Create > Point Cloud)
 #include "../core/profiling.h"
 #include "../core/hash.h"
 #include "../render/canvas.h"
@@ -184,6 +185,7 @@ bool Editor::init(int argc, char **argv) {
   std::string scene_arg = scene_in_args(argc, argv), layout_arg;  // (a double-clicked .scene: task 0076)
   resolve_project_paths(scene_arg);
   load_prefs();
+  brushes_load();  // (round 540: each brush's size, strength and colour, beside the preferences)
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a == "--scene" && i + 1 < argc) scene_arg = argv[++i];
@@ -258,6 +260,7 @@ bool Editor::wants_continuous_redraw() const {
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
          !deferred_.empty() ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_) ||
+         gsplat_sorts_running() > 0 ||  // (round 532: a worker's splat order lands; the frame after it shows it)
          vr_running();  // (round 383: the headset wants every frame - idle, the editor would draw one a second - review 383)
 }
 
@@ -588,6 +591,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
+  brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
   process_events(events);
   upload_bytes_frame_ = 0;
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
@@ -1210,6 +1214,13 @@ void Editor::draw_menubar(const Recti &r) {
       if (u.menu_item("Lattice")) create_object("Lattice");
       u.tooltip("A box of points round the selected mesh (with a Lattice modifier on it): move the points to squash, bulge\n"
                 "or taper the mesh. Blender: Add > Lattice.");
+      u.submenu("Point Cloud", u.px(170), [this] {  // (round 530, ADR 0147)
+        if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud");
+        if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats");
+        if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats");
+      });
+      u.tooltip("An empty point cloud: plain dots, or Gaussian Splats (soft turned ellipsoids whose colour changes with the view).\n"
+                "Test Splats makes one already filled: 10,000 random splats to look at. Blender 5.3: Add > Point Cloud.");
     }
     if (shows(FocusRig)) {
       if (u.menu_item("Armature")) create_object("Armature");
@@ -2724,7 +2735,7 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae", ".spz"}}, {"Motions", {".vmd"}},
                                                  {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Unity animation clips", {".anim"}}, {"Godot scenes", {".tscn"}}, {"Blender files (through Blender)", {".blend"}}};  // (rounds 370, 373, 374)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
@@ -4302,7 +4313,7 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 std::string Editor::known_create_kind(const std::string &kind) {
   static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
                                        "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice",
-                                       "Blockout"};
+                                       "Blockout", "Point Cloud", "Gaussian Splats", "Test Splats"};
   for (const char *k : kKinds)
     if (to_lower(kind) == to_lower(k)) return k;
   static const std::string kPiece = "blockout piece:";  // (round 477: "Blockout Piece: Subtract Box"; the rest is matched where it's made)
@@ -4368,6 +4379,21 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     if (parent) expanded_.insert(parent->id);
     select(g->id);
     mark_changed("Create Light Probe Group");
+    return g;
+  }
+  if (kind == "Point Cloud" || kind == "Gaussian Splats" || kind == "Test Splats") {  // (round 530, ADR 0147: an empty cloud at the pivot)
+    GameObject *g = create_point_cloud_object(*scene_, kind == "Point Cloud" ? PointCloudType::Points : PointCloudType::GaussianSplats, parent);
+    if (kind == "Test Splats") {  // (10,000 seeded splats of degree 3 in a 2 m cube: something to look at without a file)
+      PointCloudPtr cloud = pointcloud_random(PointCloudType::GaussianSplats, 10000, 3, 1u, 1.0f);
+      if (cloud) {
+        cloud->name = g->name;
+        g->get<PointCloudObject>()->data = cloud;
+      }
+    }
+    if (!parent) g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create " + kind);
     return g;
   }
   if (kind == "Lattice") {
@@ -5090,7 +5116,7 @@ void Editor::draw_dialogs() {
     dialog_files_.clear();
     if (dialog_ == Dialog::OpenScene) scan_files(assets_dir_, ".scene", dialog_files_);
     if (dialog_ == Dialog::ImportObj) {
-      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda"}) scan_files(assets_dir_, ext, dialog_files_);
+      for (const char *ext : {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".spz"}) scan_files(assets_dir_, ext, dialog_files_);
     }
   }
   u.popup(id, w, [this, id] {
@@ -5644,6 +5670,7 @@ void Editor::save_prefs() {
   s += panels_prefs_text();
   s += prefs_text_0190();
   fs::write_file(prefs_path_, s);
+  brushes_save();  // (round 540: beside prefs.txt)
 }
 
 /* points (or curve) add|move|delete|select <object> [index] [x y z]: a Curve's or Lattice's control points (tasks

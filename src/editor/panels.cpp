@@ -8,6 +8,7 @@
 #include "../texture/surface.h"
 #include "../scene/stroke_object.h"
 #include "../scene/blockout_piece_stack.h"  // (round 514: a Blockout piece's modifiers)
+#include "../scene/pointcloud_object.h"     // (round 530: a point cloud's icon)
 
 #include "../core/core.h"
 #include <cstring>
@@ -30,6 +31,7 @@ static Icon object_icon(const GameObject &g) {
   if (g.get<Blockout>()) return Icon::Cube;  // (round 477: the result's mesh - its pieces below show the Subtract below)
   if (const BlockoutPiece *bp = g.get<BlockoutPiece>()) return bp->operation == 1 ? Icon::Close : Icon::Plus;
   if (g.get<MeshFilter>()) return Icon::Cube;
+  if (g.get<PointCloudObject>()) return Icon::Vertex;  // (round 530)
   return Icon::Empty;
 }
 
@@ -78,6 +80,11 @@ void Editor::draw_hierarchy(const Recti &r) {
         if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k, child);
     });
     if (u.menu_item("Lattice")) create_object("Lattice", child);
+    u.submenu("Point Cloud", u.px(170), [this, child] {  // (round 530)
+      if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud", child);
+      if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats", child);
+      if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats", child);
+    });
     if (u.menu_item("Armature")) create_object("Armature", child);
   };
   u.popup(create_menu, u.px(200), [create_body] { create_body(false); });
@@ -3974,13 +3981,44 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (!painting) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
-  br.help("Add raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+  brush_banks_sync();  // (round 540: the Radius and Strength below are this brush's)
+  br.help("Add Weight raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Set Weight moves towards Weight (Ctrl: towards 1 - Weight), Blur evens out with the neighbours.");
   br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", wp_bank_.unified_size);
+  br.field("Unified Strength", wp_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
   br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
   br.field("Front Faces Only", wp_brush_.front_only);
+  /* Task 0519 (Blender 5.3): automasking holds parts of the mesh back from the brush; the options multiply. */
+  if (br.group("Automasking", false)) {
+    br.field("Topology", wp_brush_.am_topology);
+    br.help("Only the connected piece the stroke starts on.");
+    br.field("Mesh Boundary", wp_brush_.am_boundary);
+    br.help("Keeps the brush off the mesh's open edges, fading in over Propagation Steps edges.");
+    if (wp_brush_.am_boundary) br.field("Propagation Steps", wp_brush_.am_boundary_steps, 1, 20);
+    br.enumeration("Cavity", wp_brush_.am_cavity, kWeightCavityModes, 3);
+    br.help("Cavity paints the hollows more than the ridges; Inverted the ridges more than the hollows.");
+    if (wp_brush_.am_cavity != 0) {
+      br.field("Cavity Factor", wp_brush_.am_cavity_factor, 0.01f, 0.0f, 5.0f);
+      br.field("Cavity Blur", wp_brush_.am_cavity_blur, 0, 25);
+    }
+    br.field("View Normal", wp_brush_.am_view_normal);
+    br.help("Only the faces turned towards you, up to Limit degrees.");
+    if (wp_brush_.am_view_normal) {
+      br.field("View Limit", wp_brush_.am_view_limit, 1.0f, 0.0f, 180.0f);
+      br.field("View Falloff", wp_brush_.am_view_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+    br.field("Area Normal", wp_brush_.am_area_normal);
+    br.help("Only the faces turned the way the surface faced where the stroke began.");
+    if (wp_brush_.am_area_normal) {
+      br.field("Area Limit", wp_brush_.am_area_limit, 1.0f, 0.0f, 180.0f);
+      br.field("Area Falloff", wp_brush_.am_area_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+  }
+  br.group_end();
   br.field("Clean Below", wp_clean_below_, 0.005f, 0.0f, 1.0f);  // (task 0287: Clean's threshold)
   const int hw = (lay.area.w - u.px(16)) / 2;
   Recti brow = lay.row(u.row_h() + u.px(2));
@@ -4510,6 +4548,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   if (paint_brush_.tip == 2) br.field("Bristles", paint_brush_.bristles, 1, 64);
   static const char *modes[] = {"Paint", "Smudge", "Blend"};
   br.enumeration("Mode", paint_brush_.mode, modes, 3);
+  brush_banks_sync();  // (round 540: Size, Opacity and the colour are this mode's)
   br.field("Wet", paint_brush_.wet, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Hue", paint_brush_.jitter_h, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Saturation", paint_brush_.jitter_s, 0.01f, 0.0f, 1.0f);
@@ -4559,9 +4598,20 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Size", paint_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Hardness", paint_brush_.hardness, 0.01f, 0.0f, 1.0f);
   br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", paint_bank_.unified_size);
+  br.field("Unified Opacity", paint_bank_.unified_strength);
+  br.field("Unified Colour", paint_bank_.unified_color);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size, Opacity and the colour are kept for each of Paint, Smudge and Blend; Unified shares one value between them.");
   br.field("Flow", paint_brush_.flow, 0.01f, 0.0f, 1.0f);
   br.field("Spacing", paint_brush_.spacing, 0.01f, 0.05f, 2.0f);
   br.help("Dabs this many radii apart along the stroke.");
+  br.field("Hardness Pressure", paint_brush_.hardness_pressure);
+  if (paint_brush_.hardness_pressure) br.curve("Hardness Curve", paint_brush_.hardness_curve);
+  br.field("Spacing Pressure", paint_brush_.spacing_pressure);
+  if (paint_brush_.spacing_pressure) br.curve("Spacing Curve", paint_brush_.spacing_curve);
+  br.help("A pen's pressure (through the Pressure Curve below) scales the hardness by Hardness Curve and the spacing by 1.5 minus Spacing Curve: "
+          "a firm press packs the dabs closer.");
   br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
   static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
   br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
@@ -4656,11 +4706,16 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 11);
+  brush_banks_sync();  // (round 540: the Size and Strength below are this brush's)
   br.help("Draw raises along the normal (Alt carves), Smooth evens the surface, Grab pulls what is under the first dab with the drag; Clay Buildup lays flat layers, Inflate swells along each vertex's normal, "
           "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag; "
           "Mask paints a mask no brush gets through (Ctrl with any brush does the same; Ctrl+Alt takes it away).");
   br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", sculpt_bank_.unified_size);
+  br.field("Unified Strength", sculpt_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size and Strength are kept for each brush; Unified shares one value between all of Sculpt's brushes.");
   br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
   br.field("Carve", sculpt_brush_.carve);
   br.field("Front Faces Only", sculpt_brush_.front_only);

@@ -265,7 +265,7 @@ class OptixRenderer final : public Renderer {
   double last_gpu_ms_ = -1.0, busy_ = 0.0;
   uint64_t submits_ = 0;
   Buf sbt_buf_, launch_buf_, params_buf_, accum_, aux_, ias_, index3_;
-  Buf scene_[11];  // insts, verts, idx, mats, lights, mlights, mcdf, tex8, texf, texinfo, instances
+  Buf scene_[14];  // insts, verts, idx, mats, lights, mlights, mcdf, tex8, texf, texinfo, instances; splats, their SH, their boxes (round 534)
   std::vector<Buf> gas_;
 
   static bool fail(std::string *err, const std::string &what) {
@@ -298,7 +298,8 @@ class OptixRenderer final : public Renderer {
     const bool ok = upload_vec(scene_[0], s.instances, err) && upload_vec(scene_[1], s.verts, err) && upload_vec(scene_[2], s.idx, err) &&
                     upload_vec(scene_[3], s.materials, err) && upload_vec(scene_[4], s.lights, err) && upload_vec(scene_[5], s.mesh_lights, err) &&
                     upload_vec(scene_[6], s.mesh_cdf, err) && upload_vec(scene_[7], s.tex8, err) && upload_vec(scene_[8], s.texf, err) &&
-                    upload_vec(scene_[9], s.textures, err);
+                    upload_vec(scene_[9], s.textures, err) && upload_vec(scene_[11], s.splats, err) && upload_vec(scene_[12], s.splat_sh, err) &&
+                    upload_vec(scene_[13], s.splat_aabbs, err);
     if (!ok) return false;
     /* The triangles' indices without the material slot, three a triangle (as the Vulkan device builds its BLASes). */
     std::vector<uint32_t> i3(s.idx.size() / 4 * 3);
@@ -308,6 +309,7 @@ class OptixRenderer final : public Renderer {
     launch_.insts = scene_[0].ptr, launch_.verts = scene_[1].ptr, launch_.idx = scene_[2].ptr, launch_.mats = scene_[3].ptr;
     launch_.lights = scene_[4].ptr, launch_.mlights = scene_[5].ptr, launch_.mcdf = scene_[6].ptr, launch_.tex8 = scene_[7].ptr;
     launch_.texf = scene_[8].ptr, launch_.texinfo = scene_[9].ptr;
+    launch_.splats = scene_[11].ptr, launch_.splat_sh = scene_[12].ptr, launch_.splat_count = s.splats.size();
     return true;
   }
 
@@ -329,8 +331,8 @@ class OptixRenderer final : public Renderer {
       for (int r = 0; r < 3; r++)
         for (int c = 0; c < 4; c++) in.transform[r * 4 + c] = m[c * 4 + r];
       in.instanceId = (unsigned)o;
-      in.visibilityMask = 255;
-      in.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING | OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
+      in.visibilityMask = s.blas[b].kind == kBlasSplats ? 2 : 1;  // (round 534: shadow rays ask the meshes and the splats apart)
+      in.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING | (s.blas[b].kind == kBlasSplats ? 0u : OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT);  // (round 534: the splats' shadow pass uses any-hit)
       in.traversableHandle = gas[b];
       inst.push_back(in);
     }
@@ -348,6 +350,19 @@ class OptixRenderer final : public Renderer {
   }
 
   bool build_gas(const GBlas &gb, Buf &out, OptixTraversableHandle &h, std::string *err) {
+    if (gb.kind == kBlasSplats) {
+      /* Round 534: a splat cloud - custom primitives over its splats' boxes; __intersection__splat tests each. */
+      CUdeviceptr ab = scene_[13].ptr + (CUdeviceptr)gb.idx_off * 24;
+      const unsigned flags[1] = {OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL};  // (a shadow ray's any-hit multiplies each splat's share once)
+      OptixBuildInput bi{};
+      bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+      bi.customPrimitiveArray.aabbBuffers = &ab;
+      bi.customPrimitiveArray.numPrimitives = gb.tri_count;
+      bi.customPrimitiveArray.strideInBytes = 24;
+      bi.customPrimitiveArray.flags = flags;
+      bi.customPrimitiveArray.numSbtRecords = 1;
+      return accel(bi, OPTIX_BUILD_FLAG_PREFER_FAST_TRACE, out, h, err);
+    }
     CUdeviceptr vb = scene_[1].ptr + (CUdeviceptr)gb.vtx_off * sizeof(GVertex);
     const unsigned geo_flags[1] = {OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT};
     OptixBuildInput bi{};
@@ -391,11 +406,11 @@ class OptixRenderer final : public Renderer {
     mco.maxRegisterCount = 255;  // (fewer spills round optixTrace: 1.5x faster than the default limit on the 4070 SUPER)
     OptixPipelineCompileOptions pco{};
     pco.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
-    pco.numPayloadValues = 5;
+    pco.numPayloadValues = 6;  // (the sixth: the splats' seed, round 534)
     pco.numAttributeValues = 2;
     pco.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pco.pipelineLaunchParamsVariableName = "LP";
-    pco.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
+    pco.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;  // (custom: the splats, round 534)
     char log[4096];
     size_t ls = sizeof(log);
     const std::string &ptx = ptx_text();
@@ -411,6 +426,10 @@ class OptixRenderer final : public Renderer {
     d[2].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     d[2].hitgroup.moduleCH = module_;
     d[2].hitgroup.entryFunctionNameCH = "__closesthit__hit";
+    d[2].hitgroup.moduleIS = module_;  // (round 534: the splats' test; the triangles' built-in one ignores it)
+    d[2].hitgroup.entryFunctionNameIS = "__intersection__splat";
+    d[2].hitgroup.moduleAH = module_;  // (the splats' shadow pass; every other ray turns any-hit off)
+    d[2].hitgroup.entryFunctionNameAH = "__anyhit__splat";
     OptixProgramGroupOptions pgo{};
     ls = sizeof(log);
     if (optixProgramGroupCreate(octx_, d, 3, &pgo, log, &ls, groups_) != OPTIX_SUCCESS) return fail(err, std::string("the program groups: ") + log);
