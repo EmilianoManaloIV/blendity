@@ -142,6 +142,9 @@ bool oo_drag(Editor &ed, Vec3 a, Vec3 b, int mods = 0) {
   ed.step_frame_headless({oo_ev(ET::MouseMove, bx, by, mods)});
   ed.step_frame_headless({oo_ev(ET::MouseUp, bx, by, mods)});
   oo_settle(ed, 4);
+  /* The new opening's cut is built on a worker: wait for it to land, not for a number of frames - on a busy machine (CI's
+   * runner, round 549) four frames were not enough and a ray through the new window still hit the wall. */
+  ed.command("blockout wait");
   return true;
 }
 

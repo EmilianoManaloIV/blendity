@@ -1822,7 +1822,12 @@ void Renderer3D::shade_deferred() {
    * each gathering one of 16 interleaved ray sets; a blur over 4 x 4 receivers (that merges the sets)
    * weighted by facing and distance from the plane; then each pixel takes the nearby receivers like
    * its own surface (below). */
-  const VoxelGIFrame *gi = !rsm_out_ && env_.gi && env_.gi->grid && env_.gi->grid->valid() ? env_.gi : nullptr;
+  const VoxelGIFrame *gi_frame = !rsm_out_ && env_.gi && env_.gi->grid && env_.gi->grid->valid() ? env_.gi : nullptr;
+  /* (Round 549: with sky occlusion and bounce both off the gather adds nothing, so nothing is traced - the pixels then shade as
+   * with GI off. Traced, the blur's and the upsampling's weighted means of a sky of 1 came out a rounding away from 1, and the
+   * pass left the 8-pixel shading for the scalar one: a pixel or two differed on some machines. The frame itself still says
+   * whether a realtime lightmap's bounce is to be added: gi_frame.) */
+  const VoxelGIFrame *gi = gi_frame && (gi_frame->params.sky_occlusion || gi_frame->params.bounce) ? gi_frame : nullptr;
   const int ds = gi ? gi->params.downsample : 1;
   const int gw = gi ? (W + ds - 1) / ds : 0, gh = gi ? (H + ds - 1) / ds : 0;
   const float gvox = gi ? gi->grid->voxel : 1.0f;
@@ -2023,7 +2028,7 @@ void Renderer3D::shade_deferred() {
           sp.has_gi = true;
           sp.gi_sky = std::max(0.0f, std::min(1.0f, it.rt_sky->sample(ruv).x));
           sp.gi_bounce = it.rt_bounce->sample(ruv);
-          if (sp.has_lightmap && (gi ? gi->bounce_not_baked : env_.rt_bounce_not_baked)) sp.lightmap_add = sp.gi_bounce;
+          if (sp.has_lightmap && (gi_frame ? gi_frame->bounce_not_baked : env_.rt_bounce_not_baked)) sp.lightmap_add = sp.gi_bounce;
         }
         else if (gi && stats_.gi_traced) {
           /* The receivers around this pixel that lie on its surface (facing, plane), bilinear between them. */
