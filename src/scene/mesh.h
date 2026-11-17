@@ -522,6 +522,10 @@ MeshPtr plane(float size = 10.0f, int subdivisions = 10);
 MeshPtr quad(float size = 1.0f);
 MeshPtr uv_sphere(float radius = 0.5f, int segments = 24, int rings = 16);
 MeshPtr ico_sphere(float radius = 0.5f, int subdivisions = 2);
+/* Blender 5.3's Quad Sphere (round 535): 6 * segments^2 quads. segments clamps to [1, 500], a bad radius to 0.5;
+ * method 0 = Even Area, 1 = Even Angle. */
+MeshPtr quad_sphere(float radius = 0.5f, int segments = 4, int method = 0);
+int quad_sphere_segments(int requested);  // the count quad_sphere builds: [1, 500]
 MeshPtr cylinder(float radius = 0.5f, float height = 2.0f, int segments = 24);
 /* Unity's Capsule (round 367): a cylinder capped by half spheres, `height` tall overall (2 m, 1 m across). */
 MeshPtr capsule(float radius = 0.5f, float height = 2.0f, int segments = 24, int rings = 16);

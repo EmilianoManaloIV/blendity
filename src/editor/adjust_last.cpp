@@ -13,7 +13,7 @@
 namespace bl {
 
 static bool primitive_has_numbers(const std::string &kind) {
-  return kind == "Cube" || kind == "Sphere" || kind == "Icosphere" || kind == "Cylinder" || kind == "Cone" || kind == "Torus" || kind == "Plane";
+  return kind == "Cube" || kind == "Sphere" || kind == "Icosphere" || kind == "Quad Sphere" || kind == "Cylinder" || kind == "Cone" || kind == "Torus" || kind == "Plane";
 }
 
 /* The primitive's mesh from the panel's numbers (the same defaults create_primitive uses). */
@@ -22,6 +22,7 @@ static MeshPtr primitive_mesh(const Editor::ObjLastOp &o) {
   if (k == "Cube") return primitives::cube(o.a);
   if (k == "Sphere") return primitives::uv_sphere(o.a, o.n, o.m);
   if (k == "Icosphere") return primitives::ico_sphere(o.a, o.n);
+  if (k == "Quad Sphere") return primitives::quad_sphere(o.a, o.n, o.m);
   if (k == "Cylinder") return primitives::cylinder(o.a, o.b, o.n);
   if (k == "Cone") return primitives::cone(o.a, o.b, o.n);
   if (k == "Torus") return primitives::torus(o.a, o.b, o.n, o.m);
@@ -39,6 +40,7 @@ void Editor::record_primitive_last(GameObject *g, const std::string &kind) {
   if (kind == "Cube") o.a = 1.0f;
   else if (kind == "Sphere") o.a = 0.5f, o.n = 24, o.m = 16;
   else if (kind == "Icosphere") o.a = 0.5f, o.n = 2;
+  else if (kind == "Quad Sphere") o.a = 0.5f, o.n = 4, o.m = 0;
   else if (kind == "Cylinder") o.a = 0.5f, o.b = 2.0f, o.n = 24;
   else if (kind == "Cone") o.a = 0.5f, o.b = 1.0f, o.n = 24;
   else if (kind == "Torus") o.a = 0.5f, o.b = 0.2f, o.n = 32, o.m = 16;
@@ -253,7 +255,8 @@ void Editor::draw_obj_last_panel(const Recti &view) {
   std::string title;
   if (o.kind == "primitive") {
     title = "Add " + o.what;
-    const bool radial = o.what == "Sphere" || o.what == "Icosphere" || o.what == "Cylinder" || o.what == "Cone";
+    const bool radial = o.what == "Sphere" || o.what == "Icosphere" || o.what == "Quad Sphere" || o.what == "Cylinder" || o.what == "Cone";
+    static const char *const kQuadSphereMethods[] = {"Even Area", "Even Angle"};
     if (o.what == "Torus") rows.push_back({"Major Radius", &o.a, nullptr, nullptr, 0.01f, 0.001f, 1000.0f, 0, 0}), rows.push_back({"Minor Radius", &o.b, nullptr, nullptr, 0.01f, 0.001f, 1000.0f, 0, 0});
     else rows.push_back({radial ? "Radius" : "Size", &o.a, nullptr, nullptr, 0.01f, 0.001f, 10000.0f, 0, 0});
     if (o.what == "Cylinder" || o.what == "Cone") rows.push_back({"Height", &o.b, nullptr, nullptr, 0.01f, 0.001f, 10000.0f, 0, 0});
@@ -261,6 +264,10 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     if (o.what == "Sphere") rows.push_back({"Rings", nullptr, &o.m, nullptr, 0, 0, 0, 2, 256});
     if (o.what == "Torus") rows.push_back({"Ring Segments", nullptr, &o.m, nullptr, 0, 0, 0, 3, 256});
     if (o.what == "Icosphere") rows.push_back({"Subdivisions", nullptr, &o.n, nullptr, 0, 0, 0, 0, 6});
+    if (o.what == "Quad Sphere") {
+      rows.push_back({"Subdivisions", nullptr, &o.n, nullptr, 0, 0, 0, 1, 128});
+      rows.push_back({"Method", nullptr, &o.m, nullptr, 0, 0, 0, 0, 1, kQuadSphereMethods});
+    }
     if (o.what == "Plane") rows.push_back({"Subdivisions", nullptr, &o.n, nullptr, 0, 0, 0, 1, 256});
   }
   else if (o.kind == "uv") {
