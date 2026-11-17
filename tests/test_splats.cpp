@@ -1481,8 +1481,64 @@ static void tests_round531_engineer() {
   });
 }
 
+/* ------------------------------------------------------------- round 561: the Learn section's steps (task 0543) */
+
+static void tests_round561() {
+  test("learn: 'Point clouds and Gaussian splats' walks clean in a fresh editor - splats, Points beside them, the Game view, F12 on the CPU, the card's device - with its questions", [] {
+    int at = -1;
+    for (int i = 0; i < lesson_count() && at < 0; i++)
+      if (std::string(lesson(i).body).find("\n# Point clouds and Gaussian splats") != std::string::npos) at = i;
+    CHECK(at >= 0);
+    if (at < 0) return;
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    std::istringstream lines(std::string(lesson(at).body));
+    std::string line;
+    bool in = false;
+    int steps = 0, questions = 0, warned = 0;
+    while (std::getline(lines, line)) {
+      if (line.rfind("# ", 0) == 0) in = line == "# Point clouds and Gaussian splats";
+      if (!in) continue;
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      steps++;
+      const std::string cmds = line.substr(6, line.find(" | ") - 6);
+      std::vector<LogEntry> sink;
+      const size_t base = Log::fetch(0, sink);
+      for (size_t a = 0; a <= cmds.size();) {  // (';'-separated, as the Learn tab runs them)
+        const size_t e = cmds.find(';', a);
+        std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+      ed.step_frame_headless();
+      std::vector<LogEntry> got;
+      Log::fetch(base, got);
+      bool w = false;
+      for (const LogEntry &le : got)
+        if (le.level != LogLevel::Info) w = true, std::printf("    '%s' warned: %s\n", cmds.c_str(), le.text.c_str());
+      warned += w;
+    }
+    std::printf("    %d Try-it steps, %d warned, %d questions\n", steps, warned, questions);
+    CHECK(steps >= 6 && warned == 0 && questions >= 5);
+    /* What the steps leave: the splats and a Points cloud beside them, the path tracer chosen with Device Auto. */
+    int splats = 0, points = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      const PointCloudObject *pc = g.get<PointCloudObject>();
+      if (pc && pc->data && pc->data->count() == 10000) (pc->data->is_splats() ? splats : points)++;
+    });
+    CHECK(splats == 1 && points == 1);
+    CHECK(ed.scene().render.engine == 1 && ed.scene().render.device == 2);
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
   tests_round531_engineer();
+  tests_round561();
 }
