@@ -5,8 +5,9 @@ the CPU's (9 antialiased pixels against 17). Make the card's edge the CPU's and 
 
 **Found (task 0534)**
 - The card's edge was never narrower. The 20 m pictures, dumped from both renderers, show the sphere's cel edge in the
-  same places on both: 8 mid-tone pixels on the CPU, 7 on the card. The test's mask is every pixel that changes when the sphere moves away, and
-  that includes its shadow on the floor at the view's bottom: 8 of the CPU's 17 "between" pixels were its shadow's edge,
+  same places on both: 8 mid-tone pixels on the CPU, 6-7 on the card. The test's mask is every pixel that changes when the sphere moves away, and
+  that includes its shadow on the floor at the view's bottom: most of the CPU's 17 "between" pixels were its shadow's edge (the counts
+  don't simply add: the shadow's pixels also move the deciles the tones are cut at),
   mid-grey on the CPU where the card's is dark. The 20th never held for the sphere on either renderer (8 of 243 on the
   CPU, 7 of 242 on the card - a 30th); the CPU met it only through its shadow.
 
