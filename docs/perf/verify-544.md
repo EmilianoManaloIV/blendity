@@ -93,6 +93,25 @@ The audits on the joined tree against main (`068207d9`), every Pass 27 round joi
 | `hci_console_audit --check` | 6 | 6 | none (#420's two and #441's one were reworded before they joined) |
 | `hci_fitts_audit` | - | - | needs a `fitts-*.json` run: not part of this sweep |
 
+The new panels by hand (step 3), headless screenshots of the joined tree's exe at 1024 x 768 and 1366 x 768, `ui scale` 1
+and 1.5, a scratch project (the shots in the round's scratch folder; not committed):
+
+| Panel (round) | Finding | Where |
+|---|---|---|
+| To Circle's F9 (537) | 11 rows: taller than the Scene view at 1024 / 1366 x 768, scale 1.5 - it climbs over the view's toolbar, its title under the tab strip | `scene_view.cpp` 3508: `r.y = view.bottom() - h - ...`, not clamped to the view's top and not scrolled (every F9 panel) |
+| Point cloud Type (530) | "Gaussian Splats" elided ("Gaussian Spl...", "Ga..." at 1.5) | `pointcloud_object.cpp` 15 |
+| Vertex Paint (545) | 1024: "Vertex Groups, Weigh...", "Exit Ve..."; at 1.5 also "Front Faces O...", "New Poin...", "New Corn..." | `panels.cpp` 2019-2023 (the toggle at `min(px(120), w / 3)`), 4163 / 4165 |
+| Weight Paint's brush rows (539 / 540) | 1024 at 1.5: Brush "Ad...", "Unified Streng...", Falloff "Sm..."; clean at 1 | `panels.cpp` 4095 |
+| Camera's Panorama Type (538) | "Equirectangu..." at 1024, "Pan..." / "Equ..." at 1.5 | `scene.cpp` 960 / 981 |
+| Preferences' Ray-Traced Shadows (543) | 1024 at 1.5: the popup is taller than the screen and the row is out of sight; the popup scrolls by wheel only, no bar | `panels.cpp` 3717; `ui.cpp` 2040-2058 |
+| Checkboxes (536 / 537 / 540 / 542 / 543) | ~12-13 px at scale 1 (Lock X Y Z, Ray-Traced Shadows, Sun Lights Scene, Unified Size / Strength): the app's checkbox size, not a Pass 27 change | - |
+
+Clean: Edit Mode's Dimensions X / Y / Z (536, far down the Inspector); Relax, Space, Flatten and Curve's F9 (537); Paste
+Pose's F9 and the Key menu's Convert Rotation (541); the sky's Sun Lights Scene and Sun Intensity (542); Weight Paint's
+Automasking (539) at scale 1. Not a Pass 27 panel, seen on the way: the Animation window's third button row at 1024 x 1.5
+(AutoPosing clipped, Ragdoll off screen) and the Rigging window's "Add Spring Bone" clipped on the left. Not reached: a
+splat import dialog (there is none - a splat file imports directly), the Sculpt and Texture Paint brush banks (540).
+
 ## The Learn check list
 
 Each feature has a lesson (or a section of one) with Try-it lines that run headless without a warning, and questions.
