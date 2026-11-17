@@ -39,6 +39,23 @@ struct RasterVertex {
   float t[4] = {0, 0, 0, 0};
 };
 
+/* Round 519 (ADR 0146, task 0502): a skinned mesh on the card. The card moves the vertices; the CPU sends each bone's
+ * matrix a frame. SkinWeights is what a vertex follows (made once per binding, scene/skin_render.h's skin_card_weights),
+ * the palette is a flat float array laid out as the skin pass reads it. */
+struct SkinWeights {
+  uint32_t slots = 0;          // bone slots a vertex has (1..8)
+  uint32_t bones = 0;          // bones in the palette (indices are 16-bit: at most 65,535)
+  bool tangents = false;       // the rest vertices carry tangents (skinned too)
+  std::vector<uint8_t> count;  // per vertex: slots used (0: the vertex stays at rest)
+  std::vector<uint16_t> bone;  // slots a vertex: the palette's bone
+  std::vector<float> weight;   // slots a vertex: already divided by their sum (the CPU's floats)
+};
+/* The palette: kSkinPaletteHeader floats (owner x 12, owner inverse x 12 - each the four columns' xyz -, then the dual
+ * quaternion flag), then per bone kSkinPaletteBone floats: matrix x 12 (as the header's), dual quaternion real x 4 and
+ * dual x 4, rigid flag, padding. */
+constexpr uint32_t kSkinPaletteHeader = 32, kSkinPaletteBone = 24;
+inline size_t skin_palette_floats(uint32_t bones) { return (size_t)kSkinPaletteHeader + (size_t)bones * kSkinPaletteBone; }
+
 /* One drawn object: its mesh (from add_mesh), its model matrix (column-major) and its material - plain, textured
  * (task 0101) or toon (task 0102). */
 struct RasterInstance {
@@ -305,8 +322,35 @@ class Raster {
   virtual bool update_mesh_ranges(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &vertex_ranges,
                                   const std::vector<uint32_t> &indices, const std::vector<std::pair<uint32_t, uint32_t>> &index_ranges,
                                   std::string *error) = 0;
-  /* Frees a mesh's memory; its index may be handed out again. */
+  /* Frees a mesh's memory; its index may be handed out again. A skin's too (remove_skin is the same call). */
   virtual void remove_mesh(int mesh) = 0;
+  /* Round 519 (ADR 0146): skinning on the card. add_skin makes a mesh (its id is RasterInstance::mesh's) whose vertices
+   * the skin pass writes: `rest` posed by the palette last given, over `indices`. Until set_skin_palette it is the rest.
+   * The pass runs once a frame, before the first pass, for each skin whose palette changed since; every view and pass of
+   * the frame reads the one result. Its own compute pipeline and descriptors, made by the first add_skin. A raster that
+   * can't skin says no and the caller poses on the CPU. */
+  virtual bool can_skin() const { return false; }
+  virtual int add_skin(const std::vector<RasterVertex> &rest, const std::vector<uint32_t> &indices, const SkinWeights &weights, std::string *error) {
+    (void)rest, (void)indices, (void)weights;
+    if (error) *error = "this device doesn't skin";
+    return -1;
+  }
+  /* The palette (skin_palette_floats(bones) floats); the same one as last time changes nothing (no second dispatch). */
+  virtual bool set_skin_palette(int mesh, const std::vector<float> &palette, std::string *error) {
+    (void)mesh, (void)palette;
+    if (error) *error = "this device doesn't skin";
+    return false;
+  }
+  virtual void remove_skin(int mesh) { remove_mesh(mesh); }
+  /* Pass 27's hook (ray-traced shadows): extra VkBufferUsageFlags for the posed vertex buffers add_skin makes from now
+   * on (the acceleration-structure build input), what a skin's posed buffer was made with, and the skinned meshes whose
+   * posed buffers the pass wrote since the last call (to refit their acceleration structures from). */
+  virtual void set_skin_extra_usage(uint32_t flags) { (void)flags; }
+  virtual uint32_t skin_usage(int mesh) const { (void)mesh; return 0; }
+  virtual std::vector<int> take_skin_writes() { return {}; }
+  /* Dispatches of the skin pass so far, and the skins held (tests, the Profiler). */
+  virtual uint64_t skin_dispatches() const { return 0; }
+  virtual size_t skin_count() const { return 0; }
   /* Whether its cage pipelines were made (task 0100: else the CPU draws the cage). */
   virtual bool can_draw_cage() const = 0;
   /* Whether the g-buffer pass can tint Edit Mode's selected faces (task 0166: it needs gl_PrimitiveID, which Vulkan

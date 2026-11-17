@@ -1319,14 +1319,19 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
  * rest was built again, or moved in place and split again); its positions, normals and tangents are the kernel's, from
  * the rest's - so a pose never rebuilds a render mesh, works out normals again or redoes MikkTSpace, and the card's
  * skin pass (round 519) gives the same vertices. */
-const RenderMesh *Mesh::skinned_render_mesh(int ci, bool force_flat, bool tangents) const {
+bool Mesh::skin_pose_holds() const {
+  if (!skin_pose) return false;
   const SkinPose &sp = *skin_pose;
-  if (!sp.rest || !sp.rest_lock || !sp.binding || sp.for_version != version || sp.for_deform != deform_version) return nullptr;
+  if (!sp.rest || !sp.rest_lock || !sp.binding || sp.for_version != version || sp.for_deform != deform_version) return false;
   const Mesh &rest = *sp.rest;
-  if (rest.positions.size() != positions.size() || rest.corner_verts.size() != corner_verts.size() ||
-      rest.face_offsets.size() != face_offsets.size() || sp.binding->n.size() != positions.size() ||
-      rest.any_smooth() != any_smooth())
-    return nullptr;
+  return rest.positions.size() == positions.size() && rest.corner_verts.size() == corner_verts.size() &&
+         rest.face_offsets.size() == face_offsets.size() && sp.binding->n.size() == positions.size() && rest.any_smooth() == any_smooth();
+}
+
+const RenderMesh *Mesh::skinned_render_mesh(int ci, bool force_flat, bool tangents) const {
+  if (!skin_pose_holds()) return nullptr;
+  const SkinPose &sp = *skin_pose;
+  const Mesh &rest = *sp.rest;
   RenderMesh &rm = cache_[ci];
   if (cache_skinned_[ci] && cache_version_[ci] == version && cache_deform_[ci] == deform_version && (!tangents || cache_tangents_[ci])) return &rm;
   StatTimer st{kStatSkinned, {}};

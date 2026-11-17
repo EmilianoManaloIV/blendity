@@ -1832,8 +1832,13 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float t
   const float offset = thickness / s * (finite_bits(thickness_scale) && thickness_scale > 0.0f ? thickness_scale : 1.0f);
   if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
   ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
-  const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
-  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset && c.group == thickness_group) return c.mesh.get();
+  /* The shell reads only the source's positions and faces, so a posed skin (round 519) is keyed by its pose: the same pose
+   * object (an expired one never matches a new one at its address) and the versions it holds for. */
+  const std::shared_ptr<const SkinPose> &pose = src.skin_pose.p;
+  const bool posed = pose && src.skin_pose_holds();
+  const uint64_t serial = posed ? 0 : src.render_mesh().serial;  // unique per build of the source (not a reused address)
+  const bool same_pose = posed && !c.pose.owner_before(pose) && !pose.owner_before(c.pose) && c.pose_version == src.version && c.pose_deform == src.deform_version;
+  if (c.mesh && (same_pose || (serial != 0 && serial == c.serial)) && offset == c.offset && c.group == thickness_group) return c.mesh.get();
   BL_ZONE("outline shell");
   PoseTimer timer(PoseStat::OutlineShell);  // (round 468: shells built, not the cache hits above)
   /* The per-vertex width (task 0149): the thickness group's weight, 1 without one (or one the mesh hasn't). */
@@ -1869,6 +1874,8 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float t
   }
   c.mesh = m;
   c.serial = serial;
+  c.pose = posed ? pose : std::shared_ptr<const SkinPose>();
+  c.pose_version = src.version, c.pose_deform = src.deform_version;
   c.offset = offset;
   c.group = thickness_group;
   return c.mesh.get();
@@ -3470,6 +3477,9 @@ AABB GameObject::world_bounds() const {
     b.add(world_position());
     return b;
   }
+  /* A posed skin's box from its posed positions (round 519): its render mesh would run the CPU skin kernel, which a view on
+   * the card spares - and a toon outline's width asks for this box every frame. */
+  if (m->skin_pose && m->skin_pose_holds()) return m->bounds().transformed(world_matrix());
   return m->render_mesh().bounds.transformed(world_matrix());
 }
 

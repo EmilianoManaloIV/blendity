@@ -866,6 +866,10 @@ std::string Editor::perf_status_text() const {
   for (const JobView &j : const_cast<Editor *>(this)->jobs_running()) jobs += (jobs.empty() ? "" : ", ") + j.label;
   s += "; jobs: " + (jobs.empty() ? std::string("none") : jobs);
   s += "; views: " + gpu_view_status();
+  /* Round 519 (ADR 0146): the card's skins this frame, and why a skinned mesh was left to the CPU. */
+  s += strprintf("; skins on the card: %llu (palettes sent %llu, sent to the card %llu), posed on the CPU %llu", (unsigned long long)p.skin_items,
+                 (unsigned long long)p.skin_palettes, (unsigned long long)p.skin_uploads, (unsigned long long)p.skin_cpu);
+  if (!skin_reason_.empty()) s += " (last: " + skin_reason_ + ")";
   return s;
 }
 
@@ -923,7 +927,9 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
       {"corners split in place", (double)mc.in_place_split}, {"meshes settled", (double)mc.settled}, {"render meshes built whole", (double)mc.full_builds},
       {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies},
-      {"render meshes skinned", (double)mc.skinned}};
+      {"render meshes skinned", (double)mc.skinned},
+      {"skins on the card", (double)p.skin_items}, {"palettes sent", (double)p.skin_palettes},  // (round 519, ADR 0146)
+      {"skins sent to the card", (double)p.skin_uploads}, {"skins posed on the CPU", (double)p.skin_cpu}};
 }
 
 std::string Editor::posing_counts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames) {

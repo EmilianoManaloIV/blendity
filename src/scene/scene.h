@@ -672,6 +672,10 @@ struct Outline : ComponentBase<Outline> {
     uint64_t serial = 0;
     float offset = -1.0f;
     std::string group;  // the thickness group it was built with (task 0149)
+    /* A posed skin's source (round 519): keyed by its pose and the versions it was stamped for, not by its render mesh's
+     * serial - asking a posed mesh for its render mesh runs the CPU skin kernel, which the card spares. */
+    std::weak_ptr<const SkinPose> pose;
+    uint64_t pose_version = 0, pose_deform = 0;
   };
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;

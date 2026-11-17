@@ -194,7 +194,7 @@ void Editor::prebuild_render_meshes(const Scene &s, bool game) {
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
     const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
     if (editing && m != mf->mesh.get()) editing = false;
-    if (!m || m->render_cache_warm(editing)) return;
+    if (!m || (!editing && items_card_skin_ && m->skin_pose_holds()) || m->render_cache_warm(editing)) return;  // (round 519: the card poses it - the CPU kernel is not run for it)
     auto [it, fresh] = at.emplace(m, cold.size());
     if (fresh) cold.push_back({m});
     (editing ? cold[it->second].editing : cold[it->second].plain) = true;
@@ -382,6 +382,7 @@ static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
   if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
   if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
   if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
+  if (a.skin != b.skin || a.skin_stamp != b.skin_stamp || a.skin_note != b.skin_note) return false;  // (round 519)
   return std::memcmp(a.model.m, b.model.m, sizeof(a.model.m)) == 0;
 }
 
@@ -398,7 +399,7 @@ uint64_t Editor::items_key(bool game, bool want_tangents) {
   uint64_t h = scene_render_hash();
   auto mix = [&](uint64_t v) { h = (h ^ v) * kFnvPrime; };
   mix((uint64_t)game | (uint64_t)want_tangents << 1 | (uint64_t)edit_mode_ << 2 | (uint64_t)scene_lighting_ << 3 | (uint64_t)lm_stale_live_ << 4 |
-      (uint64_t)lighting_manual() << 5 | (uint64_t)scene_->lighting.baked_gi << 6 | (uint64_t)(int)elem_ << 8);
+      (uint64_t)lighting_manual() << 5 | (uint64_t)scene_->lighting.baked_gi << 6 | (uint64_t)(int)elem_ << 8 | (uint64_t)items_card_skin_ << 16);  // (round 519: a card view's items hold the rest render meshes of skinned objects)
   mix(edit_mode_ ? edit_obj_ : 0);
   /* (Review 436: whether this gather draws outlines by distance, LOD Groups' levels and Camera Flatten - F12 and
    * MoonRay gather into the Game view's slot with all three off.) */
@@ -435,7 +436,10 @@ uint64_t Editor::items_view_key() const {
  * picture. */
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   uint64_t gen = 0;
+  const bool card_skin = items_card_skin_;  // (round 519: this copy is for readers that draw or trace the posed render meshes)
+  items_card_skin_ = false;
   const std::vector<DrawItem> &kept = collect_items_ref(game, want_tangents, &gen);
+  items_card_skin_ = card_skin;
   view_perf::counters.item_copies++;
   view_perf::miss(view_perf::ItemsCopy);
   view_perf::Timed copy_time(view_perf::counters.items_copy_ms);
@@ -471,7 +475,7 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
   c.base = base, c.view = view, c.view_dep = view_dep;
   c.flattening = flatten_any_ || view_shapes_any_;
   c.lod = lod;
-  c.valid = !c.flattening && !c.lod;
+  c.valid = !c.flattening && !c.lod && !skin_settling_;  // (round 519: a rest settling after shape keys counts gathers until it is back on the card)
   if (!same) c.items = std::move(items);
   if (c.valid && !same) keeps_.items_gen[variant][want_tangents] = view_keeps::next_items_gen();  // (a new list: what was kept of the old one is stale)
   *gen = c.valid ? keeps_.items_gen[variant][want_tangents] : 0;
@@ -512,6 +516,7 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
 std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod) {
   BL_ZONE("collect_items");
   ProfileScope prof{prof_.ms_collect, {}};
+  skin_settling_ = false;
   prebuild_render_meshes(*scene_, game);
   std::vector<DrawItem> items;
   flatten_pivots_.clear();
@@ -539,7 +544,14 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
     if (game && m) m = lod_for_view(g, *m);  // (round 363: an LOD Group's level for its height on screen; nullptr culled)
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
+    /* (Round 519: a camera's reshaping reads the posed vertices - such a mesh never becomes a card-skin item, nor touches the
+     * stand-ins of the views' own rests.) */
+    const bool card_skin = items_card_skin_;
+    if (view_shaped || flatten_view_.on) items_card_skin_ = false;
+    skin_kind_ = game ? 1 : 0;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
+    items_card_skin_ = card_skin;
+    if (items_card_skin_ && editing && g.get<SkinModifier>()) it.skin_note = "a skinned mesh in Edit Mode, its cage drawn on the CPU", skin_reason_ = it.skin_note;
     it.view_shaped = view_shaped;
     view_dep = view_dep || view_shaped;
     if (flatten_view_.on && !editing) apply_camera_flatten(g, it);  // (round 334: the Game view and renders only)
@@ -565,13 +577,15 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
     if (outline_draw_item(g, *m, it, shell_slot, tscale, o)) items.push_back(o);
   });
   set_view_lattices(false);  // (out of this collect: the Scene view, exports and bakes see the model)
+  if (items_card_skin_) skin_prune_stands();
   return items;
 }
 
 /* A mesh's draw item as every view builds it (the import preview too, task 0152). */
 DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing) {
   DrawItem it;
-  it.mesh = want_tangents && needs_tangents(mr.materials) ? &m.render_mesh_tangents(editing) : &m.render_mesh(editing);
+  if (!(items_card_skin_ && !editing && skin_card_item(g, m, mr, want_tangents && needs_tangents(mr.materials), it)))  // (round 519: a skinned mesh the card poses is not given its posed render mesh)
+    it.mesh = want_tangents && needs_tangents(mr.materials) ? &m.render_mesh_tangents(editing) : &m.render_mesh(editing);
   it.model = g.world_matrix();
   const Material &mat0 = *mr.material(0);
   it.albedo = mat0.base_color;
@@ -1191,7 +1205,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
     }
     if (!casts) continue;
     caster_ptrs.push_back(&it);
-    bounds.add(it.mesh->bounds.transformed(it.model));
+    bounds.add(draw_bounds(it).transformed(it.model));  // (round 519: a card-skinned mesh's box moved by its palette)
     if (it.mesh->serial == 0) cacheable = false;
     uint64_t ck = kFnvBasis ^ it.id;
     mixer(ck, it.model.m, sizeof(float) * 16);
@@ -1325,14 +1339,17 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   std::vector<DrawItem> owned;
   const std::vector<DrawItem> *kept = nullptr;
   uint64_t items_gen = 0;
+  items_card_skin_ = skin_on_card_wanted();  // (round 519: a skinned mesh the card poses stays its rest render mesh in these items)
   if (view_perf::keeps) kept = &collect_items_ref(game, true, &items_gen);
-  else owned = collect_items(game, true);
+  else owned = collect_items(game, true);  // (the stress toggle with the keeps off: collect_items makes no card-skin items, so skins stay on the CPU)
+  items_card_skin_ = false;
   /* Realtime GI traces only what the bake doesn't hold (task 0017): with a current bake of every light
    * that bounces, the views cost what Realtime GI off costs. Manual (task 0020): nothing traced, but the last realtime
    * lightmaps and live probes stay up. (Decided here, after the gather it reads, and before the items are used.) */
   const bool live_gi = scene_lights && live_gi_needed();
   const bool frozen = scene_lights && lighting_frozen();
   const bool lightmaps_written = (live_gi || frozen) && !vgi_[game ? 1 : 0].rtlm.shown.empty();
+  if (kept && live_gi && skin_items_any(*kept)) owned = skin_items_to_cpu(*kept), kept = nullptr, items_gen = 0;  // (round 519: live GI voxelizes the posed vertices)
   /* (A copy where the items are changed below - and, when the stress section turns this keep off alone, as before; the kept list's
    * generation still names the copy, which is the same list.) */
   const bool copy = kept && (lightmaps_written || !view_perf::on(view_perf::ItemsCopy));
@@ -1353,14 +1370,24 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   if (!light_cull_off_for_test_) prof_.lights_culled += cull_lights_to_view(env, p * v);  // (round 415, ADR 0109: lights that can't reach the view left out of its loops)
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
+  /* Round 519: what the CPU reads - its shadow map, voxel GI, its raster - needs the posed render meshes; the card's own gather
+   * needs none of them. (A view the card won't draw, or that fails below, turns its card-skin items into the posed ones here.) */
+  std::vector<DrawItem> cpu_items;
+  const std::vector<DrawItem> *use = &items;
+  auto skins_to_cpu = [&] {
+    if (use != &items || !skin_items_any(items)) return;
+    cpu_items = skin_items_to_cpu(items);
+    use = &cpu_items;
+  };
+  if (!gpu_maybe) skins_to_cpu();
   const bool shadows = scene_lights && scene_->render.shadows;
   if (shadows) {
-    if (const ShadowMap *sm = update_shadow_map(items, env, gpu_maybe)) {
+    if (const ShadowMap *sm = update_shadow_map(*use, env, gpu_maybe)) {
       env.shadow_light = shadow_sun(env);  // (round 401: a sun without shadows casts none)
       env.shadow = sm;
     }
   }
-  if (live_gi) env.gi = update_voxel_gi(items, env, game);
+  if (live_gi) env.gi = update_voxel_gi(*use, env, game);
   bool bounce_not_baked = env.gi && env.gi->bounce_not_baked;
   if (frozen && !env.gi) {
     /* As update_voxel_gi decides it: the first directional light's bounce isn't in the shown bake. */
@@ -1412,14 +1439,15 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
   r3d.begin(&rt, v, p, env, opt);  // (also for the GPU: the overlays drawn next go through it)
-  if (gpu_maybe && gpu_view_draw(rt, v, p, eye, env, items, cam, scene_lights, filters, opt)) {
+  if (gpu_maybe && gpu_view_draw(rt, v, p, eye, env, *use, cam, scene_lights, filters, opt)) {
     size_t tris = 0;
-    for (const DrawItem &it : items) tris += it.mesh ? it.mesh->tri_count() : 0;
-    r3d.note_submitted((int)items.size(), tris);
+    for (const DrawItem &it : *use) tris += it.mesh ? it.mesh->tri_count() : 0;
+    r3d.note_submitted((int)use->size(), tris);
     return;
   }
+  skins_to_cpu();  // (the CPU draws this view)
   if (gpu_maybe && env.shadow) {  // (the GPU couldn't after all: the CPU needs the map itself, not only its frame)
-    env.shadow = update_shadow_map(items, env);
+    env.shadow = update_shadow_map(*use, env);
     r3d.begin(&rt, v, p, env, opt);
   }
   Mat4 inv = (p * v).inverse();
@@ -1431,7 +1459,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   else if (!scene_lights)  // the editor's own sky; with the scene's lighting the world's gradient, sky or HDRI
     r3d.clear_sky(inv, {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   else r3d.clear_environment(inv, env_, env.view_transform, env.exposure);
-  for (const DrawItem &it : items) r3d.add(it);
+  for (const DrawItem &it : *use) r3d.add(it);
   r3d.flush();
 }
 

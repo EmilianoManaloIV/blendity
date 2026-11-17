@@ -386,6 +386,9 @@ struct Mesh : MeshCaches {
    * posed by skin_render_vertices - normals and tangents turned by the bones, as Unity does - not this mesh's own
    * built or moved in place. Set by GameObject::evaluated_mesh only; anything that changes the mesh ends it. */
   SkinPoseRef skin_pose;
+  /* Round 519: whether skin_pose holds for this mesh as it is now (the kernel's own checks) - what the card's skin pass
+   * asks, so a posed mesh is never given the CPU's render mesh to find out. */
+  bool skin_pose_holds() const;
   /* Call right after `deform_version++` for a bump that moved only `ids` (any order, repeats fine): the render mesh then
    * follows by looking at those vertices alone. Not calling it is always safe (the render mesh scans every vertex). */
   void note_moved(const std::vector<uint32_t> &ids);

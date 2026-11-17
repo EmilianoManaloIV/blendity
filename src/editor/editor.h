@@ -62,6 +62,7 @@
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
+#include "../scene/skin_render.h"  // (round 519: SkinBinding, the card's weights and boxes)
 #include "ui.h"
 #include "livelink.h"
 #include "../scene/partfield.h"
@@ -237,6 +238,9 @@ struct FrameProfile {
    * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
   uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
   uint64_t gpu_upload_bytes = 0;  // task 0098: what the meshes sent to the card took
+  /* Round 519 (ADR 0146): skinned meshes the card poses - drawn from the card's, palettes sent (a changed one), skins sent
+   * to the card (their rest vertices and weights, once), and skinned meshes that were posed on the CPU instead. */
+  uint64_t skin_items = 0, skin_palettes = 0, skin_uploads = 0, skin_cpu = 0;
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
@@ -289,6 +293,7 @@ struct FrameProfile {
     gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
     ms_gpu_instances += o.ms_gpu_instances, ms_gpu_corners += o.ms_gpu_corners, ms_gpu_see += o.ms_gpu_see, ms_gpu_render += o.ms_gpu_render;
     gpu_upload_bytes += o.gpu_upload_bytes;
+    skin_items += o.skin_items, skin_palettes += o.skin_palettes, skin_uploads += o.skin_uploads, skin_cpu += o.skin_cpu;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
@@ -1855,6 +1860,31 @@ class Editor {
     std::string err;
     return gpu_view_ && it != gpu_meshes_.end() && it->second.id >= 0 && gpu_view_->read_mesh(it->second.id, v, indices, &err);
   }
+  gpu::Raster *gpu_raster_for_test() { return gpu_view_.get(); }  // (round 519: the card's skin counters, a skin's posed buffer)
+  /* Round 519: the card's mesh id of the skin a skinned object was last drawn from - its most lately gathered stand-in (-1: that
+   * one isn't on the card, or a moved rest has it posed on the CPU for now). */
+  int skin_card_mesh_for_test(const GameObject *g) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return -1;
+    const SkinStand *last = nullptr;
+    for (const auto &st : s->second.slots)
+      if (!last || st->seen > last->seen) last = st.get();
+    if (!last || last->moving > 0 || !last->mesh) return -1;
+    const auto e = gpu_meshes_.find(last->mesh.get());
+    return e != gpu_meshes_.end() ? e->second.id : -1;
+  }
+  /* Round 519: a skinned object's stand-ins, one a line (kind, last gather, gathers left on the CPU, the rest's serial). */
+  std::string skin_stands_text_for_test(const GameObject *g) const {
+    std::string out;
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return "no stand-ins";
+    for (const auto &st : s->second.slots) {
+      const auto e = st->mesh ? gpu_meshes_.find(st->mesh.get()) : gpu_meshes_.end();
+      out += strprintf("[kind %d seen %llu moving %d rest %llu card %d] ", st->kind, (unsigned long long)st->seen, st->moving, (unsigned long long)st->rest_serial,
+                       e != gpu_meshes_.end() ? e->second.id : -1);
+    }
+    return out + strprintf("(gather %llu)", (unsigned long long)skin_builds_);
+  }
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
@@ -1933,6 +1963,23 @@ class Editor {
     lod_view_.on = false;
     return items;
   }
+  /* Round 519 (ADR 0146): the gather a card view makes - a skinned mesh the card poses is its rest render mesh in `mesh`, the posed
+   * Mesh in `skin` - made without a card; the same items with the posed render meshes (the CPU's); the kept stand-ins; the last
+   * reason a skinned mesh was left on the CPU; and `on`: render_deferred makes such items without a card (it turns them back). */
+  std::vector<DrawItem> collect_items_card_for_test(bool game = false, bool tangents = true, const Vec3 *outline_eye = nullptr) {
+    uint64_t gen = 0;
+    items_card_skin_ = true;
+    if (outline_eye) outline_view_ = {true, *outline_eye, 500.0f, false};  // (as a view's frame sets it: the outlines' width by distance)
+    std::vector<DrawItem> items = collect_items_ref(game, tangents, &gen);
+    items_card_skin_ = false;
+    outline_view_.on = false;
+    return items;
+  }
+  static std::vector<DrawItem> skin_items_to_cpu_for_test(const std::vector<DrawItem> &items) { return skin_items_to_cpu(items); }
+  size_t skin_stands_for_test() const { return skin_stands_.size(); }
+  const std::string &skin_reason_for_test() const { return skin_reason_; }
+  void skin_items_for_test(bool on) { skin_items_for_test_ = on; }
+  void skin_cards_off_for_test(bool off) { skin_cards_off_for_test_ = off; }
   /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
    * asset path and the layer, or -1. */
   std::pair<std::string, int> texture_upto_for_test() const { return texture_upto_; }
@@ -2343,7 +2390,55 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
-  std::vector<DrawItem> collect_items(bool game, bool want_tangents);  // (a copy of collect_items_ref's)
+  std::vector<DrawItem> collect_items(bool game, bool want_tangents);  // (a copy of collect_items_ref's; always the posed render meshes: round 519's card-skin items are for render_deferred's card path alone)
+  /* Round 519 (ADR 0146, task 0502; gpu_skin.cpp): a skinned mesh the card poses. The card view's gather (collect_items_ref
+   * under items_card_skin_) keeps such a mesh as its rest render mesh - a stand-in kept per object - and says which posed Mesh
+   * it follows (DrawItem::skin); the card holds it once (add_skin) and is sent its palette a frame. Nothing there runs the CPU
+   * kernel (Mesh::render_mesh of a posed mesh). Every other reader, and a card view that can't take it, gets the posed render
+   * mesh (skin_item_cpu). */
+  struct SkinStand {
+    std::shared_ptr<RenderMesh> mesh;                // what the items point at: a copy of the rest's render mesh (its own bounds, the rest's)
+    std::shared_ptr<const SkinBinding> binding;      // the weights below are made from it
+    uint64_t rest_serial = 0, seen = 0;              // the rest render mesh's serial; the gather it was last used in
+    bool tangents = false;
+    gpu::SkinWeights weights;                        // per render vertex, for add_skin
+    SkinBoneBoxes boxes;                             // the bounds' pieces
+    std::vector<float> palette;                      // this gather's
+    std::vector<float> sent;                         // the palette the card holds for this skin
+    int sent_mesh = -1;                              // ... and the card mesh it is the palette of
+    const void *refused_card = nullptr;              // the card that couldn't hold it (for rest_serial's skin): not asked again until the rest changes
+    uint64_t refused_serial = 0;
+    std::weak_ptr<const Mesh> rest;                  // the mesh before the skin this stands for (SkinPose::rest)
+    int moving = 0;                                  // gathers left before a rest that moved (shape keys) goes back to the card
+    int kind = 0;                                    // the view kind that made it (0 the Scene view, 1 the Game view and renders)
+    uint64_t rest_hash = 0;                          // what the last rest seen held (a copy of the same rest is not a move)
+  };
+  /* By object id, a stand-in a rest it is drawn from (review 519: the Scene and Game views each pose their own rest when a
+   * modifier runs before the Skin; views that share a rest share its stand-in and its skin on the card). */
+  struct SkinStands {
+    std::vector<std::unique_ptr<SkinStand>> slots;
+  };
+  static constexpr size_t kSkinStandsAnObject = 3;
+  static constexpr int kSkinRestStill = 3;            // gathers a moved rest must hold still for before it goes back to the card
+  std::unordered_map<uint32_t, SkinStands> skin_stands_;
+  SkinStand &skin_stand_for(const GameObject &g, const std::shared_ptr<const Mesh> &rest, int kind);
+  int skin_kind_ = 0;                                 // the view kind collect_items_build is gathering (skin_stand_for)
+  bool skin_settling_ = false;                        // this gather left a moved rest on the CPU: the list isn't kept (it counts gathers)
+  SkinStand *skin_stand_of(const DrawItem &it);
+  void skin_drop_card(SkinStand &st);
+  bool items_card_skin_ = false;                      // collect_items_build makes card-skin items (set by render_deferred's gather alone)
+  bool skin_cards_off_for_test_ = false;              // a test: skinning stays on the CPU
+  bool skin_items_for_test_ = false;                  // a test: card-skin items are made without a card (to read them)
+  uint64_t skin_builds_ = 0;
+  std::string skin_reason_;                           // why the last skinned mesh left the card (the Profiler lists it)
+  bool skin_on_card_wanted() const;
+  bool skin_card_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, DrawItem &it);
+  void skin_prune_stands();
+  int gpu_skin_mesh(const DrawItem &it, std::string &err);
+  bool skin_item_card_ok(const DrawItem &it) const;
+  static DrawItem skin_item_cpu(const DrawItem &it);
+  static bool skin_items_any(const std::vector<DrawItem> &items);
+  static std::vector<DrawItem> skin_items_to_cpu(const std::vector<DrawItem> &items);
   /* Round 506 (keep 4): the list itself - a reference into items_cache_, valid until the next gather of the same variant (no nested
    * collect_items(game, tangents) may run while it is held) - and its generation (0: not a kept list: a Camera Flatten or an LOD level). */
   const std::vector<DrawItem> &collect_items_ref(bool game, bool want_tangents, uint64_t *gen);

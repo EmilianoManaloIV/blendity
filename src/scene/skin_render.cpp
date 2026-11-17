@@ -4,6 +4,7 @@
 #include "mesh.h"
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../render/gpu_raster.h"
 #include "../render/raster.h"
 
 #include <algorithm>
@@ -140,6 +141,131 @@ AABB skin_render_vertices(const SkinPose &pose, const RenderMesh &rest, const st
     std::lock_guard<std::mutex> lock(box_lock);
     box.add(local);
   });
+  return box;
+}
+
+/* ---- Round 519: the card's weights, palette and bounds ---- */
+
+bool skin_card_weights(const SkinPose &pose, const std::vector<uint32_t> &rv_vertex, bool tangents, gpu::SkinWeights &out, std::string *why) {
+  auto no = [&](const char *s) {
+    if (why) *why = s;
+    return false;
+  };
+  if (!pose.binding || pose.binding->kmax < 1) return no("no weights to skin by");
+  if (pose.mats.empty() || pose.mats.size() > 65535) return no("more than 65,535 bones (the card's bone indices are 16-bit)");
+  const SkinBinding &b = *pose.binding;
+  const size_t nv = rv_vertex.size(), verts = b.n.size(), kmax = (size_t)std::min(b.kmax, 8);
+  out.slots = (uint32_t)kmax, out.bones = (uint32_t)pose.mats.size(), out.tangents = tangents;
+  out.count.assign(nv, 0);
+  out.bone.assign(nv * kmax, 0);
+  out.weight.assign(nv * kmax, 0.0f);
+  for (size_t r = 0; r < nv; r++) {
+    const uint32_t v = rv_vertex[r];
+    if (v >= verts) continue;
+    const size_t n = std::min<size_t>(b.n[v], kmax);
+    const int *idx = &b.idx[(size_t)v * (size_t)b.kmax];
+    const float *wt = &b.wt[(size_t)v * (size_t)b.kmax];
+    float sum = 0.0f;
+    bool fits = n > 0;
+    for (size_t k = 0; k < n; k++) {
+      sum += wt[k];
+      fits = fits && idx[k] >= 0 && (size_t)idx[k] < pose.mats.size() && finite_bits(wt[k]);
+    }
+    if (!fits || !(sum > 0.0f)) continue;  // (no bone: stays at rest, as skin_blend_point decides)
+    out.count[r] = (uint8_t)n;
+    for (size_t k = 0; k < n; k++) out.bone[r * kmax + k] = (uint16_t)idx[k], out.weight[r * kmax + k] = wt[k] / sum;
+  }
+  return true;
+}
+
+void skin_card_palette(const SkinPose &pose, std::vector<float> &out) {
+  const size_t nb = pose.mats.size();
+  out.assign(gpu::skin_palette_floats((uint32_t)nb), 0.0f);
+  auto put = [](float *o, const Mat4 &m) {
+    for (int c = 0; c < 4; c++) o[c * 3] = m.m[c * 4], o[c * 3 + 1] = m.m[c * 4 + 1], o[c * 3 + 2] = m.m[c * 4 + 2];
+  };
+  put(&out[0], pose.owner);
+  put(&out[12], pose.owner_inv);
+  out[24] = pose.dq ? 1.0f : 0.0f;
+  for (size_t i = 0; i < nb; i++) {
+    float *o = &out[gpu::kSkinPaletteHeader + i * gpu::kSkinPaletteBone];
+    put(o, pose.mats[i]);
+    const SkinDual &q = pose.duals[i];
+    o[12] = q.r.x, o[13] = q.r.y, o[14] = q.r.z, o[15] = q.r.w;
+    o[16] = q.d.x, o[17] = q.d.y, o[18] = q.d.z, o[19] = q.d.w;
+    o[20] = pose.rigid[i] ? 1.0f : 0.0f;
+  }
+}
+
+void skin_bone_boxes(const SkinPose &pose, const std::vector<Vec3> &rest_positions, const gpu::SkinWeights &w, SkinBoneBoxes &out) {
+  out = SkinBoneBoxes{};
+  out.bone.assign(pose.mats.size(), AABB());
+  const size_t slots = w.slots;
+  for (size_t r = 0; r < rest_positions.size() && r < w.count.size(); r++) {
+    const Vec3 p = rest_positions[r];
+    if (!finite3(p)) continue;
+    out.rest.add(p);
+    const size_t n = w.count[r];
+    if (!n) {
+      out.still.add(p);
+      continue;
+    }
+    const Vec3 pc = pose.owner.point(p);
+    out.bound_rest.add(p);
+    out.many = out.many || n >= 3;
+    for (size_t k = 0; k < n; k++) {
+      const size_t bone = w.bone[r * slots + k];
+      if (bone >= out.bone.size()) continue;
+      out.bone[bone].add(pc);
+      if (n > 1) out.shared.resize(out.bone.size());
+      for (size_t j = 0; j < n && n > 1; j++) {
+        const uint32_t other = w.bone[r * slots + j];
+        std::vector<uint32_t> &s = out.shared[bone];
+        if (j != k && other < out.bone.size() && std::find(s.begin(), s.end(), other) == s.end()) s.push_back(other);  // (a bone's neighbours are few)
+      }
+    }
+  }
+}
+
+namespace {
+
+/* How far a dual quaternion blend can carry bone k's box past where bone k alone moves it (see skin_render.h). */
+float skin_dq_pad(const SkinPose &pose, const SkinBoneBoxes &boxes, size_t k) {
+  if (k >= boxes.shared.size() || boxes.shared[k].empty()) return 0.0f;
+  const AABB &b = boxes.bone[k];
+  const Vec3 c = (b.min + b.max) * 0.5f;
+  const Vec3 at = pose.mats[k].point(c);
+  float far = 0.0f;
+  for (uint32_t j : boxes.shared[k])
+    if (j < pose.mats.size()) far = std::max(far, length(pose.mats[j].point(c) - at));
+  const float pad = length(b.max - b.min) + 2.0f * far;
+  return finite_bits(pad) ? pad : 0.0f;
+}
+
+}  // namespace
+
+AABB skin_posed_bounds(const SkinPose &pose, const SkinBoneBoxes &boxes, const Mesh *posed) {
+  AABB box = boxes.still;
+  if (pose.dq) box.add(boxes.bound_rest);  // (a degenerate or non-finite blend leaves the vertex at rest)
+  if (pose.dq && boxes.many && posed) {
+    box.add(posed->bounds());  // (the deform's positions: the card's within its tolerance, padded below)
+    const Vec3 pad = (box.max - box.min) * 1e-4f + Vec3(1e-6f);
+    box.min = box.min - pad, box.max = box.max + pad;
+    return box;
+  }
+  for (size_t k = 0; k < boxes.bone.size() && k < pose.mats.size(); k++) {
+    if (!boxes.bone[k].valid()) continue;
+    AABB moved = boxes.bone[k].transformed(pose.mats[k]);  // (the character's space, where the blend happens)
+    if (pose.dq && moved.valid()) {
+      const float pad = skin_dq_pad(pose, boxes, k);
+      moved.min = moved.min - Vec3(pad), moved.max = moved.max + Vec3(pad);
+    }
+    box.add(moved.transformed(pose.owner_inv));
+  }
+  if (!box.valid()) return box;
+  /* (Float rounding of the matrices.) */
+  const Vec3 pad = (box.max - box.min) * 1e-4f + Vec3(1e-6f);
+  box.min = box.min - pad, box.max = box.max + pad;
   return box;
 }
 

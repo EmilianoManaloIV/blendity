@@ -826,7 +826,7 @@ uint64_t materials_sum(const std::vector<MaterialPtr> *mv) {
 uint64_t instance_item_sum(const DrawItem &it, uint64_t materials) {
   constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ull;
   auto page = [](const Lightmap *lm) { return (uint64_t)(uintptr_t)lm ^ (lm ? lm->serial * kGolden : 0); };
-  uint64_t w[24];
+  uint64_t w[25];
   std::memcpy(w, it.model.m, 64);
   const RenderMesh *rm = it.mesh;
   w[8] = (uint64_t)(uintptr_t)rm;
@@ -846,8 +846,9 @@ uint64_t instance_item_sum(const DrawItem &it, uint64_t materials) {
   w[21] = page(it.rt_sky);
   w[22] = (uint64_t)(uintptr_t)it.rt_uv ^ (it.rt_uv ? (uint64_t)it.rt_uv->size() << 48 : 0);
   w[23] = (uint64_t)(uintptr_t)it.vertex_colors;
+  w[24] = it.skin_stamp;  // (round 519: a card-skinned mesh's serial stays while it is posed - the pose is its palette)
   uint64_t s = 0;
-  for (uint64_t k = 0; k < 24; k++) s += (w[k] ^ (0x5BD1E995ull * (k + 1))) * (kGolden * (2 * k + 1));
+  for (uint64_t k = 0; k < 25; k++) s += (w[k] ^ (0x5BD1E995ull * (k + 1))) * (kGolden * (2 * k + 1));
   return s;
 }
 
@@ -1122,6 +1123,64 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err, uint64_t owner) {
   e.bytes = e.id >= 0 ? (uint64_t)v.size() * sizeof(gpu::RasterVertex) + (uint64_t)rm.indices.size() * 4 : 0;
   gpu_mesh_bytes_ += e.bytes;
   prof_.gpu_mesh_uploads++;
+  return e.id;
+}
+
+/* Round 519 (ADR 0146, task 0502): a skinned mesh on the card. It goes up once - the stand-in's rest vertices, its weights,
+ * its indices (add_skin) - and after that only its palette, when the pose changed since the card's copy: a second view of the
+ * frame, or a still frame, sends nothing. Its card id is what the instances carry, as any mesh's. -1 and `err` when the card
+ * can't hold it (the caller poses it on the CPU). */
+int Editor::gpu_skin_mesh(const DrawItem &it, std::string &err) {
+  SkinStand *stand = it.skin && it.mesh && gpu_view_ ? skin_stand_of(it) : nullptr;
+  if (!stand) {
+    err = "a skinned mesh without its pose";
+    return -1;
+  }
+  SkinStand &st = *stand;
+  const RenderMesh &rm = *it.mesh;
+  GpuMesh &e = gpu_meshes_[&rm];
+  e.used = gpu_calls_;
+  mesh_deferred_now_ = false;
+  const bool tangents = !rm.tangents.empty();
+  bool fresh = false;
+  if (!(e.id >= 0 && rm.serial != 0 && e.serial == rm.serial && e.tangents == tangents)) {
+    if (st.refused_card == gpu_view_.get() && st.refused_serial == rm.serial) {
+      err = "the card couldn't hold this skin";
+      return -1;
+    }
+    BL_ZONE("gpu skin");
+    ProfileScope upload_scope{prof_.ms_mesh_uploads, {}};
+    const std::vector<gpu::RasterVertex> v = raster_vertices(rm);
+    const std::vector<uint32_t> indices = card_indices(rm, e.parts);
+    if (e.id >= 0) {
+      gpu_view_->remove_mesh(e.id);
+      gpu_mesh_bytes_ -= std::min(gpu_mesh_bytes_, e.bytes);
+      e.id = -1;
+    }
+    e.id = gpu_view_->add_skin(v, indices, st.weights, &err);
+    if (e.id < 0) {
+      st.refused_card = gpu_view_.get(), st.refused_serial = rm.serial;
+      return -1;
+    }
+    const uint64_t sent = (uint64_t)v.size() * sizeof(gpu::RasterVertex) * 2 + (uint64_t)indices.size() * 4 + (uint64_t)st.weights.bone.size() * 6 + st.weights.count.size();
+    prof_.gpu_upload_bytes += sent;
+    mesh_bytes_frame_ += (size_t)sent;
+    mesh_bytes_frame_max_ = std::max(mesh_bytes_frame_max_, mesh_bytes_frame_);
+    e.serial = rm.serial;
+    e.tangents = tangents;
+    e.vertices = (uint32_t)rm.positions.size();
+    e.indices = (uint32_t)rm.indices.size();
+    e.bytes = sent;
+    gpu_mesh_bytes_ += e.bytes;
+    prof_.skin_uploads++;
+    fresh = true;
+  }
+  if (fresh || st.sent_mesh != e.id || st.sent != st.palette) {
+    if (!gpu_view_->set_skin_palette(e.id, st.palette, &err)) return -1;
+    st.sent = st.palette, st.sent_mesh = e.id;
+    prof_.skin_palettes++;
+  }
+  prof_.skin_items++;
   return e.id;
 }
 
@@ -1497,7 +1556,7 @@ const char *Editor::live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 
     e.uv_stretch = uv_stretch(*it.mesh);
     e.stretch_serial = it.mesh->serial;
   }
-  const AABB box = it.mesh->bounds.transformed(it.model);
+  const AABB box = draw_bounds(it).transformed(it.model);
   const Vec3 c(clampf(eye.x, box.min.x, box.max.x), clampf(eye.y, box.min.y, box.max.y), clampf(eye.z, box.min.z, box.max.z));
   const bool ortho = std::fabs(p.at(3, 3) - 1.0f) < 1e-6f;
   /* A pixel's world size one metre away at the frame's centre, shrunk to the object's farthest place from it on screen
@@ -1567,6 +1626,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   InstanceRows &rows = instance_rows_[slot];
   std::vector<InstanceRows::Row> new_rows;
   std::vector<const DrawItem *> row_items;
+  std::deque<DrawItem> skin_cpu_items;  // (round 519: skinned items posed on the CPU - the rows and see-through jobs point at them, so they stay put)
   std::vector<int32_t> row_see;  // a row's see-through triangles: -1 none, -2 the kept list, else its job
   std::vector<InstanceRows::SeeRel> new_see;
   std::vector<std::pair<std::weak_ptr<const Texture>, int>> new_deps;
@@ -1761,6 +1821,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const char *close_up_why = nullptr;
   /* One item's instances - and its see-through job, its baked ids - at the end of `inst`. */
   auto gather_item = [&](const DrawItem &it, int mesh, GpuMesh &e) {
+    if (it.skin_note) add_note(approx, it.skin_note);  // (round 519: a skinned mesh left on the CPU, with why)
     if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's colours, a mesh made anew every frame)
     if (it.materials && keepable)  // (live_close_up_of looks at every material of the item, used or not: its answer is the eye's)
       for (const MaterialPtr &mp : *it.materials)
@@ -1807,9 +1868,26 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   auto gather = [&](bool by_rows) {
     const std::vector<MaterialPtr> *last_materials = nullptr;
     uint64_t last_sum = 0;
-    for (const DrawItem &it : items) {
-      if (!it.mesh || it.mesh->indices.empty()) continue;
-      const int mesh = gpu_mesh(*it.mesh, err, it.id);
+    for (const DrawItem &listed : items) {
+      if (!listed.mesh || listed.mesh->indices.empty()) continue;
+      /* Round 519 (ADR 0146): a skinned mesh the card poses goes up as a skin and is sent its palette; one the card can't
+       * hold (or draw from its posed buffer) is posed on the CPU, its vertices going up as any mesh's, and says so. */
+      const DrawItem *chosen = &listed;
+      int mesh;
+      if (listed.skin) {
+        std::string skin_err;
+        mesh = skin_item_card_ok(listed) ? gpu_skin_mesh(listed, skin_err) : -1;
+        if (mesh < 0) {
+          skin_cpu_items.push_back(skin_item_cpu(listed));
+          chosen = &skin_cpu_items.back();
+          skin_cpu_items.back().skin_note = skin_err.empty() ? "a skinned mesh with see-through, baked or painted surfaces, posed on the CPU" : "a skinned mesh the card couldn't hold, posed on the CPU";
+          skin_reason_ = skin_err.empty() ? std::string(skin_cpu_items.back().skin_note) : skin_err;
+          prof_.skin_cpu++;
+          mesh = gpu_mesh(*chosen->mesh, err, chosen->id);
+        }
+      }
+      else mesh = gpu_mesh(*listed.mesh, err, listed.id);
+      const DrawItem &it = *chosen;
       if (mesh < 0 && mesh_deferred_now_) {  // (round 458: left for a later frame's budget: not drawn now, not a refusal)
         keepable = false, rows_whole = false;
         continue;

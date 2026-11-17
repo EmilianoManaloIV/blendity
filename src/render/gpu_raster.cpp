@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 
 #if defined(BL_WITH_VULKAN)
 #  include "gpu_vk.h"
@@ -2589,6 +2590,119 @@ void main() {
 }
 )";
 
+/* ---------------------------------------------------------------- the skin pass */
+
+/* Round 519 (ADR 0146): skin_render_vertices (src/scene/skin_render.cpp) in GLSL, a vertex a thread, line for line from
+ * skin_blend_point / skin_blend_dir: the same order of operations, dual quaternions only when every bone of the vertex is
+ * rigid, a vertex with no bone (or a degenerate turn) left as it is, a non-finite position kept at rest. Standalone: it
+ * shares nothing with the views' shaders. The weights are the CPU's (divided by their sum there). */
+const char *kSkinComp = R"(
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer Rest { float rest[]; };       // RasterVertex: p, n, uv, t (12 floats)
+layout(std430, set = 0, binding = 1) writeonly buffer Posed { float posed[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Bones { uint bone_words[]; };   // 16-bit palette indices, two a word
+layout(std430, set = 0, binding = 3) readonly buffer Weights { float wts[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Counts { uint counts[]; };      // slots used a vertex, four a word
+layout(std430, set = 0, binding = 5) readonly buffer Palette { float pal[]; };       // this frame's (a dynamic offset)
+layout(push_constant) uniform Push { uint verts; uint slots; uint tangents; uint bones; } pc;
+const uint HEAD = 32u, REC = 24u;  // gpu_raster.h's kSkinPaletteHeader, kSkinPaletteBone
+uint gb[8];
+float gw[8];
+
+vec3 pcol(uint base, uint c) { return vec3(pal[base + c * 3u], pal[base + c * 3u + 1u], pal[base + c * 3u + 2u]); }
+vec3 mpoint(uint base, vec3 p) { return pcol(base, 0u) * p.x + pcol(base, 1u) * p.y + pcol(base, 2u) * p.z + pcol(base, 3u); }
+vec3 mdir(uint base, vec3 d) { return pcol(base, 0u) * d.x + pcol(base, 1u) * d.y + pcol(base, 2u) * d.z; }
+vec4 qmul(vec4 a, vec4 b) {  // Quat::operator*
+  return vec4(a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+              a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+              a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+              a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+vec3 qrot(vec4 q, vec3 v) {  // Quat::rotate
+  vec3 u = q.xyz;
+  vec3 t = cross(u, v) * 2.0;
+  return v + t * q.w + cross(u, t);
+}
+bool bad3(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
+
+/* skin_blend_dir */
+bool skin_dir(vec3 dir, bool dq, vec4 turn, uint n, out vec3 res) {
+  res = dir;
+  vec3 nw = mdir(0u, dir);
+  vec3 on = vec3(0.0);
+  if (dq) on = qrot(turn, nw);
+  else
+    for (uint k = 0u; k < n; k++) on += mdir(HEAD + REC * gb[k], nw) * gw[k];
+  on = mdir(12u, on);
+  float len = length(on);
+  if (isnan(len) || isinf(len) || !(len > 1e-12)) return false;
+  res = on / len;
+  return true;
+}
+
+void main() {
+  uint r = gl_GlobalInvocationID.x;
+  if (r >= pc.verts) return;
+  uint o = r * 12u;
+  vec3 p = vec3(rest[o], rest[o + 1u], rest[o + 2u]);
+  vec3 nrm = vec3(rest[o + 3u], rest[o + 4u], rest[o + 5u]);
+  vec4 tan = vec4(rest[o + 8u], rest[o + 9u], rest[o + 10u], rest[o + 11u]);
+  uint n = min((counts[r >> 2u] >> ((r & 3u) * 8u)) & 255u, min(pc.slots, 8u));  // (add_skin refuses more; the clamps keep every read in range)
+  if (n > 0u) {
+    uint e0 = r * pc.slots;
+    bool all_rigid = pal[24] != 0.0;
+    for (uint k = 0u; k < n; k++) {
+      uint e = e0 + k;
+      gb[k] = min((bone_words[e >> 1u] >> ((e & 1u) * 16u)) & 0xFFFFu, pc.bones - 1u);
+      gw[k] = wts[e];
+    }
+    for (uint k = 0u; k < n && all_rigid; k++) all_rigid = pal[HEAD + REC * gb[k] + 20u] != 0.0;
+    vec3 pw = mpoint(0u, p);  // the character's space
+    vec3 ob = vec3(0.0);
+    vec4 turn = vec4(0.0, 0.0, 0.0, 1.0);
+    bool ok = true;
+    if (all_rigid) {
+      /* Dual quaternion blend, each kept on the first's side. */
+      uint b0 = HEAD + REC * gb[0];
+      vec4 q0r = vec4(pal[b0 + 12u], pal[b0 + 13u], pal[b0 + 14u], pal[b0 + 15u]);
+      vec4 rr = vec4(0.0), dd = vec4(0.0);
+      for (uint k = 0u; k < n; k++) {
+        uint qb = HEAD + REC * gb[k];
+        vec4 qr = vec4(pal[qb + 12u], pal[qb + 13u], pal[qb + 14u], pal[qb + 15u]);
+        vec4 qd = vec4(pal[qb + 16u], pal[qb + 17u], pal[qb + 18u], pal[qb + 19u]);
+        float w = gw[k];
+        if (qr.x * q0r.x + qr.y * q0r.y + qr.z * q0r.z + qr.w * q0r.w < 0.0) w = -w;
+        rr += qr * w;
+        dd += qd * w;
+      }
+      float len = sqrt(rr.x * rr.x + rr.y * rr.y + rr.z * rr.z + rr.w * rr.w);
+      if (!(len > 1e-8)) ok = false;
+      else {
+        rr /= len;
+        dd /= len;
+        vec4 t = qmul(dd, vec4(-rr.xyz, rr.w));  // translation = 2 d r*
+        ob = qrot(rr, pw) + t.xyz * 2.0;
+        turn = rr;
+      }
+    }
+    else
+      for (uint k = 0u; k < n; k++) ob += mpoint(HEAD + REC * gb[k], pw) * gw[k];
+    if (ok) {
+      vec3 moved = mpoint(12u, ob);  // back into the mesh's space
+      if (!bad3(moved)) p = moved;
+      vec3 d;
+      if (skin_dir(nrm, all_rigid, turn, n, d)) nrm = d;
+      if (pc.tangents != 0u && skin_dir(tan.xyz, all_rigid, turn, n, d)) tan = vec4(d, tan.w);
+    }
+  }
+  posed[o] = p.x, posed[o + 1u] = p.y, posed[o + 2u] = p.z;
+  posed[o + 3u] = nrm.x, posed[o + 4u] = nrm.y, posed[o + 5u] = nrm.z;
+  posed[o + 6u] = rest[o + 6u], posed[o + 7u] = rest[o + 7u];
+  posed[o + 8u] = tan.x, posed[o + 9u] = tan.y, posed[o + 10u] = tan.z, posed[o + 11u] = tan.w;
+}
+)";
+
 /* ---------------------------------------------------------------- the device */
 
 struct Buf {
@@ -2781,6 +2895,7 @@ class VulkanRaster final : public Raster {
   bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *idx, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    if (is_skin(mesh)) return fail(err, "a skinned mesh is written by the card's skin pass");
     Mesh &m = meshes_[(size_t)mesh];
     if (v.size() != m.vertices || (idx && idx->size() != m.indices)) return fail(err, "a mesh of another size");
     if (!upload(m.vb, v.data(), v.size() * sizeof(RasterVertex), err)) return false;
@@ -2790,6 +2905,7 @@ class VulkanRaster final : public Raster {
   bool update_mesh_ranges(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &vr,
                           const std::vector<uint32_t> &idx, const std::vector<std::pair<uint32_t, uint32_t>> &ir, std::string *err) override {
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    if (is_skin(mesh)) return fail(err, "a skinned mesh is written by the card's skin pass");
     Mesh &m = meshes_[(size_t)mesh];
     if (idx.size() != m.indices) return fail(err, "a mesh of another size");
     size_t nv = 0;
@@ -2839,6 +2955,250 @@ class VulkanRaster final : public Raster {
     }
     free_buffer(host);
     return ok;
+  }
+
+  /* ------------------------------------------------------------ the skin pass (round 519, ADR 0146)
+   * Its own compute pipeline, descriptor layout and pool, made by the first add_skin - the views' layout (set 0) and the
+   * pipelines made at init are not touched. A skin is a mesh in meshes_ whose vertex buffer the pass writes. */
+  struct Skin {
+    Buf rest, bones, weights, counts;  // device-local storage, written once
+    Buf pal;                           // host-visible: a ring of kSkinRing regions, one a dispatch
+    VkDeviceSize region = 0;           // a ring region's bytes (aligned for a dynamic offset)
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    uint32_t verts = 0, slots = 0, bone_count = 0, tangents = 0, ring = 0, usage = 0;
+    std::vector<float> palette;  // the last given
+    bool dirty = false;          // a palette not yet dispatched
+  };
+  static constexpr uint32_t kSkinRing = 3;  // (every recording settles the frame before, so one region would do; three are spare room should frames overlap)
+  std::map<int, Skin> skins_;
+  std::vector<int> skin_written_;  // (take_skin_writes: the meshes dispatched since)
+  uint64_t skin_dispatches_ = 0;
+  uint32_t skin_extra_usage_ = 0;
+  bool skin_failed_ = false;
+  VkDescriptorSetLayout skin_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout skin_layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool skin_pool_ = VK_NULL_HANDLE;
+  VkPipeline skin_pipeline_ = VK_NULL_HANDLE;
+  PFN_vkCreateComputePipelines skin_create_pipelines_ = nullptr;
+  PFN_vkCmdDispatch skin_dispatch_ = nullptr;
+  static constexpr uint32_t kSkinPoolSets = 256;
+
+  bool can_skin() const override { return dev_ != VK_NULL_HANDLE && !skin_failed_ && !lost_; }
+  uint64_t skin_dispatches() const override { return skin_dispatches_; }
+  size_t skin_count() const override { return skins_.size(); }
+  void set_skin_extra_usage(uint32_t flags) override { skin_extra_usage_ = flags; }
+  uint32_t skin_usage(int mesh) const override {
+    const auto it = skins_.find(mesh);
+    return it == skins_.end() ? 0u : it->second.usage;
+  }
+  std::vector<int> take_skin_writes() override {
+    std::vector<int> out;
+    out.swap(skin_written_);
+    return out;
+  }
+  void remove_skin(int mesh) override { remove_mesh(mesh); }
+  void drop_skin(int mesh) {
+    const auto it = skins_.find(mesh);
+    if (it == skins_.end()) return;
+    free_skin_buffers(it->second, true);
+    skin_written_.erase(std::remove(skin_written_.begin(), skin_written_.end(), mesh), skin_written_.end());
+    skins_.erase(it);
+  }
+  bool is_skin(int mesh) const { return skins_.count(mesh) != 0; }
+
+  /* The pass's pipeline, layout and pool, once (a refusal is remembered: not tried every frame). */
+  bool make_skin_pass(std::string *err) {
+    if (skin_pipeline_) return true;
+    if (skin_failed_) return fail(err, "the card's skin pass couldn't be made");
+    skin_failed_ = true;  // (until it is made)
+    skin_create_pipelines_ = (PFN_vkCreateComputePipelines)f_.vkGetDeviceProcAddr(dev_, "vkCreateComputePipelines");
+    skin_dispatch_ = (PFN_vkCmdDispatch)f_.vkGetDeviceProcAddr(dev_, "vkCmdDispatch");
+    if (!skin_create_pipelines_ || !skin_dispatch_) return fail(err, info_.name + " has no compute dispatch");
+    std::string cerr;
+    const std::vector<uint32_t> spv = vk::compile(kSkinComp, shaderc_compute_shader, &cerr);
+    if (spv.empty()) return fail(err, "the skin shader: " + cerr);
+    VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smi.codeSize = spv.size() * 4;
+    smi.pCode = spv.data();
+    VkShaderModule sm = VK_NULL_HANDLE;
+    if (f_.vkCreateShaderModule(dev_, &smi, nullptr, &sm) != VK_SUCCESS) return fail(err, "the skin shader module");
+    VkDescriptorSetLayoutBinding b[6];
+    for (uint32_t i = 0; i < 6; i++)
+      b[i] = {i, i == 5 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dli.bindingCount = 6;
+    dli.pBindings = b;
+    const VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &skin_set_layout_;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kSkinPoolSets}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, kSkinPoolSets}};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = kSkinPoolSets;
+    dpi.poolSizeCount = 2;
+    dpi.pPoolSizes = ps;
+    VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = sm;
+    cpi.stage.pName = "main";
+    const bool made = f_.vkCreateDescriptorSetLayout(dev_, &dli, nullptr, &skin_set_layout_) == VK_SUCCESS &&
+                      f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &skin_layout_) == VK_SUCCESS &&
+                      f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &skin_pool_) == VK_SUCCESS;
+    cpi.layout = skin_layout_;
+    const bool piped = made && skin_create_pipelines_(dev_, VK_NULL_HANDLE, 1, &cpi, nullptr, &skin_pipeline_) == VK_SUCCESS;
+    f_.vkDestroyShaderModule(dev_, sm, nullptr);
+    if (!piped) {
+      destroy_skin_pass();
+      return fail(err, "the skin pass's pipeline");
+    }
+    skin_failed_ = false;
+    return true;
+  }
+  void destroy_skin_pass() {
+    for (auto &kv : skins_) free_skin_buffers(kv.second, false);
+    skins_.clear();
+    if (skin_pipeline_) f_.vkDestroyPipeline(dev_, skin_pipeline_, nullptr);
+    if (skin_pool_) f_.vkDestroyDescriptorPool(dev_, skin_pool_, nullptr);
+    if (skin_layout_) f_.vkDestroyPipelineLayout(dev_, skin_layout_, nullptr);
+    if (skin_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, skin_set_layout_, nullptr);
+    skin_pipeline_ = VK_NULL_HANDLE, skin_pool_ = VK_NULL_HANDLE, skin_layout_ = VK_NULL_HANDLE, skin_set_layout_ = VK_NULL_HANDLE;
+  }
+  void free_skin_buffers(Skin &s, bool free_set) {
+    if (free_set && s.set && skin_pool_) f_.vkFreeDescriptorSets(dev_, skin_pool_, 1, &s.set);
+    for (Buf *b : {&s.rest, &s.bones, &s.weights, &s.counts, &s.pal}) free_buffer(*b);
+    s.set = VK_NULL_HANDLE;
+  }
+
+  /* The skin's static buffers: its rest vertices, bones (16-bit, two a word), weights and counts (a byte each, four a word). */
+  bool make_skin_buffers(Skin &s, const std::vector<RasterVertex> &rest, const SkinWeights &w, std::string *err) {
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const VkBufferUsageFlags st = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const size_t slots = w.bone.size();  // (the vertices' slots, all of them)
+    std::vector<uint32_t> words((slots + 1) / 2, 0u), counts((w.count.size() + 3) / 4, 0u);
+    for (size_t e = 0; e < slots; e++) words[e >> 1] |= (uint32_t)w.bone[e] << ((e & 1) * 16);
+    for (size_t v = 0; v < w.count.size(); v++) counts[v >> 2] |= (uint32_t)w.count[v] << ((v & 3) * 8);
+    s.region = (VkDeviceSize)((skin_palette_floats(w.bones) * 4 + 255) / 256 * 256);
+    if (!make_buffer(s.rest, rest.size() * sizeof(RasterVertex), st, local) || !make_buffer(s.bones, words.size() * 4, st, local) ||
+        !make_buffer(s.weights, slots * 4, st, local) || !make_buffer(s.counts, counts.size() * 4, st, local) ||
+        !make_buffer(s.pal, s.region * kSkinRing, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
+      return fail(err, info_.name + ": out of memory for a skin");
+    if (!upload(s.rest, rest.data(), rest.size() * sizeof(RasterVertex), err) || !upload(s.bones, words.data(), words.size() * 4, err) ||
+        !upload(s.weights, w.weight.data(), slots * 4, err) || !upload(s.counts, counts.data(), counts.size() * 4, err))
+      return false;
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = skin_pool_;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &skin_set_layout_;
+    if (f_.vkAllocateDescriptorSets(dev_, &dai, &s.set) != VK_SUCCESS) return fail(err, "too many skins on the card");
+    return true;
+  }
+  void bind_skin(const Skin &s, const Buf &posed) {
+    const VkDescriptorBufferInfo info[6] = {{s.rest.buf, 0, VK_WHOLE_SIZE}, {posed.buf, 0, VK_WHOLE_SIZE}, {s.bones.buf, 0, VK_WHOLE_SIZE},
+                                            {s.weights.buf, 0, VK_WHOLE_SIZE}, {s.counts.buf, 0, VK_WHOLE_SIZE}, {s.pal.buf, 0, s.region}};
+    VkWriteDescriptorSet w[6];
+    for (uint32_t i = 0; i < 6; i++) {
+      w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      w[i].dstSet = s.set;
+      w[i].dstBinding = i;
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = i == 5 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      w[i].pBufferInfo = &info[i];
+    }
+    f_.vkUpdateDescriptorSets(dev_, 6, w, 0, nullptr);
+  }
+
+  int add_skin(const std::vector<RasterVertex> &rest, const std::vector<uint32_t> &idx, const SkinWeights &w, std::string *err) override {
+    if (!settle(err)) return -1;
+    const size_t nv = rest.size();
+    if (!nv || idx.empty()) return fail(err, "an empty skin"), -1;
+    if (w.slots < 1 || w.slots > 8 || w.bones < 1 || w.bones > 65535 || w.count.size() != nv || w.bone.size() != nv * w.slots || w.weight.size() != nv * w.slots)
+      return fail(err, "skin weights that don't fit the card's pass"), -1;
+    if ((VkDeviceSize)nv * sizeof(RasterVertex) > max_storage_ || (VkDeviceSize)nv * w.slots * 4 > max_storage_ || nv > 65535u * 64u)  // (a dispatch's 65,535 groups of 64)
+      return fail(err, "a skin too large for the card's storage buffers"), -1;
+    for (size_t v = 0; v < nv; v++) {  // (every used slot names a bone of the palette: the pass reads it unchecked otherwise)
+      if (w.count[v] > w.slots) return fail(err, "skin weights with more bones a vertex than slots"), -1;
+      for (size_t k = 0; k < w.count[v]; k++)
+        if (w.bone[v * w.slots + k] >= w.bones) return fail(err, "skin weights naming a bone the palette doesn't hold"), -1;
+    }
+    if (!make_skin_pass(err)) return -1;
+    Mesh m;
+    m.vertices = (uint32_t)nv;
+    m.indices = (uint32_t)idx.size();
+    const VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // (SRC: read_mesh)
+    const VkBufferUsageFlags vb_usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | copies | (VkBufferUsageFlags)skin_extra_usage_;
+    Skin s;
+    s.verts = (uint32_t)nv, s.slots = w.slots, s.bone_count = w.bones, s.tangents = w.tangents ? 1u : 0u, s.usage = (uint32_t)vb_usage;
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const bool made = make_buffer(m.vb, nv * sizeof(RasterVertex), vb_usage, local) &&
+                      make_buffer(m.ib, idx.size() * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT | copies, local) &&
+                      make_skin_buffers(s, rest, w, err) && upload(m.vb, rest.data(), nv * sizeof(RasterVertex), err) &&
+                      upload(m.ib, idx.data(), idx.size() * sizeof(uint32_t), err);
+    if (!made) {
+      if (err && err->empty()) *err = info_.name + ": out of memory for a skin";
+      free_skin_buffers(s, true);
+      free_mesh(m);
+      return -1;
+    }
+    bind_skin(s, m.vb);
+    m.live = true;
+    resources_gen_++;
+    int id = -1;
+    for (size_t i = 0; i < meshes_.size() && id < 0; i++)
+      if (!meshes_[i].live) id = (int)i;
+    if (id < 0) id = (int)meshes_.size(), meshes_.push_back(m);
+    else meshes_[(size_t)id] = m;
+    skins_[id] = std::move(s);
+    return id;
+  }
+
+  bool set_skin_palette(int mesh, const std::vector<float> &palette, std::string *err) override {
+    const auto it = skins_.find(mesh);
+    if (it == skins_.end()) return fail(err, "no such skin");
+    Skin &s = it->second;
+    if (palette.size() != skin_palette_floats(s.bone_count)) return fail(err, "a palette of the wrong size");
+    if (!s.dirty && s.palette == palette) return true;  // (the same pose: nothing to dispatch)
+    s.palette = palette;
+    s.dirty = true;
+    return true;
+  }
+
+  /* Before the frame's first pass: the pass for each skin whose palette changed, then one barrier (shader write -> the
+   * vertex fetches and everything after it). A second view of the frame finds nothing dirty. */
+  void record_skins() {
+    bool any = false;
+    skin_written_.clear();  // (this frame's alone: M2's refit reads the frame it is recorded in)
+    for (auto &kv : skins_) {
+      Skin &s = kv.second;
+      if (!s.dirty || !skin_pipeline_) continue;
+      if (!any) {
+        // The posed buffer is one buffer, and an earlier submission on the queue may still be reading it as vertices: its
+        // reads come before this frame's write (an execution dependency is enough for a write after a read; the barrier
+        // after the dispatches orders a write after a write).
+        f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
+                                nullptr, 0, nullptr);
+        f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, skin_pipeline_);
+      }
+      any = true;
+      s.ring = (s.ring + 1) % kSkinRing;
+      std::memcpy((uint8_t *)s.pal.mapped + (size_t)s.ring * s.region, s.palette.data(), s.palette.size() * sizeof(float));
+      const uint32_t offset = (uint32_t)(s.ring * s.region);
+      f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, skin_layout_, 0, 1, &s.set, 1, &offset);
+      const uint32_t pc[4] = {s.verts, s.slots, s.tangents, s.bone_count};
+      f_.vkCmdPushConstants(cmd_, skin_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc);
+      skin_dispatch_(cmd_, (s.verts + 63) / 64, 1, 1);
+      s.dirty = false;
+      skin_dispatches_++;
+      skin_written_.push_back(kv.first);
+    }
+    if (!any) return;
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
   }
 
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
@@ -2994,6 +3354,7 @@ class VulkanRaster final : public Raster {
   void remove_mesh(int mesh) override {
     settle();  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return;
+    drop_skin(mesh);  // (round 519: a skin's own buffers go with its mesh)
     free_mesh(meshes_[(size_t)mesh]);  // (no wait: every submission here is waited for before its call returns)
   }
 
@@ -3123,6 +3484,7 @@ class VulkanRaster final : public Raster {
     }
     begin();
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
+    record_skins();    // (round 519: the skinned meshes' posed vertices, one barrier after, before the first pass)
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 4);
     stamp(0);
     draw_pass(rp_shadow_, sl.fb_shadow, sl.shadow.w, sl.shadow.h, sl.set, 1, fr.shadow_size > 0 ? DrawShadow : DrawNothing, false);  // (cleared even when unused)
@@ -5336,6 +5698,7 @@ class VulkanRaster final : public Raster {
     if (post_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, post_set_layout_, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_, rp_post16_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
+    destroy_skin_pass();  // (round 519: the skins' buffers and sets, the pass's pipeline and pool)
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
                    &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_})
@@ -5395,6 +5758,7 @@ bool warm_shaders(const std::string &dir, std::string *report) {
   std::string err;
   bool ok = compile_kernels(devices()[0].hardware_rt, &err);
   ok = Raster::create(0, &err) != nullptr && ok;
+  ok = !vk::compile(kSkinComp, shaderc_compute_shader, &err).empty() && ok;  // (round 519: the skin pass, made by a raster's first add_skin)
   /* Only the SPIR-V travels with the build: the driver's pipeline cache belongs to its card. */
   size_t kept = 0;
   std::error_code ec;

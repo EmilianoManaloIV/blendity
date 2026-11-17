@@ -6204,6 +6204,767 @@ static void tests_round508_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 519 (task 0502, ADR 0146): the card's skin pass.
+ * Written without a card to run them on - skipped without a GPU, as the others. */
+
+/* A skinned tube: `nbones` bones in a chain up the y axis (each `step` above the last), a tube of rings round them, each ring's
+ * vertices weighted to the bones nearest its height. Posed by turning every bone a little. */
+static const Mesh *r519_tube(Scene &s, int nbones, float step, int dq, int influences, int variant, GameObject **tube_out = nullptr) {
+  GameObject *rig = s.create("Rig519");
+  rig->add<Armature>()->deform = dq;
+  std::vector<GameObject *> bones;
+  GameObject *parent = rig;
+  for (int i = 0; i < nbones; i++) {
+    const Vec3 at(0.0f, i == 0 ? 0.0f : step, 0.0f);
+    parent = s.create("B" + std::to_string(i), parent);
+    parent->set_local_position(at);
+    parent->add<Bone>()->rest_position = at;
+    bones.push_back(parent);
+  }
+  MeshPtr m = std::make_shared<Mesh>();
+  const int rings = std::max(12, nbones * 3 / 2), seg = 10;
+  const float height = step * (float)nbones;
+  for (int r = 0; r < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const float a = (float)k * 2.0f * kPi / (float)seg;
+      m->add_vert({0.3f * std::cos(a), height * (float)r / (float)(rings - 1), 0.3f * std::sin(a)});
+    }
+  for (int r = 0; r + 1 < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+      m->add_face({a, a + (uint32_t)seg, b + (uint32_t)seg, b});
+    }
+  for (int gi = 0; gi < nbones; gi++) {
+    VertexGroup g{"B" + std::to_string(gi), {}};
+    for (const Vec3 &p : m->positions) g.weights.push_back(std::max(0.0f, 1.0f - std::fabs(p.y / step - (float)gi) / 2.5f));
+    m->vertex_groups.push_back(g);
+  }
+  m->touch();
+  GameObject *tube = s.create("Tube519");
+  tube->add<MeshFilter>()->mesh = m;
+  tube->add<SkinModifier>()->object = "Rig519";
+  tube->get<SkinModifier>()->max_influences = influences;
+  if (variant == 1) tube->set_local_scale({1.0f, 2.0f, 0.5f}), tube->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.6f));  // (an uneven owner)
+  if (variant == 2 && nbones > 3) bones[2]->set_local_scale({-1.0f, 1.0f, 1.0f});                                              // (a mirrored bone)
+  for (int i = 0; i < nbones; i++)
+    bones[(size_t)i]->set_local_rotation(Quat::axis_angle(normalize(Vec3(1.0f, (float)(i % 5) * 0.3f, 0.5f)), nbones > 100 ? 0.004f * (float)(i % 7) : 0.15f + 0.05f * (float)(i % 6)));
+  if (tube_out) *tube_out = tube;
+  return tube->evaluated_mesh();
+}
+
+/* The rest render mesh as the card is given it (with tangents made up where `tangents`: the skin pass turns them too). */
+static std::vector<gpu::RasterVertex> r519_vertices(const RenderMesh &r) {
+  std::vector<gpu::RasterVertex> v(r.positions.size());
+  for (size_t i = 0; i < v.size(); i++) {
+    const Vec3 p = r.positions[i], n = i < r.normals.size() ? r.normals[i] : Vec3(0, 1, 0);
+    v[i] = {{p.x, p.y, p.z}, {n.x, n.y, n.z}};
+    if (i < r.uvs.size()) v[i].uv[0] = r.uvs[i].x, v[i].uv[1] = r.uvs[i].y;
+    if (i < r.tangents.size()) v[i].t[0] = r.tangents[i].x, v[i].t[1] = r.tangents[i].y, v[i].t[2] = r.tangents[i].z, v[i].t[3] = r.tangents[i].w;
+  }
+  return v;
+}
+
+/* One frame of one instance of `mesh` on a slot (what makes the card run its skin passes). */
+static bool r519_frame(gpu::Raster &g, const std::vector<int> &meshes, int slot, std::string &err) {
+  std::vector<gpu::RasterInstance> inst;
+  for (size_t k = 0; k < meshes.size(); k++) {
+    gpu::RasterInstance in;
+    const Mat4 model = Mat4::translate({(float)k * 0.1f, 0.0f, 0.0f});
+    std::memcpy(in.model, model.m, 64);
+    in.mesh = (uint32_t)meshes[k];
+    in.id = (uint32_t)k + 1;
+    inst.push_back(in);
+  }
+  g.set_instances(inst);
+  gpu::RasterFrame fr;
+  fr.slot = slot, fr.width = 64, fr.height = 64, fr.shadow_size = 0;
+  const Mat4 vp = Mat4::perspective(40 * kDeg2Rad, 1.0f, 0.1f, 200.0f) * Mat4::look_at({0, 2, 12}, {0, 2, 0}, {0, 1, 0});
+  std::memcpy(fr.view_proj, vp.m, 64);
+  std::memcpy(fr.sun_view_proj, vp.m, 64);
+  fr.eye[1] = 2, fr.eye[2] = 12;
+  return g.render(fr, &err);
+}
+
+static void tests_round519_gpu() {
+  test("the card's skin pass poses a mesh as the CPU kernel does (round 519): positions within 1e-5 of the diagonal, normals and tangents within 1e-4 - linear and dual quaternion, 1 to 8 influences, an unevenly scaled owner, a mirrored bone, 292 bones (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    size_t cases = 0, off = 0;
+    double worst_pos = 0.0, worst_dir = 0.0;
+    struct Case {
+      int bones, dq, influences, variant;
+    };
+    std::vector<Case> all;
+    for (int dq = 0; dq < 2; dq++)
+      for (int influences : {1, 4, 8})
+        for (int variant = 0; variant < 3; variant++) all.push_back({8, dq, influences, variant});
+    all.push_back({292, 0, 8, 0}), all.push_back({292, 1, 8, 0});
+    for (const Case &c : all) {
+      Scene s;
+      const Mesh *em = r519_tube(s, c.bones, c.bones > 100 ? 0.01f : 1.0f, c.dq, c.influences, c.variant);
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) continue;
+      const SkinPose &sp = *em->skin_pose;
+      RenderMesh r = sp.rest->render_mesh();  // (a copy: tangents added)
+      r.tangents.resize(r.positions.size());
+      for (size_t i = 0; i < r.positions.size(); i++) {
+        const Vec3 n = r.normals[i];
+        Vec3 t = cross(n, Vec3(0.3f, 1.0f, 0.2f));
+        t = length(t) > 1e-3f ? normalize(t) : Vec3(1, 0, 0);
+        r.tangents[i] = Vec4(t, (i & 1) ? -1.0f : 1.0f);
+      }
+      std::vector<uint32_t> table;
+      skin_render_vertex_table(*sp.rest, r, table);
+      gpu::SkinWeights w;
+      std::string why;
+      CHECK(skin_card_weights(sp, table, true, w, &why));
+      std::vector<float> pal;
+      skin_card_palette(sp, pal);
+      const int id = g->add_skin(r519_vertices(r), r.indices, w, &err);
+      CHECK(id >= 0);
+      if (id < 0) continue;
+      CHECK(g->set_skin_palette(id, pal, &err));
+      CHECK(r519_frame(*g, {id}, 0, err));
+      std::vector<gpu::RasterVertex> got;
+      std::vector<uint32_t> idx;
+      CHECK(g->read_mesh(id, got, idx, &err));
+      RenderMesh ref;
+      const AABB box = skin_render_vertices(sp, r, table, ref);
+      const float diag = std::max(1e-3f, length(box.max - box.min));
+      double wp = 0.0, wd = 0.0;
+      bool ok = got.size() == ref.positions.size() && idx == r.indices;
+      for (size_t i = 0; ok && i < got.size(); i++) {
+        const Vec3 p(got[i].p[0], got[i].p[1], got[i].p[2]), n(got[i].n[0], got[i].n[1], got[i].n[2]), t(got[i].t[0], got[i].t[1], got[i].t[2]);
+        wp = std::max(wp, (double)length(p - ref.positions[i]));
+        wd = std::max(wd, (double)length(n - ref.normals[i]));
+        wd = std::max(wd, (double)length(t - ref.tangents[i].xyz()) + std::fabs(got[i].t[3] - ref.tangents[i].w));
+        wd = std::max(wd, (double)std::fabs(length(n) - 1.0f));  // (unit length)
+      }
+      cases++;
+      if (!ok || !(wp <= 1e-5 * diag) || !(wd <= 1e-4)) off++, std::printf("    %d bones, dq %d, %d influences, variant %d: position %.3g of a %.3g diagonal, direction %.3g\n", c.bones, c.dq, c.influences, c.variant, wp, (double)diag, wd);
+      worst_pos = std::max(worst_pos, wp / diag), worst_dir = std::max(worst_dir, wd);
+      g->remove_skin(id);
+    }
+    std::printf("    %zu cases on the card, %zu off; worst position %.3g of the diagonal, worst direction %.3g\n", cases, off, worst_pos, worst_dir);
+    CHECK(cases == all.size() && off == 0);
+    CHECK(g->skin_count() == 0);
+  });
+
+  test("the card's skin pass runs once a frame for the skins whose palette changed, a second view adds none, a skin keeps its rest until it has a palette, and M2's hook lists the dispatched meshes and flags the posed buffer (round 519; skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    const RenderMesh &r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+    constexpr uint32_t kExtra = 0x100;  // (VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT: a flag the posed buffer has no other reason to carry)
+    const int plain = g->add_skin(rest, r.indices, w, &err);
+    g->set_skin_extra_usage(kExtra);
+    const int flagged_a = g->add_skin(rest, r.indices, w, &err), flagged_b = g->add_skin(rest, r.indices, w, &err);
+    CHECK(plain >= 0 && flagged_a >= 0 && flagged_b >= 0 && g->skin_count() == 3);
+    CHECK((g->skin_usage(plain) & kExtra) == 0 && (g->skin_usage(flagged_a) & kExtra) == kExtra && (g->skin_usage(flagged_b) & kExtra) == kExtra);
+    CHECK(g->skin_usage(-1) == 0);
+    /* Until it has a palette the posed buffer is the rest. */
+    std::vector<gpu::RasterVertex> got;
+    std::vector<uint32_t> idx;
+    CHECK(r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    CHECK(g->skin_dispatches() == 0 && g->take_skin_writes().empty());
+    CHECK(g->read_mesh(plain, got, idx, &err) && got.size() == rest.size() && std::memcmp(got.data(), rest.data(), got.size() * sizeof(gpu::RasterVertex)) == 0);
+    /* Two of the three get a palette: one dispatch each, the list names exactly those. */
+    CHECK(g->set_skin_palette(plain, pal, &err) && g->set_skin_palette(flagged_b, pal, &err));
+    CHECK(!g->set_skin_palette(flagged_a, std::vector<float>(5, 0.0f), &err));  // (a palette of the wrong size)
+    CHECK(r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    std::vector<int> wrote = g->take_skin_writes();
+    std::sort(wrote.begin(), wrote.end());
+    std::vector<int> want = {plain, flagged_b};
+    std::sort(want.begin(), want.end());
+    CHECK(wrote == want && g->skin_dispatches() == 2);
+    CHECK(g->take_skin_writes().empty());  // (taken)
+    /* A second view of the same frame, and the same palette again: nothing. */
+    CHECK(r519_frame(*g, {plain, flagged_a, flagged_b}, 1, err));
+    CHECK(g->set_skin_palette(plain, pal, &err) && r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    CHECK(g->skin_dispatches() == 2 && g->take_skin_writes().empty());
+    /* One pose changes: one dispatch, its mesh alone in the list; the posed buffer moved off the rest. */
+    std::vector<float> pal2 = pal;
+    for (size_t b = 0; b < sp.mats.size(); b++) pal2[gpu::kSkinPaletteHeader + b * gpu::kSkinPaletteBone + 9] += 0.5f;  // (a bone's translation)
+    CHECK(g->set_skin_palette(flagged_b, pal2, &err) && r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    wrote = g->take_skin_writes();
+    CHECK(wrote.size() == 1 && wrote[0] == flagged_b && g->skin_dispatches() == 3);
+    std::vector<gpu::RasterVertex> moved;
+    CHECK(g->read_mesh(flagged_b, moved, idx, &err) && g->read_mesh(plain, got, idx, &err));
+    CHECK(moved.size() == got.size() && std::memcmp(moved.data(), got.data(), got.size() * sizeof(gpu::RasterVertex)) != 0);
+    /* Removing a skin takes it out of the list and the card; a removed mesh id may come back as another skin. */
+    g->set_skin_palette(flagged_a, pal, &err);
+    g->remove_skin(flagged_a);
+    CHECK(g->skin_count() == 2 && r519_frame(*g, {plain, flagged_b}, 0, err) && g->take_skin_writes().empty());
+    std::printf("    3 skins, %llu dispatches in all, the extra usage 0x%X on the posed buffers made after the setting\n", (unsigned long long)g->skin_dispatches(), kExtra);
+  });
+
+  test("a posed character in a view on the card sends palettes, not meshes (round 519): after the first frame no mesh upload for the skinned meshes, none skinned on the CPU, one dispatch a pose and none for a second view of it; the picture matches the CPU's to 1 / 255 (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    /* The first frames put the skins on the card. */
+    const FrameProfile f0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    const uint64_t d0 = g->skin_dispatches();
+    const int frames = 12;
+    for (int i = 0; i < frames; i++) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.05f * (float)(i + 1)));
+      ed.mark_changed_for_test("R519 pose");
+      r34_steps(ed, 1);
+    }
+    const FrameProfile f1 = ed.frame_profile_totals();
+    const MeshCounts md = mesh_counts() - m0;
+    const uint64_t dispatches = g->skin_dispatches() - d0;
+    std::printf("    %d posed frames: %llu skins drawn from the card, %llu palettes sent, %llu skins sent whole, %llu meshes sent or updated, %llu render meshes skinned on the CPU, %llu dispatches\n", frames,
+                (unsigned long long)(f1.skin_items - f0.skin_items), (unsigned long long)(f1.skin_palettes - f0.skin_palettes), (unsigned long long)(f1.skin_uploads - f0.skin_uploads),
+                (unsigned long long)(f1.gpu_mesh_uploads - f0.gpu_mesh_uploads + f1.gpu_mesh_updates - f0.gpu_mesh_updates), (unsigned long long)md.skinned, (unsigned long long)dispatches);
+    CHECK(f1.skin_items > f0.skin_items && f1.skin_palettes >= (uint64_t)frames);
+    CHECK(f1.skin_uploads == f0.skin_uploads);  // (the skins went up once, before)
+    CHECK(md.skinned == 0);  // (the outlines' shells read the posed positions, never the posed render mesh - round 519's review)
+    CHECK(dispatches > 0 && dispatches <= (uint64_t)frames * 8);  // (the skinned meshes of the stand-in, a pose a frame - not a second view's, which finds the posed buffers)
+    /* A toon outline's shell is still made on the CPU from the posed positions and sent each pose (on the card in round
+     * 521, task 0501): with the outlines off, a pose sends no mesh at all. */
+    int outlines_off = 0;
+    ed.scene().for_each([&](GameObject &o) {
+      if (Outline *ol = o.get<Outline>()) ol->enabled = false, outlines_off++;
+    });
+    ed.mark_changed_for_test("R519 outlines off");
+    r34_steps(ed, 3);
+    const FrameProfile f2 = ed.frame_profile_totals();
+    for (int i = 0; i < frames; i++) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.05f * (float)(i + 1)));
+      ed.mark_changed_for_test("R519 pose, no outlines");
+      r34_steps(ed, 1);
+    }
+    const FrameProfile f3 = ed.frame_profile_totals();
+    std::printf("    with %d outlines off, %d posed frames: %llu meshes sent or updated\n", outlines_off, frames,
+                (unsigned long long)(f3.gpu_mesh_uploads - f2.gpu_mesh_uploads + f3.gpu_mesh_updates - f2.gpu_mesh_updates));
+    CHECK(f3.gpu_mesh_uploads == f2.gpu_mesh_uploads && f3.gpu_mesh_updates == f2.gpu_mesh_updates);  // (no mesh sent for the skinned ones; the plain prop is unchanged)
+    CHECK(f3.skin_palettes - f2.skin_palettes >= (uint64_t)frames);
+    /* The picture: the card's against the CPU's. */
+    chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.4f));
+    ed.mark_changed_for_test("R519 picture");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> card = r34_crop(ed, ed.scene_view_rect());
+    CHECK(ed.scene_on_gpu_for_test());
+    ed.viewport_device_for_test(1);
+    ed.mark_changed_for_test("R519 picture, CPU");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> cpu = r34_crop(ed, ed.scene_view_rect());
+    size_t within = 0, n = 0;
+    for (size_t i = 0; i < card.size() && i < cpu.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((card[i] >> k) & 255) - (int)((cpu[i] >> k) & 255)));
+      n++, within += worst <= 3;
+    }
+    std::printf("    the card's picture against the CPU's: %.3f %% of %zu pixels within 3 / 255\n", n ? 100.0 * (double)within / (double)n : 0.0, n);
+    CHECK(n > 0 && (double)within >= 0.99 * (double)n);  // (ADR 0036's tolerance over the whole view: silhouettes may fall a pixel either way; ADR 0108's approximations aside)
+  });
+}
+
+/* ---------------------------------------------------------------- round 519, the test engineer's card checks (task 0502): the pass at its
+ * edges, and a character's skin on the card through a shared mesh, a re-bind and the rest-position switch. Skipped without a GPU. */
+
+/* A skinned tube whose every vertex has 12 bones (weights from a permutation, so the 8 heaviest are well defined). */
+static const Mesh *r519m_many(Scene &s, int dq, int influences) {
+  GameObject *rig = s.create("RigMany");
+  rig->add<Armature>()->deform = dq;
+  std::vector<GameObject *> bones;
+  GameObject *parent = rig;
+  for (int i = 0; i < 12; i++) {
+    const Vec3 at(0.0f, i == 0 ? 0.0f : 1.0f, 0.0f);
+    parent = s.create("M" + std::to_string(i), parent);
+    parent->set_local_position(at);
+    parent->add<Bone>()->rest_position = at;
+    bones.push_back(parent);
+  }
+  MeshPtr m = std::make_shared<Mesh>();
+  const int rings = 34, seg = 8;
+  for (int r = 0; r < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const float a = (float)k * 2.0f * kPi / (float)seg;
+      m->add_vert({0.3f * std::cos(a), 11.0f * (float)r / (float)(rings - 1), 0.3f * std::sin(a)});
+    }
+  for (int r = 0; r + 1 < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+      m->add_face({a, a + (uint32_t)seg, b + (uint32_t)seg, b});
+    }
+  for (size_t gi = 0; gi < 12; gi++) {
+    VertexGroup g{"M" + std::to_string(gi), {}};
+    for (const Vec3 &p : m->positions) g.weights.push_back(0.05f + 0.07f * (float)((gi * 7 + (size_t)std::floor(p.y * 3.0f + 0.5f)) % 12));
+    m->vertex_groups.push_back(g);
+  }
+  m->touch();
+  GameObject *tube = s.create("TubeMany");
+  tube->add<MeshFilter>()->mesh = m;
+  tube->add<SkinModifier>()->object = "RigMany";
+  tube->get<SkinModifier>()->max_influences = influences;
+  for (size_t i = 0; i < bones.size(); i++) bones[i]->set_local_rotation(Quat::axis_angle(normalize(Vec3(1.0f, 0.2f * (float)i, 0.4f)), 0.12f + 0.03f * (float)(i % 5)));
+  return tube->evaluated_mesh();
+}
+
+/* Whether the card's posed buffer `id` is the CPU kernel's posing of `em`'s pose (positions within 1e-5 of the diagonal). */
+static bool r519m_card_equals_cpu(gpu::Raster &g, int id, const Mesh &em, double &worst) {
+  worst = 1e9;
+  if (id < 0 || !em.skin_pose) return false;
+  const SkinPose &sp = *em.skin_pose;
+  std::vector<gpu::RasterVertex> got;
+  std::vector<uint32_t> idx;
+  std::string err;
+  if (!g.read_mesh(id, got, idx, &err)) return false;
+  const RenderMesh *r = &sp.rest->render_mesh(false);
+  if (r->positions.size() != got.size()) r = &sp.rest->render_mesh_tangents(false);
+  if (r->positions.size() != got.size()) return false;
+  std::vector<uint32_t> table;
+  skin_render_vertex_table(*sp.rest, *r, table);
+  RenderMesh ref;
+  const AABB box = skin_render_vertices(sp, *r, table, ref);
+  const double diag = std::max(1e-3f, box.valid() ? length(box.max - box.min) : 1.0f);
+  worst = 0.0;
+  for (size_t i = 0; i < got.size(); i++) worst = std::max(worst, (double)length(Vec3(got[i].p[0], got[i].p[1], got[i].p[2]) - ref.positions[i]) / diag);
+  return worst <= 1e-5;
+}
+
+static void tests_round519_more_gpu() {
+  test("the card's skin pass at its edges (round 519): vertices with no bone stay at rest bit for bit, 8 influences on every vertex match the kernel, and a skin of the same rest with another palette is its own (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    for (int dq = 0; dq < 2; dq++) {
+      Scene s;
+      const Mesh *em = r519m_many(s, dq, 8);
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) continue;
+      const SkinPose &sp = *em->skin_pose;
+      RenderMesh r = sp.rest->render_mesh();
+      std::vector<uint32_t> table;
+      skin_render_vertex_table(*sp.rest, r, table);
+      gpu::SkinWeights w;
+      CHECK(skin_card_weights(sp, table, false, w, nullptr));
+      size_t eight = 0;
+      for (uint8_t n : w.count) eight += n == 8;
+      CHECK(eight > 0);
+      std::vector<float> pal;
+      skin_card_palette(sp, pal);
+      const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+      /* Every third vertex has no bone: it must be the rest, exactly. */
+      gpu::SkinWeights holed = w;
+      for (size_t i = 0; i < holed.count.size(); i += 3) holed.count[i] = 0;
+      const int a = g->add_skin(rest, r.indices, holed, &err);
+      CHECK(a >= 0);
+      if (a < 0) continue;
+      CHECK(g->set_skin_palette(a, pal, &err) && r519_frame(*g, {a}, 0, err));
+      std::vector<gpu::RasterVertex> got;
+      std::vector<uint32_t> idx;
+      CHECK(g->read_mesh(a, got, idx, &err) && got.size() == rest.size());
+      RenderMesh ref;
+      const AABB box = skin_render_vertices(sp, r, table, ref);
+      const double diag = std::max(1e-3f, length(box.max - box.min));
+      size_t still_bad = 0, moved_bad = 0, moved = 0;
+      for (size_t i = 0; i < got.size() && i < rest.size(); i++) {
+        if (i % 3 == 0) {
+          still_bad += std::memcmp(&got[i], &rest[i], sizeof(gpu::RasterVertex)) != 0;
+          continue;
+        }
+        moved++;
+        moved_bad += !(length(Vec3(got[i].p[0], got[i].p[1], got[i].p[2]) - ref.positions[i]) <= 1e-5 * diag);
+      }
+      std::printf("    %s: %zu unbound vertices off the rest, %zu of %zu 8-bone vertices off the kernel\n", dq ? "dual quaternion" : "linear", still_bad, moved_bad, moved);
+      CHECK(still_bad == 0 && moved_bad == 0);
+      /* The same rest again with the full weights and another palette: its own buffer, the first untouched. */
+      const int b = g->add_skin(rest, r.indices, w, &err);
+      CHECK(b >= 0 && b != a);
+      if (b < 0) continue;
+      std::vector<float> pal2 = pal;
+      for (size_t k = 0; k < sp.mats.size(); k++) pal2[gpu::kSkinPaletteHeader + k * gpu::kSkinPaletteBone + 10] += 0.25f;
+      CHECK(g->set_skin_palette(b, pal2, &err) && r519_frame(*g, {a, b}, 0, err));
+      std::vector<gpu::RasterVertex> got_a, got_b;
+      CHECK(g->read_mesh(a, got_a, idx, &err) && g->read_mesh(b, got_b, idx, &err));
+      CHECK(got_a.size() == got.size() && std::memcmp(got_a.data(), got.data(), got.size() * sizeof(gpu::RasterVertex)) == 0);  // (a's buffer is what it was)
+      CHECK(got_b.size() == got.size() && std::memcmp(got_b.data(), got.data(), got.size() * sizeof(gpu::RasterVertex)) != 0);
+      /* Removed and made again (the id may come back): a fresh skin is the rest, never the old pose. */
+      g->remove_skin(a);
+      g->remove_skin(b);
+      CHECK(g->skin_count() == 0);
+      const int c = g->add_skin(rest, r.indices, w, &err);
+      CHECK(c >= 0 && r519_frame(*g, {c}, 0, err));
+      CHECK(g->read_mesh(c, got, idx, &err) && got.size() == rest.size() && std::memcmp(got.data(), rest.data(), got.size() * sizeof(gpu::RasterVertex)) == 0);
+      g->remove_skin(c);
+    }
+  });
+
+  test("the card refuses what its skin pass can't hold and goes on drawing (round 519): 65,536 bones, weights that don't fit the vertices, an empty rest, a palette for a mesh that isn't a skin, a bone index past the palette (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    const RenderMesh &r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+    const size_t before = g->skin_count();
+    gpu::SkinWeights big = w;
+    big.bones = 65536;
+    std::string why;
+    CHECK(g->add_skin(rest, r.indices, big, &why) < 0 && !why.empty());
+    gpu::SkinWeights shorter = w;
+    shorter.count.pop_back();
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, shorter, &why) < 0 && !why.empty());
+    gpu::SkinWeights thin = w;
+    thin.weight.pop_back();
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, thin, &why) < 0 && !why.empty());
+    gpu::SkinWeights nine = w;
+    nine.slots = 9;
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, nine, &why) < 0 && !why.empty());
+    gpu::SkinWeights nobones = w;
+    nobones.bones = 0;
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, nobones, &why) < 0 && !why.empty());
+    why.clear();
+    CHECK(g->add_skin(std::vector<gpu::RasterVertex>(), std::vector<uint32_t>(), gpu::SkinWeights(), &why) < 0 && !why.empty());
+    CHECK(g->skin_count() == before);
+    /* A palette for a plain mesh, for nothing, of the wrong size; removing what isn't there. */
+    const int plain = g->add_mesh(rest, r.indices, &err);
+    CHECK(plain >= 0);
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    CHECK(!g->set_skin_palette(plain, pal, &why) && !g->set_skin_palette(-1, pal, &why) && !g->set_skin_palette(100000, pal, &why));
+    const int id = g->add_skin(rest, r.indices, w, &err);
+    CHECK(id >= 0);
+    if (id < 0) return;
+    CHECK(!g->set_skin_palette(id, std::vector<float>(), &why) && !g->set_skin_palette(id, std::vector<float>(pal.size() + 24, 0.0f), &why));
+    g->remove_skin(-1);
+    g->remove_skin(100000);
+    g->remove_skin(id);
+    g->remove_skin(id);  // (twice)
+    CHECK(g->skin_count() == before);
+    CHECK(!g->set_skin_palette(id, pal, &why));  // (a removed skin takes no palette)
+    /* A bone index one past the palette, and a vertex with more bones than slots: refused with a reason (review 519). */
+    gpu::SkinWeights past = w;
+    for (size_t i = 0; i < past.count.size(); i++)
+      if (past.count[i]) {
+        past.bone[i * past.slots] = (uint16_t)past.bones;
+        break;
+      }
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, past, &why) < 0 && !why.empty());
+    std::printf("    a bone index past the palette: refused: %s\n", why.c_str());
+    gpu::SkinWeights crowded = w;
+    crowded.count[0] = (uint8_t)(crowded.slots + 1);
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, crowded, &why) < 0 && !why.empty());
+    std::printf("    more bones than slots: refused: %s\n", why.c_str());
+    CHECK(g->skin_count() == before);
+    g->remove_mesh(plain);
+    /* The card still skins and draws. */
+    const int ok = g->add_skin(rest, r.indices, w, &err);
+    CHECK(ok >= 0 && g->set_skin_palette(ok, pal, &err) && r519_frame(*g, {ok}, 0, err));
+    double worst = 0.0;
+    CHECK(g->can_skin() && r519m_card_equals_cpu(*g, ok, *em, worst));
+    g->remove_skin(ok);
+  });
+
+  test("a character's skin on the card is never stale (round 519): two characters sharing one mesh asset, a re-pose, the rest-position switch, a re-bind and a Skin taken out and put back each leave the card's posed buffer equal to the CPU's (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("camera 0 2 10 3 2 0");
+    ed.viewport_device_for_test(2);
+    Scene &s = ed.scene();
+    GameObject *tubes[2] = {nullptr, nullptr};
+    std::vector<GameObject *> bones[2];
+    MeshPtr shared;
+    std::vector<std::string> names;
+    for (int k = 0; k < 2; k++) {
+      GameObject *rig = s.create(k ? "RigB" : "RigA");
+      rig->set_local_position({(float)k * 4.0f, 0, 0});
+      rig->add<Armature>();
+      GameObject *parent = rig;
+      names.clear();
+      for (int i = 0; i < 4; i++) {
+        names.push_back("C" + std::to_string(i));
+        const Vec3 at(0.0f, i == 0 ? 0.0f : 1.0f, 0.0f);
+        parent = s.create(names.back(), parent);
+        parent->set_local_position(at);
+        parent->add<Bone>()->rest_position = at;
+        bones[k].push_back(parent);
+      }
+      if (!shared) {
+        shared = std::make_shared<Mesh>();
+        for (int r = 0; r < 21; r++)
+          for (int j = 0; j < 12; j++) {
+            const float a = (float)j * 2.0f * kPi / 12.0f;
+            shared->add_vert({0.3f * std::cos(a), 4.0f * (float)r / 20.0f, 0.3f * std::sin(a)});
+          }
+        for (int r = 0; r < 20; r++)
+          for (int j = 0; j < 12; j++) {
+            const uint32_t a = (uint32_t)(r * 12 + j), b = (uint32_t)(r * 12 + (j + 1) % 12);
+            shared->add_face({a, a + 12, b + 12, b});
+          }
+        for (size_t gi = 0; gi < names.size(); gi++) {
+          VertexGroup vg{names[gi], {}};
+          for (const Vec3 &p : shared->positions) vg.weights.push_back(std::max(0.0f, 1.0f - std::fabs(p.y - (float)gi) / 1.5f));
+          shared->vertex_groups.push_back(vg);
+        }
+        shared->touch();
+      }
+      tubes[k] = s.create(k ? "TubeB" : "TubeA");
+      tubes[k]->add<MeshFilter>()->mesh = shared;
+      tubes[k]->add<SkinModifier>()->object = k ? "RigB" : "RigA";
+      tubes[k]->set_local_position({(float)k * 4.0f, 0, 0});
+      tubes[k]->add<MeshRenderer>();
+    }
+    auto pose = [&](int k, float a) {
+      for (size_t i = 1; i < bones[k].size(); i++) bones[k][i]->set_local_rotation(Quat::axis_angle({0, 0, 1}, a));
+    };
+    auto settle = [&](const char *why) {
+      ed.mark_changed_for_test(why);
+      r34_steps(ed, 4);
+    };
+    pose(0, 0.6f), pose(1, -0.9f);
+    settle("R519m card shared");
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    auto both_equal = [&](const char *what) {
+      for (int k = 0; k < 2; k++) {
+        const int id = ed.skin_card_mesh_for_test(tubes[k]);
+        double worst = 0.0;
+        const bool ok = tubes[k]->evaluated_mesh() && r519m_card_equals_cpu(*g, id, *tubes[k]->evaluated_mesh(), worst);
+        if (!ok) std::printf("    %s: %s is not the CPU's pose on the card (mesh %d, worst %.3g of the diagonal); %s\n", what, tubes[k]->name.c_str(), id, worst, ed.skin_stands_text_for_test(tubes[k]).c_str());
+        CHECK(ok);
+      }
+    };
+    both_equal("two characters, one mesh");
+    const int id_a = ed.skin_card_mesh_for_test(tubes[0]), id_b = ed.skin_card_mesh_for_test(tubes[1]);
+    CHECK(id_a >= 0 && id_b >= 0 && id_a != id_b);  // (a skin an object, not a skin a mesh asset)
+    pose(0, -0.3f);
+    settle("R519m card re-pose A");
+    both_equal("A re-posed");
+    /* The rest-position switch and back, with another pose: the card's copy is not the old pose. */
+    ed.scene().find_by_name("RigA")->get<Armature>()->rest_position = true;
+    settle("R519m card rest position");
+    ed.scene().find_by_name("RigA")->get<Armature>()->rest_position = false;
+    pose(0, 1.1f);
+    settle("R519m card rest position off");
+    both_equal("rest position off");
+    /* A re-bind: the weights the card holds are the new ones. */
+    {
+      Mesh &m = *mesh_make_mutable(tubes[0]->mesh_filter()->mesh);
+      for (VertexGroup &vg : m.vertex_groups)
+        for (size_t i = 0; i < vg.weights.size(); i++) vg.weights[i] = (i % 5 == 0) ? 1.0f - vg.weights[i] : vg.weights[i] * 0.5f + 0.1f;
+      m.touch();
+    }
+    settle("R519m card re-bind");
+    both_equal("re-bound");
+    /* Review 519, M1: Max Influences changed and a bone's Deform off, the rest the same - the card's weights are made again. */
+    tubes[0]->get<SkinModifier>()->max_influences = 1;
+    settle("R519m card influences");
+    both_equal("Max Influences 1");
+    bones[0][1]->get<Bone>()->deform = false;
+    settle("R519m card deform off");
+    both_equal("Bone Deform off");
+    bones[0][1]->get<Bone>()->deform = true;
+    tubes[0]->get<SkinModifier>()->max_influences = 4;
+    settle("R519m card back");
+    both_equal("weights back");
+    /* Review 519, M3: a shape key moving the rest under the Skin - posed on the CPU while it moves, on the card again once it holds. */
+    {
+      Mesh &m = *mesh_make_mutable(tubes[0]->mesh_filter()->mesh);
+      std::vector<Vec3> d(m.vert_count());
+      for (size_t i = 0; i < d.size(); i++) d[i] = Vec3(0.1f * std::sin((float)i), 0.0f, 0.05f);
+      m.shape_keys.push_back(ShapeKey{"Bulge", d});
+      m.touch();
+    }
+    for (int i = 0; i < 4; i++) {
+      tubes[0]->get<MeshRenderer>()->shape_weights = {{"Bulge", 0.2f * (float)(i + 1)}};
+      settle("R519m card shape key");
+    }
+    /* The key held: back on the card after three drawn gathers. A frame where nothing changed draws and gathers nothing (even
+     * one marked changed: the view keeps its picture), so the mesh stays posed on the CPU - a right picture - until the view
+     * is drawn again; the pose moves here so each frame is drawn. Until the countdown ends the card's copy may lag (it isn't
+     * drawn); both_equal below reads the card's copy after it ends. */
+    for (int i = 0; i < 4; i++) {
+      pose(0, -0.3f + 0.05f * (float)(i + 1));
+      settle("R519m card shape key held");
+    }
+    both_equal("shape key held");
+    /* One character's Skin taken out and put back. */
+    tubes[1]->remove_component(tubes[1]->get<SkinModifier>());
+    settle("R519m card skin removed");
+    tubes[1]->add<SkinModifier>()->object = "RigB";
+    pose(1, 0.45f);
+    settle("R519m card skin added");
+    both_equal("skin put back");
+    const FrameProfile f0 = ed.frame_profile_totals();
+    settle("R519m card quiet");
+    const FrameProfile f1 = ed.frame_profile_totals();
+    CHECK(f1.skin_uploads == f0.skin_uploads);  // (nothing is sent whole on a quiet frame)
+  });
+
+  test("a skinned mesh the card can't draw from its posed buffer is posed on the CPU, counted and said, while the others stay on the card (round 519): a see-through material (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    GameObject *victim = nullptr;
+    ed.scene().for_each([&](GameObject &obj) {
+      GameObject *o = &obj;
+      if (!victim && o->mesh_filter() && o->get<SkinModifier>() && o->get<MeshRenderer>() && !o->get<MeshRenderer>()->materials.empty()) victim = o;
+    });
+    CHECK(victim != nullptr);
+    if (!victim) return;
+    const FrameProfile f0 = ed.frame_profile_totals();
+    chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.3f));
+    ed.mark_changed_for_test("R519m before");
+    r34_steps(ed, 3);
+    const FrameProfile f1 = ed.frame_profile_totals();
+    CHECK(f1.skin_items > f0.skin_items);
+    MaterialPtr veil = make_material("veil", {0.9f, 0.3f, 0.2f});
+    veil->surface = (int)MaterialSurface::Transparent;
+    veil->alpha = 0.5f;
+    veil->touch();
+    victim->get<MeshRenderer>()->materials[0] = veil;
+    chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+    ed.mark_changed_for_test("R519m see-through");
+    r34_steps(ed, 3);
+    const FrameProfile f2 = ed.frame_profile_totals();
+    std::printf("    with %s see-through: %llu skinned items on the card, %llu posed on the CPU; reason: %s\n", victim->name.c_str(), (unsigned long long)(f2.skin_items - f1.skin_items),
+                (unsigned long long)(f2.skin_cpu - f1.skin_cpu), ed.skin_reason_for_test().c_str());
+    CHECK(f2.skin_cpu > f1.skin_cpu);                // (that one on the CPU ...)
+    CHECK(f2.skin_items > f1.skin_items);            // (... the rest of the character still skinned by the card)
+    CHECK(!ed.skin_reason_for_test().empty());
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+
+  test("take_skin_writes lists the last recorded frame's dispatches alone (round 519 review): two frames with dispatches and one take gives only the second's, a quiet frame gives none (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    const RenderMesh &r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+    const int a = g->add_skin(rest, r.indices, w, &err), b = g->add_skin(rest, r.indices, w, &err);
+    CHECK(a >= 0 && b >= 0);
+    if (a < 0 || b < 0) return;
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    std::vector<float> pal2 = pal;
+    for (size_t k = 0; k < sp.mats.size(); k++) pal2[gpu::kSkinPaletteHeader + k * gpu::kSkinPaletteBone + 10] += 0.25f;
+    CHECK(g->set_skin_palette(a, pal, &err) && g->set_skin_palette(b, pal, &err) && r519_frame(*g, {a, b}, 0, err));  // (frame 1: both)
+    CHECK(g->set_skin_palette(b, pal2, &err) && r519_frame(*g, {a, b}, 0, err));                                         // (frame 2: b alone)
+    std::vector<int> wrote = g->take_skin_writes();  // (one take after both frames)
+    CHECK(wrote.size() == 1 && wrote[0] == b);
+    CHECK(g->skin_dispatches() == 3);
+    CHECK(r519_frame(*g, {a, b}, 0, err));  // (a quiet frame)
+    CHECK(g->take_skin_writes().empty());
+    g->remove_skin(a);
+    g->remove_skin(b);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -6246,4 +7007,6 @@ void run_gpu_tests() {
   tests_round506_third_gpu();
   tests_round506_engineer_gpu();
   tests_round508_gpu();
+  tests_round519_gpu();
+  tests_round519_more_gpu();
 }
