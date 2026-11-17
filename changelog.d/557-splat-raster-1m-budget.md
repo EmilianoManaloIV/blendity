@@ -51,6 +51,9 @@ the round-557 exe before the merge - 0 pixels differ in each. Seen on P1's merge
 the pre-557 exe and on 557b, 0 pixels each); the likely cause is round 508's recorded starvation follow-up (HCI, round 555). The tests'
 card cache is now per build (the one folder every session's test run had shared).
 
+**Round 557b, M3's run:** the cache test no longer asks for the runner's own folder name - a run that sets
+BLENDITY_CACHE_DIR itself passes; it checks that the cache lands inside the folder in effect and never in the user's.
+
 **Checked:** on #443's head (27a16b4a) with the review's fixes: Windows with Blender's libraries, `splats_raster`, `splats`,
 `splats_trace`, `gpu` and `editor`, 9,197 checks, none failed; Linux (WSL, with the libraries) `splats_raster` and `editor`,
 3,585 checks, none failed; the full suite on CI. The card against the CPU on the small splat scene through Standard, Filmic and ACES:

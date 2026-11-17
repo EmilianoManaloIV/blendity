@@ -928,8 +928,8 @@ static void splat_raster_round557_cache_tests() {
     const std::string user = norm(fs::join(fs::join(fs::home_dir(), ".blendity"), "cache"));
     const std::string own = dir ? norm(dir) : std::string();
     CHECK(own != user);
-    /* (557b: a build's own - another worktree's test run never shares it) */
-    CHECK(own.find("blendity_test_cache_") != std::string::npos);
+    /* (Not its name: a run that sets BLENDITY_CACHE_DIR itself - as the scratch-folder rule asks - is as right as the
+     * runner's per-build default. What matters is that the cache is the folder in effect and never the user's.) */
     if (!gpu::available() || gpu::devices().empty()) {
       std::printf("    no Vulkan GPU: the file's path not checked\n");
       return;
