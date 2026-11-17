@@ -985,7 +985,9 @@ bool Editor::run_action(const std::string &id) {
     /* Round 541 (task 0521): Pose context only - the Scene view with only bones selected; anywhere else the chord is passed on (Ctrl+R
      * refreshes the assets, the Animation window's Ctrl+C / Ctrl+V copy keys, the Reference Board's Ctrl+V pastes). The palette
      * and the Wheel name the action on purpose: any selection then. */
-    if (!action_asked_for_ && (!scene_hovered_ || !pose_context())) return false;  // (the pointer over the Scene view: not over the Animation window, whose Ctrl+C / Ctrl+V copy keys, nor any other)
+    /* (Align has no chord of its own - it is only ever named - so the guard is for the chords alone.) */
+    const bool chord_guard = id != "pose.align" && !action_asked_for_;
+    if (chord_guard && (!scene_hovered_ || !pose_context())) return false;  // (the pointer over the Scene view: not over the Animation window, whose Ctrl+C / Ctrl+V copy keys, nor any other)
     if (id == "pose.rotation_convert") anim_rotation_convert(0, false);
     else if (id == "pose.copy") pose_copy();
     else if (id == "pose.paste") pose_paste_step(1.0f, false, false);
