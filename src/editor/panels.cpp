@@ -577,19 +577,30 @@ struct InspectorReflector : Reflector {
     const Recti own = lay.row();
     return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
   }
-  /* Round 559: where an enumeration's dropdown goes, so its longest word shows whole: beside the label when the field
-   * column holds it; else on a row of its own under the label, at the full width ("Gaussian Splats" at 1024 x 1.5, the
-   * camera's "Equirectangular" in a narrow Inspector). Sized by the longest word, not the chosen one, so picking
+  /* Round 559: where an enumeration's dropdown goes, so its longest word shows whole - as vec3_rect places three numbers:
+   * in the field column when it holds it; else starting right after the label's word; only when even that is too narrow
+   * on a row of its own under the label, at the full width ("Gaussian Splats" at 1024 x 1.5). A row of its own moves every
+   * control under it, so it is the last resort (Linux's wider font sent a narrow Inspector's Style, Opening and Falloff
+   * each to a row, and the fields under them off the window). Sized by the longest word, not the chosen one, so picking
    * another does not move the rows under it. */
-  Recti enum_rect(const Recti &row, const char *const *opts, int count) {
+  Recti enum_rect(const Recti &row, const char *label, const char *const *opts, int count) {
     int widest = 0;
     for (int i = 0; i < count; i++)
       if (ui::Context::combo_choosable(opts[i])) widest = std::max(widest, u.font.text_width(opts[i]));  // (headings and separators never show)
     const Recti f = field_rect(row);
     const int need = widest + f.h + u.px(5);  // (the combo's text room is its width less its arrow column and margin)
     if (f.w >= need) return f;
+    const int after_word = u.px(4) + u.font.text_width(label) + u.px(8);
+    const Recti beside{row.x + after_word, row.y, row.w - after_word - u.px(6), row.h};
+    if (beside.x <= f.x && beside.w >= need) return beside;
     const Recti own = lay.row();
     return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
+  }
+  /* The label's rect beside a dropdown placed by enum_rect: it ends where the dropdown begins (its right-click menu too). */
+  Recti enum_label_rect(const Recti &row, const Recti &f) {
+    Recti lr = label_rect(row);
+    if (f.y == row.y) lr.w = std::max(0, std::min(lr.w, f.x - lr.x - u.px(4)));
+    return lr;
   }
   FieldEdit &record(FieldEdit::Kind k, const char *n) {
     edits.emplace_back();
@@ -895,15 +906,17 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     if (dim) {  // (a field with no effect now: its value shown, not editable; the help says why)
-      u.label(label_rect(row), n, u.theme.text_dim);
-      const Recti f = enum_rect(row, opts, count);  // (round 559: placed as the editable one is, so greying it moves nothing)
+      const Recti f = enum_rect(row, n, opts, count);  // (round 559: placed as the editable one is, so greying it moves nothing)
+      u.label(enum_label_rect(row, f), n, u.theme.text_dim);
       u.frame(f, u.theme.field, u.theme.field_border, u.px(2));
       u.label({f.x + u.px(5), f.y, f.w - u.px(8), f.h}, opts[std::max(0, std::min(count - 1, v))], u.theme.text_dim);
       if (u.record_buttons) u.button_rects["greyed:" + record_prefix + n] = f;
       return;
     }
-    u.label(label_rect(row), n);
-    if (u.combo(fid(n), enum_rect(row, opts, count), v, opts, count) || field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
+    const Recti f = enum_rect(row, n, opts, count);
+    const Recti lr = enum_label_rect(row, f);
+    u.label(lr, n);
+    if (u.combo(fid(n), f, v, opts, count) || field_menu(n, lr, defaults ? &defaults->i : nullptr, v)) {
       record(FieldEdit::Enum, n).i_new = v;
       if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
