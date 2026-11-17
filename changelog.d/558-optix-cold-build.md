@@ -22,8 +22,10 @@ change (round 534 changed it). The 4070 SUPER had compiled this PTX in round 534
 - Quitting, or a headless run ending, while it compiles leaves at once (as with a GPU still opening): the statics
   the thread reads are never freed.
 
-**Checked:** `--group splats_gpu` (the warm-up's tests: no OptiX, choosing OptiX, an open during a compile) on
-Windows with both cards and on Linux; CHECKS_W / CHECKS_L on CI.
+**Checked:** `--group splats_gpu` on Windows (RTX 4070 SUPER), 3917 checks, 0 failed, with OptiX's cache in a
+scratch folder: a cold kernel compile 62 s (a busy machine), the warm module 33-51 ms; an open during a cold compile
+waited for it and then loaded the module in 51 ms (one compile, not two); `set_backend(2)` returned in 0.1 ms. Linux
+`splats_gpu` and `render`; the full suite on CI.
 
 <!-- docs/ARCHITECTURE.md -->
 after: | `PTLens`, thin-lens primary rays
