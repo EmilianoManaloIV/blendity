@@ -24,11 +24,13 @@ bool scene_has_splats(const Scene &scene);
 bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarget &rt, const Mat4 &v, const Mat4 &p,
                           ViewTransform vt, float exposure, bool async = true);
 
-/* The card's pass: the same projection and order, kept per card slot (`owner_key`: the slot, not a renderer). Returns
- * the prepared pass, or null when the scene has no splats. The pass belongs to the key; it stays valid until the key's
- * next call. */
-const SplatPass *scene_splats_prepare_pass(const Scene &scene, int owner_key, int width, int height, const Mat4 &v, const Mat4 &p,
-                                           ViewTransform vt, float exposure, bool async = true);
+/* The most fragments the card may be asked for in a frame: about 10 x the CPU's kSplatPixelBudget (6e7), which the card has
+ * no per-splat way to keep to. A frame estimated over it (a camera inside or beside a dense cloud) is drawn on the CPU. */
+constexpr double kCardSplatFragmentBudget = 6.0e8;
+/* Tests: a stand-in for the card's largest storage buffer (0: the card's own). */
+void scene_splats_card_limit_for_test(uint64_t bytes);
+/* Frees a slot's CardSplats once its frame is written. */
+void scene_splats_release_keep(int slot);
 /* The most clouds the card's splat pass takes (a cloud index is a byte of the ids plane's flagged value). */
 constexpr size_t kCardMaxSplatClouds = 255;
 /* The most card memory a set of splats may take (the static splats plus their SH): a bigger one is drawn on the CPU. */

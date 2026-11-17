@@ -40,25 +40,68 @@ std::map<int, std::unique_ptr<SlotSplats>> &card_passes() {
   return *m;
 }
 
-/* A cloud's centre of positions, kept by (uid, version): the farthest-first order of clouds reads it every frame and a
- * million positions are not walked each time. */
-struct CenterKeep {
+/* A cloud's bounds of positions and a typical splat's size, kept by (uid, version): the farthest-first order of clouds and
+ * the card's fragment estimate read them every frame and a million positions are not walked each time. `median` is the
+ * median of max(scale) over a fixed sample of up to 1024 splats (0 for a Points cloud). */
+struct CloudStats {
   uint64_t version = 0;
-  Vec3 center{0, 0, 0};
+  AABB bounds;
+  float median = 0.0f;
+  Vec3 center() const { return bounds.valid() ? bounds.center() : Vec3(0, 0, 0); }
 };
+uint64_t g_test_buffer_limit = 0;
 std::mutex g_center_mutex;
-std::unordered_map<uint64_t, CenterKeep> g_centers;
+std::unordered_map<uint64_t, CloudStats> g_centers;
 
-Vec3 cloud_center(const PointCloud &pc) {
+CloudStats cloud_stats(const PointCloud &pc) {
   std::lock_guard<std::mutex> lk(g_center_mutex);
   auto it = g_centers.find(pc.uid.v);
-  if (it != g_centers.end() && it->second.version == pc.version) return it->second.center;
+  if (it != g_centers.end() && it->second.version == pc.version) return it->second;
   if (g_centers.size() > 256) g_centers.clear();  // (clouds long gone)
-  AABB b;
-  for (const Vec3 &p : pc.position) b.add(p);
-  const Vec3 c = b.valid() ? b.center() : Vec3(0, 0, 0);
-  g_centers[pc.uid.v] = CenterKeep{pc.version, c};
-  return c;
+  CloudStats s;
+  s.version = pc.version;
+  for (const Vec3 &p : pc.position) s.bounds.add(p);
+  if (pc.is_splats() && pc.scale.size() == pc.count() && pc.count()) {
+    std::vector<float> sample;
+    const size_t n = pc.count(), take = std::min<size_t>(n, 1024);
+    for (size_t k = 0; k < take; k++) {
+      const Vec3 sc = pc.scale[k * n / take];
+      sample.push_back(std::max(sc.x, std::max(sc.y, sc.z)));
+    }
+    std::nth_element(sample.begin(), sample.begin() + sample.size() / 2, sample.end());
+    s.median = sample[sample.size() / 2];
+  }
+  g_centers[pc.uid.v] = s;
+  return s;
+}
+
+/* The frame's fragment load on the card if it drew these clouds (round 557, review): per cloud a typical splat's box on
+ * screen times its count. The box is 4 sigma across, sigma = the median world size x the projection's pixel scale / the
+ * distance from the camera to the cloud's world bounds (grown by 3 x the median; zero inside, floored at kNear), capped at
+ * the screen. A camera inside or beside a dense cloud makes most boxes the whole screen: the load is then huge. */
+double card_fragment_load(const std::vector<SplatOrder> &ords, const SplatView &view) {
+  constexpr float kNear = 0.01f;
+  const bool ortho = std::fabs(view.proj.m[15] - 1.0f) < 1e-6f && std::fabs(view.proj.m[11]) < 1e-6f;
+  const float pix_scale = std::fabs(view.proj.at(1, 1)) * 0.5f * (float)view.height;
+  double load = 0;
+  for (const SplatOrder &o : ords) {
+    const PointCloud &pc = *o.draw->cloud;
+    const CloudStats st = cloud_stats(pc);
+    if (!st.bounds.valid()) continue;
+    const Mat4 &m = o.draw->model;
+    const float mscale = std::cbrt(std::fabs(length(m.dir(Vec3(1, 0, 0))) * length(m.dir(Vec3(0, 1, 0))) * length(m.dir(Vec3(0, 0, 1)))));
+    const float med = pc.is_splats() ? st.median : 0.5f * o.draw->point_size;  // (a dot: its radius)
+    AABB b = st.bounds;
+    b.min = b.min - Vec3(3.0f * med), b.max = b.max + Vec3(3.0f * med);
+    const Vec3 c = o.dv.cam_local;
+    const Vec3 d(std::max(std::max(b.min.x - c.x, c.x - b.max.x), 0.0f), std::max(std::max(b.min.y - c.y, c.y - b.max.y), 0.0f),
+                 std::max(std::max(b.min.z - c.z, c.z - b.max.z), 0.0f));
+    const float dist = ortho ? 1.0f : std::max(length(d) * mscale, kNear);
+    const double sigma = (double)med * mscale * pix_scale / dist;
+    const double side = 4.0 * sigma;
+    load += std::min(side, (double)view.width) * std::min(side, (double)view.height) * (double)pc.count();
+  }
+  return load;
 }
 
 /* Whether a scene has a point cloud that draws, kept on the structure counter (review 532, ADR 0115): every view's
@@ -107,7 +150,10 @@ bool scene_has_splats(const Scene &scene) {
 bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarget &rt, const Mat4 &v, const Mat4 &p,
                           ViewTransform vt, float exposure, bool async) {
   std::vector<SplatDraw> draws = scene_splat_draws(scene);
-  if (draws.empty()) return false;
+  if (draws.empty()) {
+    r3d.release_splat_pass();  // (no clouds left: the pass's screen splats and orders go)
+    return false;
+  }
   SplatPass &pass = r3d.splat_pass();
   SplatView sv{v, p, rt.width, rt.height, vt, exposure};
   pass.prepare(draws, sv, async);
@@ -117,16 +163,19 @@ bool scene_splats_prepare(const Scene &scene, Renderer3D &r3d, const RenderTarge
 
 namespace {
 
-/* Round-to-nearest float to half bits for a value of any size: clamped to the half range (+-65504), NaN to 0. */
+/* Round-to-nearest float to half bits for a value of any size: finite values clamped to the half range (+-65504). A
+ * non-finite value stays non-finite (+-inf is 0x7C00 with the sign, NaN 0x7E00): the shader's sum then goes non-finite
+ * and the colour is set to 0 there, as the CPU's sh_color does for a non-finite sum (clamping an infinite coefficient
+ * would show it as a bright colour instead). The tests are on the bits: a float compare is folded away under /fp:fast. */
 uint32_t half_bits(float f) {
   uint32_t b;
   std::memcpy(&b, &f, 4);
-  if ((b & 0x7F800000u) == 0x7F800000u && (b & 0x7FFFFFu)) return 0u;  // NaN (read from its bits: a float compare is folded away under /fp:fast)
+  const uint32_t sign = (b >> 16) & 0x8000u;
+  if ((b & 0x7F800000u) == 0x7F800000u) return (b & 0x7FFFFFu) ? 0x7E00u : (sign | 0x7C00u);
   f = std::max(-65504.0f, std::min(65504.0f, f));
   std::memcpy(&b, &f, 4);
-  const uint32_t sign = (b >> 16) & 0x8000u, m = b & 0x7FFFFFu;
+  const uint32_t m = b & 0x7FFFFFu;
   const int e = (int)((b >> 23) & 0xFF) - 127 + 15;
-  if (e == 143) return 0u;  // inf / NaN
   if (e >= 31) return sign | 0x7BFFu;
   if (e <= 0) {  // subnormal or zero
     if (e < -10) return sign;
@@ -165,11 +214,13 @@ void fill_cloud(const PointCloud &pc, uint32_t cloud, const CloudSlice &sl, gpu:
       splat_covariance(pc, i, r.cov);
       if (!sl.rest) continue;
       const Vec3 *rest = &pc.sh_rest[i * sl.rest];
-      uint16_t *h = (uint16_t *)(sh + sl.sh_first + i * sl.per);  // (little endian: the first half is a uint's low bits, as unpackHalf2x16 takes it)
+      uint32_t *w = sh + sl.sh_first + i * sl.per;  // (halves two to a uint, the first in the low bits, as unpackHalf2x16 takes them)
       for (uint32_t j = 0; j < sl.rest; j++) {
-        h[3 * j] = (uint16_t)half_bits(rest[j].x);
-        h[3 * j + 1] = (uint16_t)half_bits(rest[j].y);
-        h[3 * j + 2] = (uint16_t)half_bits(rest[j].z);
+        const uint32_t h[3] = {half_bits(rest[j].x), half_bits(rest[j].y), half_bits(rest[j].z)};
+        for (uint32_t q = 0; q < 3; q++) {
+          const uint32_t at = 3 * j + q;
+          w[at >> 1] |= h[q] << ((at & 1u) * 16u);
+        }
       }
     }
   });
@@ -202,6 +253,11 @@ const char *scene_splats_to_card(const std::vector<SplatDraw> &draws, SplatPass 
   }
   if (!key) key = 1;
   if (total * sizeof(gpu::RasterSplatSrc) + sh_total * 4 > kCardMaxSplatBytes) return "a set of Gaussian splats over the card's memory (512 MB)";
+  const uint64_t max_buf = g_test_buffer_limit ? g_test_buffer_limit : card.max_storage_buffer_bytes();
+  if (max_buf && (total * sizeof(gpu::RasterSplatSrc) > max_buf || sh_total * 4 > max_buf))
+    return "a set of Gaussian splats over the card's largest storage buffer (drawn on the CPU)";
+  if (card.splat_set_key_failed() == key) return "a set of Gaussian splats the card could not hold (drawn on the CPU)";
+  if (card_fragment_load(ords, view) > kCardSplatFragmentBudget) return "Gaussian splats too close to the camera for the card (drawn on the CPU, within its budget)";
   fr.splat_set_key = key;
 
   if (card.splat_set_key_held() != key) {  // the set isn't on the card: build it (once a version)
@@ -221,7 +277,7 @@ const char *scene_splats_to_card(const std::vector<SplatDraw> &draws, SplatPass 
   fr.splat_ids.resize(ords.size());
   for (size_t c = 0; c < ords.size(); c++) {
     const SplatOrder &o = ords[c];
-    const Vec4 clip = o.dv.mvp * Vec4(cloud_center(*o.draw->cloud), 1.0f);
+    const Vec4 clip = o.dv.mvp * Vec4(cloud_stats(*o.draw->cloud).center(), 1.0f);
     depth[c] = clip.w > 1e-6f ? clip.z / clip.w : 1e30f;  // (behind the camera: culled anyway; first)
     gpu::RasterSplatCloud &rc = fr.splat_clouds[c];
     std::memcpy(rc.mvp, o.dv.mvp.m, 64);
@@ -245,6 +301,16 @@ const char *scene_splats_to_card(const std::vector<SplatDraw> &draws, SplatPass 
     at += order.size();
   }
   return nullptr;
+}
+
+void scene_splats_card_limit_for_test(uint64_t bytes) { g_test_buffer_limit = bytes; }
+
+void scene_splats_release_keep(int slot) {
+  std::lock_guard<std::mutex> lk(g_passes_mutex);
+  auto it = card_passes().find(slot);
+  if (it == card_passes().end()) return;
+  std::vector<gpu::RasterSplatSrc>().swap(it->second->keep.src);
+  std::vector<uint32_t>().swap(it->second->keep.sh);
 }
 
 const char *scene_splats_to_card(const Scene &scene, int slot, int width, int height, const Mat4 &v, const Mat4 &p, ViewTransform vt, float exposure,

@@ -800,9 +800,15 @@ static void splat_raster_round557_tests() {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
     }
-    /* In a scratch cache folder, as tests/test_gpu.cpp does: never the user's. */
-    const char *old_env = std::getenv("BLENDITY_CACHE_DIR");
-    const std::string keep_env = old_env ? old_env : "";
+    /* In a scratch cache folder, as tests/test_gpu.cpp does: never the user's (restored on every way out). */
+    struct EnvGuard {
+      std::string keep;
+      EnvGuard() {
+        const char *old_env = std::getenv("BLENDITY_CACHE_DIR");
+        keep = old_env ? old_env : "";
+      }
+      ~EnvGuard() { set_env("BLENDITY_CACHE_DIR", keep); }
+    } guard;
     set_env("BLENDITY_CACHE_DIR", fs::join(test_dir(), "raster_cache"));
     const std::string path = gpu::raster_pipeline_cache_file(0);
     CHECK(!path.empty() && path.find("raster_cache") != std::string::npos);
@@ -811,10 +817,7 @@ static void splat_raster_round557_tests() {
     {
       std::unique_ptr<gpu::Raster> first = gpu::Raster::create(0, &err);
       CHECK(first != nullptr);
-      if (!first) {
-        set_env("BLENDITY_CACHE_DIR", keep_env);
-        return;
-      }
+      if (!first) return;
       CHECK(!first->pipelines_from_cache());
     }
     CHECK(fs::exists(path));
@@ -830,8 +833,78 @@ static void splat_raster_round557_tests() {
       std::unique_ptr<gpu::Raster> third = gpu::Raster::create(0, &err);
       CHECK(third != nullptr && !third->pipelines_from_cache());
     }
+    /* A cache from another device (the header's deviceID changed, the trailer valid): ignored. */
+    std::string blob;
+    CHECK(gpu::pipeline_cache_load(0, path, blob) && blob.size() > 32);  // (the third open wrote a good one)
+    if (blob.size() > 32) {
+      blob[12] = (char)(blob[12] ^ 0x5A);
+      gpu::pipeline_cache_store(path, blob);
+      std::unique_ptr<gpu::Raster> fourth = gpu::Raster::create(0, &err);
+      CHECK(fourth != nullptr && !fourth->pipelines_from_cache());
+    }
     std::remove(path.c_str());
-    set_env("BLENDITY_CACHE_DIR", keep_env);
+  });
+
+  test("splats: a Points cloud's dots on the card match the CPU's (skipped without a card)", [] {
+    std::unique_ptr<gpu::Raster> g = open_splat_card();
+    if (!g) return;
+    auto pc = pointcloud_random(PointCloudType::Points, 25, 0, 3, 1.0f);
+    CHECK(pc != nullptr);
+    if (!pc) return;
+    const std::vector<SplatDraw> draws = {SplatDraw{pc, Mat4::identity(), 7, false, 1, 0.3f}};
+    SplatShot s;
+    s.draw(draws);
+    gpu::RasterFrame fr = splat_card_frame(s);
+    SplatPass card_pass;
+    CardSplats keep;
+    const SplatView sv{s.v, s.p, s.W, s.H, ViewTransform::Standard, 0.0f};
+    CHECK(scene_splats_to_card(draws, card_pass, sv, keep, *g, fr, false) == nullptr);
+    std::vector<uint32_t> col((size_t)s.W * s.H), ids((size_t)s.W * s.H);
+    std::string err;
+    CHECK(g->render_read(fr, col.data(), nullptr, ids.data(), &err));
+    const gpu::RasterMatch m = gpu::raster_match(s.img.pixels.data(), s.rt.ids.data(), col.data(), ids.data(), s.W, s.H);
+    std::printf("    Points: scored %zu px, mean %.3f / 255, ids same %.1f %%\n", m.pixels, m.mean, m.ids_same * 100);
+    CHECK(m.pixels > 100 && m.mean < 3.0 && m.ids_same > 0.9);
+  });
+
+  test("splats: a camera inside a dense cloud is refused for the card with a reason, the same cloud from 10 m is not (skipped without a card)", [] {
+    std::unique_ptr<gpu::Raster> g = open_splat_card();
+    if (!g) return;
+    auto pc = pointcloud_random(PointCloudType::GaussianSplats, 50000, 0, 9, 1.0f);
+    CHECK(pc != nullptr);
+    if (!pc) return;
+    const std::vector<SplatDraw> draws = {SplatDraw{pc, Mat4::identity(), 7, false, 1}};
+    SplatShot s;
+    SplatPass pass;
+    CardSplats keep;
+    gpu::RasterFrame fr;
+    const Mat4 inside = Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), from_afar = Mat4::look_at({0, 0, -10}, {0, 0, 0}, {0, 1, 0});
+    const char *why = scene_splats_to_card(draws, pass, SplatView{inside, s.p, s.W, s.H, ViewTransform::Standard, 0.0f}, keep, *g, fr, false);
+    CHECK(why != nullptr && std::string(why).find("too close to the camera") != std::string::npos);
+    CHECK(fr.splat_order.empty() && fr.splat_src == nullptr);
+    CHECK(scene_splats_to_card(draws, pass, SplatView{from_afar, s.p, s.W, s.H, ViewTransform::Standard, 0.0f}, keep, *g, fr, false) == nullptr);
+    CHECK(fr.splat_order.size() == 50000);
+  });
+
+  test("splats: a set over the card's largest storage buffer is refused with a reason and nothing is filled (skipped without a card)", [] {
+    std::unique_ptr<gpu::Raster> g = open_splat_card();
+    if (!g) return;
+    auto pc = pointcloud_random(PointCloudType::GaussianSplats, 100, 3, 4, 1.0f);
+    CHECK(pc != nullptr);
+    if (!pc) return;
+    const std::vector<SplatDraw> draws = {SplatDraw{pc, Mat4::identity(), 7, false, 1}};
+    SplatShot s;
+    SplatPass pass;
+    CardSplats keep;
+    gpu::RasterFrame fr;
+    const SplatView sv{s.v, s.p, s.W, s.H, ViewTransform::Standard, 0.0f};
+    CHECK(g->max_storage_buffer_bytes() > 0);
+    scene_splats_card_limit_for_test(4096);  // (100 splats are 6400 bytes)
+    const char *why = scene_splats_to_card(draws, pass, sv, keep, *g, fr, false);
+    scene_splats_card_limit_for_test(0);
+    CHECK(why != nullptr && std::string(why).find("storage buffer") != std::string::npos);
+    CHECK(fr.splat_order.empty() && fr.splat_src == nullptr && keep.src.empty());
+    CHECK(scene_splats_to_card(draws, pass, sv, keep, *g, fr, false) == nullptr && fr.splat_src != nullptr);
   });
 }
 

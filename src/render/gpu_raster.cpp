@@ -3175,6 +3175,8 @@ class VulkanRaster final : public Raster {
   bool can_draw_splats() const override { return pl_splat_ && pl_splat_ids_; }  // round 532
   uint64_t splat_set_key_held() const override { return splat_key_; }
   uint64_t splat_uploads() const override { return splat_uploads_; }
+  uint64_t splat_set_key_failed() const override { return splat_failed_key_; }
+  uint64_t max_storage_buffer_bytes() const override { return max_storage_; }
   /* Frees the static splats (the scene has none left); the placeholders go back in the sets. */
   void release_splats() override {
     if (!splat_key_ || !settle()) return;
@@ -3492,7 +3494,7 @@ class VulkanRaster final : public Raster {
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced ? pl_light_rt_ : pl_light_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
-    if (!fr.splat_order.empty() && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
+    if (splat_drawn_ && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
     if (!fr.see_through.empty() && can_draw_see_through()) draw_see_through(fr, sl);
     if (can_draw_overlays()) draw_overlays(fr);
     if (fr.cage && can_draw_cage()) draw_cage(fr);
@@ -4179,7 +4181,8 @@ class VulkanRaster final : public Raster {
   /* Round 532, 557: the Gaussian splats - bindings 40 the static splats and 42 their SH (device-local, kept while
    * splat_key_ holds), 41 the clouds' pick ids, 43 the frame's order, 44 the clouds' values (host-visible, written each frame). */
   Buf splat_src_buf_, splat_ids_buf_, splat_sh_buf_, splat_ord_buf_, splat_cl_buf_;
-  uint64_t splat_key_ = 0, splat_uploads_ = 0;
+  uint64_t splat_key_ = 0, splat_uploads_ = 0, splat_failed_key_ = 0;
+  bool splat_drawn_ = false;  // this frame's splats are on the card (write_splats)
   /* Task 0101: the textures. Their texels in two arenas (8-bit as stored, float), each texture's levels one after
    * another; the tables of textures and levels mirrored here and sent when they change. */
   struct TexSlot {
@@ -4955,6 +4958,12 @@ class VulkanRaster final : public Raster {
   /* A static splat array on the card, device-local, sent through the staging buffer in chunks (a million splats is 64 MB
    * of splats and as much of SH: one staging buffer that size would stay as large as the biggest set ever sent). */
   bool make_static(Buf &b, const void *data, size_t bytes, std::string *err) {
+    if (make_static_try(b, data, bytes, err)) return true;
+    free_buffer(b);  // (a placeholder back: no binding is ever left with a null descriptor)
+    make_buffer(b, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props());
+    return false;
+  }
+  bool make_static_try(Buf &b, const void *data, size_t bytes, std::string *err) {
     if (bytes > max_storage_) return fail(err, info_.name + ": a splat set over the card's storage buffer limit");
     free_buffer(b);
     if (!make_buffer(b, std::max<size_t>(bytes, 16), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
@@ -4978,6 +4987,7 @@ class VulkanRaster final : public Raster {
   /* Round 557: the splats. The static set (centres, covariances, colours, SH) goes up once - when its key is not the one the
    * card holds - and stays; each frame sends the clouds' values, the order and the pick ids. */
   bool write_splats(const RasterFrame &fr, std::string *err) {
+    splat_drawn_ = false;
     if (fr.splat_src) {
       static const std::vector<uint32_t> no_sh;
       const std::vector<uint32_t> &sh = fr.splat_sh ? *fr.splat_sh : no_sh;
@@ -4986,13 +4996,21 @@ class VulkanRaster final : public Raster {
       if (!make_static(splat_src_buf_, fr.splat_src->data(), fr.splat_src->size() * sizeof(RasterSplatSrc), err) ||
           !make_static(splat_sh_buf_, sh.data(), sh.size() * 4, err)) {
         for (Slot &sl : slots_) bind_buffers(sl.set);
-        return false;
+        if (lost_) return false;  // (the card stopped responding: the frame fails as any would)
+        /* A set that doesn't fit: this frame goes without its splats and the key is remembered, so the editor refuses it
+         * (the CPU draws the view) instead of losing the card's views for the session. */
+        splat_failed_key_ = fr.splat_set_key;
+        Log::warn("The GPU view couldn't hold a Gaussian splat set (%s): the CPU draws those views", err && !err->empty() ? err->c_str() : "?");
+        if (err) err->clear();
+        return true;
       }
       splat_key_ = fr.splat_set_key;
+      splat_failed_key_ = 0;
       splat_uploads_++;
       for (Slot &sl : slots_) bind_buffers(sl.set);
     }
     if (!fr.splat_order.empty() && (!splat_key_ || splat_key_ != fr.splat_set_key)) return fail(err, "the frame's splats aren't on the card");
+    splat_drawn_ = !fr.splat_order.empty();
     return write_array(splat_ord_buf_, fr.splat_order.data(), fr.splat_order.size() * 4, err) &&
            write_array(splat_cl_buf_, fr.splat_clouds.data(), fr.splat_clouds.size() * sizeof(RasterSplatCloud), err) &&
            write_array(splat_ids_buf_, fr.splat_ids.data(), fr.splat_ids.size() * 4, err);

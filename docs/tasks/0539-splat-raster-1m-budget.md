@@ -43,8 +43,11 @@ not a minute and a half.
   3. **A pipeline cache for the rasterizer**: loaded from and saved to the user's cache folder (`pipeline_cache_file`'s
      scheme with its own name, the device's header checked, as task 0160's); the pipelines made in parallel where the
      driver allows (the cache is internally synchronised).
-  4. The `splat_raster` stress section prints the card's own split (CPU prepare, upload, card ms) and the cold open's
-     time with an empty cache.
+  4. The `splat_raster` stress section prints the parts of each orbit (`splat stats`) and the cold open's time with an
+     empty cache. (Review: the card's own CPU / upload / card split is left to the profiler's GPU rows; not separated.)
+  5. (Review) The card's budget: a frame whose estimated fragments (the clouds' median splat size at the nearest
+     distance, times their counts) exceed 6e8 is drawn by the CPU within its budget; a set over the card's
+     storage-buffer limit or whose upload failed is refused with a reason, never dropping the GPU views.
 - Out: splats on the card in more than one cloud blended across clouds splat by splat (the CPU merges them; the card
   orders by cloud), shadows from splats, SH beyond degree 3.
 

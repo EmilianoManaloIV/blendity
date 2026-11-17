@@ -369,7 +369,7 @@ void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v,
     stats_.culled += pc.count() - kept_.size();
     stats_.ms_project += tp.ms();
     if (screen_.empty() && lists.empty()) screen_.swap(kept_);  // (one cloud: no copy; the buffers keep their room)
-    else lists.push_back(kept_);
+    else lists.push_back(std::move(kept_));
   }
   /* Several clouds: their back-to-front lists merged by depth (a worker's slightly older order is near sorted; the
    * merge keeps each list's own order). */

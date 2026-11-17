@@ -2147,6 +2147,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     else ok = g->render_read(fr, color, depth, ids, &err);
     prof_.ms_gpu_render += render_timer.ms();
   }
+  if (splats) scene_splats_release_keep(slot);  // (the frame is written: the static set's host copy is no longer needed)
   if (ok && rows.valid && !fr.see_through.empty()) rows.see_frame = std::move(fr.see_through), rows.see_frame_ok = true;  // (round 471)
   if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
   if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)

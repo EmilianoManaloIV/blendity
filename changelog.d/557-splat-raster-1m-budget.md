@@ -27,8 +27,27 @@ time (162 ms the second). Find where the time goes, and fix it or name the cause
   file, is ignored.
 - The `splat_raster` stress section prints each orbit's parts (`splat stats`) and the card's open with an empty and a
   written pipeline cache.
+- Tests and stress keep the cards' caches (the compiled kernels, both pipeline caches) in a folder of their own under
+  the system's temporary folder, never the user's `~/.blendity/cache`.
+
+**Review:** the card keeps a budget too: a cloud the camera is inside or right next to (most splats at the 1024 px cap:
+about a million screens of pixels) is drawn by the CPU that frame, within its budget, instead of risking the card's
+timeout; a set of clouds over the card's storage-buffer limit, or one whose upload failed, is drawn by the CPU with a
+reason instead of turning the GPU views off; a cache from another card is ignored (tested with a valid file of another
+device); the CPU's projection room goes back when the scene's clouds are gone.
+
+**Not done (named):** the pipelines are made one after another, not in parallel (with the cache, a new build's first
+open no longer pays for that; a machine's very first open still does - on a worker in the editor). The card's vertex
+shader evaluates a splat six times (once per corner) and converts its colour per pixel; a projecting compute pass (once a
+splat) is the next step if the timed rows show it. An edit that changes a cloud every frame (a slider drag) sends the
+whole cloud again every frame.
 
 **Checked:** CHECKS_LIBS
+
+<!-- docs/ARCHITECTURE.md -->
+after: | `SplatPass`, `SplatSorter`, `gsplat_project_one()`
+| `RasterSplatSrc`, `RasterSplatCloud`, `RasterFrame::splat_set_key`, `scene_splats_to_card()` | `src/render/gpu_raster.h`, `src/editor/scene_splats.h` | the card projects splats itself: a set of clouds kept on the card by their (uid, version), each frame only their order and matrices (round 557) |
+| `pipeline_cache_load()`, `pipeline_cache_store()`, `raster_pipeline_cache_file()` | `src/render/gpu_device.h` | the pipeline cache files of the path tracer and the rasterizer (round 557) |
 
 <!-- docs/PERFORMANCE.md -->
 append:

@@ -371,6 +371,8 @@ class Raster {
   /* Round 557: the key of the static splat set on the card (0: none) and how many times a set was uploaded (tests). */
   virtual uint64_t splat_set_key_held() const { return 0; }
   virtual uint64_t splat_uploads() const { return 0; }
+  virtual uint64_t splat_set_key_failed() const { return 0; }       // the key of a set whose upload failed (the editor refuses it)
+  virtual uint64_t max_storage_buffer_bytes() const { return 0; }  // the card's largest storage buffer (0: unknown)
   virtual void release_splats() {}  // frees the static set (the scene has no splats left); the key is 0 after
   virtual bool pipelines_from_cache() const { return false; }   // round 557: the pipelines came from the disk cache
   virtual bool can_draw_toon_maps() const { return false; }   // task 0196: toon materials' painted maps (the toon pass)
