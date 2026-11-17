@@ -145,6 +145,43 @@ const ColorAttribute *Mesh::render_colors() const {
   return color_fits(c) ? &c : nullptr;
 }
 
+bool render_vertex_colors_into(const Mesh &m, const RenderMesh &rm, std::vector<Vec4> &out) {
+  out.clear();
+  const ColorAttribute *c = m.render_colors();
+  if (!c) return false;
+  const bool corner = c->domain == ColorAttribute::Domain::Corner;
+  const size_t nv = rm.positions.size();
+  out.assign(nv, Vec4(0, 0, 0, 0));
+  std::vector<float> n(nv, 0.0f);
+  /* Each triangle corner names its render vertex and its mesh corner: the colour goes where the render vertex is, each
+   * mesh corner once (a quad's corner sits in one or two of its triangles: counted per triangle, a seam's mean would
+   * lean with the triangulation). */
+  std::vector<uint8_t> seen(m.corner_verts.size(), 0);
+  for (size_t k = 0; k < rm.indices.size() && k < rm.tri_corner.size(); k++) {
+    const uint32_t v = rm.indices[k], cn = rm.tri_corner[k];
+    if (v >= nv || cn >= m.corner_verts.size() || seen[cn]) continue;
+    seen[cn] = 1;
+    const size_t e = corner ? cn : m.corner_verts[cn];
+    if (e >= c->rgba.size()) continue;
+    Vec4 col = c->rgba[e];
+    if (!finite_bits(col.x) || !finite_bits(col.y) || !finite_bits(col.z) || !finite_bits(col.w)) col = Vec4(1, 1, 1, 1);
+    out[v] = out[v] + col;
+    n[v] += 1.0f;
+  }
+  for (size_t v = 0; v < nv; v++) out[v] = n[v] > 0.0f ? out[v] * (1.0f / n[v]) : Vec4(1, 1, 1, 1);
+  return true;
+}
+
+const std::vector<Vec4> *Mesh::render_vertex_colors(const RenderMesh &rm) const {
+  const uint64_t build = rm.build_serial ? rm.build_serial : rm.serial;
+  ColourCache &cc = colour_cache_[&rm == &cache_[1] ? 1 : 0];  // (the variant's own slot)
+  if (cc.build == build && build != 0 && cc.version == version && cc.layer == render_color && cc.rgba.size() == rm.positions.size())
+    return cc.rgba.empty() ? nullptr : &cc.rgba;
+  if (!render_vertex_colors_into(*this, rm, cc.rgba)) std::vector<Vec4>().swap(cc.rgba);
+  cc.build = build, cc.version = version, cc.layer = render_color;
+  return cc.rgba.empty() ? nullptr : &cc.rgba;
+}
+
 /* A layer that no longer fits has had its elements renumbered by an operator that didn't carry it: it goes whole
  * rather than colour the wrong vertices or corners. The active and render choices follow the layers that stay. */
 void Mesh::prune_colors(bool points_too) {
@@ -1967,6 +2004,103 @@ MeshPtr ico_sphere(float r, int subdivisions) {
   orient_outward(*m);
   m->smooth = true;
   assign_uvs(*m, UvKind::Sphere);
+  m->touch();
+  return m;
+}
+
+/* Quad Sphere (round 535): a cube of `segments` quads along each edge pushed onto a sphere, all quads. Ported from
+ * Blender's bmo_create_quadsphere_exec (blender/source/blender/bmesh/operators/bmo_primitive.cc, Blender Authors,
+ * GPL-2.0-or-later): the same vertex order (Z layers: full bottom and top grids, rings between), the same face
+ * layout, the two mappings (method 0 Even Area, 1 Even Angle) and the cube UV layout. Blender is Z-up, so its Z
+ * becomes our Y (a rotation, so the winding stays). The vertex and face tables below are our own write-up. */
+int quad_sphere_segments(int requested) { return std::max(1, std::min(requested, 500)); }  // (Blender's own limit is 500 too)
+
+MeshPtr quad_sphere(float r, int segments, int method) {
+  auto m = std::make_shared<Mesh>();
+  m->name = "Quad Sphere";
+  if (!std::isfinite(r) || r <= 0.0f) r = 0.5f;
+  const int seg = quad_sphere_segments(segments);
+  const int seg_vert = seg + 1;
+  const int layer_full = seg_vert * seg_vert, layer_ring = seg * 4;
+
+  /* Where a cube vertex goes on the sphere: a face axis maps to itself, the other two through a warp that depends
+   * only on the axis (the angle is 0.8687 rad with 1 / tan(angle) as the scale for Even Area, pi/4 for Even Angle). */
+  const float angle = method == 1 ? kPi * 0.25f : 0.8687f;
+  const float angle_scale = method == 1 ? 1.0f : 0.845878184f;
+  auto cube_co = [seg](int i) { return float(i * 2 - seg) / float(seg); };
+  std::vector<float> warp(seg_vert);
+  for (int i = 0; i <= seg; i++) warp[i] = (i == 0 || i == seg) ? cube_co(i) : std::tan(cube_co(i) * angle) * angle_scale;
+
+  /* The vertex index of a grid point (each axis in [0, seg], one of them at an extreme). */
+  auto vert_index = [&](int x, int y, int z) -> uint32_t {
+    if (z == 0) return (uint32_t)(y * seg_vert + x);
+    if (z == seg) return (uint32_t)(layer_full + layer_ring * (seg - 1) + y * seg_vert + x);
+    int ring;
+    if (y == 0) ring = x;
+    else if (x == seg) ring = seg + y;
+    else if (y == seg) ring = seg * 3 - x;
+    else ring = seg * 4 - y;
+    return (uint32_t)(layer_full + layer_ring * (z - 1) + ring);
+  };
+  auto add_vertex = [&](int x, int y, int z) {
+    const int g[3] = {x, y, z};
+    const int face_axis = (x == 0 || x == seg) ? 0 : ((y == 0 || y == seg) ? 1 : 2);
+    float c[3];
+    for (int a = 0; a < 3; a++) c[a] = a == face_axis ? cube_co(g[a]) : warp[g[a]];
+    const Vec3 d = normalize(Vec3(c[0], c[1], c[2])) * r;
+    m->add_vert({d.x, d.z, -d.y});  // Blender's Z up to our Y up
+  };
+  for (int z = 0; z <= seg; z++) {
+    if (z == 0 || z == seg) {
+      for (int y = 0; y <= seg; y++)
+        for (int x = 0; x <= seg; x++) add_vertex(x, y, z);
+      continue;
+    }
+    for (int x = 0; x <= seg; x++) add_vertex(x, 0, z);
+    for (int y = 1; y <= seg; y++) add_vertex(seg, y, z);
+    for (int x = seg - 1; x >= 0; x--) add_vertex(x, seg, z);
+    for (int y = seg - 1; y >= 1; y--) add_vertex(0, y, z);
+  }
+
+  /* The six cube faces as corner indices (bit 2 = x, bit 1 = y, bit 0 = z) and the lower left of each in the UV
+   * layout, each face a quarter-wide square. */
+  static const int kCubeFaces[6][4] = {{0, 1, 3, 2}, {2, 3, 7, 6}, {6, 7, 5, 4}, {4, 5, 1, 0}, {2, 6, 4, 0}, {7, 3, 1, 5}};
+  static const float kFaceUv[6][2] = {{0.375f, 0.0f}, {0.375f, 0.25f}, {0.375f, 0.5f}, {0.375f, 0.75f}, {0.125f, 0.5f}, {0.625f, 0.5f}};
+  auto corner = [](int cube_vert, int out[3]) {
+    out[0] = (cube_vert >> 2) & 1;
+    out[1] = (cube_vert >> 1) & 1;
+    out[2] = cube_vert & 1;
+  };
+  const float uv_step = 0.25f / float(seg);
+  std::vector<Vec2> uvs;
+  for (int f = 0; f < 6; f++) {
+    int c0[3], c1[3], c3[3], su[3], sv[3];
+    corner(kCubeFaces[f][0], c0);
+    corner(kCubeFaces[f][1], c1);
+    corner(kCubeFaces[f][3], c3);
+    for (int a = 0; a < 3; a++) su[a] = c1[a] - c0[a], sv[a] = c3[a] - c0[a];
+    for (int v = 0; v < seg; v++) {
+      for (int u = 0; u < seg; u++) {
+        int g[3];
+        for (int a = 0; a < 3; a++) g[a] = c0[a] * seg + su[a] * u + sv[a] * v;
+        auto at = [&](int du, int dv) { return vert_index(g[0] + su[0] * du + sv[0] * dv, g[1] + su[1] * du + sv[1] * dv, g[2] + su[2] * du + sv[2] * dv); };
+        const float u0 = kFaceUv[f][0] + uv_step * float(u), u1 = kFaceUv[f][0] + uv_step * float(u + 1);
+        const float v0 = kFaceUv[f][1] + uv_step * float(v), v1 = kFaceUv[f][1] + uv_step * float(v + 1);
+        uint32_t q[4] = {at(0, 0), at(1, 0), at(1, 1), at(0, 1)};
+        Vec2 t[4] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
+        /* Quads on two of the four corners swap their diagonal, so a triangulated sphere is rounder. */
+        if ((((u * 2) + 1) < seg) != (((v * 2) + 1) < seg)) {
+          std::rotate(q, q + 1, q + 4);
+          std::rotate(t, t + 1, t + 4);
+        }
+        m->add_face({q[0], q[1], q[2], q[3]});
+        uvs.insert(uvs.end(), t, t + 4);
+      }
+    }
+  }
+  m->uvs = std::move(uvs);
+  orient_outward(*m);  // (the UVs are set first: a flipped face takes its UVs along)
+  m->smooth = true;
   m->touch();
   return m;
 }

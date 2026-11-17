@@ -9,6 +9,7 @@
 #include <chrono>
 #include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
+#include "test_panoramic.h"
 
 static void colormanagement_tests() {
   test("display: exact sRGB table and SIMD encoders", [] {
@@ -12349,6 +12350,560 @@ static void tests_round462() {
   });
 }
 
+/* ---- Round 538 (task 0518): panoramic cameras - the projection maths (the views' and the tracer's checks are the
+ * test-engineer's) ---- */
+static PanoramicParams pano_params(int type) {
+  PanoramicParams p;
+  p.type = type;
+  p.sensor_w = p.sensor_h = 36.0f;  // (a square picture: the fisheyes' circle is round)
+  return p;
+}
+
+static void tests_round538() {
+  test("panoramic: every type's direction from a picture point and the picture point from that direction agree (1e-4)", [] {
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      const PanoramicParams p = pano_params(type);
+      int checked = 0;
+      for (int iy = 1; iy < 10; iy++)
+        for (int ix = 1; ix < 10; ix++) {
+          const float u = ix / 10.0f, v = iy / 10.0f;
+          const Vec3 d = panoramic_direction(p, u, v);
+          if (length(d) < 0.5f) continue;  // (outside the circle: nothing to look along)
+          /* The mirror ball's rim (radius 1 on the ball: (0.8, 0.6) and the like) reflects straight back, the one
+           * direction every rim point shares, so no single picture point comes back from it - skipped, as Cycles' own
+           * inverse is undefined there. */
+          if (type == kPanoMirrorBall && std::hypot(2.0f * u - 1.0f, 2.0f * v - 1.0f) > 0.98f) continue;
+          float ru = -1, rv = -1;
+          CHECK(panoramic_uv(p, d, ru, rv));
+          CHECK_NEAR(ru, u, 1e-4);
+          CHECK_NEAR(rv, v, 1e-4);
+          checked++;
+        }
+      std::printf("    %s: %d of 81 points round-tripped\n", panoramic_type_name(type), checked);
+      CHECK(checked >= 30);  // (Equisolid's circle is small on a 36 mm sensor: about half the grid)
+    }
+  });
+  test("panoramic: an Equirectangular camera's centre looks along +Z, its left and right edges straight back, its top straight up, a quarter across to the right", [] {
+    const PanoramicParams p = pano_params(kPanoEquirectangular);
+    auto near_dir = [](Vec3 d, Vec3 e) { return length(d - e) < 1e-4f; };
+    CHECK(near_dir(panoramic_direction(p, 0.5f, 0.5f), Vec3(0, 0, 1)));
+    CHECK(near_dir(panoramic_direction(p, 0.0f, 0.5f), Vec3(0, 0, -1)));
+    CHECK(near_dir(panoramic_direction(p, 1.0f, 0.5f), Vec3(0, 0, -1)));
+    CHECK(near_dir(panoramic_direction(p, 0.5f, 0.0f), Vec3(0, 1, 0)));
+    CHECK(near_dir(panoramic_direction(p, 0.5f, 1.0f), Vec3(0, -1, 0)));
+    CHECK(near_dir(panoramic_direction(p, 0.75f, 0.5f), Vec3(1, 0, 0)));  // (the camera's right is +X)
+  });
+  test("panoramic: a Fisheye Equidistant circle's edge is 90 degrees off axis at 180 degrees, its corners show nothing; Equisolid obeys r = 2 f sin(theta / 2); a Mirror Ball's centre looks along the camera's forward", [] {
+    const PanoramicParams fe = pano_params(kPanoFisheyeEquidistant);
+    const Vec3 edge = panoramic_direction(fe, 1.0f, 0.5f);
+    CHECK_NEAR(dot(edge, Vec3(0, 0, 1)), 0.0, 1e-5);  // (90 degrees off the forward)
+    CHECK_NEAR(edge.x, 1.0, 1e-5);
+    const Vec3 corner = panoramic_direction(fe, 0.0f, 0.0f);
+    CHECK(corner.x == 0.0f && corner.y == 0.0f && corner.z == 0.0f);
+    const PanoramicParams es = pano_params(kPanoFisheyeEquisolid);
+    for (float u : {0.55f, 0.65f, 0.8f}) {
+      const Vec3 d = panoramic_direction(es, u, 0.5f);
+      CHECK(length(d) > 0.5f);
+      const float theta = std::acos(clampf(d.z, -1.0f, 1.0f));
+      const float r = (u - 0.5f) * es.sensor_w;  // mm on the sensor
+      CHECK_NEAR(r, 2.0f * es.fisheye_lens * std::sin(theta * 0.5f), 1e-3);
+    }
+    const Vec3 mb = panoramic_direction(pano_params(kPanoMirrorBall), 0.5f, 0.5f);
+    CHECK(length(mb - Vec3(0, 0, 1)) < 1e-5f);
+  });
+  test("panoramic: the cube faces a projection needs - a fisheye of 90 degrees the front, 120 the front and four sides, 300 all six; Equirectangular all six", [] {
+    auto mask = [](int type, float fov_deg) {
+      PanoramicParams p = pano_params(type);
+      p.fisheye_fov = fov_deg * kDeg2Rad;
+      return panoramic_face_mask(p);
+    };
+    const uint32_t front = 1u << 4, sides = 0xF, back = 1u << 5;
+    CHECK(mask(kPanoFisheyeEquidistant, 90.0f) == front);
+    CHECK(mask(kPanoFisheyeEquidistant, 120.0f) == (front | sides));
+    CHECK(mask(kPanoFisheyeEquidistant, 240.0f) == (front | sides));  // (half 120: a side face still reaches it along a diagonal - 126.6 degrees)
+    CHECK(mask(kPanoFisheyeEquidistant, 260.0f) == (front | sides | back));
+    CHECK(mask(kPanoFisheyeEquidistant, 300.0f) == (front | sides | back));
+    CHECK(mask(kPanoFisheyeEquisolid, 120.0f) == (front | sides));
+    CHECK(mask(kPanoEquirectangular, 180.0f) == (front | sides | back));
+  });
+  test("panoramic: faces drawn in colours land where their direction maps in an Equirectangular picture, and a fisheye's corners stay black", [] {
+    PanoramicParams p = pano_params(kPanoEquirectangular);
+    const int w = 64, h = 32;
+    std::vector<uint32_t> out((size_t)w * h);
+    PanoramicState st;
+    PanoramicCameraFrame cam;
+    cam.eye = {0, 0, 0}, cam.right = {1, 0, 0}, cam.up = {0, 1, 0}, cam.forward = {0, 0, 1};
+    int drawn = 0;
+    auto face_colour = [](int f) { return 0xFF000000u | (uint32_t)(40 + f * 30) << 16 | (uint32_t)(200 - f * 25) << 8 | (uint32_t)(f * 20 + 10); };
+    auto draw = [&](int f, const Mat4 &, const Mat4 &, RenderTarget &rt) {
+      drawn++;
+      for (int y = 0; y < rt.height; y++)
+        for (int x = 0; x < rt.width; x++) rt.color[(size_t)y * rt.stride + x] = face_colour(f);
+    };
+    panoramic_render(p, w, h, cam, st, out.data(), w, draw);
+    CHECK(drawn == 6);
+    CHECK(out[(size_t)16 * w + 32] == face_colour(4));  // the centre: straight ahead (+Z)
+    CHECK(out[(size_t)16 * w + 0] == face_colour(5));   // the left edge: straight back
+    CHECK(out[(size_t)16 * w + 48] == face_colour(0));  // a quarter across: +X
+    CHECK(out[(size_t)16 * w + 16] == face_colour(1));  // a quarter in: -X
+    CHECK(out[(size_t)0 * w + 32] == face_colour(2));   // the top: up
+    CHECK(out[(size_t)31 * w + 32] == face_colour(3));  // the bottom: down
+    const PanoramicParams fe = pano_params(kPanoFisheyeEquidistant);
+    std::vector<uint32_t> circle((size_t)40 * 40);
+    drawn = 0;
+    panoramic_render(fe, 40, 40, cam, st, circle.data(), 40, draw);
+    CHECK(drawn == 5);  // (180 degrees: the front and the four sides)
+    CHECK(circle[0] == 0xFF000000u);
+    CHECK(circle[(size_t)20 * 40 + 20] == face_colour(4));
+  });
+  test("panoramic: every output pixel takes its colour from the face position the projection says, seams included, and none needs a face position past the overscan", [] {
+    /* The draw callback encodes each face pixel's (x, y) in red and green (4 x, 4 y: linear, so the bilinear lookup keeps it)
+     * and the face in blue; a decoded pixel is where on which face the output pixel looked. */
+    struct Case { int type; float fov_deg; };
+    for (const Case &cs : {Case{kPanoEquirectangular, 0}, Case{kPanoFisheyeEquisolid, 260.0f}, Case{kPanoFisheyeEquidistant, 250.0f},Case{kPanoMirrorBall, 0}, Case{kPanoCentralCylindrical, 0}}) {
+      PanoramicParams p = pano_params(cs.type);
+      if (cs.fov_deg > 0) p.fisheye_fov = cs.fov_deg * kDeg2Rad;
+      const int w = 128, h = 64;
+      std::vector<uint32_t> out((size_t)w * h);
+      PanoramicState st;
+      PanoramicCameraFrame cam;
+      cam.right = {1, 0, 0}, cam.up = {0, 1, 0}, cam.forward = {0, 0, 1};
+      panoramic_render(p, w, h, cam, st, out.data(), w, [](int f, const Mat4 &, const Mat4 &, RenderTarget &rt) {
+        for (int y = 0; y < rt.height; y++)
+          for (int x = 0; x < rt.width; x++) rt.color[(size_t)y * rt.stride + x] = 0xFF000000u | (uint32_t)std::min(255, x * 4) << 16 | (uint32_t)std::min(255, y * 4) << 8 | (uint32_t)(f * 30);
+      });
+      const int side = panoramic_face_side(w, h);
+      CHECK(side == 64);
+      const uint32_t mask = panoramic_face_mask(p);
+      int judged = 0, wrong_face = 0, seam = 0;
+      double worst = 0.0;
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+          const Vec3 d = panoramic_direction(p, (x + 0.5f) / w, (y + 0.5f) / h);
+          if (length(d) < 0.5f) continue;
+          int face = -1;
+          float best = -2.0f;
+          for (int f = 0; f < 6; f++) {
+            Vec3 fw, up;
+            panoramic_face(f, fw, up);
+            if ((mask & (1u << f)) && dot(d, fw) > best) best = dot(d, fw), face = f;
+          }
+          Vec3 fw, up;
+          panoramic_face(face, fw, up);
+          const Vec3 right = cross(up, fw);
+          const float tx = dot(d, right) / best, ty = dot(d, up) / best;
+          CHECK(std::fabs(tx) <= kPanoramicOverscan + 1e-3f && std::fabs(ty) <= kPanoramicOverscan + 1e-3f);  // (no pixel asks for more than the faces draw)
+          if (std::fabs(tx) > 0.95f || std::fabs(ty) > 0.95f) seam++;
+          const float ex = (tx / kPanoramicOverscan * 0.5f + 0.5f) * side, ey = (0.5f - ty / kPanoramicOverscan * 0.5f) * side;
+          const uint32_t px = out[(size_t)y * w + x];
+          judged++;
+          if ((int)(px & 255) != face * 30) {
+            wrong_face++;
+            continue;
+          }
+          const double gx = ((px >> 16) & 255) / 4.0 + 0.5, gy = ((px >> 8) & 255) / 4.0 + 0.5;  // (the face position decoded)
+          worst = std::max(worst, std::max(std::fabs(gx - ex), std::fabs(gy - ey)));
+        }
+      std::printf("    %s: %d pixels judged, %d on the wrong face, %d near a seam, worst position error %.3f face pixels\n", panoramic_type_name(cs.type), judged, wrong_face, seam, worst);
+      CHECK(judged > 2000);
+      CHECK(seam > 50);
+      CHECK(wrong_face == 0);
+      CHECK(worst < 0.4);
+    }
+  });
+  test("panoramic: bad numbers - NaN, a minimum above its maximum, a field of view of 0 or 400 degrees - give finite directions and a render through panoramic_render that doesn't crash, even at 1x1", [] {
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      PanoramicParams p = pano_params(type);
+      p.lat_min = std::nanf(""), p.lat_max = -5.0f;
+      p.lon_min = 4.0f, p.lon_max = -4.0f;
+      p.fisheye_fov = type % 2 ? 0.0f : 400.0f * kDeg2Rad;
+      p.fisheye_lens = std::nanf(""), p.cyl_v_min = 3.0f, p.cyl_v_max = std::nanf("");
+      p.sanitize();
+      for (int i = 0; i <= 10; i++) {
+        const Vec3 d = panoramic_direction(p, i / 10.0f, 0.5f);
+        CHECK(std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z));
+      }
+      PanoramicState st;
+      PanoramicCameraFrame cam;
+      cam.right = {1, 0, 0}, cam.up = {0, 1, 0}, cam.forward = {0, 0, 1};
+      uint32_t one = 0;
+      panoramic_render(p, 1, 1, cam, st, &one, 1, [](int, const Mat4 &, const Mat4 &, RenderTarget &rt) {
+        for (int y = 0; y < rt.height; y++)
+          for (int x = 0; x < rt.width; x++) rt.color[(size_t)y * rt.stride + x] = 0xFF123456u;
+      });
+      CHECK((one >> 24) == 0xFF);
+    }
+  });
+
+  /* ---- the test-engineer's: the views, F12 and the path tracer through a real scene (acceptance criterion 4, 7) ---- */
+  /* F12 through the console on the default 900x600 editor with the six walls: engine "Rasterized" or "Path". */
+  auto f12 = [](Editor &ed, const char *engine, int w, int h) -> const Image & {
+    ed.command(std::string("set Render.RenderEngine ") + engine);
+    ed.command("set Render.ResolutionX " + std::to_string(w));
+    ed.command("set Render.ResolutionY " + std::to_string(h));
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("device cpu");
+    ed.command("render");
+    for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    return ed.render_image_for_test();
+  };
+  auto open_walls = [](Editor &ed, int w = 900, int h = 600) {
+    ed.init_headless(w, h);
+    ed.step_frame_headless();
+    GameObject *cam = r538_six_walls(ed);
+    CHECK(cam && cam->get<Camera>());
+    ed.command("select Main Camera");
+    ed.step_frame_headless();
+    return cam ? cam->get<Camera>() : nullptr;
+  };
+  auto name_of = [](int type) { return std::string(panoramic_type_name(type)); };
+
+  test("panoramic: the Camera Preview of an Equirectangular camera shows each coloured wall where its direction maps (cyan ahead in the middle, red a quarter right, green a quarter left, magenta at both edges, blue at the top, yellow at the bottom)", [&] {
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    ed.command("camera panoramic equirectangular");
+    r34_steps(ed, 6);
+    const Recti box = r538_preview_picture(ed);
+    CHECK(box.w > 60 && box.h > 30);
+    if (box.w <= 0) return;
+    const Image &fb = ed.framebuffer();
+    auto at = [&](int x, int y) { return fb.pixels[(size_t)(box.y + y) * fb.width + box.x + x]; };
+    /* The named points first: the user's own reading of the picture. */
+    auto wall_at = [&](float u, float v) { return r538_classify(at((int)(u * box.w), (int)(v * box.h))); };
+    CHECK(wall_at(0.50f, 0.50f) == 4);
+    CHECK(wall_at(0.75f, 0.50f) == 0);
+    CHECK(wall_at(0.25f, 0.50f) == 1);
+    CHECK(wall_at(0.03f, 0.50f) == 5);
+    CHECK(wall_at(0.97f, 0.50f) == 5);
+    CHECK(wall_at(0.50f, 0.08f) == 2);
+    CHECK(wall_at(0.50f, 0.92f) == 3);
+    /* And every pixel that looks squarely at one wall. */
+    const Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    const R538Check c = r538_compare(panoramic_params_for(*cam, box.w, box.h), box.w, box.h, at, 3, 2);  // (a 1-pixel outline of the inset is drawn over the picture's edge: left out)
+    std::printf("    Camera Preview %dx%d: %d pixels judged, %d wrong %s\n", box.w, box.h, c.judged, c.wrong, c.first_wrong.c_str());
+    CHECK(c.judged > 500);
+    CHECK(c.wrong == 0);
+  });
+
+  test("panoramic: the Game view of every panoramic type shows the six walls where the projection says; a fisheye's corners and a cylinder's missing sky stay black", [&] {
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      ed.command("camera panoramic " + name_of(type));
+      r34_steps(ed, 6);
+      const Recti g = ed.game_rect_for_test();
+      const Image &fb = ed.framebuffer();
+      const Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+      CHECK(cam->panoramic_type == type);
+      auto at = [&](int x, int y) { return fb.pixels[(size_t)(g.y + y) * fb.width + g.x + x]; };
+      const R538Check c = r538_compare(panoramic_params_for(*cam, g.w, g.h), g.w, g.h, at, 5);
+      std::printf("    Game view, %s, %dx%d: %d judged, %d wrong, %d outside (%d not black) %s\n", name_of(type).c_str(), g.w, g.h, c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 300);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+    }
+  });
+
+  test("panoramic: F12's rasterized render of every panoramic type shows the six walls where the projection says, with depth of field on, an orthographic flag set and a camera filter added (panoramic wins; the filters are skipped)", [&] {
+    Editor ed;
+    Camera *cam = open_walls(ed);
+    if (!cam) return;
+    cam->dof = true;
+    cam->orthographic = true;  // (ignored while panoramic)
+    ed.command("filter add Retro Console");
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      ed.command("camera panoramic " + name_of(type));
+      const Image &img = f12(ed, "Rasterized", 160, 80);
+      CHECK(img.width == 160 && img.height == 80);
+      if (img.width != 160) continue;
+      const PanoramicParams p = panoramic_params_for(*cam, 160, 80);
+      const R538Check c = r538_compare(p, 160, 80, [&](int x, int y) { return img.pixels[(size_t)y * 160 + x]; }, 2);
+      std::printf("    F12 rasterized, %s: %d judged, %d wrong, %d outside (%d not black) %s\n", name_of(type).c_str(), c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 200);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+      for (uint32_t px : img.pixels)
+        if ((px >> 24) != 0xFF) {
+          CHECK(false);  // (an unfilled or NaN-poisoned pixel)
+          break;
+        }
+    }
+  });
+
+  test("panoramic: F12's path-traced render of every panoramic type agrees with the projection on the six walls (the CPU tracer's primary rays)", [&] {
+    Editor ed;
+    Camera *cam = open_walls(ed);
+    if (!cam) return;
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      ed.command("camera panoramic " + name_of(type));
+      const Image &img = f12(ed, "Path", 96, 48);
+      CHECK(img.width == 96 && img.height == 48 && !ed.rendering_for_test());
+      if (img.width != 96) continue;
+      const PanoramicParams p = panoramic_params_for(*cam, 96, 48);
+      const R538Check c = r538_compare(p, 96, 48, [&](int x, int y) { return img.pixels[(size_t)y * 96 + x]; }, 2);
+      std::printf("    F12 path-traced, %s: %d judged, %d wrong, %d outside (%d not black) %s\n", name_of(type).c_str(), c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 100);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+    }
+  });
+
+  test("panoramic: the raster picture and the path-traced picture of the same Equirectangular camera show the same wall at every judged pixel", [&] {
+    Editor ed;
+    Camera *cam = open_walls(ed);
+    if (!cam) return;
+    ed.command("camera panoramic equirectangular");
+    const std::vector<uint32_t> ras = f12(ed, "Rasterized", 128, 64).pixels;
+    const std::vector<uint32_t> pt = f12(ed, "Path", 128, 64).pixels;
+    CHECK(ras.size() == 128 * 64 && pt.size() == ras.size());
+    if (ras.size() != pt.size()) return;
+    const PanoramicParams p = panoramic_params_for(*cam, 128, 64);
+    int judged = 0, differ = 0;
+    for (int y = 0; y < 64; y += 2)
+      for (int x = 0; x < 128; x += 2) {
+        if (r538_wall_of(panoramic_direction(p, (x + 0.5f) / 128, (y + 0.5f) / 64)) < 0) continue;
+        judged++;
+        differ += r538_classify(ras[(size_t)y * 128 + x]) != r538_classify(pt[(size_t)y * 128 + x]);
+      }
+    std::printf("    raster against path tracer: %d pixels, %d showing another wall\n", judged, differ);
+    CHECK(judged > 500);
+    CHECK(differ == 0);
+  });
+
+  test("panoramic: the path tracer through the PathTracer API with the camera's lens shows the six walls for Equirectangular and a Fisheye Equidistant, black outside the circle", [] {
+    static const Vec3 pos[6] = {{5, 0, 0}, {-5, 0, 0}, {0, 5, 0}, {0, -5, 0}, {0, 0, 5}, {0, 0, -5}};
+    static const Vec3 euler[6] = {{0, 90, 0}, {0, 90, 0}, {90, 0, 0}, {90, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    MeshPtr quad = primitives::quad(14.0f);
+    std::vector<std::vector<MaterialPtr>> mats(6);
+    std::vector<PTObject> objs;
+    for (int f = 0; f < 6; f++) {
+      MaterialPtr m = make_material("wall", Vec3(0.0f));
+      m->emission = r538_wall_colour(f), m->emission_strength = 1.0f, m->specular = 0.0f, m->double_sided = true;
+      mats[(size_t)f] = {m};
+      objs.push_back({&quad->render_mesh_tangents(), Mat4::trs(pos[f], Quat::euler(euler[f]), Vec3(1.0f)), &mats[(size_t)f]});
+    }
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0, 0, 0};
+    for (int type : {kPanoEquirectangular, kPanoFisheyeEquidistant}) {
+      const int W = 96, H = 48;
+      PanoramicParams p;
+      p.type = type;
+      p.sensor_w = 36.0f, p.sensor_h = 18.0f;
+      PathTracer pt;
+      pt.build(objs, {}, env);
+      PTSettings st;
+      st.max_bounces = 1, st.clamp_indirect = 0, st.denoise = false;
+      pt.set_settings(st);
+      PTLens lens;
+      lens.pano = p;
+      pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 100.0f), W, H, lens);
+      pt.render(1e9, 4);
+      std::vector<uint32_t> out((size_t)W * H);
+      pt.resolve(out.data(), W, false);
+      const R538Check c = r538_compare(p, W, H, [&](int x, int y) { return out[(size_t)y * W + x]; }, 2);
+      std::printf("    PathTracer, %s: %d judged, %d wrong, %d outside (%d not black) %s\n", panoramic_type_name(type), c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 100);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+      if (type == kPanoFisheyeEquidistant) CHECK(c.black_outside > 100);
+      /* A card in the machine is asked for but a panoramic camera traces on the CPU: the same picture. */
+      if (gpu::available()) {
+        PathTracer pg;
+        pg.build(objs, {}, env);
+        PTSettings sg = st;
+        sg.gpus = {gpu::devices()[0].index};
+        pg.set_settings(sg);
+        pg.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 100.0f), W, H, lens);
+        pg.render(1e9, 4);
+        std::vector<uint32_t> og((size_t)W * H);
+        pg.resolve(og.data(), W, false);
+        const R538Check cg = r538_compare(p, W, H, [&](int x, int y) { return og[(size_t)y * W + x]; }, 2);
+        std::printf("    PathTracer with a card asked for, %s: %d judged, %d wrong\n", panoramic_type_name(type), cg.judged, cg.wrong);
+        CHECK(cg.judged > 100 && cg.wrong == 0);
+      }
+    }
+  });
+
+  test("panoramic: the Game view on the GPU raster path shows the six walls where the projection says (skipped without a Vulkan card)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    ed.command("camera panoramic equirectangular");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 8);
+    const FrameProfile before = ed.frame_profile_totals();
+    ed.scene().find_by_name("Main Camera")->get<Camera>()->latitude_max = 89.0f;  // (a change: every view draws again)
+    ed.mark_changed_for_test("camera");
+    r34_steps(ed, 8);
+    const FrameProfile after = ed.frame_profile_totals();
+    std::printf("    %s; %llu views on the GPU, %llu on the CPU instead\n", ed.gpu_view_status().c_str(), (unsigned long long)(after.gpu_views - before.gpu_views),
+                (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks));
+    CHECK(after.gpu_views > before.gpu_views);  // (the faces really went through the card, not the CPU rasterizer)
+    const Recti g = ed.game_rect_for_test();
+    const Image &fb = ed.framebuffer();
+    const Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    const R538Check c = r538_compare(panoramic_params_for(*cam, g.w, g.h), g.w, g.h, [&](int x, int y) { return fb.pixels[(size_t)(g.y + y) * fb.width + g.x + x]; }, 5);
+    std::printf("    Game view on the GPU: %d judged, %d wrong %s\n", c.judged, c.wrong, c.first_wrong.c_str());
+    CHECK(c.judged > 300);
+    CHECK(c.wrong == 0);
+    ed.viewport_device_for_test(1);
+  });
+
+  test("panoramic: F12 with MoonRay chosen and a panoramic camera renders with the path tracer instead (MoonRay's export has no panoramic lens), not as a perspective picture", [] {
+    Editor ed;
+    r34_open(ed);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "stand-in";
+    in.version = "test";
+    in.launcher = {test_program(), "--fake-moonray"};
+    ed.moonray_set_for_test(in);
+    ed.command("engine moonray");
+    ed.command("select Main Camera");
+    ed.command("camera panoramic equirectangular");
+    ed.command("set Render.ResolutionX 32");
+    ed.command("set Render.ResolutionY 16");
+    ed.command("set Render.Samples 2");
+    ed.command("set Render.Denoise false");
+    ed.command("device cpu");
+    ed.command("render");
+    CHECK(!ed.moonray_rendering_for_test());  // (a MoonRay job would be under way)
+    for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    std::printf("    status: '%s'\n", ed.render_status_for_test().substr(0, 60).c_str());
+    CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos);
+    CHECK(!ed.render_image_for_test().pixels.empty());
+    ed.command("camera panoramic off");  // (the same scene with an ordinary camera does go to MoonRay)
+    ed.command("render");
+    CHECK(ed.moonray_rendering_for_test() || ed.render_status_for_test().rfind("MoonRay", 0) == 0);
+    ed.stop_render_for_test();
+    ed.step_frame_headless();
+  });
+
+  test("panoramic: bad numbers in the camera (NaN, latitude min above max, a fisheye field of view of 0 or 400, the smallest F12 render of 16x16) leave the Camera Preview, Game view, F12 raster and F12 path tracer opaque and finite", [&] {
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    const Camera original(*cam);
+    struct Case { const char *what; std::function<void(Camera &)> set; };
+    const float nan = std::nanf("");
+    const std::vector<Case> cases = {
+        {"latitude min 80 above max -20", [](Camera &c) { c.panoramic_type = 1, c.latitude_min = 80, c.latitude_max = -20; }},
+        {"longitude min above max", [](Camera &c) { c.panoramic_type = 1, c.latitude_min = -90, c.latitude_max = 90, c.longitude_min = 120, c.longitude_max = -120; }},
+        {"every number NaN", [nan](Camera &c) { c.panoramic_type = 1, c.latitude_min = c.latitude_max = c.longitude_min = c.longitude_max = nan; }},
+        {"fisheye field of view 0", [](Camera &c) { c.panoramic_type = 2, c.fisheye_fov = 0; }},
+        {"fisheye field of view 400", [](Camera &c) { c.panoramic_type = 2, c.fisheye_fov = 400; }},
+        {"fisheye field of view NaN", [nan](Camera &c) { c.panoramic_type = 3, c.fisheye_fov = nan; }},
+        {"equisolid lens 0 and NaN", [nan](Camera &c) { c.panoramic_type = 3, c.fisheye_fov = 180, c.fisheye_lens = 0; c.sensor_width = nan; }},
+        {"cylinder height min above max", [](Camera &c) { c.panoramic_type = 4, c.cylinder_min = 5, c.cylinder_max = -5; }},
+        {"cylinder height NaN and equal", [nan](Camera &c) { c.panoramic_type = 4, c.cylinder_min = nan, c.cylinder_max = 0; }},
+        {"mirror ball with everything infinite", [](Camera &c) { c.panoramic_type = 5, c.fisheye_fov = INFINITY, c.sensor_width = INFINITY; }},
+        {"a type number out of range", [](Camera &c) { c.panoramic_type = 9; }},
+    };
+    for (const Case &cs : cases) {
+      *cam = original;  // (the camera as it was, in place: the object keeps its component and its owner)
+      cs.set(*cam);
+      ed.mark_changed_for_test("bad numbers");
+      r34_steps(ed, 5);
+      auto sane = [&](const Image &img, const char *where) {
+        bool opaque = img.width > 0;
+        for (uint32_t px : img.pixels) opaque = opaque && (px >> 24) == 0xFF;
+        if (!opaque) std::printf("    %s: %s gave a picture with unfilled pixels\n", cs.what, where);
+        return opaque;
+      };
+      /* The views: the framebuffer's Game view and preview regions are opaque (no crash is the other half). */
+      Image game;
+      const Recti g = ed.game_rect_for_test();
+      game.resize(g.w, g.h);
+      for (int y = 0; y < g.h; y++)
+        for (int x = 0; x < g.w; x++) game.pixels[(size_t)y * g.w + x] = ed.framebuffer().pixels[(size_t)(g.y + y) * ed.framebuffer().width + g.x + x];
+      CHECK(sane(game, "the Game view"));
+      const Recti box = r538_preview_picture(ed);
+      if (box.w > 0) {
+        Image pv;
+        pv.resize(box.w, box.h);
+        for (int y = 0; y < box.h; y++)
+          for (int x = 0; x < box.w; x++) pv.pixels[(size_t)y * box.w + x] = ed.framebuffer().pixels[(size_t)(box.y + y) * ed.framebuffer().width + box.x + x];
+        CHECK(sane(pv, "the Camera Preview"));
+      }
+      ed.command("set Render.RenderEngine Rasterized");
+      ed.command("set Render.ResolutionX 48");
+      ed.command("set Render.ResolutionY 24");
+      ed.command("device cpu");
+      ed.command("render");
+      CHECK(sane(ed.render_image_for_test(), "F12 rasterized"));
+      ed.command("set Render.RenderEngine Path");
+      ed.command("set Render.Samples 1");
+      ed.command("set Render.Denoise false");
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(sane(ed.render_image_for_test(), "F12 path traced"));
+    }
+    /* The smallest render F12 allows (it clamps to 16x16; panoramic_render itself is checked at 1x1 above), raster and path-traced. */
+    *cam = original;
+    cam->panoramic_type = 1;
+    ed.mark_changed_for_test("tiny");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      ed.command(std::string("set Render.RenderEngine ") + engine);
+      ed.command("set Render.ResolutionX 1");
+      ed.command("set Render.ResolutionY 1");
+      ed.command("set Render.Samples 2");
+      ed.command("set Render.Denoise false");
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      std::printf("    %s render at 1x1 -> %dx%d, pixel 0x%08X\n", engine, img.width, img.height, img.pixels.empty() ? 0u : img.pixels[0]);
+      CHECK(img.width >= 1 && img.height >= 1 && !img.pixels.empty() && (img.pixels[0] >> 24) == 0xFF);
+    }
+  });
+
+  test("panoramic: the path tracer's linear light stays finite for every type with bad numbers in the lens (NaN, reversed ranges, a field of view of 0 and 400)", [] {
+    MeshPtr quad = primitives::quad(14.0f);
+    std::vector<MaterialPtr> mats = {make_material("wall", Vec3(0.5f))};
+    mats[0]->double_sided = true;
+    std::vector<PTObject> objs = {{&quad->render_mesh_tangents(), Mat4::trs({0, 0, 5}, Quat(), Vec3(1.0f)), &mats}};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.2f, 0.2f, 0.2f};
+    const float nan = std::nanf("");
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++)
+      for (int bad = 0; bad < 3; bad++) {
+        PanoramicParams p;
+        p.type = type;
+        p.sensor_w = 36.0f, p.sensor_h = 24.0f;
+        if (bad == 0) p.lat_min = nan, p.lat_max = nan, p.lon_min = nan, p.fisheye_fov = nan, p.fisheye_lens = nan, p.cyl_v_min = nan;
+        if (bad == 1) p.lat_min = 1.0f, p.lat_max = -1.0f, p.lon_min = 3.0f, p.lon_max = -3.0f, p.fisheye_fov = 0.0f, p.cyl_v_min = 4.0f, p.cyl_v_max = -4.0f;
+        if (bad == 2) p.fisheye_fov = 400.0f * kDeg2Rad, p.fisheye_lens = 0.0f, p.sensor_w = 0.0f;
+        PathTracer pt;
+        pt.build(objs, {}, env);
+        PTSettings st;
+        st.max_bounces = 2, st.denoise = false;
+        pt.set_settings(st);
+        PTLens lens;
+        lens.pano = p;  // (not sanitized here: the tracer meets the numbers as a caller hands them)
+        pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, 2.0f, 0.1f, 100.0f), 32, 16, lens);
+        pt.render(1e9, 2);
+        const std::vector<float> rgb = pt.linear_rgb(false);
+        bool finite = rgb.size() == 32 * 16 * 3;
+        for (float f : rgb) finite = finite && std::isfinite(f) && f >= 0.0f;
+        if (!finite) std::printf("    %s with bad numbers %d: a pixel is NaN, infinite or negative\n", panoramic_type_name(type), bad);
+        CHECK(finite);
+      }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -12403,4 +12958,5 @@ void run_render_tests() {
   tests_round343();
   tests_round341();
   tests_round462();
+  tests_round538();
 }

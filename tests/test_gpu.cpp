@@ -6276,6 +6276,470 @@ static void tests_round508_gpu() {
   });
 }
 
+/* Round 543 (task 0523, ADR 0151): the views' shadows traced on the card. The raster tests open the card as the other GPU
+ * tests do and skip without one, or without ray queries (Raster::can_trace_shadows); the preference, console and greyed-out
+ * tests need no card. The sun's RasterLight::direction is the way its light travels (down is {0,-1,0}). */
+namespace r543 {
+
+struct Scene {
+  std::unique_ptr<gpu::Raster> g;
+  int cube = -1, plane = -1;
+  static constexpr int W = 400, H = 400;
+  Mat4 vp;
+  std::vector<gpu::RasterInstance> inst;
+  std::vector<gpu::RasterLight> lights;
+  std::vector<uint32_t> px;
+
+  /* False (with the reason printed) when there is no card or it can't trace shadows. */
+  bool open() {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return false;
+    }
+    std::string err;
+    g = gpu::Raster::create(0, &err);
+    if (!g) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return false;
+    }
+    if (!g->can_trace_shadows()) {
+      std::printf("    skipped: this card has no ray queries\n");
+      return false;
+    }
+    auto upload = [&](const MeshPtr &mp) {
+      const RenderMesh &rm = mp->render_mesh();
+      std::vector<gpu::RasterVertex> vs(rm.positions.size());
+      for (size_t i = 0; i < vs.size(); i++)
+        vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      return g->add_mesh(vs, rm.indices, &err);
+    };
+    cube = upload(primitives::cube(1.0f));
+    plane = upload(primitives::plane(20.0f, 1));
+    vp = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 100.0f) * Mat4::look_at({0, 14, 0}, {0, 0, 0}, {0, 0, 1});
+    px.assign((size_t)W * H, 0);
+    return cube >= 0 && plane >= 0;
+  }
+  gpu::RasterInstance make(int mesh, Vec3 at, Vec3 scale, uint32_t flags, uint32_t id) const {
+    gpu::RasterInstance in;
+    const Mat4 m = Mat4::translate(at) * Mat4::scale(scale);
+    std::memcpy(in.model, m.m, 64);
+    in.flags = flags;
+    in.mesh = (uint32_t)mesh;
+    in.id = id;
+    return in;
+  }
+  static constexpr uint32_t kBoth = gpu::RasterInstance::ReceiveShadows | gpu::RasterInstance::CastShadows;
+  /* A frame of the current instances and lights. map: the sun's shadow map is drawn (the old path), fitted over the floor. */
+  bool solid = false;  // Solid shading (RasterFrame::gouraud)
+  bool draw(bool rt, bool map, int slot = 0) {
+    std::string err;
+    gpu::RasterFrame fr;
+    fr.width = W, fr.height = H;
+    fr.slot = slot;
+    fr.gouraud = solid;
+    std::memcpy(fr.view_proj, vp.m, 64);
+    fr.eye[1] = 14;
+    const Vec3 d = normalize(Vec3(1, -2, 0));
+    const Mat4 sun = Mat4::ortho(8.0f, 1.0f, 0.1f, 60.0f) * Mat4::look_at(d * -20.0f, {0, 0, 0}, {0, 0, 1});
+    std::memcpy(fr.sun_view_proj, sun.m, 64);
+    fr.shadow_size = map ? 2048 : 0;
+    fr.shadow_light = 0;
+    fr.rt_shadows = rt;
+    fr.lights = lights;
+    fr.env_mode = 1;
+    fr.env_color[0] = fr.env_color[1] = fr.env_color[2] = 0.03f;
+    g->set_instances(inst);
+    return g->render(fr, &err) && g->read_back(slot, px.data(), nullptr, nullptr, &err);
+  }
+  /* The picture's brightness (sum of the three channels) at a floor point. */
+  float lum(Vec3 world) const {
+    const Vec4 c = vp * Vec4(world.x, world.y, world.z, 1.0f);
+    const int x = (int)((c.x / c.w * 0.5f + 0.5f) * W), y = (int)((0.5f - c.y / c.w * 0.5f) * H);
+    const uint32_t p = px[(size_t)std::clamp(y, 0, H - 1) * W + std::clamp(x, 0, W - 1)];
+    return (float)((p & 255) + ((p >> 8) & 255) + ((p >> 16) & 255));
+  }
+  static gpu::RasterLight sun(Vec3 dir) {
+    gpu::RasterLight l;
+    l.type = 0;
+    const Vec3 d = normalize(dir);
+    l.direction[0] = d.x, l.direction[1] = d.y, l.direction[2] = d.z;
+    l.intensity = 1.5f;
+    return l;
+  }
+  static gpu::RasterLight point(Vec3 at, float intensity = 60.0f) {
+    gpu::RasterLight l;
+    l.type = 1;
+    l.position[0] = at.x, l.position[1] = at.y, l.position[2] = at.z;
+    l.intensity = intensity;
+    l.range = 30.0f;
+    return l;
+  }
+};
+
+/* The floor with a cube floating over it, a sun slanting towards +x: (0.9, 0, 0) lies in the cube's shadow, (-3, 0, 0) and
+ * (3.5, 0, 0) in the light. */
+inline void cube_over_floor(Scene &s, uint32_t cube_flags = Scene::kBoth, uint32_t floor_flags = Scene::kBoth, Vec3 cube_at = {0, 1, 0}) {
+  s.inst = {s.make(s.plane, {0, 0, 0}, {1, 1, 1}, floor_flags, 1), s.make(s.cube, cube_at, {1, 1, 1}, cube_flags, 2)};
+  s.lights = {Scene::sun({1, -2, 0})};
+}
+
+/* Two boxes with a point light between them: (-4.5, 0, 0) and (4.5, 0, 0) are the far sides. */
+inline void boxes_and_point_light(Scene &s, bool light_shadows = true) {
+  s.inst = {s.make(s.plane, {0, 0, 0}, {1, 1, 1}, Scene::kBoth, 1), s.make(s.cube, {-3, 0.5f, 0}, {1, 1, 1}, Scene::kBoth, 2),
+            s.make(s.cube, {3, 0.5f, 0}, {1, 1, 1}, Scene::kBoth, 3)};
+  s.lights = {Scene::point({0, 1.0f, 0})};
+  s.lights[0].shadows = light_shadows;
+}
+
+}  // namespace r543
+
+static void tests_round543_gpu() {
+  test("round 543: ray-traced shadows with a sun - under a floating cube the floor is dark and beside it lit, as the shadow map draws them (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    CHECK(s.draw(false, true));
+    const float map_in = s.lum({0.9f, 0, 0}), map_out_a = s.lum({-3, 0, 0}), map_out_b = s.lum({3.5f, 0, 0});
+    CHECK(s.draw(true, true));
+    const float rt_in = s.lum({0.9f, 0, 0}), rt_out_a = s.lum({-3, 0, 0}), rt_out_b = s.lum({3.5f, 0, 0});
+    std::printf("    in shadow: map %.0f / traced %.0f; lit: map %.0f %.0f / traced %.0f %.0f\n", map_in, rt_in, map_out_a, map_out_b, rt_out_a, rt_out_b);
+    CHECK(map_in < 0.7f * map_out_a);  // (the reference itself shadows there: the points are well inside / outside the edge)
+    CHECK(rt_in < 0.7f * rt_out_a && rt_in < 0.7f * rt_out_b);
+    CHECK(std::fabs(rt_out_a - map_out_a) <= 0.1f * map_out_a + 6.0f);
+    CHECK(std::fabs(rt_out_b - map_out_b) <= 0.1f * map_out_b + 6.0f);
+    CHECK(std::fabs(rt_in - map_in) <= 0.2f * map_out_a);
+  });
+  test("round 543: ray-traced shadows with a point light between two boxes - the far side of each box is dark with them on, and lit with them off (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::boxes_and_point_light(s);
+    CHECK(s.draw(false, false));
+    const float off_l = s.lum({-4.5f, 0, 0}), off_r = s.lum({4.5f, 0, 0}), off_near = s.lum({-1.5f, 0, 0});
+    CHECK(s.draw(true, false));
+    const float on_l = s.lum({-4.5f, 0, 0}), on_r = s.lum({4.5f, 0, 0}), on_near = s.lum({-1.5f, 0, 0});
+    std::printf("    far sides off: %.0f %.0f, on: %.0f %.0f; the lit floor between the boxes off %.0f, on %.0f\n", off_l, off_r, on_l, on_r, off_near, on_near);
+    CHECK(off_l > 0 && off_r > 0);
+    CHECK(on_l < 0.6f * off_l && on_r < 0.6f * off_r);
+    CHECK(std::fabs(on_near - off_near) <= 0.05f * off_near + 4.0f);  // (what the light reaches is not touched)
+  });
+  test("round 543: a light with Shadows off casts no traced shadow, the same light with Shadows on does (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::boxes_and_point_light(s, false);
+    CHECK(s.draw(false, false));
+    const float off = s.lum({-4.5f, 0, 0});
+    CHECK(s.draw(true, false));
+    const float on_unshadowed = s.lum({-4.5f, 0, 0});
+    CHECK(std::fabs(on_unshadowed - off) <= 0.03f * off + 3.0f);
+    r543::boxes_and_point_light(s, true);
+    CHECK(s.draw(true, false));
+    const float on_shadowed = s.lum({-4.5f, 0, 0});
+    std::printf("    far side: RT off %.0f, light Shadows off %.0f, on %.0f\n", off, on_unshadowed, on_shadowed);
+    CHECK(on_shadowed < 0.6f * off);
+  });
+  test("round 543: an object without Cast Shadows throws no traced shadow, one without Receive Shadows has none on it (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    CHECK(s.draw(false, false));
+    const float lit = s.lum({0.9f, 0, 0});
+    CHECK(s.draw(true, false));
+    const float shadowed = s.lum({0.9f, 0, 0});
+    CHECK(shadowed < 0.7f * lit);  // (the control: with both on, it is dark)
+    r543::cube_over_floor(s, gpu::RasterInstance::ReceiveShadows);  // (the cube: no CastShadows)
+    CHECK(s.draw(true, false));
+    const float no_cast = s.lum({0.9f, 0, 0});
+    r543::cube_over_floor(s, r543::Scene::kBoth, gpu::RasterInstance::CastShadows);  // (the floor: no ReceiveShadows)
+    CHECK(s.draw(true, false));
+    const float no_receive = s.lum({0.9f, 0, 0});
+    std::printf("    the floor point: lit %.0f, shadowed %.0f, cube without Cast %.0f, floor without Receive %.0f\n", lit, shadowed, no_cast, no_receive);
+    CHECK(std::fabs(no_cast - lit) <= 0.05f * lit + 4.0f);
+    CHECK(std::fabs(no_receive - lit) <= 0.05f * lit + 4.0f);
+  });
+  test("round 543: moving the cube moves its traced shadow in the next frame, and an unchanged frame builds no new top-level structure (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    CHECK(s.draw(true, false));
+    const float dark0 = s.lum({0.9f, 0, 0}), lit0 = s.lum({-3.1f, 0, 0});
+    const gpu::RtShadowStats a = s.g->rt_shadow_stats();
+    CHECK(a.blas_builds >= 1 && a.tlas_builds >= 1);
+    CHECK(s.draw(true, false));
+    const float dark0b = s.lum({0.9f, 0, 0});
+    CHECK(s.draw(true, false));
+    const float dark0c = s.lum({0.9f, 0, 0});
+    std::printf("    the shadow point on frames 1-3 (nothing changed): %.0f %.0f %.0f\n", dark0, dark0b, dark0c);
+    CHECK(dark0b < 0.7f * lit0 && dark0c < 0.7f * lit0);  // (later frames keep the shadow, not only the first)
+    const gpu::RtShadowStats b = s.g->rt_shadow_stats();
+    std::printf("    first frame: %llu BLAS / %llu TLAS builds; two unchanged frames later: %llu / %llu\n", (unsigned long long)a.blas_builds, (unsigned long long)a.tlas_builds,
+                (unsigned long long)b.blas_builds, (unsigned long long)b.tlas_builds);
+    CHECK(b.tlas_builds == a.tlas_builds);
+    CHECK(b.blas_builds == a.blas_builds);
+    /* (The cube's matrix moves 4 m towards the light: its shadow lands at x -3.25 .. -2.75, on the camera's side of it. Moved
+     * 4 m the other way, the cube itself hid the floor its shadow fell on from the camera above.) */
+    r543::cube_over_floor(s, r543::Scene::kBoth, r543::Scene::kBoth, {-4.0f, 1, 0});
+    CHECK(s.draw(true, false));
+    const float dark1 = s.lum({-3.1f, 0, 0}), lit1 = s.lum({0.9f, 0, 0});
+    const gpu::RtShadowStats c = s.g->rt_shadow_stats();
+    std::printf("    shadow point before: %.0f dark / %.0f lit; after the move: %.0f dark / %.0f lit; TLAS builds %llu, BLAS %llu\n", dark0, lit0, dark1, lit1,
+                (unsigned long long)c.tlas_builds, (unsigned long long)c.blas_builds);
+    CHECK(s.draw(false, true));
+    const float map1 = s.lum({-3.1f, 0, 0});
+    std::printf("    the moved cube's shadow with the map: %.0f\n", map1);
+    CHECK(map1 < 0.7f * lit1);  // (the reference: the map shadows the same point)
+    CHECK(dark0 < 0.7f * lit0);
+    CHECK(dark1 < 0.7f * lit1);
+    CHECK(c.tlas_builds > b.tlas_builds);
+    CHECK(c.blas_builds == b.blas_builds);  // (the mesh didn't change: only the top level follows)
+  });
+  test("round 543: with ray-traced shadows off the card draws exactly as before - bit for bit the same picture before and after a traced frame, and the traced picture really differs (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::boxes_and_point_light(s);
+    CHECK(s.draw(false, false));
+    const std::vector<uint32_t> before = s.px;
+    CHECK(s.draw(true, false));
+    const std::vector<uint32_t> traced = s.px;
+    CHECK(s.draw(false, false));
+    CHECK(s.px.size() == before.size() && std::memcmp(s.px.data(), before.data(), before.size() * 4) == 0);
+    CHECK(std::memcmp(traced.data(), before.data(), before.size() * 4) != 0);
+    /* The sun's map path (one shadow light, the old lookup) the same. */
+    r543::cube_over_floor(s);
+    CHECK(s.draw(false, true));
+    const std::vector<uint32_t> map_before = s.px;
+    CHECK(s.draw(true, true));
+    CHECK(s.draw(false, true));
+    CHECK(std::memcmp(s.px.data(), map_before.data(), map_before.size() * 4) == 0);
+  });
+  test("round 543: Ray-Traced Shadows is off by default, `views rtshadows on|off` sets it, and the preferences keep it", [&] {
+    const std::string prefs = fs::join(test_dir(), "r543_prefs.txt");
+    std::remove(prefs.c_str());
+    {
+      Editor ed;
+      ed.init_headless(1200, 800);
+      ed.prefs_for_test(prefs);
+      ed.step_frame_headless();
+      CHECK(!ed.rt_shadows_for_test());
+      ed.command("views rtshadows on");
+      CHECK(ed.rt_shadows_for_test());
+      std::string text;
+      CHECK(fs::read_file(prefs, text) && text.find("rt_shadows=1") != std::string::npos);
+      Editor ed2;
+      ed2.init_headless(1200, 800);
+      ed2.prefs_for_test(prefs);
+      ed2.load_prefs_for_test();
+      CHECK(ed2.rt_shadows_for_test());
+      ed.command("views rtshadows off");
+      CHECK(!ed.rt_shadows_for_test());
+      CHECK(fs::read_file(prefs, text) && text.find("rt_shadows=0") != std::string::npos);
+      Editor ed3;
+      ed3.init_headless(1200, 800);
+      ed3.prefs_for_test(prefs);
+      ed3.load_prefs_for_test();
+      CHECK(!ed3.rt_shadows_for_test());
+      ed.command("views rtshadows");  // (no value: the other way round)
+      CHECK(ed.rt_shadows_for_test());
+      ed.command("views rtshadows off");
+    }
+    /* An older preferences file without the line: off. */
+    fs::write_file(prefs, "feel=Unity\n");
+    Editor ed4;
+    ed4.init_headless(800, 600);
+    ed4.prefs_for_test(prefs);
+    ed4.load_prefs_for_test();
+    CHECK(!ed4.rt_shadows_for_test());
+    std::remove(prefs.c_str());
+  });
+  test("round 543: where the views draw on the CPU, Preferences shows Ray-Traced Shadows greyed out - no toggle, a click does nothing, and hovering it says why", [&] {
+    const std::string prefs = fs::join(test_dir(), "r543_prefs2.txt");
+    std::remove(prefs.c_str());
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.prefs_for_test(prefs);
+    ed.force_cpu_views_for_test("no Vulkan GPU (a test)");
+    ed.record_buttons_for_test(true);  // (the rectangles and tooltips each frame drew)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("preferences");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* The row's text carries the tooltip: find its rectangle by the tooltip the frame recorded, scroll it into view. */
+    auto find = [&](Recti &r) {
+      for (const auto &kv : ed.ui_for_test().tooltip_texts) {
+        if (kv.second.find("Vulkan ray queries") == std::string::npos) continue;
+        int x = 0, y = 0, w = 0, h = 0;
+        if (std::sscanf(kv.first.c_str(), "%d,%d,%d,%d", &x, &y, &w, &h) != 4) continue;
+        r = {x, y, w, h};
+        return true;
+      }
+      return false;
+    };
+    Recti r{};
+    bool found = false;
+    for (int i = 0; i < 120; i++) {
+      found = find(r);
+      if (!found) break;
+      const Recti dlg = ed.top_popup_rect_for_test();
+      if (r.y >= dlg.y && r.bottom() <= dlg.bottom()) break;
+      const int cx = dlg.x + dlg.w / 2, cy = dlg.y + dlg.h / 2;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cx, cy)});
+      platform::Event w = r34_mouse(R34ET::Wheel, cx, cy);
+      w.wheel_y = r.bottom() > dlg.bottom() ? -1.0f : 1.0f;
+      ed.step_frame_headless({w});
+      ed.step_frame_headless();
+    }
+    found = find(r);
+    if (!found) std::printf("    no tooltip about ray queries among %zu recorded\n", ed.ui_for_test().tooltip_texts.size());
+    CHECK(found);
+    if (!found) return;
+    bool toggle = false;
+    for (const auto &c : ed.ui_for_test().controls) toggle = toggle || c.label == "Ray-Traced Shadows";
+    CHECK(!toggle);  // (text, not a toggle row)
+    /* (The test clock from before the pointer reaches the row: until it is set the UI reads the process's own clock, and in
+     * the whole group - minutes in - the hover started there, after the 300.8 s read below: it passed alone, not in the
+     * group.) */
+    ed.set_clock_for_test(299.0);
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cx, cy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, cx, cy)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, cx, cy)});
+    CHECK(!ed.rt_shadows_for_test());
+    /* The row found again before hovering it (the window-status lines above it may change between frames). */
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(find(r));
+    const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
+    ed.set_clock_for_test(300.0);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+    ed.set_clock_for_test(300.8);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+    const std::string tip = ed.ui_for_test().tooltip_text_for_test();
+    std::printf("    the greyed row's tooltip: '%s'\n", tip.c_str());
+    /* The spec's wording for a card without ray queries is "This graphics card has no ray tracing (Vulkan ray queries): the
+     * views use the shadow map."; with the views on the CPU the code says the views draw on the CPU instead (same keywords). */
+    CHECK(tip.find("ray tracing") != std::string::npos && tip.find("Vulkan ray queries") != std::string::npos);
+    CHECK(!ed.rt_shadows_for_test());
+    ed.command("views rtshadows on");  // (kept for a card that can; a frame on the CPU draws as before)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.rt_shadows_for_test());
+    ed.command("views rtshadows off");
+    std::remove(prefs.c_str());
+  });
+  test("round 543: raising the cube's vertices with update_mesh rebuilds its bottom level and the traced shadow follows (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    CHECK(s.draw(true, false));
+    const float lit_before = s.lum({1.5f, 0, 0}), lit_ref = s.lum({-3.1f, 0, 0});  // (1.5: past the low cube's shadow, inside the raised one's)
+    const gpu::RtShadowStats a = s.g->rt_shadow_stats();
+    std::string err;
+    std::vector<gpu::RasterVertex> v;
+    std::vector<uint32_t> idx;
+    CHECK(s.g->read_mesh(s.cube, v, idx, &err));
+    for (gpu::RasterVertex &x : v) x.p[1] += 1.0f;
+    CHECK(s.g->update_mesh(s.cube, v, nullptr, &err));
+    CHECK(s.draw(true, false));
+    const float dark_after = s.lum({1.5f, 0, 0});
+    const gpu::RtShadowStats b = s.g->rt_shadow_stats();
+    std::printf("    the point at x 1.5: %.0f before, %.0f after (lit reference %.0f); BLAS builds %llu -> %llu\n", lit_before, dark_after, lit_ref, (unsigned long long)a.blas_builds,
+                (unsigned long long)b.blas_builds);
+    CHECK(lit_before > 0.8f * lit_ref);
+    CHECK(dark_after < 0.7f * lit_ref);
+    CHECK(b.blas_builds > a.blas_builds);
+  });
+  test("round 543: a mesh removed from the card casts no traced shadow and nothing crashes, and a mesh added in its place is traced (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    CHECK(s.draw(true, false));
+    const float lit = s.lum({-3.1f, 0, 0}), dark = s.lum({0.9f, 0, 0});
+    CHECK(dark < 0.7f * lit);
+    s.g->remove_mesh(s.cube);
+    s.inst.pop_back();  // (the cube's instance goes with its mesh)
+    CHECK(s.draw(true, false));
+    const float gone = s.lum({0.9f, 0, 0});
+    std::printf("    the point at x 0.9: %.0f with the cube, %.0f after its mesh was removed (lit %.0f)\n", dark, gone, lit);
+    CHECK(gone > 0.8f * lit);
+    /* Another shape in the freed slot (or another): a cube twice the size, its shadow reaches x 2.0. */
+    std::string err;
+    const MeshPtr big = primitives::cube(2.0f);
+    const RenderMesh &rm = big->render_mesh();
+    std::vector<gpu::RasterVertex> vs(rm.positions.size());
+    for (size_t i = 0; i < vs.size(); i++)
+      vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+    const int again = s.g->add_mesh(vs, rm.indices, &err);
+    CHECK(again >= 0);
+    if (again < 0) return;
+    CHECK(s.draw(true, false));
+    const float before = s.lum({2.0f, 0, 0});
+    s.inst.push_back(s.make(again, {0, 2, 0}, {1, 1, 1}, r543::Scene::kBoth, 2));
+    CHECK(s.draw(true, false));
+    const float after = s.lum({2.0f, 0, 0});
+    std::printf("    the point at x 2.0: %.0f without the new mesh, %.0f with it\n", before, after);
+    CHECK(before > 0.8f * lit);
+    CHECK(after < 0.7f * lit);
+  });
+  test("round 543: more than 64 casting instances draw with traced shadows right at two sample points (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    s.inst = {s.make(s.plane, {0, 0, 0}, {1, 1, 1}, r543::Scene::kBoth, 1)};
+    uint32_t id = 2;
+    for (int j = 0; j < 8; j++)
+      for (int i = 0; i < 10; i++) s.inst.push_back(s.make(s.cube, {-4.5f + (float)i, 1.0f, -3.5f + (float)j}, {0.3f, 0.3f, 0.3f}, r543::Scene::kBoth, id++));
+    s.lights = {r543::Scene::sun({1, -2, 0})};
+    CHECK(s.inst.size() == 81);
+    CHECK(s.draw(true, false));
+    /* The cube at (-2.5, 1, 0.5) shadows the floor at (-2.0, 0, 0.5); (-2.0, 0, 0) lies between two rows of cubes. */
+    const float dark = s.lum({-2.0f, 0, 0.5f}), lit = s.lum({-2.0f, 0, 0.0f});
+    const gpu::RtShadowStats st = s.g->rt_shadow_stats();
+    std::printf("    80 casters: shadowed point %.0f, lit point %.0f; %llu BLAS / %llu TLAS builds\n", dark, lit, (unsigned long long)st.blas_builds, (unsigned long long)st.tlas_builds);
+    CHECK(st.tlas_builds >= 1);
+    CHECK(dark < 0.7f * lit);
+  });
+  test("round 543: two view slots drawing traced frames in turn are both shadowed (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    float dark[4] = {}, lit[4] = {};
+    for (int k = 0; k < 4; k++) {
+      CHECK(s.draw(true, false, k % 2));
+      dark[k] = s.lum({0.9f, 0, 0}), lit[k] = s.lum({-3.1f, 0, 0});
+    }
+    std::printf("    slot 0/1/0/1: shadowed %.0f %.0f %.0f %.0f, lit %.0f %.0f %.0f %.0f\n", dark[0], dark[1], dark[2], dark[3], lit[0], lit[1], lit[2], lit[3]);
+    for (int k = 0; k < 4; k++) CHECK(dark[k] < 0.7f * lit[k]);
+  });
+  test("round 543: a failed top-level build falls back to the shadow map - the frame still draws, as the map's picture, and the card stops offering traced shadows (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    CHECK(s.draw(false, true));
+    const std::vector<uint32_t> map_picture = s.px;
+    const float map_dark = s.lum({0.9f, 0, 0}), map_lit = s.lum({-3.1f, 0, 0});
+    CHECK(map_dark < 0.7f * map_lit);
+    CHECK(s.g->can_trace_shadows());
+    s.g->fail_rt_shadows_for_test();
+    CHECK(s.draw(true, true));  // (the build fails: the frame must still come back, drawn with the map)
+    const bool same = s.px.size() == map_picture.size() && std::memcmp(s.px.data(), map_picture.data(), map_picture.size() * 4) == 0;
+    std::printf("    after the failed build: the shadow point %.0f (map %.0f), picture equals the map's: %d, can_trace_shadows %d\n", s.lum({0.9f, 0, 0}), map_dark,
+                (int)same, (int)s.g->can_trace_shadows());
+    CHECK(same);
+    CHECK(!s.g->can_trace_shadows());
+    CHECK(s.draw(true, true));  // (and the next frame too)
+    CHECK(std::memcmp(s.px.data(), map_picture.data(), map_picture.size() * 4) == 0);
+  });
+  test("round 543: Solid shading records no traced-shadow builds even with ray-traced shadows on (skipped without a card with ray queries)", [&] {
+    r543::Scene s;
+    if (!s.open()) return;
+    r543::cube_over_floor(s);
+    s.solid = true;
+    const gpu::RtShadowStats a = s.g->rt_shadow_stats();
+    CHECK(s.draw(true, false));
+    CHECK(s.draw(true, false));
+    const gpu::RtShadowStats b = s.g->rt_shadow_stats();
+    std::printf("    Solid frames with traced shadows on: BLAS builds %llu -> %llu, TLAS %llu -> %llu\n", (unsigned long long)a.blas_builds, (unsigned long long)b.blas_builds,
+                (unsigned long long)a.tlas_builds, (unsigned long long)b.tlas_builds);
+    CHECK(b.blas_builds == a.blas_builds && b.tlas_builds == a.tlas_builds);
+    CHECK(s.g->can_trace_shadows());  // (skipping is not a failure)
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -6318,4 +6782,5 @@ void run_gpu_tests() {
   tests_round506_third_gpu();
   tests_round506_engineer_gpu();
   tests_round508_gpu();
+  tests_round543_gpu();
 }

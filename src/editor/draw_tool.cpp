@@ -209,6 +209,7 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
       return h;
     }
   }
+  if (!ui_.in.ctrl() && draw_origin_hit(view, mx, my, h)) return h;  // (round 535: Snap to Object Origins)
   /* The face under the mouse: its centre is a snap (Plasticity), and with Start at Face
    * Center a centre-based shape's first click goes there wherever it lands on the face. */
   if (!ui_.in.ctrl()) {
@@ -906,10 +907,11 @@ bool Editor::draw_update(const Recti &view) {
     return true;
   }
   /* X / Y / Z: a guide along that axis (Plasticity's construction lines). */
-  if (!in.ctrl() && !in.alt() && !u.wants_keyboard() && scene_hovered_) {
+  if (!u.wants_keyboard() && scene_hovered_) {
     const int keys[3] = {platform::KEY_X, platform::KEY_Y, platform::KEY_Z};
     for (int a = 0; a < 3; a++) {
       if (!in.key_pressed[keys[a]]) continue;
+      if (in.chord_mods(keys[a]) & (platform::MOD_CTRL | platform::MOD_ALT)) continue;  // (round 548: that key's chord - a quick Ctrl+Z is Undo, not a Z guide)
       in.key_pressed[keys[a]] = false;  // not a shortcut as well
       draw_axis_guide(view, a);
     }
@@ -1194,6 +1196,7 @@ void Editor::draw_preview(const Recti &view) {
       u.canvas.fill_circle(s.x, s.y, (float)u.px(5.5f), 0xFF000000);
       u.canvas.fill_circle(s.x, s.y, (float)u.px(4), h.color);
       std::string label = h.label;
+      draw_hint_label_ = h.label;  // (what the tests read: the snap the hint names)
       if (!draw_.pts.empty()) label += strprintf("  %.3f m", length(h.world - draw_.pts.back()));
       const int tw = u.font.text_width(label) + u.px(10);
       Recti box{(int)s.x + u.px(10), (int)s.y + u.px(8), tw, u.row_h()};

@@ -29,7 +29,7 @@
 
 namespace bl {
 
-static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "drawproject", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "unity", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "vpaint", "vpbrush", "vpblend", "vpcolor", "vpset", "vpautomask", "vpstroke", "colorattr", "where", "perf", "window", "world", "wpautomask", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr", "blockout", "pointcloud", "splat", "brush"};
+static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "drawproject", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "snap", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "unity", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "vpaint", "vpbrush", "vpblend", "vpcolor", "vpset", "vpautomask", "vpstroke", "colorattr", "where", "perf", "window", "world", "wpautomask", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr", "blockout", "pointcloud", "splat", "brush", "pose"};
 // (The names above: the sketch families dispatched before the chain, then this file's `c == "..."` cases as generated by
 // round 280's patch; regenerate when commands change - nothing checks the list against the dispatcher yet.)
 
@@ -150,6 +150,8 @@ bool Editor::round367_command(const std::string &c, const std::vector<std::strin
   if (c == "new") return new_scene_asked(), true;  // (asking first, as File > New does)
   if (c == "save") return save_scene_to(line_rest(line, 1)), true;
   if (c == "open") return open_scene_cmd(line_rest(line, 1)), true;
+  if (c == "snap") return snap_command(t), true;  // (round 535: here, the long chain in run_console_command is at the compiler's nesting limit)
+  if (c == "camera" && field == "panoramic") return camera_panoramic_command(t), true;  // (round 538; `camera <yaw> <pitch> <distance>` is the chain's)
   if (c == "rotate" || c == "scale") return transform_command(c == "scale" ? "scale" : "rotation", std::vector<std::string>(t.begin() + 1, t.end())), true;
   if (c != "set" || field.rfind("transform.", 0) != 0) return false;
   transform_command(field.substr(10), std::vector<std::string>(t.begin() + 2, t.end()));
@@ -251,6 +253,11 @@ struct SetFieldReflector : Reflector {
  * views simpler on|off (task 0104): the CPU views' shadows cheaper while you move, exact when you stop. No value: the
  * other way round; anything but "on" is off. */
 void Editor::views_command(const std::string &what, const std::string &value) {
+  if (what == "rtshadows") {  // views rtshadows on|off (round 543): the card's views trace their shadows (kept even where the card can't: it applies on one that can)
+    set_rt_shadows(value.empty() ? !rt_shadows_ : value == "on");
+    Log::info("Ray-traced shadows: %s%s", rt_shadows_ ? "on" : "off", rt_shadows_ && !rt_shadows_available() ? " (this card can't trace them: the views use the shadow map)" : "");
+    return;
+  }
   if (what == "simpler") {  // views simpler on|off (task 0104): the CPU views' shadows cheaper while you interact, exact when you stop
     simpler_while_moving_ = value.empty() ? !simpler_while_moving_ : value == "on";
     save_prefs();
@@ -258,7 +265,7 @@ void Editor::views_command(const std::string &what, const std::string &value) {
     return;
   }
   if (what != "follow") {
-    Log::warn("views follow|simpler on|off");
+    Log::warn("views follow|simpler|rtshadows on|off");
     return;
   }
   other_views_follow_ = value.empty() ? !other_views_follow_ : value == "on";
@@ -1274,6 +1281,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "anim") {
     anim_command(split_quoted(line));  // (round 335: a property with spaces quoted - "Material 0.Roughness", "Cast Shadows")
+    return;
+  }
+  if (c == "pose") {  // pose copy | paste [influence] [flipped] [selected] | align [global|local] (round 541)
+    pose_command(t);
     return;
   }
   if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike|avatarlike|avatarworld (task 0202; cubes50k round 433; the avatar ones round 468)

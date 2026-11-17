@@ -59,7 +59,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty")) create_object("Empty", child);
     u.submenu("3D Object", u.px(170), [this, child] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
     u.submenu("Blockout", u.px(190), [this, child] { blockout_menu_items(child); });  // (round 477)
@@ -614,7 +614,8 @@ struct InspectorReflector : Reflector {
     const std::string prop = anim_prefix + n;
     const int state = keyable ? ed.anim_property_state(anim_obj, prop) : 0;
     if (state) draw_key_marker(label, state == 2);
-    if (keyable && u.hovered(label) && u.in.key_pressed[platform::KEY_I] && u.in.mods == 0 && !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
+    if (keyable && u.hovered(label) && u.in.chord(platform::KEY_I, 0) &&  // (round 548: I's own chord)
+         !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
       u.in.key_pressed[platform::KEY_I] = false;
       ed.anim_key_property(anim_obj, prop, axes);
     }
@@ -3651,6 +3652,18 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
             "it shows the window too; the little it doesn't draw yet (realtime GI's per-pixel light, a retro filter's snapped vertices,\n"
             "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. " + key("render.image") + " renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
+  /* Round 543 (task 0523): shadows traced on the card, as Blender 5.3's Workbench - greyed out where the card can't. */
+  if (rt_shadows_available()) {
+    bool on = rt_shadows_;
+    if (u.toggle_row(row(u.row_h()), "Ray-Traced Shadows", on)) set_rt_shadows(on);
+    u.tooltip("On: the views drawn on the graphics card trace each pixel's shadows with its ray tracing (Vulkan ray queries) in place\n"
+              "of the sun's shadow map - exact at any distance, and every light with Shadows on casts them (the map has the sun\n"
+              "alone). Hard-edged; see-through surfaces keep the map. Off (the default): the shadow map.");
+  } else {
+    text(std::string("Ray-Traced Shadows: ") + (rt_shadows_ ? "on, " : "off, ") + "not available here", u.theme.text_dim);
+    u.tooltip(gpu_view_ ? "This graphics card has no ray tracing (Vulkan ray queries): the views use the shadow map."
+                        : "The views draw on the CPU: ray-traced shadows need a graphics card with ray tracing (Vulkan ray queries).");
+  }
   /* Task 0199: each window - its views' device and who shows it. */
   /* (While a secondary window draws, its state is the members' and its entry holds the main window's, swapped.) */
   auto label = [&](int id) { return id == 0 ? std::string("Main window: ") : strprintf("Window %d: ", id); };
