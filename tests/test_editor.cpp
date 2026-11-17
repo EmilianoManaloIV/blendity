@@ -15533,6 +15533,9 @@ static void tests_round537() {
       CHECK(ops_seen.count(op) == 1);
     }
     CHECK(steps >= 5 && questions >= 3);
+  });
+}
+
 /* ---------------------------------------------------------------- round 542 (task 0522): the sky's sun and the lighting keep */
 static void tests_round542() {
   test("Sky world's sun: Sun Lights Scene, Sun Intensity, Turbidity and the world changed with no edit show the same frame - the views drawn with the lighting keep on are the ones drawn with it off", [] {
