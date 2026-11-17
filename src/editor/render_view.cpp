@@ -381,6 +381,7 @@ void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, 
 static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
   if (a.mesh != b.mesh || a.id != b.id || a.materials != b.materials || a.lightmap != b.lightmap || a.lightmap_uv != b.lightmap_uv) return false;
   if (a.lightmap_dir != b.lightmap_dir || a.shadowmask != b.shadowmask || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
+  if (a.material_colors != b.material_colors) return false;  // (task 0533)
   if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
   if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
   if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
@@ -586,6 +587,12 @@ DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRe
   it.receive_shadows = mr.receive_shadows;
   it.cast_shadows = mr.cast_shadows;  // (round 415)
   it.id = (uint32_t)g.id;
+  /* Task 0533: the vertex colours, only where a material reads them (worked out here, on the main thread). */
+  for (const MaterialPtr &mp : mr.materials)
+    if (mp && mp->vertex_color) {
+      it.material_colors = m.render_vertex_colors(*it.mesh);
+      break;
+    }
   return it;
 }
 
@@ -1717,7 +1724,7 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
 static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &items, const LightingEnv &env,
                      const Environment &world) {
   std::vector<PTObject> objs;
-  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model});
+  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model, it.material_colors});
   pt.build(objs, env.lights, world);
 }
 
@@ -2421,7 +2428,7 @@ void Editor::trace_picture(RenderJob &j, PathTracer &pt) {
   pt.set_settings(j.ps);  // before build(): it picks the ray backend
   {
     std::vector<PTObject> objs;
-    for (const DrawItem &it : j.items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model});
+    for (const DrawItem &it : j.items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model, it.material_colors});
     pt.build(objs, j.env.lights, j.environment);
   }
   pt.set_camera(j.view, j.proj_filtered, j.tw, j.th, j.lens);

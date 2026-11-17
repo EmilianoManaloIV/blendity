@@ -988,6 +988,8 @@ const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, 
     sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
     sp.has_tangent = true;
   }
+  if (ob.colors && ob.colors->size() == rm.positions.size())  // (task 0533: read only by a Vertex Color material)
+    sp.vertex_color = (*ob.colors)[tri[0]] * w + (*ob.colors)[tri[1]] * u + (*ob.colors)[tri[2]] * v;
   int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
   const Material *mat = default_material().get();
   if (ob.materials && !ob.materials->empty()) {

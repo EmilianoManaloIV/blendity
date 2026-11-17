@@ -8,6 +8,7 @@
 #include "import_splat.h"       // (round 531: .spz)
 #include "pointcloud_object.h"  // (round 531: an imported cloud's component)
 #include "spring_bones.h"
+#include "../image/image.h"  // (task 0533: srgb_to_linear for FBX colours)
 
 #include <algorithm>
 #include <climits>
@@ -502,13 +503,18 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
                      (float)(g.m20 * p.x + g.m21 * p.y + g.m22 * p.z + g.m23)});
       }
       bool has_uv = fm->vertex_uv.exists;
+      /* Task 0533: the first colour set (LayerElementColor), per corner as FBX keeps it, sRGB as Blender reads it. */
+      const bool has_col = fm->vertex_color.exists;
+      std::vector<Vec4> corner_cols;
       std::vector<uint32_t> fv;
       std::vector<Vec2> fuv;
+      std::vector<Vec4> fcol;
       for (size_t fi = 0; fi < fm->faces.count; fi++) {
         ufbx_face f = fm->faces.data[fi];
         if (f.num_indices < 3) continue;
         fv.clear();
         fuv.clear();
+        fcol.clear();
         for (uint32_t k = 0; k < f.num_indices; k++) {
           uint32_t ix = f.index_begin + k;
           fv.push_back(fm->vertex_indices.data[ix]);
@@ -516,12 +522,25 @@ bool import_fbx_file(const std::string &path, ImportResult &out) {
             ufbx_vec2 uv = ufbx_get_vertex_vec2(&fm->vertex_uv, ix);
             fuv.push_back({(float)uv.x, (float)uv.y});
           }
+          if (has_col) {
+            const ufbx_vec4 c = ufbx_get_vertex_vec4(&fm->vertex_color, ix);
+            auto ch = [](double v) { return finite_bits((float)v) ? srgb_to_linear(std::max(0.0f, std::min((float)v, 1.0f))) : 0.0f; };
+            fcol.push_back(Vec4(ch(c.x), ch(c.y), ch(c.z), finite_bits((float)c.w) ? std::max(0.0f, std::min((float)c.w, 1.0f)) : 1.0f));
+          }
         }
         /* The mirror flips the winding: reverse it so faces still point out. */
         std::reverse(fv.begin(), fv.end());
         std::reverse(fuv.begin(), fuv.end());
+        std::reverse(fcol.begin(), fcol.end());
+        corner_cols.insert(corner_cols.end(), fcol.begin(), fcol.end());
         int slot = fi < fm->face_material.count ? (int)fm->face_material.data[fi] : 0;
         m->add_face(fv.data(), fv.size(), has_uv ? fuv.data() : nullptr, slot);
+      }
+      if (has_col && corner_cols.size() == m->corner_count()) {  // (Blender names an FBX colour layer "Col")
+        ColorAttribute c = m->make_color("Col", ColorAttribute::Domain::Corner, Vec4(1, 1, 1, 1));
+        c.rgba = std::move(corner_cols);
+        m->color_attributes.push_back(std::move(c));
+        m->active_color = m->render_color = 0;
       }
       /* Blend shapes (task 0135): each channel a shape key, its weight onto the renderer. */
       for (size_t bi = 0; bi < fm->blend_deformers.count; bi++)
