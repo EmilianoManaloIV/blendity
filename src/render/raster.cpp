@@ -1036,8 +1036,11 @@ static inline bool edge_covers_exact(float xa, float ya, float xb, float yb, flo
  * each within `tol` of zero settled exactly (above). */
 static inline bool tri_covers(const float *x, const float *y, float px, float py, float w0, float w1, float w2, float tol0, float tol1,
                               float tol2) {
-  if (w0 < -tol0 || w1 < -tol1 || w2 < -tol2) return false;
-  if (w0 > tol0 && w1 > tol1 && w2 > tol2) return true;
+  /* (Inside first, and no branch between the three: a solved span's pixels are mostly well inside, and this runs for each.
+   * Round 556: round 554's two short-circuit chains here and a double division a row made the Scene view's orbit ~6 %
+   * slower.) */
+  if ((w0 > tol0) & (w1 > tol1) & (w2 > tol2)) return true;
+  if ((w0 < -tol0) | (w1 < -tol1) | (w2 < -tol2)) return false;
   if (!(w0 > tol0) && !edge_covers_exact(x[1], y[1], x[2], y[2], px, py)) return false;
   if (!(w1 > tol1) && !edge_covers_exact(x[2], y[2], x[0], y[0], px, py)) return false;
   if (!(w2 > tol2) && !edge_covers_exact(x[0], y[0], x[1], y[1], px, py)) return false;
@@ -1097,11 +1100,13 @@ void Renderer3D::raster_tile(int tile_index) {
        * triangles, a dense orthographic sphere's depths on its surface) pass with the wide margin too, so they don't show
        * what the strokes tripped on; a wide span sends many more pixels through tri_covers, and the frame's cost is one
        * guess - not proven.) */
-      double Ad[3], Bd[3], Cd[3];  // (A and B too: the float ones are differences rounded to float - 50.3 - 10.1 isn't exact)
+      double Ad[3], Bd[3], Cd[3], iAd[3];  // (A and B too: the float ones are differences rounded to float - 50.3 - 10.1 isn't exact)
       for (int q = 0; q < 3; q++) {
         const int a = (q + 1) % 3, b = (q + 2) % 3;
         Ad[q] = (double)vy[a] - vy[b], Bd[q] = (double)vx[b] - vx[a];
         Cd[q] = (double)vx[a] * vy[b] - (double)vx[b] * vy[a];
+        iAd[q] = Ad[q] != 0.0 ? 1.0 / Ad[q] : 0.0;  // (once a triangle, not a division a row; its rounding, 1e-16 of the
+                                                    // crossing, is far inside the 1e-4 pixel margin)
       }
       const bool spans = opt_.span_rows;
       for (int y = miny; y <= maxy; y++) {
@@ -1115,7 +1120,7 @@ void Renderer3D::raster_tile(int tile_index) {
          * triangles of a horizontal shared edge, their row values rounded either way, would otherwise both leave it). */
         for (int q = 0; q < 3 && spans; q++) {
           const double row_c = Bd[q] * py + Cd[q];  // w = A*px + row_c, px = x + 0.5
-          const double crossing = Ad[q] != 0.0 ? -row_c / Ad[q] - 0.5 : 0.0;
+          const double crossing = -row_c * iAd[q] - 0.5;
           if (Ad[q] > 0) xl = (float)std::max((double)xl, crossing - 1e-4);
           else if (Ad[q] < 0) xr = (float)std::min((double)xr, crossing + 1e-4);
           else if (row_c < -1e-9 * (std::fabs(Bd[q] * py) + std::fabs(Cd[q]) + 1.0)) { empty = true; break; }
