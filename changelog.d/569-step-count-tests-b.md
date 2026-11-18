@@ -33,5 +33,15 @@ and add the two outline-shell tests Pass 26's reviewer left for round 521 (PR #4
   and while a render job still holds the shell the blink goes into a copy with a lock of its own, what is held keeps its
   rest shell, positions and picture, and once released the next blink is in place again.
 
-**Checked:** each of the two tests 10 of 10 alone and 10 of 10 inside its group with every core kept busy, on Windows (with
-Blender's libraries) and Linux (WSL); CHECKS_TBD
+**Checked:** with every core kept busy by other processes, each changed or new test 10 of 10 alone and its group 10 of 10
+(animation 3 of 3), on Windows with Blender's libraries (Decimate to Good, Save As, opening again, the shell tests; the
+groups assets 3,028, lighting 9,929, animation 5,077 checks) and on Linux in WSL, dependency-free (the same, where
+Decimate to Good has no meshoptimizer and returns at once; both Preferences walks and the hci group 10 of 10; assets 2,985,
+lighting 9,875, animation 5,077, hci 2,004). Before the changes, under the same load: the Preferences walk failed 3 of 6
+and 2 of 8 alone on Linux, the other walk 3 of 10 hci group runs, "opening again" 1 of 10 lighting group runs on Windows;
+Decimate to Good and Save As did not fail in 10 loaded runs each, so their causes are shown by construction - the solve's
+landing held back until the Undo fails exactly the two checks every run, and both of the Save As's landing orders were
+seen (4 of 10 runs took the one that had only the 20 frames). On the top of the stack (#466's head merged): Windows hci
+2,009, assets 3,028, lighting 9,929, animation 5,077; Linux hci 2,004, assets 2,985, lighting 9,875, animation 5,077,
+sculpt 531 - 0 failed. The code reviewer (approve): a freed shell no longer read when the in-place check fails, the blink
+also moves vertices where the thickness group has weight, the copy's lock checked. No sanitizer build here (CI's).

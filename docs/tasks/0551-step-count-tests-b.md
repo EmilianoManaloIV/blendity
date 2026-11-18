@@ -4,7 +4,7 @@
 - **Requirements:** the suite's reliability (ADR 0056: a red check must mean a broken behaviour)
 - **Decisions:** none needed (ADR 0056: a unit test pins a behaviour; ADR 0146's round 521 amendment for the shells)
 - **Model:** a Pass 28 worker session (W7), tests only
-- **PR:** (link when opened)
+- **PR:** task/0551-step-count-tests-b
 
 ## Goal
 Two unit tests failed once each inside a group run on a busy machine and passed every time alone: round 355's
