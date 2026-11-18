@@ -105,3 +105,16 @@ rule behind the tray: a frame while a job runs stays under 50 ms, and the one fr
 100 ms. Pass~25 therefore judged an import or a bake by its longest frame, not its total, and split what ended in one
 big frame (the Unity export's folder walk, \code{budget pc}'s count, a bake's files, the lightmap pages sent to the card
 before the bake lands, \adr{0140}).
+
+\section{Skinning on the card in the editor}
+A posed character in a card view is drawn from a \emph{stand-in}: the gather (\code{render\_deferred}) keeps the rest render
+mesh once per object and rest, with the posed \code{Mesh} in \code{DrawItem::skin}, and sends the card a palette a frame in
+place of a posed mesh. The CPU kernel \code{skin\_render\_vertices} is the reference the card's compute pass is checked
+against, and it poses everything the card cannot take: a Skin with a limit group or a modifier after it, Edit Mode, a
+see-through, volume or baked material, a view-shaped mesh, and the mesh Sculpt or Weight Paint holds; the reason is listed in
+the view's notes and \code{perf status}. Nothing that wants \emph{positions} -- picking, snapping, colliders, exports, the
+bounds -- asks for the posed render mesh (\code{mesh\_tris}, \code{render\_bounds} read the evaluated mesh), so a click on a
+raised arm costs no frame. A toon outline of a posed skin is the rest's shell skinned by the body's bones
+(\code{Outline::posed\_shell}), an approximation the Learn lesson \emph{Where a Posing Frame Goes} names, and a shape key under
+a skin goes up as ranges of the rest (\code{update\_skin\_rest}), so a blink or a viseme stays on the card. The Profiler's
+Posing block counts it all: skins on the card, palettes sent, skins sent whole, skins posed on the CPU, rest updates.

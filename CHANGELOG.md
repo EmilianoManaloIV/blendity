@@ -2,6 +2,252 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-17 (round 523): Pass 26's write-up - skinning on the card
+
+**Asked:** Pass 26's documentation as Pass 25's write-up did it (task 0506): rounds 518-522 folded into this file, README
+and the shared docs, a Pass 26 section in `docs/PERFORMANCE.md` from round 522's timed check, the posing lesson's numbers,
+both books rebuilt.
+
+**Added (task 0506)**
+- `docs/PERFORMANCE.md`, "Pass 26: skinning on the card": what moved to the card, round 518 -> 521 -> 522 alone and in
+  the world, the owner's avatar in the owner's world, and what still holds the rows over 16.7 ms (the card's draw of the
+  world, not skinning).
+- The architecture book's performance and editor chapters and the user guide's posing chapter say what the card does now:
+  the CPU kernel as the reference, the compute pass, stand-ins, CPU positions on demand, outlines as skins, shape-key
+  ranges, the timed results. Both books rebuilt (PDFs in `docs/`).
+
+**Changed (task 0506)**
+- The Learn tab's posing lesson ("What a frame still costs") quotes round 522's timed frames, alone and in the world, and
+  no longer says a whole-body pose is 35 to 53 ms; its quiz question on the chest against the IK target follows. README's
+  Pass 22 clauses, `docs/USABILITY.md`'s open row, `docs/ARCHITECTURE.md`'s "Where it stopped" and `docs/requirements.md`'s
+  Q-07 say the same: whole-body poses meet 16.7 ms alone on the card (6.8 - 12.3 ms) and, in a world, are held by the card's
+  draw of the world (11 - 25 ms).
+
+**Checked:** the full unit suite on Windows with Blender's libraries - 106,367 checks in 3,749 tests (with gpu's 1,510 and 149 tests from the card run of round 522), 0 failed
+(104,857 checks in 3,600 tests in every group but gpu, which the hub runs on the card, not run here; private test,
+prefs and cache folders per group); Linux in CI. `tools/test_coverage_map.py --check` clean.
+
+## 2026-11-17 (round 522): Pass 26's timed check, and the Game view's skins on the card
+
+**Asked:** time every row of Pass 26's target table on the owner's machine (task 0505) - the stand-in alone and in its world,
+the owner's avatar in the owner's world - against round 518's baseline, and fix or name what still misses 16.7 ms.
+
+**Fixed:** every skin in the Game view was posed on the CPU and sent whole (21 meshes, 8 MB a frame of the stand-in): the
+Game view turns the flatten view on for every gather, and round 519 kept a skin off the card whenever it was on. A Camera
+Flatten only moves an item's matrix, so only view-shaped meshes (view-angle shape keys, a camera-aligned lattice) stay off
+the card now. Alone on the card: a scrub with the Game view beside 29.1 -> 10.8 ms, Play with the springs 28.2 -> 9.7, the
+clip with two views 18.0 -> 11.8.
+
+**Checked (the hub's timed windows):** stress `posing` on the card, 518 -> 522, alone: the chest's Rotate gizmo 37.3 -> 6.9,
+a Puppet handle 55.6 -> 12.3, R on the chest 47.3 -> 6.8, a scrub 47.3 -> 7.9, a two-view scrub 70.1 -> 10.8, Play 45.6 ->
+9.7 - every row alone meets 16.7 ms; in the world: the chest 42.6 -> 11.1, the IK target 15.9 -> 9.4, R 57.2 -> 16.0, the Game
+view beside 28.3 -> 14.0; over-budget rows in the section 42 -> 27. The owner's avatar in the owner's world: the chest 50.0
+-> 16.9 windowed, a scrub 38.0 -> 15.4. The CPU rows all as fast or faster (the chest 29.9 -> 14.4). Still over, in the world:
+a Puppet handle 20.8, scrubs 20.5 / 23.9, the clip 17.8, Play 24.7 and most setting rows (17-29) - their frames are the card
+drawing the world (its render call 6-15 ms and lighting 3-6 ms, 9 with two views), not skinning, named for the render stream. `animation`
+unchanged. `tests_round522` (the Game view's gather makes card skins; a Camera Flatten's item stays one, and the CPU fallback its view takes poses it); animation 5,035, editor
+3,869, render 40,472, gpu on the card 1,510 - 0 failed. `stress/results/baseline.md`'s posing section is the timed run's.
+
+## 2026-11-17 (round 521): Outline shells and shape keys on the card's skin
+
+**Asked:** a posed toon character keeps its outline on the card with no shell built on the CPU a frame, and a blink or a
+viseme while posing stays on the card instead of sending the character back to the CPU (Pass 26, task 0504, ADR 0146).
+
+**Changed (task 0504)**
+- The shell of a posed skin is the shell of its rest, skinned (`Outline::posed_shell`): the inverted hull of the pose's rest
+  mesh is built once for a rest, an offset and a Thickness Group (a pose never rebuilds it; a thickness or distance step change
+  does, once), and each pose makes a bare copy of it that carries the body's bones and weights - so on the card it is a skin
+  of its own (a stand-in of its own, the body's palette) and on the CPU its render mesh is round 518's kernel on the rest
+  shell. Its `positions` are the posed ones (exports, bounds). A mesh that isn't a posed skin builds its shell as before.
+- **An approximation, in the Learn lesson:** the shell is the rest's hull pushed along the rest's normals and then posed, not
+  the posed mesh pushed along its posed normals. A one-bone part is exact; where bones blend the line is thinner (the
+  stand-in avatar, chest turned 0.5 rad: at most 43.7 % of the thickness off today's shell, 0.37 ms a pose for its four
+  outlined meshes against 2.37 ms to build today's).
+- A shape key under a skin goes up as ranges (`gpu::Raster::update_skin_rest`, and `update_skin_triangles` for a quad whose
+  diagonal flipped): the stand-in takes the new rest, the render vertices that changed are written into the card's rest buffer
+  and the skin runs again; the bone boxes grow to hold them and are made whole after 3 still gathers. The round 519
+  `kSkinRestStill` CPU fallback stays only for a card that refuses ranges or a render vertex whose UVs change; a blink builds no outline hull (the rest shell follows in place); a whole rebuild of the rest sends the skin whole (weights from the new table); a weight that changes the render vertex count
+  sends the skin whole once.
+- Profiler: "skin rest updates", "skin rest ranges sent", "skin rest vertices sent", "skin triangle ranges sent".
+
+**Checked:** the round's tests (animation group): 0 shells built and 0 render meshes skinned over posed gathers of a character
+and of the stand-in avatar, the same pose gives the same shell, rebuilds by thickness / group / distance step, the unskinned
+shell bit for bit, the one-bone shell exact, OBJ export and the CPU gather write the posed shell, a blink goes up as 24 of 72
+render vertices (the shell 28-36 of 72); on the card (the hub's window, the full gpu group 1,510 checks, 0 failed): `update_skin_rest` / `update_skin_triangles`
+against the kernel (8.9e-8 of the diagonal), the 4 posed outline shells read back against the CPU kernel (worst 3.5e-7), four posed
+frames of the outlined avatar with 0 shells built and 36 skins drawn by the card, six blink frames with 0 hulls built, 0 skins
+sent whole (12 rest updates, 30,444 vertices; 5.5 ms a blink frame against 3.5 ms posed, untimed). Reviewed twice (code-reviewer:
+the lesson's numbers, a shell rebuilt every blink frame, weights after a rest rebuilt in another vertex order, the card
+read-back test - fixed; approve). Round 519's outline test changed (a new pose builds no shell; it built one a pose) and its M3 shape-key test now runs
+with `skin_ranges_off_for_test` (the fallback it pins is the path for a card that refuses ranges). Unit suite on Windows
+with Blender's libraries (all groups but gpu, which the hub runs on the card): modeling 6,751, render 40,472, lighting 9,926,
+assets 3,027, animation 5,029, physics 208, editor 3,869, livelink 365, input 283, sketch 521, board 96, sculpt 466, hci 1,985,
+vr 116, blockout 20,809 (+ its four modifier / join groups), splats 387 / 175 / 3,996, runner 64 - 0 failed (render's
+"OpenPGL path guiding learns" failed once in a full run while other work ran and passes alone and in the final run); Linux (WSL,
+dependency-free) animation 5,029, editor 3,843, render 40,378 - 0 failed. Stress `posing` (a 50k-vertex pose change 0.41 ms
+Linear, 0.49 ms Dual Quaternion), `animation`, `editor`, `editor_render`: no problems, nothing over its target; the timed rows
+are round 522's.
+
+## 2026-11-17 (round 520): What still needs CPU positions, without a stall
+
+**Asked:** with skinning on the card (round 519), nothing a posed frame does on the CPU may ask for the posed render mesh
+unless it needs one, and everything that needs posed positions - picking, snapping, colliders, exports, renders, bakes -
+sees the posed shape without reading from the card (Pass 26, task 0503, ADR 0146 point 5 amended).
+
+**Changed (task 0503)**
+- Audit of the ~65 `render_mesh()` / `render_mesh_tangents()` callers (the table is in the spec): base meshes and operator
+  inputs are never posed; bakes ask on their worker; what needs only a ray, a snap or a box now reads the evaluated mesh.
+- `mesh_tris(m)` (a posed skin's positions and `Mesh::tessellation()`, now public; any other mesh's render mesh) and
+  `render_bounds(m)` (a posed skin's positions' box): used by `raycast_scene`, `raycast_surface` (surface snapping and Drop on
+  Surface), the origin snap, the auto-rig tool's crossings, Display As Bounds (overlay and box-select), Add Lattice's fit and
+  the LOD level's height. A click on the raised arm of a posed character finds it; where the arm was at rest it finds nothing.
+- Solid shading's items are card-skin items on a card view (`solid_items`, kept list keyed on the flag): a posed skin sends a
+  palette like the Shaded views, and a card that doesn't draw it turns the items back. Before, Solid ran the CPU kernel for
+  every posed mesh every frame.
+- The lighting hash key (`mesh_hash_of`) no longer asks a posed skin's render mesh for its serial: the hash is made from its
+  positions. VR's segment BVH of a posed skin is made from its positions and tessellation (the tessellation and the copy on
+  the main thread only when a build starts, the BVH on the worker), not from the posed render mesh.
+- The kept Solid and Shaded lists are dropped with the card's stand-ins they point into (`Editor::skin_forget_kept_lists`, on
+  a prune or a spare replaced - review 520: a kept Solid list could reach a freed stand-in); Weight and Vertex Paint objects
+  skip the evaluated render mesh their base mesh replaces.
+- Texture Bake of a posed skin keeps its pose: the re-UV'd copy used to end the pose (`touch()`) and was built whole on the
+  posed shape - posed diagonals, MikkTSpace on the posed positions - so `same` could fail. It is now the rest with the baked
+  UVs, posed by round 518's kernel: the views' triangulation and turned tangents. The editor's bake and export-bake jobs keep
+  the pose on their bare copy (the worker poses it from the shared rest, under its lock). `TextureBakeResult::lined_up` says it held.
+- Sculpt and Weight Paint on a skinned mesh: the object gets no `skin_pose` (`GameObject::skin_pose_off`, kept by
+  `Editor::sync_skin_pose_off` every frame and by both modes), so it is built whole as before round 518; the card's gather lists
+  it as left on the CPU.
+- Not moved: F12 / the path tracers / MoonRay gather their items on the main thread, so a posed skin's render mesh is made there,
+  once per pose and object (the worker route needs the card-skin item machinery); the mesh-vertex deform stays every frame.
+
+**Merged:** main 3e5337c3 (#456, Pass 27) into Pass 26 (7b145049, #445's head): `record_skins()` before the traced shadows'
+builds; a skin's posed vertex and index buffers take `mesh_usage()` (acceleration-structure build input with ray queries);
+each dispatched skin moves its mesh's `rt_content`, so the traced shadow's bottom level follows the pose.
+
+**Checked:** the round's tests - picking, snapping, a Jolt collider on a posed platform, posed OBJ / PLY export, F12 + the CPU
+path tracer, Solid and Display As Bounds without the kernel, a kept Solid list re-gathered when its stand-ins go, Sculpt / Weight
+Paint without a pose (a stroke still paints), Texture Bake lined up on a twisted grid where the old triangulation differed;
+on the card: a posed skin's traced shadow follows it (765 lit -> 132 shadowed, BLAS builds 2 -> 3 -> 3 on a still frame) and a
+posed Solid frame builds 0 render meshes with 20 skins drawn by the card. With Blender's libraries and private test / prefs
+folders: gpu on the card 1,478 checks, animation 4,934, render 40,488, editor 3,869, lighting 9,926, sculpt 466, assets 3,027,
+physics 208, vr 116 - 0 failed; Linux (WSL, dependency-free) animation 4,934, render 40,378, editor 3,843, sculpt 446, lighting
+9,872 - 0 failed. Reviewed twice (code-reviewer: a kept Solid list could reach a freed stand-in - fixed; approve). Stress: CI's
+sections; the timed rows are round 522's.
+
+## 2026-11-17 (round 519): The card's skin pass
+
+**Asked:** move skeletal skinning to the graphics card (the user, 2026-11-15; Pass 26, task 0501, ADR 0146). Round 518
+made the CPU reference (`skin_render_vertices`); this round writes the card's pass from it, line for line, and sends the
+card a palette a frame in place of the posed mesh.
+
+**Added (task 0502, ADR 0146)**
+- `gpu::Raster::can_skin()`, `add_skin(rest vertices, indices, weights)` -> a mesh id the instances draw as any mesh,
+  `set_skin_palette`, `remove_skin`; the defaults say no, so a raster without the pass needs nothing. `VulkanRaster` makes
+  a compute pipeline of its own - its own descriptor layout and pool, made by the first `add_skin`, not in `init`, and no
+  binding in the lighting layout - from `kSkinComp`, GLSL written from `skin_blend_point` / `skin_blend_dir` /
+  `skin_render_vertices` (the same order of operations, dual quaternions only when every bone of the vertex is rigid, a
+  vertex with no bone or a degenerate turn left at rest, a non-finite position kept at rest). One dispatch per skin whose
+  palette changed, before the frame's first pass, between two barriers (the frame before's vertex reads -> the write;
+  the write -> the vertex fetches and the next write); the palettes live in a host-visible ring of three, bound by a
+  dynamic offset (spare room: every recording settles the frame before). Every pass and both views of a frame draw the
+  one posed buffer: a second view, or a still frame, adds no dispatch. `add_skin` refuses weights naming a bone the
+  palette doesn't hold or more bones a vertex than slots, and the shader clamps both. `warm_shaders` compiles the shader.
+- Pass 27's hook (M2): `set_skin_extra_usage(flags)` adds a VkBufferUsageFlags to every posed vertex buffer made after
+  it (`skin_usage(mesh)` says what a buffer was made with), and `take_skin_writes()` lists the skinned meshes the last
+  recorded frame's pass wrote - what a BLAS refit is made from. The index buffer and the device-address allocation flag a
+  build input also needs are M2's to add.
+- `skin_card_weights` (per render vertex up to 8 bones, 16-bit indices, the weights already divided by their sum on the
+  CPU, so the card's are the CPU's floats; a vertex with no weight stays at rest; more than 65,535 bones refused),
+  `skin_card_palette` (the owner's matrices, then per bone a matrix, a dual quaternion and a rigid flag: 96 bytes a
+  bone, 28 KB for 292), `skin_bone_boxes` / `skin_posed_bounds` (`src/scene/skin_render.cpp`): the bounds of a posed
+  mesh without its vertices. A linear blend is a weighted mean of the bones' moves, so each bone's rest box moved by its
+  matrix holds it. A dual quaternion blend is a rigid motion about each box's centre, padded by the box's diagonal and
+  twice the farthest the bones sharing its vertices carry that centre (a blend about a far pivot swings by the pivot's
+  distance); with vertices on three bones or more, whose turns can cancel, the box of the deform's positions, which the CPU
+  still makes this round. `Mesh::skin_pose_holds()` is the kernel's own check, so a caller needn't ask the render mesh.
+- Profiler / `perf status`: skins on the card, palettes sent, skins sent to the card, skins posed on the CPU, and the last
+  reason a skin was left to the CPU.
+
+**Changed (task 0502)**
+- A card view's gather (`render_deferred`) keeps a posed skinned mesh as a stand-in: its rest render mesh (a copy), one per
+  object and rest - the Scene and Game views share it when they pose one rest, and keep one each when a modifier before
+  the Skin gives each its own - with the posed `Mesh` in `DrawItem::skin`, the box in `skin_box` (the shadow map's frame
+  and the close-up test read it through `draw_bounds`) and the pose's stamp in the item's words (the serial stays while a
+  pose changes). The card holds it once and is sent the palette when it changed; a re-bind (Max Influences, a bone's
+  Deform) makes the stand-in and the card's copy again. Nothing there asks the posed mesh for its render mesh: the CPU
+  kernel does not run for it. Every other reader of the items (`collect_items`: F12, the path tracers, bakes, MoonRay)
+  gets the posed render meshes as before. A stand-in costs a second copy of the rest render mesh in memory.
+- A skinned mesh the card can't take - a Skin with a limit group or a modifier after it (no pose: the reason is listed in
+  the view's notes), Edit Mode, a see-through, volume, baked or highlighted surface, a card that is full or has no compute
+  pass, a camera's flatten or View Angle Shapes, Realtime GI on Automatic (voxelizes the posed vertices), and a rest that
+  shape keys under the Skin move (a blink, a viseme: sending the whole skin each frame would cost more; back on the card
+  once it holds still for three gathers, until round 521 puts shape keys on the card) - is posed on the CPU and sent as a
+  mesh, the rest of the view staying on the card. A view the CPU draws gets the posed render meshes too, and so do the
+  Solid shading mode and Display As Bounds.
+- A toon outline's shell is keyed by its source's pose, not by the posed render mesh's serial, and an object's box
+  (`GameObject::world_bounds`, the outline's width by distance) is a posed skin's posed positions: both asked the posed
+  mesh for its render mesh every frame, which ran the CPU kernel the card was to spare (found on the card: 3 meshes a frame
+  of the stand-in avatar). The shell itself is still made on the CPU a pose (round 521).
+- The instance's Generated mapping box and a volume's thickness read the rest box, not the posed one (an approximation
+  on a skinned mesh with such a material).
+
+**Reviewed (code-reviewer):** a re-bind with the same rest left the card's weights stale; the stand-ins, kept by object
+alone, were made again every frame when the Scene and Game views posed different rests; a rest moved by shape keys sent
+the whole skin each frame; the dual quaternion bound (first half the rest's diagonal, which a test engineer's far pivot
+broke) didn't hold three bones whose turns cancel; `add_skin` trusted the bone indices; the list of written skins grew
+without end; the barrier after the pass lacked the next write; Edit Mode's reason wasn't listed. All fixed, with tests.
+
+**Checked:** on the card (`--group gpu`, the hub's window): the pass against the CPU kernel - 20 cases, worst position
+5.4e-7 of the diagonal, worst direction 6.9e-7 (bounds 1e-5 / 1e-4); 8 influences and unbound vertices 0 off; M2's hook
+(the extra usage, exactly the dispatched meshes); the stand-in avatar posed over 12 frames: 0 skins sent whole, 0 render
+meshes skinned on the CPU, a palette a pose, and with its outlines off 0 meshes sent; its picture against the CPU's
+99.4 % of 561,946 pixels within 3 / 255 (ADR 0108's approximations aside); a skin never stale through two characters
+of one mesh, a re-pose, the rest position, a re-bind, Max Influences, a bone's Deform, a shape key held and a Skin put back
+- round 519's gpu tests 238 checks, 0 failed. With Blender's libraries, merged with main c842763d and run with a test,
+prefs and cache folder of their own, the animation, render and editor groups 4,560 / 2,639 / 3,214 checks, 0 failed;
+dependency-free animation 4,558 on Windows and 4,562 on Linux (before the merge), whose only failures were those of
+"assets: Ctrl and Shift click select several materials" (21 on Windows, 4 on Linux): every run on this machine fails it
+while it shares one default test project with other sessions, and passes it with a folder of its own (#433). The three gpu picture tests
+that fail on this machine (textured materials, overlays, the Lanczos probe ball) fail on main too and #436 fixes them;
+two more that failed in one full run only pass alone (a starved run: round 555). CI runs the whole suite.
+
+(README's feature paragraph and USABILITY's rows: round 523's write-up, once round 522's timed rows say what the user sees;
+the Learn tab's "Where a Posing Frame Goes" lesson says what runs on the card now and what still needs the CPU.)
+
+## 2026-11-16 (round 518): The skin poses the render mesh
+
+**Asked:** move skeletal skinning to the graphics card (the user, 2026-11-15; Pass 26, task 0501, ADR 0146: normals
+turned by the bones as Unity does, and the CPU views by the same rule). This round lays the ground on the CPU: the
+reference the card's skin pass (round 519) is written from and checked against, and the CPU views' path.
+
+**Changed (task 0501, ADR 0146)**
+- A posed character's render mesh is its rest render mesh with the vertices moved by the skin
+  (`skin_render_vertices`, `src/scene/skin_render.cpp`): positions by the same blend as the Skin modifier (the two
+  share `skin_blend_point`, so a corner lands on the deform's own bits), normals and tangents turned by the blended
+  bones as Unity's SkinnedMeshRenderer does - no longer worked out again from the posed faces. A pose therefore
+  never builds a render mesh whole, moves one in place, splits a corner again or redoes MikkTSpace.
+- `GameObject::evaluated_mesh` keeps, on a mesh whose last modifier drawn is a Skin (without a limit group, outside
+  Edit Mode's cage), the pose and the mesh before the skin (`Mesh::skin_pose`); the rest's render mesh is kept from
+  frame to frame while the mesh before the skin is the same, and follows in place when only its positions moved (a
+  shape key). Any change to the mesh after that ends it, and the usual build takes over.
+- A posed quad or n-gon keeps the rest's diagonal (as on the card, and in Unity); before, it was split again from
+  the posed positions.
+- Profiler: "render meshes skinned" and "render meshes posed by the skin" (ms) in the Posing block.
+
+**Measured:** main's baseline for the pass (068207d9: `posing`, `animation`, the owner's avatar in the owner's world,
+measured locally) - in round 522's comparison.
+
+**Reviewed (code-reviewer, two passes):** worker copies (`MeshCopyBare`) no longer carry the pose; each pose's rest has
+its own lock, taken inside the new `JobSystem::isolate` (one lock for all skins hung with oneTBB when a waiting thread
+stole another skin's piece); a rest that followed a shape key is settled with the mesh; the rest is written in place
+when nothing else holds it, without the vertex weights; the round 470 / 474 checks that pinned the in-place move keep
+it through a limit group (the skin's own render mesh no longer moves in place).
+
+**Checked:** with Blender's libraries (oneTBB) the animation, render and editor groups - 2,636 / 2,639 / 3,220 checks,
+the only failures the 21 of "assets: Ctrl and Shift click select several materials", which fails on this machine on
+main too and passes on CI and Linux; dependency-free the animation group 2,635 checks on Windows (the same 21) and
+2,635 on Linux, 0 failed. CI runs the whole suite.
+
 ## 2026-11-17 (round 561): The splat lesson walks through the renderers
 
 **Asked:** the hub, from M3's Learn walk. The "Point clouds and Gaussian splats" section stopped after making test

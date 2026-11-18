@@ -15230,7 +15230,9 @@ static void tests_round521() {
     CHECK(em && em->skin_pose_holds());
     if (!em) return;
     CHECK(built([] {}, 1.04f) == 0u);  // a pose
-    /* A cube with no skin: the hull of its own positions, bit for bit (each vertex out along the area-weighted smoothed normal). */
+    /* A cube with no skin: the hull of its own positions (each vertex out along the area-weighted smoothed normal), worked out as
+     * outline_hull_positions does. Within 2e-7 of the cube's size, not to the bit (round 521, linux-unit): GCC may contract the
+     * push into a fused multiply-add in one compilation unit and not the other - an ulp apart, the same shell. */
     const MeshPtr cube = primitives::cube();
     Outline plain;
     plain.thickness = 0.05f;
@@ -15247,10 +15249,15 @@ static void tests_round521() {
       for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
     }
     bool same = true;
+    float worst = 0.0f;
     for (size_t i = 0; i < vn.size(); i++) {
-      const Vec3 want = cube->positions[i] + normalize(vn[i]) * 0.05f;
-      same = same && std::memcmp(&want, &sh->positions[i], sizeof(Vec3)) == 0;
+      const float len = length(vn[i]);
+      const Vec3 want = cube->positions[i] + (vn[i] / len) * (0.05f * 1.0f);
+      const float off = length(want - sh->positions[i]);
+      worst = std::max(worst, off);
+      same = same && off <= 2e-7f;
     }
+    if (!same) std::printf("    the cube's hull against the formula: worst %.3g\n", worst);
     CHECK(same);
   });
 

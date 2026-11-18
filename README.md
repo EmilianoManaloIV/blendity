@@ -208,7 +208,7 @@ FBX carries the skeleton, skin and clip as glTF does, round 352;
 the texture set and lightmap UVs go along, round 353;
 an export waits for a remesh or bind still running on it, round 354;
 the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355;
-posing pays for the meshes a pose moves, not for the avatar: each mesh is skinned once a frame and only when its bones moved, follows in place, and the world's rows stay on the card (dragging an IK target on a 140,000-triangle stand-in: 48 ms a frame before, 10 ms now; a whole-body pose 35 to 53 ms), Pass 22, rounds 468-475;
+posing pays for the meshes a pose moves, not for the avatar: each mesh is skinned once a frame and only when its bones moved, follows in place, and the world's rows stay on the card (dragging an IK target on a 140,000-triangle stand-in: 48 ms a frame before, 10 ms now; a whole-body pose 35 to 53 ms, 7 to 12 ms from Pass 26's skinning on the card: the card moves a posed character's vertices from a palette a frame, outlines and shape keys stay on it, and the CPU views and everything that reads a posed shape (picking, snapping, colliders, exports, bakes) use the same rule - on the stand-in avatar alone every pose row meets 16.7 ms, in a world the card's own draw of the world holds the rest), Pass 22, rounds 468-475, Pass 26, rounds 518-523;
 the Avatar window makes VRChat's 15 visemes and checks an avatar,
 after the CATS plugin,
 round 356,
@@ -375,8 +375,8 @@ film made in Blendity and compared stage by stage with Blender, Unity, Godot and
 the export's missing shape keys and painted textures lead the 15 ranked findings.
 Rounds 468-475, Pass 22: posing and playing an avatar cost what the avatar cost, whatever was moved; a mesh is skinned once a frame and only
 when its bones moved, a posed mesh follows in place, the world's rows stay on the card, the full-body solver works on a pose buffer and the
-scene is written once a frame (dragging an IK target on a 140,000-triangle stand-in 48 ms -> 10 ms; whole-body poses 35 to 53 ms, skinning
-on the card waits for a decision).
+scene is written once a frame (dragging an IK target on a 140,000-triangle stand-in 48 ms -> 10 ms; whole-body poses 35 to 53 ms, then skinning on the card (Pass 26, rounds 518-523: the chest 37 -> 7 ms, a Puppet handle 56 -> 12, Play 46 -> 10 on the stand-in alone;
+in a world the chest 43 -> 11, R on the chest 57 -> 16, a Puppet handle 63 -> 21, Play 71 -> 25: the world's draw on the card is what is left).
 Rounds 476-483, 494-502 and 513-515, Blockout: a mesh built from boxes, cylinders and spheres that add, cut or intersect and follow as they
 move - rooms, handles, the Room tool, wedges, stairs, arches, outlines and any mesh as pieces, a Blend radius, materials by floor, wall and
 ceiling, Bake to Mesh, outlines you click, Draw Piece with a Shape list that ends in Door and Window, styled windows and doors,
@@ -428,7 +428,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (103578 unit checks in 3681 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (106367 unit checks in 3749 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

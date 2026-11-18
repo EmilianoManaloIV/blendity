@@ -460,6 +460,10 @@ Cycles has one device backend per vendor (`intern/cycles/device/cuda`, `optix`, 
 | `Lattice`, `LatticeModifier` (`scene/lattice.cpp`) | A box of u x v x w points (offsets from rest places on a unit cube); `displacement(q)` blends the offsets round q with linear or uniform cubic B-spline weights (border points repeated, outside clamped to the box); `resample` keeps the shape when the resolution changes. The modifier maps each vertex into the lattice's space and back (deform-only, parallel) | Blender `lattice_deform.cc` |
 | `Mesh::vertex_groups` (`VertexGroup`), `meshops::transfer_vertex_groups` (`scene/vertex_groups.cpp`) | Named dense per-vertex weights. remove_loose_verts remaps them, Mirror / Array / Join copy them; any other topology change is mended afterwards by position (by index, exact match, else the nearest point of the old surface, barycentric) | ADR 0024 |
 | `Bone`, `Armature`, `SkinModifier`, `armature_bones`, `skin_bind_automatic` (`scene/skin.cpp`) | Bones are GameObjects (rest TRS on the Bone); a skin's matrix per bone is owner^-1 x bone world x (root's parent x rest)^-1 x owner, blended linearly or by dual quaternions (rigid bones), 4 influences from the groups named after bones; automatic weights by distance to the bone segments | ADR 0025 |
+| `SkinPose`, `skin_blend_point` / `skin_blend_dir`, `skin_render_vertices` (`scene/skin_render.cpp`), `Mesh::skin_pose`, `Mesh::skinned_render_mesh` (`scene/mesh.cpp`) | Round 518: one pose of a skin (bone matrices, dual quaternions, the binding, the mesh before the skin) and the kernel that poses a rest render mesh by it - the blend the Skin modifier shares, normals and tangents turned by the bones (Unity's way); the CPU reference of the card's skin pass | ADR 0146 |
+| `gpu::Raster::add_skin` / `set_skin_palette` / `take_skin_writes` (`render/gpu_raster.cpp`, `kSkinComp`), `skin_card_weights` / `skin_card_palette` / `skin_posed_bounds` (`scene/skin_render.cpp`), `Editor::gpu_skin_mesh` / `skin_card_item` / `skin_stand_for` (`editor/gpu_views.cpp`, `gpu_skin.cpp`), `DrawItem::skin` | Round 519: the card's skin pass - a compute dispatch per skin whose palette changed, before the frame's first pass, writing a posed vertex buffer every pass and view draws; the CPU sends weights once (a stand-in per object and rest) and a palette a frame; a skinned mesh the card can't take is posed by the CPU kernel | ADR 0146 |
+| `mesh_tris`, `render_bounds` (`scene/skin_render.cpp`), `Mesh::tessellation`, `GameObject::skin_pose_off`, `Editor::sync_skin_pose_off` (`editor/gpu_skin.cpp`), `TextureBakeResult::lined_up` | Round 520: what needs where a posed skin is, not its render mesh - a ray, a snap or a box reads the evaluated mesh's positions and triangulation; Sculpt and Weight Paint hold their skinned object without a pose; a posed skin's texture bake keeps the views' triangulation and turned tangents | ADR 0146 |
+| `Outline::posed_shell`, `skin_pose_positions`, `skin_bone_boxes_grow` (`scene/scene.cpp`, `skin_render.cpp`), `gpu::Raster::update_skin_rest` / `update_skin_triangles`, `Editor::skin_rest_moved` (`editor/gpu_skin.cpp`) | Round 521: a posed skin's outline shell is the rest's shell skinned (built once per rest, offset and group; a card skin of its own); a shape key under a skin goes up as vertex and index ranges, not the skin again | ADR 0146 |
 | `transform_from_matrix` (`scene/scene.cpp`), `ImportedNode::bind_world`, `mirror_x` (`scene/import.h`) | A matrix as position / rotation / scale; an imported joint's bind pose (glTF inverse bind matrices, FBX cluster bind), which `instantiate_import` makes each Bone's rest | ADR 0025 |
 | `Editor::Workspace`, `kWorkspaces`, `apply_workspace`, `shows(groups)`, `create_reference_image` (`editor/workspaces.cpp`) | Layouts for each stage of the work: a dock string plus a focus (tool groups); `shows` gates the Tools window's sections, the GameObject menu and Add Component; user layouts in preferences | ADR 0027 |
 | `Editor::draw_rigging_window`, `rig_root`, `rig_mesh`, `add_bone`, `add_ik`; `draw_reflected`, `draw_weight_paint_controls` (`editor/rigging_window.cpp`, `panels.cpp`) | The Rigging window: skeleton, skin, vertex groups, Weight Paint, IK, on the selection's objects (not names); any reflected fields drawn with the Inspector's widgets elsewhere | task 0052 |
@@ -1013,9 +1017,9 @@ fit.
 | Solve order, Record, the Animation window | `Editor::solve_after_tools`, `bind_clip` / `clip_bindings`, `AnimationClip::touch_keys` (round 472, ADR 0126) | Constraints are solved before the windows are drawn and again after the Scene view's tools wrote a transform. Code that changes a track's path, property or axis, or adds, removes or reorders tracks, calls `touch()` |
 | Play with the springs | `physics_step`, `Editor::autopose_pins`, `trail_follow_edit` (round 474) | Nothing that runs before the constraints and springs in Play may ask for evaluated bounds: the views would build the mesh twice |
 
-Where it stopped (round 475): an IK drag meets 16.7 ms on the stand-in (48-56 ms before, 10-13 now); whole-body poses
+Where it stopped (round 475; Pass 26 moved it on, see below): an IK drag meets 16.7 ms on the stand-in (48-56 ms before, 10-13 now); whole-body poses
 are 35-53 ms, what is left being the moved meshes sent to the card, their normals and tangents on the CPU and the outline
-shells. Skinning on the card is the owner's open decision (`docs/PERFORMANCE.md`, "Pass 22 in one table").
+shells. Skinning on the card was the owner's open decision (`docs/PERFORMANCE.md`, "Pass 22 in one table"); Pass 26 took it.
 
 ## Pass 25: speed and usability surveys (rounds 504-515, ADRs 0140, 0145)
 
@@ -1042,3 +1046,21 @@ instruments came out of it that later rounds should keep running.
 The audits that stand beside the sweep (`tools/hci_label_audit.py`, `hci_consistency_audit.py`, `hci_console_audit.py`,
 `hci_fitts_audit.py`, `tools/test_coverage_map.py --check`) are static; the sweep is the live one. All run at their
 baselines (`docs/requirements.md`, "Usability").
+
+## Pass 26: skinning on the card (rounds 518-523, task 0501, ADR 0146)
+
+A posed character is its rest render mesh moved by the skin; the CPU kernel is the reference, the card's compute pass is
+written from it line for line, and the CPU views use the kernel too. The rows above name the functions; the shape of it:
+
+| Part | Where | What to keep true |
+|---|---|---|
+| The reference | `skin_render_vertices`, `skin_blend_point` / `skin_blend_dir` (`scene/skin_render.cpp`) | The Skin modifier and the kernel share one blend; normals and tangents are turned by the bones (Unity's way). A change to the blend changes `kSkinComp` too, and `--group gpu` compares the two |
+| The card's pass | `gpu::Raster::add_skin` / `set_skin_palette` (`kSkinComp`) | One dispatch per skin whose palette changed, before the frame's first pass; every pass and view draws the one posed buffer. A raster without the pass says no and the CPU poses |
+| Stand-ins | `Editor::skin_stand_for`, `DrawItem::skin` (`editor/gpu_skin.cpp`) | The gather keeps the rest render mesh once per object and rest; nothing asks the posed mesh for its render mesh on a card view (the kernel does not run) |
+| CPU positions on demand | `mesh_tris`, `render_bounds` | Picking, snapping, colliders, exports and bounds read the evaluated mesh's positions; only a render or a bake builds the posed render mesh |
+| Outlines as skins | `Outline::posed_shell` | The shell of a posed skin is the rest's shell, skinned: an approximation (up to 44 % of the thickness off where bones blend) the Learn lesson names |
+| Shape keys | `update_skin_rest`, `update_skin_triangles` | A blink or a viseme goes up as ranges of the rest; the skin runs again |
+| What the CPU keeps | the reasons listed in the view's notes and `perf status` | A limit group, a modifier after the Skin, Edit Mode, see-through / volume / baked materials, view-shaped meshes, Sculpt and Weight Paint |
+
+Where it stopped (round 522): every pose row alone on the card meets 16.7 ms; in a world the misses are the card's draw of
+the world (render call 6-15 ms, lighting 3-6 ms, 9 with two views), named for the Speed / render stream, not skinning.
