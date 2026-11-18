@@ -2079,6 +2079,11 @@ class Editor {
   /* Round 520: every stand-in not gathered since is let go, as 600 gathers without them would (the kept lists go with them). */
   void skin_age_stands_for_test() { skin_builds_ += 700; skin_prune_stands(); }
   size_t skin_stands_for_test() const { return skin_stands_.size(); }
+  /* Round 563: `n` gathers of a card view that found none of the stand-ins (another view's, of another rest): each counts and prunes. */
+  void skin_gathers_elsewhere_for_test(int n) {
+    for (int i = 0; i < n; i++) skin_prune_stands();
+  }
+  size_t solid_kept_stands_for_test(bool game = false) const { return solid_cache_[game].valid ? solid_cache_[game].stands.size() : 0; }
   const std::string &skin_reason_for_test() const { return skin_reason_; }
   void skin_items_for_test(bool on) { skin_items_for_test_ = on; }
   void skin_cards_off_for_test(bool off) { skin_cards_off_for_test_ = off; }
@@ -2609,8 +2614,11 @@ class Editor {
     bool flattening = false;  // (a Camera Flatten or View Angle Shapes was in the scene: the gather filled side tables - never kept)
     bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
     std::vector<DrawItem> items;
+    std::vector<SkinStand *> stands;  // (round 563: the card stand-ins a kept list's items point at - read only while `valid`, which every stand-in let go clears)
   } items_cache_[3][2];  // (round 506: [0 Scene view, 1 Game view (its LOD levels), 2 any other game gather - the Camera Preview, VR, renders][tangents]: the Game view and the preview each keep theirs)
   void skin_forget_kept_lists();
+  void skin_list_stands(ItemsCache &c);         // (round 563, render_view.cpp)
+  void skin_stamp_kept(const ItemsCache &c);
   ItemsCache solid_cache_[2];  // (round 506: Solid shading's [game])
   mutable view_keeps::PerEditor keeps_;  // (round 506: what the Scene view's keeps hold between frames)
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
