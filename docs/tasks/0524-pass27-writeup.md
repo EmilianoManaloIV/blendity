@@ -6,7 +6,7 @@
 - **Decisions:** none expected (a measurement and documentation round; ADR 0056: a measurement is a stress row; ADR 0123:
   the fragments fold here)
 - **Model:** main session (worker M3, after round 537)
-- **PR:** (link when opened) - base `main`, the single top of every Pass 27 stack
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/456 - base `main`, the single top of every Pass 27 stack
 
 ## Goal
 One answer to "what did Pass 27 bring from Blender 5.3, how fast is it, and is it easy to use": every Pass 27 round on one
