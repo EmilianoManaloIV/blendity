@@ -34,8 +34,8 @@ pass changed; the lessons and the books are untouched and not rebuilt.
   a key on the frame to spare the compare of the see-through corners, and one lighting pass with two targets for a
   camera with filters.
 - A judgement call for the owner (round 565): the one fix that round kept - the see-through corners staying on the
-  card - is 1.2x on the card's frame of the world (13.1 -> 10.7 ms in P8), under ADR 0112's 1.3x bar for keeping a
-  speed-up. It was kept because it was the only part of that frame the editor sent for nothing and the pictures are
+  card - is 1.2x on the card's frame of the world (13.1 -> 10.7 ms in P8), under the 1.3x bar that round's spec took
+  from ADR 0112 (which sets it for adopting a library, not for a change of the editor's own code). It was kept because it was the only part of that frame the editor sent for nothing and the pictures are
   the same byte for byte; it can be taken out again.
 - A playing clip cannot be pinned in a test: `anim_tick` and the three places that start playback read
   `now_seconds()`, not the editor's clock (round 568). Play by `clock_now()`.
@@ -53,7 +53,8 @@ pass changed; the lessons and the books are untouched and not rebuilt.
   its copy, and the serial validation.
 - Round 543's Preferences hover test on macOS: the cause is a reading, not proven (round 568).
 - CI's macOS jobs can end red without running: #465's build was cancelled twice after 15 minutes with no runner given
-  (GitHub's capacity notice) and passed on the third try (round 571). Nothing to fix in the repository.
+  (GitHub's capacity notice) and passed on the third try (seen on that pull request's runs; it is in no round's entry).
+  Nothing to fix in the repository.
 
 **Checked:** the full unit suite on the joined tree (#472's head, every Pass 28 round in it), every group in its own process with its own test and prefs folder - Windows with Blender's libraries 106,871 checks in 3,801 tests (the card groups with the card: gpu 1,655, splats_raster 276, splats_gpu 3,917, splats_trace 3,996); Windows dependency-free 100,021; Linux dependency-free (WSL) 100,060; 25 groups each, 0 failed. `changelog.py check` on the 13 fragments before the fold; `tools/sweep_commands.py --check`, `tools/test_coverage_map.py --check`, both HCI audits and the shard table pass. The suites ran before the fold, which changes documents only; the groups that read the README ran again on the release commit's build (round 575).
 

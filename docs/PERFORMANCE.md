@@ -4389,7 +4389,7 @@ notes folder's `pass27-timed/`, the detail in `docs/perf/verify-544.md`.
 | Card first open, empty pipeline cache / written | 92.5 s / 0.16 s | **0.54 s / 0.16 s** |
 
 The timed batch of 2026-11-17 (the hub's, normal priority, a quiet machine; RTX 4070 SUPER, 32 threads), on round 557's
-exe. The card meets ADR 0105's 50 ms with room to spare. **The CPU at 1M still misses it (86.8 ms; round 566 brought it to 38 ms, see "Round 566"), named:** a
+exe. The card meets ADR 0105's 50 ms with room to spare. **The CPU at 1M missed it at this round (86.8 ms; round 566 brought it to 38 ms, see "Round 566"), named:** a
 degree-3 splat costs its EWA projection and 48 SH terms every frame, and the 1M array read and written is most of the
 41 ms; the compositing's 37 ms is a million alpha-blended ellipses, front to back. The CPU draws the views only when there
 is no card (or the card refuses a frame: too close, too big); at 100k the CPU is within budget (15.4 ms). What would move

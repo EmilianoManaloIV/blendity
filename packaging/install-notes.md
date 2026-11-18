@@ -21,5 +21,5 @@ Click the link for your computer. It downloads the one file you need:
 - **Linux:** right-click the downloaded file, choose **Properties**, turn on **Allow executing file as program**
   (or "Executable as Program"), then double-click it.
 
-The full guide, with uninstalling and what to do if something goes wrong, is in the
-[README](https://github.com/EmilianoManaloIV/blendity#download).
+The full guide, with uninstalling and what to do if something goes wrong, is
+[docs/INSTALL.md](https://github.com/EmilianoManaloIV/blendity/blob/main/docs/INSTALL.md).

@@ -9,7 +9,7 @@
 #   by the build's tag; Blendity's updater finds its own there. Kept: the archives of existing releases (and of the
 #   newest KEEP_PR_BUILDS PR builds, from when merges made releases).
 # - A suffixed tag (v0.11.0-beta.1) is a GitHub pre-release. Other tags are releases (GitHub picks the Latest); v0.x
-#   ones are titled and described as pre-releases of the program, since 1.0 isn't out. Merges into main make no
+#   ones were titled and described as pre-releases of the program, before 1.0.0. Merges into main make no
 #   release (artifacts only, the user's choice).
 # GitHub adds "Source code" archives to every release by itself; they can't be left out (and the GPL wants the source
 # at hand anyway). The install guide in the notes tells people they don't need them.
