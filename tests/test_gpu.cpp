@@ -6627,6 +6627,10 @@ static void tests_round543_gpu() {
     ed.init_headless(1400, 900);
     ed.prefs_for_test(prefs);
     ed.force_cpu_views_for_test("no Vulkan GPU (a test)");
+    /* (The test clock from the first frame: the scroll below can rest the pointer on the row, and a hover started on the
+     * process's own clock keeps its start - in a full suite past 300.8 s (macOS CI once Pass 26's tests ran before it) the
+     * tooltip would be due after the reads below. A hover started at 0 is due long before them.) */
+    ed.set_clock_for_test(0.0);
     ed.record_buttons_for_test(true);  // (the rectangles and tooltips each frame drew)
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
     ed.command("preferences");
