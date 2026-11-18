@@ -297,11 +297,24 @@ uint64_t Editor::pick_part_target(uint64_t hit, int mx, int my) {
   if (is_selected(hit)) return hit;  // (the part is the selection: a click on it keeps it)
   const int slop = ui_.px(6);
   const std::vector<GameObject *> now = selected_objects(false);
-  const bool only_opening = now.size() == 1 && now[0] == opening;  // (another way of changing the selection - the Hierarchy, a box - ends the pair of clicks)
+  const bool only_opening = now.size() == 1 && now[0] == opening;  // (another way of changing the selection - the Hierarchy, a box - ends the pair of clicks: pick_part_spot_watch)
   const bool again = only_opening && pick_part_spot_.part == hit && std::abs(mx - pick_part_spot_.x) <= slop && std::abs(my - pick_part_spot_.y) <= slop;
-  if (again) return hit;
+  if (again) {
+    pick_part_spot_ = {};  // (round 571: the pair is used - the next click on this spot is a first click again)
+    return hit;
+  }
   pick_part_spot_ = {hit, mx, my};
   return opening->id;
+}
+
+/* Round 571 (task 0553): the first click's spot is kept only while its opening alone stays selected. Looked at once a frame (Editor::frame_body), because some thirty places write the selection
+ * (the Hierarchy, a box, the console, Undo): whichever did, the next click on the spot selects the opening again, not the part at once. */
+void Editor::pick_part_spot_watch() {
+  if (!pick_part_spot_.part) return;
+  const GameObject *part = scene_->find(pick_part_spot_.part);
+  const GameObject *opening = part ? part->parent : nullptr;
+  if (opening && selection_.size() == 1 && selection_[0] == opening->id) return;  // (the ids as stored, stricter than pick_part_target's selected_objects: a stale id beside the opening ends the pair too)
+  pick_part_spot_ = {};
 }
 
 /* Wire and Bounds objects have no pixels in the id buffer: pick them by

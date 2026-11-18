@@ -2008,6 +2008,117 @@ static void tests_round547_review() {
   });
 }
 
+/* ---- Round 571 (task 0553): a used pair of clicks on a frame is forgotten ---- */
+namespace {
+/* Slow single clicks: the editor's clock pinned and moved a second before each, so no two make a double click (which would frame the view and move the spot). */
+struct SlowClicks {
+  Editor &ed;
+  double t = 1000.0;
+  void click(int x, int y) {
+    t += 1.0;
+    ed.set_clock_for_test(t);
+    pe_click(ed, x, y);
+    pe_settle(ed, 2);
+  }
+  /* A click on an object's row in the Hierarchy. */
+  bool row(const char *name) {
+    int x = 0, y = 0;
+    if (!ed.hierarchy_row_for_test(name, x, y)) {
+      std::printf("      the Hierarchy row '%s' is not drawn\n", name);
+      return false;
+    }
+    click(x, y);
+    return true;
+  }
+  const char *active() const { return ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "nothing"; }
+  bool only(const GameObject *g) const { return ed.selection_size_for_test() == 1 && ed.active_object_for_test() == g; }
+};
+}  // namespace
+
+static void tests_round571() {
+  test("blockout parts (571): after two clicks on a window's frame selected the Frame, selecting the window again in the Hierarchy and clicking that spot once selects the window, not the Frame at once", [] {
+    Editor ed;
+    const PickScene s = pe_pick_scene(ed);
+    const GameObject *frame = pe_part(*s.window, kPartKindFrame);
+    CHECK(frame != nullptr);
+    if (!frame) return;
+    int x = 0, y = 0;
+    CHECK(pe_pixel(ed, *frame, Vec3(-0.8f + 0.15f, 1.2f, 0.1f), x, y));
+    ed.clear_selection_for_test();
+    pe_settle(ed, 3);
+    SlowClicks c{ed};
+    c.click(x, y);
+    std::printf("    first click on the frame: %s\n", c.active());
+    CHECK(c.only(s.window));
+    c.click(x, y);
+    std::printf("    second click on the spot: %s\n", c.active());
+    CHECK(c.only(frame));
+    CHECK(c.row("Window"));
+    std::printf("    the window's row in the Hierarchy: %s\n", c.active());
+    CHECK(c.only(s.window));
+    c.click(x, y);
+    std::printf("    one click on the spot: %s (want the window)\n", c.active());
+    CHECK(c.only(s.window));
+    c.click(x, y);
+    std::printf("    and one more: %s (want the Frame)\n", c.active());
+    CHECK(c.only(frame));
+  });
+
+  test("blockout parts (571): a first click on a window's frame, then another object and the window again in the Hierarchy: the next click on that spot is a first click again", [] {
+    Editor ed;
+    const PickScene s = pe_pick_scene(ed);
+    const GameObject *frame = pe_part(*s.window, kPartKindFrame);
+    CHECK(frame != nullptr);
+    if (!frame) return;
+    int x = 0, y = 0;
+    CHECK(pe_pixel(ed, *frame, Vec3(-0.8f + 0.15f, 1.2f, 0.1f), x, y));
+    ed.clear_selection_for_test();
+    pe_settle(ed, 3);
+    SlowClicks c{ed};
+    c.click(x, y);
+    CHECK(c.only(s.window));
+    CHECK(c.row("Door"));
+    std::printf("    the door's row in the Hierarchy: %s\n", c.active());
+    CHECK(c.only(s.door));
+    CHECK(c.row("Window"));
+    CHECK(c.only(s.window));
+    c.click(x, y);
+    std::printf("    one click on the spot: %s (want the window)\n", c.active());
+    CHECK(c.only(s.window));
+    c.click(x, y);
+    std::printf("    and one more: %s (want the Frame)\n", c.active());
+    CHECK(c.only(frame));
+  });
+
+  test("blockout parts (571): the pair of clicks ends too when the selection changes while the Game view is in front of the Scene view (the check runs once an editor frame, not in the Scene view)", [] {
+    Editor ed;
+    const PickScene s = pe_pick_scene(ed);
+    const GameObject *frame = pe_part(*s.window, kPartKindFrame);
+    CHECK(frame != nullptr);
+    if (!frame) return;
+    int x = 0, y = 0;
+    CHECK(pe_pixel(ed, *frame, Vec3(-0.8f + 0.15f, 1.2f, 0.1f), x, y));
+    ed.clear_selection_for_test();
+    pe_settle(ed, 3);
+    SlowClicks c{ed};
+    c.click(x, y);
+    CHECK(c.only(s.window));
+    ed.command("window Game");  // (the Game tab in front: the Scene view is not drawn while the selection changes)
+    pe_settle(ed, 3);
+    CHECK(c.row("Door"));
+    CHECK(c.only(s.door));
+    CHECK(c.row("Window"));
+    CHECK(c.only(s.window));
+    ed.command("window Scene");
+    pe_settle(ed, 3);
+    c.click(x, y);
+    std::printf("    back in the Scene view, one click on the spot: %s (want the window)\n", c.active());
+    CHECK(c.only(s.window));
+    c.click(x, y);
+    CHECK(c.only(frame));
+  });
+}
+
 void tests_round547() {
   tests_round547_leaf();
   tests_round547_objects();
@@ -2016,5 +2127,6 @@ void tests_round547() {
   tests_round547_pick();
   tests_round547_te();  // (the test engineer's block)
   tests_round547_review();
+  tests_round571();
 }
 // r547-end
