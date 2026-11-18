@@ -976,6 +976,12 @@ class Editor {
   };
   const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
   void clear_toasts_for_test() { toasts_.clear(); }
+  /* Round 564: where the last draw put the toasts (a test compares a view's picture outside them). */
+  std::vector<Recti> toast_frames_for_test() const {
+    std::vector<Recti> out;
+    for (const ToastRects &t : toast_rects_) out.push_back(t.frame);
+    return out;
+  }
   Vec3 scene_view_pivot_for_test() const { return cam_.pivot; }  // (round 374)
   struct JobView {  // (task 0253: one running job as the tray shows it)
     std::string label;
@@ -984,8 +990,21 @@ class Editor {
     bool cancellable = false, cancelled = false;  // (cancelled: the job's own flag is set - by the tray, Esc or a console verb)
     std::function<void()> cancel;
     std::function<void()> now;  // (review 354: a waiting export's Export Now)
+    std::string key;            // (round 564: what the tray follows the job by when its label changes with its phase - a bake; empty: the label)
   };
   std::vector<JobView> jobs_for_test() { return jobs_running(); }
+  static constexpr const char *kBakeJobKey = "Generate Lighting";  // (round 564: the bake's name in the tray, through its phases)
+  /* Round 564: the running job of this key as if it had started `secs` earlier (a test's job that "ran a second or more" without waiting one). */
+  void jobs_age_for_test(const std::string &key, double secs) {
+    for (JobSeen &s : jobs_seen_)
+      if (s.key == key) s.started -= secs, s.label_started -= secs;
+  }
+  /* How long the tray has followed the job of this key, in seconds; -1 when it follows none. */
+  double jobs_ran_for_test(const std::string &key) const {
+    for (const JobSeen &s : jobs_seen_)
+      if (s.key == key) return clock_now() - s.started;
+    return -1.0;
+  }
   /* Round 411 (ADR 0105): the last frame's time with its deferred work, the last 240 frames, and `perf mark`'s
    * bookkeeping - what the responsiveness rows and tools/bench_world.py read. */
   float last_frame_ms() const { return frame_ms_; }
@@ -7678,8 +7697,12 @@ class Editor {
     std::string label;
     double started = 0.0;
     bool cancelled = false, alive = true;
+    std::string key;             // (round 564: JobView::key, or the label)
+    double label_started = 0.0;  // (when the label it has now was first seen: the tray's time and estimate are the phase's)
   };
   std::vector<JobSeen> jobs_seen_;
+  void jobs_note_cancelled(const std::string &key);  // (round 564: a cancel made past the tray, before the job leaves it)
+  void jobs_end(const JobSeen &s, double now);       // (its end toast and HCI log line)
   std::string busy_label_;  // (a main-thread job about to block: shown for a frame first)
   /* The History window and the unsaved-changes prompt (task 0254, editor/history_window.cpp). */
   void draw_history_window(const Recti &r);

@@ -6249,55 +6249,127 @@ static void tests_round506_engineer_gpu() {
   });
 }
 
+/* Round 564 (task 0546): a picture of the Scene view with where its toasts were drawn. The job tray says "Baking lighting done in
+ * 1.3 s" in a toast over the view when a bake's worker took a second or more - which it does on a busy machine and not on an idle
+ * one - so a test that compares whole pictures while a bake's pages go up failed there by the toast's box alone (4,586 pixels,
+ * x 166..318, y 10..39: read as "mixed frames"). The lighting is what ADR 0140 is about: the pictures are compared outside the
+ * toasts of either. */
+namespace r564 {
+
+struct Pic {
+  std::vector<uint32_t> px;
+  std::vector<Recti> toasts;  // (in the view's pixels, two pixels wider each way)
+  int w = 0;
+};
+
+static Pic view(Editor &ed) {
+  Pic p;
+  const Recti r = ed.scene_view_rect();
+  p.px = r34_crop(ed, r), p.w = r.w;
+  for (const Recti &t : ed.toast_frames_for_test()) p.toasts.push_back({t.x - r.x - 2, t.y - r.y - 2, t.w + 4, t.h + 4});
+  return p;
+}
+
+static bool under_toast(const Pic &p, int x, int y) {
+  for (const Recti &t : p.toasts)
+    if (x >= t.x && x < t.right() && y >= t.y && y < t.bottom()) return true;
+  return false;
+}
+
+/* The pixels that differ outside both pictures' toasts; `all` counts those under a toast too. */
+static size_t differ(const Pic &a, const Pic &b, size_t *all = nullptr) {
+  size_t n = 0, every = a.px.size() != b.px.size() ? 1 : 0;
+  for (size_t i = 0; i < a.px.size() && i < b.px.size() && a.w > 0; i++) {
+    if ((a.px[i] & 0xFFFFFF) == (b.px[i] & 0xFFFFFF)) continue;
+    every++;
+    const int x = (int)(i % (size_t)a.w), y = (int)(i / (size_t)a.w);
+    n += !under_toast(a, x, y) && !under_toast(b, x, y);
+  }
+  if (all) *all = every;
+  return n + (a.px.size() != b.px.size() ? 1 : 0);
+}
+
+/* Whether a toast of the bake's job (by its name or a phase's) says `end` (" done in ", " cancelled in "). */
+static bool bake_toast(const Editor &ed, const char *end) {
+  for (const auto &t : ed.toasts_for_test()) {
+    const bool bake = t.text.rfind("Generate Lighting ", 0) == 0 || t.text.rfind("Baking ", 0) == 0 || t.text.rfind("Sending ", 0) == 0;
+    if (bake && t.text.find(end) != std::string::npos) return true;
+  }
+  return false;
+}
+
+/* Until the card has caught up - no mesh waiting for it, no texture streaming, no bake running - and the Scene view is the same
+ * picture (outside toasts) two frames running. It waits on that state, not on a count of frames or seconds: under a load that
+ * starves the editor the 121 meshes of the scene below were still going up after r555_card_settle's 20 s (58 waiting), and
+ * every frame after was read as "not still" or "mixed". The ten minutes are only there so a broken editor ends the test; false
+ * then. */
+static bool settle(Editor &ed) {
+  Pic last;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(600);
+  for (int f = 1; std::chrono::steady_clock::now() < deadline; f++) {
+    ed.step_frame_headless();
+    Pic now = view(ed);
+    const bool same = !last.px.empty() && differ(last, now) == 0;
+    last = std::move(now);
+    if (f >= 2 && same && ed.mesh_queue_for_test() == 0 && !ed.texture_stream_busy_for_test() && !ed.baking_for_test()) return true;
+  }
+  std::printf("    r564::settle: not settled in ten minutes (%zu meshes waiting)\n", ed.mesh_queue_for_test());
+  return false;
+}
+
+/* A still scene on the card that bakes to more than one page (worldlike's view changes every frame while it bakes, so no picture
+ * there can be compared): a floor and 120 cubes at 48 texels a metre. */
+static void still_scene(Editor &ed, bool workers) {
+  ed.init_headless(800, 450);
+  if (workers) ed.set_async_jobs_for_test(true);
+  ed.viewport_device_for_test(2);
+  GameObject *floor = ed.scene().create("Floor");
+  floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+  floor->add<MeshRenderer>()->contribute_gi = true;
+  for (int i = 0; i < 120; i++) {
+    GameObject *box = ed.scene().create("Box" + std::to_string(i));
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->set_local_position({(float)(i % 12) - 5.5f, 0.5f, (float)(i / 12) - 4.5f});
+    box->set_local_scale({0.5f, 0.5f, 0.5f});
+    box->add<MeshRenderer>()->contribute_gi = true;
+  }
+  ed.command("create Directional Light");
+  ed.commit_change("r508 scene");
+  ed.command("camera 30 35 16 0 0 0");
+  ed.command("shading shaded");
+  r34_steps(ed, 3);
+  r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+  r34_steps(ed, 3);
+  CHECK(settle(ed));  // (round 555: 121 meshes go up to the card a few a frame - the view still before the bake starts)
+  ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
+}
+
+}  // namespace r564
+
 static void tests_round508_gpu() {
   test("Generate Lighting with the views on the card (round 508, ADR 0140): the pages go up before the bake lands, a few a frame; the view shows the old lighting whole until then; the landing frame sends none; the lightmaps and the landed picture are the one-frame landing's (skipped without a GPU)", [] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
     }
-    auto make = [](Editor &ed, bool workers) {
-      ed.init_headless(800, 450);
-      if (workers) ed.set_async_jobs_for_test(true);
-      ed.viewport_device_for_test(2);
-      /* A still scene (worldlike's view changes every frame while it bakes, so no picture there can be compared): a floor and
-       * 120 cubes at 48 texels a metre - more than one page. */
-      GameObject *floor = ed.scene().create("Floor");
-      floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
-      floor->add<MeshRenderer>()->contribute_gi = true;
-      for (int i = 0; i < 120; i++) {
-        GameObject *box = ed.scene().create("Box" + std::to_string(i));
-        box->add<MeshFilter>()->mesh = primitives::cube();
-        box->set_local_position({(float)(i % 12) - 5.5f, 0.5f, (float)(i / 12) - 4.5f});
-        box->set_local_scale({0.5f, 0.5f, 0.5f});
-        box->add<MeshRenderer>()->contribute_gi = true;
-      }
-      ed.command("create Directional Light");
-      ed.commit_change("r508 scene");
-      ed.command("camera 30 35 16 0 0 0");
-      ed.command("shading shaded");
-      r34_steps(ed, 3);
-      r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
-      r34_steps(ed, 3);
-      r555_card_settle(ed);  // (round 555: 121 meshes go up to the card a few a frame - the view still before the bake starts)
-      ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
-    };
+    const auto make = r564::still_scene;  // (round 564: the scene is round 564's tests' too)
     std::vector<std::vector<Vec3>> one_frame;
-    std::vector<uint32_t> one_frame_pic;
+    r564::Pic one_frame_pic;  // (round 564: the pictures here are compared outside the toasts - see r564::Pic for why)
     {
       Editor ed;
       make(ed, false);  // (no workers: the bake lands in the frame that started it, pages and all - the old behaviour)
       ed.command("bake start");
       for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
       r34_steps(ed, 6);
-      r555_card_settle(ed);  // (round 555: the reference picture settled too)
+      CHECK(r564::settle(ed));  // (round 555: the reference picture settled too; round 564: waited for, however long the machine takes)
       for (const Lightmap &p : ed.lighting_data_for_test().pages) one_frame.push_back(p.texels);
-      one_frame_pic = r34_crop(ed, ed.scene_view_rect());
+      one_frame_pic = r564::view(ed);
     }
     Editor ed;
     make(ed, true);
     const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
     ed.command("bake start");
-    std::vector<uint32_t> before_pages, last_before;
+    r564::Pic before_pages, last_before;
     size_t frames_sending = 0, mixed = 0, unsteady = 0;  // (unsteady: frames before any page went up that differ from the one before)
     size_t tray_said = 0;  // (frames sending pages whose job tray named that step)
     bool still = false;  // (the last two frames before the first page are the same picture: the view is still, so `mixed` means a frame showed something new)
@@ -6306,16 +6378,16 @@ static void tests_round508_gpu() {
     while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
       const uint64_t ahead = view_perf::counters.lightmap_pages_before_landing, sent = view_perf::counters.lightmap_pages_sent;
       if (ahead == ahead0) {  // (the last picture before any page went up)
-        before_pages = r34_crop(ed, ed.scene_view_rect());
-        still = !last_before.empty() && r458_differ(last_before, before_pages) == 0;
-        if (!last_before.empty() && !still) unsteady++;  // (said, not checked: the first frames after `bake start` settle - the toolbar's state, the status line)
+        before_pages = r564::view(ed);
+        still = !last_before.px.empty() && r564::differ(last_before, before_pages) == 0;
+        if (!last_before.px.empty() && !still) unsteady++;  // (said, not checked: the first frames after `bake start` settle - the toolbar's state, the status line)
         last_before = before_pages;
       }
       ed.step_frame_headless();
       if (view_perf::counters.lightmap_pages_before_landing != ahead) {
         frames_sending++;
         for (const Editor::JobView &jv : ed.jobs_for_test()) tray_said += jv.label == "Sending the bake to the card";
-        if (!before_pages.empty() && r458_differ(before_pages, r34_crop(ed, ed.scene_view_rect())) != 0) mixed++;
+        if (!before_pages.px.empty() && r564::differ(before_pages, r564::view(ed)) != 0) mixed++;
       }
       if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
     }
@@ -6331,16 +6403,16 @@ static void tests_round508_gpu() {
     CHECK(sent_in_landing == 0);
     CHECK(tray_said == frames_sending);  // (the job tray says what the bake is doing while its pages go up)
     r34_steps(ed, 6);
-    const std::vector<uint32_t> at_six = r34_crop(ed, ed.scene_view_rect());
+    const r564::Pic at_six = r564::view(ed);
     const int settle_frames = r555_card_settle(ed);  // (round 555: the landed picture once the card shows it)
     std::printf("    after the landing and 6 frames: %d more frame(s) to settle; %zu pixels changed meanwhile\n", settle_frames,
-                r458_differ(at_six, r34_crop(ed, ed.scene_view_rect())));
+                r564::differ(at_six, r564::view(ed)));
     CHECK(pages == one_frame.size());
     for (size_t k = 0; k < pages && k < one_frame.size(); k++) {
       const std::vector<Vec3> &t = ed.lighting_data_for_test().pages[k].texels;
       CHECK(t.size() == one_frame[k].size() && std::memcmp(t.data(), one_frame[k].data(), t.size() * sizeof(Vec3)) == 0);
     }
-    const size_t differ = r458_differ(one_frame_pic, r34_crop(ed, ed.scene_view_rect()));
+    const size_t differ = r564::differ(one_frame_pic, r564::view(ed));
     std::printf("    the landed picture against the one-frame landing's: %zu pixels differ\n", differ);
     CHECK(differ == 0);
   });
@@ -8411,6 +8483,192 @@ static void tests_round563_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 564 (task 0546, ADR 0140): what round 508's test read as
+ * mixed frames on a busy machine was the job tray's toast over the view; here the pages are made to go up one a frame, over an
+ * older bake, with a toast up throughout - what a starved machine does, without needing one. */
+static void tests_round564_gpu() {
+  test("a bake says done once, when it has landed (round 564): the job tray follows Generate Lighting through its phases as one job - no \"done\" toast while it is still baking its reflection probes, one \"Generate Lighting done\" after", [] {
+    Editor ed;
+    r34_open(ed, false);
+    GameObject *probe = ed.scene().create("R564 Probe");
+    probe->set_local_position(Vec3(0, 1, 0));
+    probe->add<ReflectionProbeComponent>()->resolution = 16;
+    /* Something to bake for a good many frames: a floor and 40 boxes at 48 texels a metre. */
+    GameObject *floor = ed.scene().create("R564 Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+    floor->add<MeshRenderer>()->contribute_gi = true;
+    for (int i = 0; i < 40; i++) {
+      GameObject *box = ed.scene().create("R564 Box" + std::to_string(i));
+      box->add<MeshFilter>()->mesh = primitives::cube();
+      box->set_local_position({(float)(i % 8) - 3.5f, 0.5f, (float)(i / 8) - 2.0f});
+      box->set_local_scale({0.5f, 0.5f, 0.5f});
+      box->add<MeshRenderer>()->contribute_gi = true;
+    }
+    ed.commit_change("r564 probe");
+    ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 8;
+    ed.set_async_jobs_for_test(true);
+    ed.clear_toasts_for_test();
+    ed.command("bake start");
+    ed.step_frame_headless();
+    CHECK(ed.baking_for_test() && !ed.jobs_for_test().empty());  // (the tray has seen the job)
+    ed.jobs_age_for_test(Editor::kBakeJobKey, 2.0);  // (the bake as if it had run two seconds: a phase that ends is worth a toast, without waiting)
+    std::set<std::string> labels;
+    size_t early = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
+      for (const Editor::JobView &j : ed.jobs_for_test()) labels.insert(j.label);
+      ed.step_frame_headless();
+      if (ed.baking_for_test()) early += r564::bake_toast(ed, " done in ");
+    }
+    /* (Read in the landing frame, or the one after: a toast lives three seconds of wall time, which a test must not count on.) */
+    bool done = r564::bake_toast(ed, "Generate Lighting done in ");
+    if (!done) ed.step_frame_headless(), done = r564::bake_toast(ed, "Generate Lighting done in ");
+    std::string seen;
+    for (const std::string &l : labels) seen += (seen.empty() ? "" : ", ") + l;
+    std::printf("    the tray's labels while it baked: %s; frames with a \"done\" toast while baking %zu; \"Generate Lighting done\" at the landing: %d\n", seen.c_str(), early, (int)done);
+    CHECK(!ed.baking_for_test());
+    CHECK(labels.size() >= 2);  // (the tray saw the job change its phase - or "none while baking" below says nothing)
+    CHECK(early == 0);
+    CHECK(done);
+  });
+
+  test("a bake that is cancelled says cancelled, never done (round 564): the tray's Cancel by the job's name, `bake cancel` (the Lighting window's Cancel), Clear Baked Data and a new scene", [] {
+    for (const char *how : {"jobs cancel Generate Lighting", "bake cancel", "bake clear", "newscene"}) {
+      Editor ed;
+      r34_open(ed, false);
+      GameObject *floor = ed.scene().create("R564 Floor");
+      floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+      floor->add<MeshRenderer>()->contribute_gi = true;
+      ed.commit_change("r564 floor");
+      ed.scene().lighting.texels_per_unit = 128, ed.scene().lighting.indirect_samples = 64;  // (long enough to be cancelled in)
+      ed.set_async_jobs_for_test(true);
+      ed.clear_toasts_for_test();
+      ed.command("bake start");
+      ed.step_frame_headless();
+      CHECK(ed.baking_for_test() && !ed.jobs_for_test().empty());
+      ed.jobs_age_for_test(Editor::kBakeJobKey, 2.0);  // (as if it had run two seconds: its end is worth a toast)
+      ed.command(how);
+      bool cancelled = false, done = false;
+      for (int k = 0; k < 3; k++) {
+        ed.step_frame_headless();
+        cancelled = cancelled || r564::bake_toast(ed, "Generate Lighting cancelled in ");
+        done = done || r564::bake_toast(ed, " done in ");
+      }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+      while (ed.bake_job_running_for_test() && std::chrono::steady_clock::now() < deadline) {  // (the worker stops at its next slice)
+        ed.step_frame_headless();
+        done = done || r564::bake_toast(ed, " done in ");
+      }
+      std::printf("    %s: a \"cancelled\" toast %d, a \"done\" toast %d, still baking %d\n", how, (int)cancelled, (int)done, (int)ed.baking_for_test());
+      CHECK(!ed.baking_for_test());
+      CHECK(cancelled && !done);
+    }
+  });
+
+  test("a bake cancelled and started again in one frame is a new job (round 564): the cancelled one says cancelled at once, and the tray shows the new one from its own start", [] {
+    Editor ed;
+    r34_open(ed, false);
+    GameObject *floor = ed.scene().create("R564 Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+    floor->add<MeshRenderer>()->contribute_gi = true;
+    ed.commit_change("r564 floor");
+    ed.scene().lighting.texels_per_unit = 128, ed.scene().lighting.indirect_samples = 64;
+    ed.set_async_jobs_for_test(true);
+    ed.clear_toasts_for_test();
+    ed.command("bake start");
+    ed.step_frame_headless();
+    CHECK(ed.baking_for_test() && !ed.jobs_for_test().empty());
+    ed.jobs_age_for_test(Editor::kBakeJobKey, 100.0);
+    ed.command("bake cancel");
+    CHECK(r564::bake_toast(ed, "Generate Lighting cancelled in "));  // (in the call that cancels, not a frame later)
+    ed.command("bake start");
+    ed.step_frame_headless();
+    const std::vector<Editor::JobView> jobs = ed.jobs_for_test();
+    CHECK(ed.baking_for_test() && jobs.size() == 1);
+    const double ran = ed.jobs_ran_for_test(Editor::kBakeJobKey);
+    std::printf("    the new bake's job has run %.2f s in the tray (the cancelled one was aged 100 s), cancelled flag %d\n", ran, jobs.empty() ? -1 : (int)jobs[0].cancelled);
+    CHECK(ran >= 0.0 && ran < 50.0);
+    CHECK(!jobs.empty() && !jobs[0].cancelled);
+    ed.command("bake cancel");
+  });
+
+  test("Generate Lighting again with a page a frame and a toast over the view (round 564, ADR 0140): every frame while the pages go up is the old bake's picture outside the toast, then the new bake's in one frame, and the tray's \"done\" toast comes with it, not while the pages go up (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r564::still_scene(ed, true);
+    auto bake = [&](const std::function<void()> &each_frame) {
+      ed.command("bake start");
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+      while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) each_frame();
+      CHECK(!ed.baking_for_test());
+    };
+    /* The sun baked (Light Mode Baked: its direct light and shadows are in the lightmaps - a Realtime light is in no bake, and the
+     * second bake's picture would be the first's). */
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun && sun->get<Light>());
+    if (!sun || !sun->get<Light>()) return;
+    sun->get<Light>()->mode = 2;
+    ed.commit_change("r564 baked sun");
+    bake([&] { ed.step_frame_headless(); });  // (the older bake: its pages are what the view draws while the next one's go up)
+    r34_steps(ed, 6);
+    CHECK(r564::settle(ed));
+    const size_t pages = ed.lighting_data_for_test().pages.size();
+    CHECK(pages > 1);
+    /* The sun turned and reddened: the next bake's light is not this one's, and until it lands the view keeps the old one's. */
+    sun->set_local_euler(Vec3(35.0f, 140.0f, 0.0f));
+    sun->get<Light>()->color = Vec3(1.0f, 0.25f, 0.1f);
+    ed.commit_change("r564 sun");
+    r34_steps(ed, 6);
+    CHECK(r564::settle(ed));
+    ed.clear_toasts_for_test();  // (the first bake's own "done" toast)
+    ed.mesh_budget_for_test(16u << 20, 0.0);  // (no time left after a frame's first page: one page a frame, as a starved frame sends them)
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    r564::Pic before;
+    size_t frames_sending = 0, mixed = 0, toasted = 0, worst = 0, early_done = 0;
+    uint64_t sent_in_landing = 0;
+    bool aged = false;
+    bake([&] {
+      ed.command("toast R564: a toast over the view");  // (said again every frame: it stays up, its count changing)
+      const uint64_t ahead = view_perf::counters.lightmap_pages_before_landing, sent = view_perf::counters.lightmap_pages_sent;
+      if (ahead == ahead0) before = r564::view(ed);  // (the last picture before any page went up)
+      ed.step_frame_headless();
+      if (!aged) ed.jobs_age_for_test(Editor::kBakeJobKey, 2.0), aged = true;  // (as if the bake had run two seconds: the tray toasts a job that ran one)
+      if (ed.baking_for_test()) early_done += r564::bake_toast(ed, " done in ");
+      if (view_perf::counters.lightmap_pages_before_landing != ahead) {
+        frames_sending++;
+        size_t all = 0;
+        const size_t d = r564::differ(before, r564::view(ed), &all);
+        mixed += d != 0, toasted += all != 0, worst = std::max(worst, d);
+      }
+      if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
+    });
+    const uint64_t ahead_sent = view_perf::counters.lightmap_pages_before_landing - ahead0;
+    ed.mesh_budget_for_test(16u << 20);
+    bool done_toast = r564::bake_toast(ed, "Generate Lighting done in ");  // (the landing frame's, or the one after: never a count of seconds)
+    if (!done_toast) ed.step_frame_headless(), done_toast = r564::bake_toast(ed, "Generate Lighting done in ");
+    CHECK(early_done == 0);   // (before: "Baking lighting done" while the pages went up and the view showed the old bake)
+    CHECK(done_toast);
+    ed.clear_toasts_for_test();
+    r34_steps(ed, 6);
+    CHECK(r564::settle(ed));
+    size_t landed_all = 0;
+    const size_t landed = r564::differ(before, r564::view(ed), &landed_all);
+    std::printf("    %llu page(s) sent before the landing over %zu frame(s), %llu in the landing frame; %zu of those frames differ from the old bake's picture outside the toast (worst %zu pixels), %zu under it; the landed picture differs in %zu pixels\n",
+                (unsigned long long)ahead_sent, frames_sending, (unsigned long long)sent_in_landing, mixed, worst, toasted, landed);
+    CHECK(ahead_sent >= pages);
+    CHECK(frames_sending == ahead_sent);  // (a page a frame: the upload spread over as many frames as there are pages)
+    CHECK(frames_sending >= 2);
+    CHECK(mixed == 0);                    // (no frame shows the new bake's texels, nor the old one's with the new UVs)
+    CHECK(toasted > 0);                   // (the toast was over those frames: a whole-picture comparison would have failed here)
+    CHECK(sent_in_landing == 0);
+    CHECK(landed > 1000);                 // (the new bake is another picture: the comparison above could see a change of light)
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -8460,4 +8718,5 @@ void run_gpu_tests() {
   tests_round520_gpu();
   tests_round521_gpu();
   tests_round563_gpu();
+  tests_round564_gpu();
 }
