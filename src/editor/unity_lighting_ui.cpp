@@ -232,7 +232,7 @@ public static class BlendityLightmaps {
                 sh[i].Evaluate(axes, seen);
                 foreach (Color c in seen) { o.w.Write(c.r); o.w.Write(c.g); o.w.Write(c.b); }
             }
-            /* Round 401: each ReflectionProbe's baked cubemap - its path, box and settings, then six faces +X -X +Y -Y +Z -Z
+)cs" R"cs(            /* Round 401: each ReflectionProbe's baked cubemap - its path, box and settings, then six faces +X -X +Y -Y +Z -Z
              * of size x size half RGB, each face as Cubemap.GetPixels gives it (the top row first). A probe with no bake, or
              * one whose cubemap can't be read, writes size 0. */
             var rprobes = new List<ReflectionProbe>();

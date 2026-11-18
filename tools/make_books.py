@@ -170,7 +170,10 @@ def lessons():
     text = read(LESSONS)
     out = []
     for m in re.finditer(r'\{"([^"]+)", "([^"]*)", R"\((.*?)\)"\}', text, re.S):
-        title, body = m.group(1), m.group(3)
+        title = m.group(1)
+        # (Round 580: a long lesson is several adjacent raw literals - tools/dev/split_long_literals.py; the compiler joins
+        # them, and so does this: a cut can fall right before a "> " or "@ " line.)
+        body = re.sub(r'\)"[ \t\r\n]*R"\(', '', m.group(3))
         refs = [l[2:].strip() for l in body.splitlines() if l.startswith("> ")]
         srcs = [l[2:].strip() for l in body.splitlines() if l.startswith("@ ")]
         out.append((title, refs, srcs))

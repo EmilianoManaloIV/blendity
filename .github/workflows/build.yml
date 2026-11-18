@@ -88,10 +88,11 @@ jobs:
         # `all` compiles every source once and links the three programs from the same objects (round 492).
         env:
           BLENDITY_FETCH_OPTIX: "1"
-          # Round 579: the compiler every green build used. Runner image 20261116.315's default, 14.52, built programs
-          # that crashed, and that image has no 14.51; its other toolset, 14.44, cannot compile the lessons' long
-          # strings (C2026). So on such a runner the build stops (STRICT) rather than use 14.52: run the job again.
-          BLENDITY_VCVARS_VER: "14.51"
+          # Rounds 579 / 580: runner image 20261116.315's default compiler, 14.52, built programs that crashed. 14.44
+          # (Visual Studio 2022's last) is on the old image and the new one alike, and builds the tree since round 580
+          # cut the lessons' long strings into pieces it accepts. STRICT: on a runner without it the build stops
+          # rather than use that runner's default.
+          BLENDITY_VCVARS_VER: "14.44"
           BLENDITY_VCVARS_STRICT: "1"
         run: call build.bat release all || exit /b 1
       - uses: actions/upload-artifact@v4
@@ -260,6 +261,8 @@ jobs:
         run: python3 tools/make_books.py --check-cited
       - name: The inventory sweep's command table is current (round 411)
         run: python3 tools/sweep_commands.py --check
+      - name: No string literal is too long for MSVC 14.44 (round 580)
+        run: python3 tools/dev/split_long_literals.py --check
       # Round 559: the HCI sweep's two static audits. They read the source, not the build, so they run even when a unit test
       # failed (the runs whose logs get read), each its own step so one failing does not hide the other.
       - name: UI wording - one spelling (round 559)

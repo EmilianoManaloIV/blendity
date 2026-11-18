@@ -80,10 +80,11 @@ jobs:
         # Task 0169 (ADR 0054): both carry the OptiX device (its host headers fetched from NVIDIA at a pinned tag).
         env:
           BLENDITY_FETCH_OPTIX: "1"
-          # Round 579: the compiler every green build used. Runner image 20261116.315's default, 14.52, built programs
-          # that crashed, and that image has no 14.51; its other toolset, 14.44, cannot compile the lessons' long
-          # strings (C2026). So on such a runner the build stops (STRICT) rather than use 14.52: run the job again.
-          BLENDITY_VCVARS_VER: "14.51"
+          # Rounds 579 / 580: runner image 20261116.315's default compiler, 14.52, built programs that crashed. 14.44
+          # (Visual Studio 2022's last) is on the old image and the new one alike, and builds the tree since round 580
+          # cut the lessons' long strings into pieces it accepts. STRICT: on a runner without it the build stops
+          # rather than use that runner's default.
+          BLENDITY_VCVARS_VER: "14.44"
           BLENDITY_VCVARS_STRICT: "1"
         run: |
           set BLENDITY_OUT=dist\windows\Blendity-full.exe
