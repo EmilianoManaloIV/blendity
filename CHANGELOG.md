@@ -73,14 +73,16 @@ code. The 0.x versions were pre-releases; the entries below are the whole histor
   first on a new runner image whose compiler is MSVC 14.52.37025, and its build crashed in two programs: the tests at
   "smart materials (ADR 0082)" (test 645) and the stress program in `modifiers_ngon`. With MSVC 14.51 - every earlier
   CI build, and the machine everything here was tested on - the same commit does not crash in well over a hundred
-  runs. CI and the release's Windows build are pinned to toolset 14.44 (round 579), so the installer is not built
-  with 14.52; whether 14.52 miscompiles or exposes a fault in the code is not known. `docs/handoff/OPEN-WORK.md`
-  item 19 has the facts and how to catch it.
+  runs. CI's Windows build and the release's now ask for 14.51 and build nothing without it (round 579): on a runner
+  of the new image the job stops red and is run again until it lands on an old-image runner, so no installer comes
+  from 14.52. It is a stopgap - the old image will go; and an older toolset both images carry, 14.44, cannot compile
+  the tree. Whether 14.52 miscompiles or exposes a fault in the code is not known. `docs/handoff/OPEN-WORK.md` item
+  19 has the facts and how to catch it.
 - The other open follow-ups are listed in round 574's entry, below.
 
 **Checked:** the full unit suite again on builds of this tree, which report 1.0.0 (no 0.13.0 string is left in the programs), every group in its own process with its own test and prefs folder: Windows with Blender's libraries 106,864 checks in 3,801 tests (the card groups on the card: gpu 1,655, splats_raster 276, splats_gpu 3,917, splats_trace 3,996), Linux dependency-free (WSL) 100,060 in 3,801; 25 groups each, 0 failed - the updater's and the manual's tests among them (assets, render, editor). The dependency-free Windows build ran on the tree before the version changed (round 574: 100,021, 0 failed); on this tree it is CI's. The 1.0.0 `Blendity.exe` starts headless in a scratch project and writes its picture. The suites ran before rounds 575 and 577 were merged in (new documents, pictures and the README: no code). `tools/sweep_commands.py --check`, `tools/test_coverage_map.py --check`, both HCI audits, the shard table, `make_books.py --check-cited` and `changelog.py check` pass. Code review: approve (rounds 574 and 578), its notes taken.
 
-**Not checked here:** the suites above ran on programs built with MSVC 14.51 (Windows) and GCC (Linux). The release's Windows installer is built with toolset 14.44 (round 579's pin): that toolset's suite is this pull request's CI, not a local run. The installers themselves are built and installed by `release.yml` when the tag is pushed, not before.
+**Not checked here:** the suites above ran on programs built with MSVC 14.51 (Windows) and GCC (Linux) - 14.51 is also what round 579 makes CI and the release's Windows build require. The installers themselves are built and installed by `release.yml` when the tag is pushed, not before; its Windows job may need running again until it lands on a runner that has 14.51.
 
 ## 2026-11-18 (round 577): A README for a first visit, with current pictures
 
