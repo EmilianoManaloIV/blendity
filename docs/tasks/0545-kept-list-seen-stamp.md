@@ -4,7 +4,7 @@
 - **Requirements:** Q-performance, Q-robustness
 - **Decisions:** none needed (ADR 0146 1(c) and ADR 0115 as they stand; this closes the follow-up of round 520's review)
 - **Model:** main session (worker W2 of Pass 28)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/461
 
 ## Goal
 Round 520's review (PR #457) found that Solid view's kept draw list could point at a freed card stand-in after a prune;

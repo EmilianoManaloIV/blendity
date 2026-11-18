@@ -710,6 +710,7 @@ void Editor::bake_cancel(bool discard) {
     if (!bake_job_) baker_.cancel();  // nothing left behind either way
     return;
   }
+  jobs_note_cancelled(kBakeJobKey);  // (round 564: the bake leaves the tray with `baking_` below - its end must not read "done")
   baking_ = false;
   bake_status_ = "Baking cancelled";
   Log::info("Generate Lighting cancelled");
