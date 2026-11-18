@@ -54,7 +54,7 @@ that time goes in the card's frame, fix what is cheap and safe, name what remain
   and the CPU rows are unchanged; over-budget rows in the section 27 / 26 before, 27 after.
 
 **Checked:** the round's groups - on the card (`gpu`, with Blender's libraries) 1,612 checks; Windows with Blender's
-libraries `render` RENDER_W and `editor` EDITOR_W; Linux dependency-free `gpu` 138 (the card tests skip), `render` 40,378,
+libraries `render` 40,490 and `editor` 3,872; Linux dependency-free `gpu` 138 (the card tests skip), `render` 40,378,
 `editor` 3,843 - 0 failed; two reviews (the second's blocker, a send marked as held by a frame that then failed, fixed
 with a test that forces it). The whole suite is CI's.
 

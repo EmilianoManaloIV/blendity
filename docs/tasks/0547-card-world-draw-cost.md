@@ -169,7 +169,7 @@ unchanged (a Puppet handle alone 12.3 -> 12.3; the CPU views' FK chest 15.0 -> 1
 
 ### Checks
 - Card (`gpu` group, with Blender's libraries, the tree merged with #466): 1,612 checks, 0 failed.
-- Windows with Blender's libraries: `render` 40,472 checks, `editor` 3,866, 0 failed. Linux dependency-free: `gpu` 138
+- Windows with Blender's libraries (the tree merged with #471): `render` 40,490 checks, `editor` 3,872, 0 failed. Linux dependency-free: `gpu` 138
   (the card tests skip), `render` 40,378, `editor` 3,843, 0 failed. Windows dependency-free: CI's.
 - Review: two passes; the second's blocker (a frame that fails after it recorded the corners' send left the slot marked as
   holding them) fixed, with a test that forces it (`fail_next_frame_for_test`).
