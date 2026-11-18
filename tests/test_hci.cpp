@@ -600,6 +600,33 @@ void tests_round570_adjust_key() {
     CHECK(l.op.find("Scene view.") != std::string::npos);  // (the sentence ends where the bracket was)
     for (const std::string *s : {&l.drag, &l.box, &l.cone, &l.pull}) CHECK(s->find("(Adjust Last Operation ") != std::string::npos);
   });
+
+  test("hci: Edit Mode's Inspector note on where a tool's settings are names Adjust Last Operation's key from the keymap, and with no key bound shows no key and no empty bracket (round 571, task 0553)", [] {
+    Editor ed;
+    ed.init_headless(1366, 1000);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Default");
+    ed.command("select Cube");
+    ed.command("fsel 0");  // (Edit Mode, faces)
+    const auto note = [&]() {
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      for (const auto &kv : ed.ui_for_test().tooltip_texts)
+        if (kv.second.find("show in Adjust Last Operation") != std::string::npos) return kv.second;
+      return std::string("<not drawn>");
+    };
+    const std::string bound = note();
+    std::printf("    default: '%s'\n", bound.substr(0, bound.find('\n')).c_str());
+    CHECK(bound.find("Adjust Last Operation (F9, bottom left") != std::string::npos);
+    ed.set_binding("edit.adjust_last", {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}});
+    const std::string rebound = note();
+    CHECK(rebound.find("Adjust Last Operation (Ctrl+Shift+U, bottom left") != std::string::npos);
+    ed.set_binding("edit.adjust_last", {});
+    const std::string unbound = note();
+    std::printf("    no key bound: '%s'\n", unbound.substr(0, unbound.find('\n')).c_str());
+    CHECK(unbound.find("Adjust Last Operation (bottom left") != std::string::npos);
+    CHECK(unbound.find("F9") == std::string::npos && unbound.find("()") == std::string::npos && unbound.find("(,") == std::string::npos);
+  });
 }
 
 void run_hci_tests() {

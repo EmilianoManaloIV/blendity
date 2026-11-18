@@ -4617,6 +4617,7 @@ class Editor {
     uint64_t part = 0;
     int x = 0, y = 0;
   } pick_part_spot_;
+  void pick_part_spot_watch();  // (round 571: once a frame, from frame_body - the spot is forgotten when the selection is anything but its opening alone)
   void blockout_part_command(const std::vector<std::string> &t);  // (round 547: blockout part select [frame|glass|leaf] | opening)
   void blockout_parts_select(bool to_parts, int kind, const char *command);
   void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
