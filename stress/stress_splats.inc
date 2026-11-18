@@ -10,13 +10,22 @@
 //     every value finite. Counts go in a table; any problem is listed with its seed.
 //  2. a measurement row for import speed (100k splats: PLY binary and ASCII, SPZ v3). Times are printed, never judged
 //     (ADR 0056).
-// Nothing here touches the user's files: the one file it writes (a .glb for import_model) goes in the temp folder.
+//  3. (round 567, task 0549) a million splats of SH degree 3 (`--quick`: 100,000), a PLY and an SPZ written to the
+//     run's scratch folder: the time of each stage (the file read, the unpack, the setup, the decode, the change of
+//     axes, the validation), the cloud's bytes and the process's memory growth; then the same files through the editor's
+//     `import` with jobs on workers - the frames while the file is read and the frame it lands in.
+// Nothing here touches the user's files: what it writes (a .glb for import_model, the 1M files) goes in the temp
+// folder and the run's scratch project (BLENDITY_PROJECT, which the stress program points at a temp folder).
 #include "../src/scene/import_splat.h"
 #include "../src/scene/pointcloud.h"
+#include "../src/scene/pointcloud_object.h"
 #include "../src/scene/unity_package.h"
 
+#include <atomic>
 #include <cctype>
 #include <cfloat>
+#include <chrono>
+#include <thread>
 
 namespace splatstress {
 
@@ -417,6 +426,204 @@ static void measure_import(Report &rep) {
   rep.note("Import speed is a measurement (ADR 0056): printed, never asserted. SPZ's time includes the gzip inflate.");
 }
 
+/* ------------------------------------------------------------------ a million splats (round 567) */
+
+/* An SPZ v3 stream of SH degree 3 whose bytes look like a trained scene's to the inflate, not like make_spz's short
+ * repeating pattern (which packs 20:1 and inflates as fast as a copy): positions over a 16 m cube at 12 fractional
+ * bits, every other byte hashed, the SH on SPZ's own 5-bit (band 1) and 4-bit (bands 2, 3) steps. */
+static std::string make_spz_scene(uint32_t n) {
+  const size_t coeffs = 15;
+  std::string head;
+  put32(head, 0x5053474e);
+  put32(head, 3);
+  put32(head, n);
+  head += (char)3, head += (char)12, head += (char)0, head += (char)0;
+  std::string out(head.size() + (size_t)n * (9 + 1 + 3 + 3 + 4 + 3 * coeffs), '\0');
+  std::memcpy(&out[0], head.data(), head.size());
+  uint8_t *pos = (uint8_t *)&out[head.size()], *alpha = pos + (size_t)n * 9, *color = alpha + n, *scale = color + (size_t)n * 3, *rot = scale + (size_t)n * 3,
+          *sh = rot + (size_t)n * 4;
+  Rng r(567);
+  for (uint32_t i = 0; i < n; i++) {
+    for (int k = 0; k < 3; k++) {
+      const uint32_t c = (uint32_t)((int32_t)r.below(1u << 16) - (1 << 15)) & 0xFFFFFFu;  // (+-8 m)
+      pos[i * 9 + 3 * k] = (uint8_t)c, pos[i * 9 + 3 * k + 1] = (uint8_t)(c >> 8), pos[i * 9 + 3 * k + 2] = (uint8_t)(c >> 16);
+      color[i * 3 + k] = (uint8_t)r.below(256);
+      scale[i * 3 + k] = (uint8_t)(90 + r.below(70));
+    }
+    alpha[i] = (uint8_t)r.below(256);
+    const uint32_t packed = (r.below(4) << 30) | (r.below(1u << 30));
+    std::memcpy(rot + (size_t)i * 4, &packed, 4);
+    uint8_t *h = sh + (size_t)i * 3 * coeffs;
+    for (size_t k = 0; k < 3 * coeffs; k++) h[k] = k < 9 ? (uint8_t)(r.below(32) * 8 + 4) : (uint8_t)(r.below(16) * 16 + 8);
+  }
+  return out;
+}
+
+static double cloud_mb(const PointCloud &pc) {
+  return (double)(pc.position.size() * sizeof(Vec3) + pc.color.size() * sizeof(Vec3) + pc.opacity.size() * sizeof(float) + pc.scale.size() * sizeof(Vec3) +
+                  pc.rotation.size() * sizeof(Quat) + pc.sh_rest.size() * sizeof(Vec3)) / 1048576.0;
+}
+
+/* The process's working set sampled while `fn` runs (every 2 ms, on a thread of its own): its highest value. */
+template<class F> static uint64_t peak_working_set_during(F &&fn) {
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> peak{sys::working_set_bytes()};
+  std::thread sampler([&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      const uint64_t now = sys::working_set_bytes();
+      if (now > peak.load(std::memory_order_relaxed)) peak.store(now, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  });
+  fn();
+  stop.store(true);
+  sampler.join();
+  return std::max(peak.load(), sys::working_set_bytes());
+}
+
+struct BigFile {
+  const char *name;
+  std::string path;
+  int kind;  // 0 PLY, 1 SPZ
+  size_t bytes = 0;
+};
+
+/* The files' name: what the editor's import copies into the scratch project's Assets is found again by it. */
+static const char *const kBigStem = "stress_splats_million";
+
+/* The files, written once for both tables; each one's bytes are freed before the next is built. */
+static std::vector<BigFile> write_big_files(const std::string &dir, int n) {
+  std::vector<BigFile> files;
+  files.push_back({"PLY binary, degree 3", fs::join(dir, std::string(kBigStem) + ".ply"), 0});
+  files.push_back({"SPZ v3 gzip, degree 3", fs::join(dir, std::string(kBigStem) + ".spz"), 1});
+  for (BigFile &f : files) {
+    const std::string bytes = f.kind == 0 ? make_ply(1, n, 15) : gzip(make_spz_scene((uint32_t)n));
+    f.bytes = fs::write_file(f.path, bytes) ? bytes.size() : 0;
+  }
+  return files;
+}
+
+static void measure_import_big(Report &rep, const std::vector<BigFile> &files, int n) {
+  rep.note(strprintf("Round 567 (task 0549): %d splats of SH degree 3 from a file on disk, stage by stage. Read: the file's bytes off the disk (just written: "
+                     "from the system's cache); unpack: SPZ's inflate; setup: the header read and the cloud's arrays allocated; decode: the bytes to "
+                     "those arrays; axes: the file's axes to Blendity's "
+                     "(positions, turns, SH bands); validate: pointcloud_validate. Memory: the cloud's own arrays, and the most the process's working "
+                     "set grew while the file was read and decoded (the file's bytes, the unpacked stream and the cloud together).",
+                     n));
+  rep.table({"file", "splats", "file MB", "read ms", "unpack ms", "setup ms", "decode ms", "axes ms", "validate ms", "total ms", "M splats / s", "cloud MB", "peak growth MB"});
+  for (const BigFile &f : files) {
+    if (!f.bytes) {
+      rep.note(std::string("PROBLEM: couldn't write ") + f.path);
+      continue;
+    }
+    const int reps = 3;  // (the best of three: the first also pays for the allocator's fresh pages)
+    double best[7] = {1e30, 0, 0, 0, 0, 0, 0}, mb = 0.0, growth = 0.0;
+    size_t got = 0;
+    for (int rep_i = 0; rep_i < reps; rep_i++) {
+      const uint64_t before = sys::working_set_bytes();
+      double read_ms = 0.0, total_ms = 0.0;
+      SplatReadReport r;
+      PointCloudPtr pc;
+      const uint64_t peak = peak_working_set_during([&] {
+        ScopedTimer whole;
+        std::string bytes;
+        fs::read_file(f.path, bytes);
+        read_ms = whole.ms();
+        pc = f.kind == 0 ? read_ply_point_cloud(bytes, r) : read_spz(bytes, r);
+        total_ms = whole.ms();
+      });
+      got = pc ? pc->count() : 0;
+      if (pc) mb = cloud_mb(*pc);
+      growth = std::max(growth, peak > before ? (double)(peak - before) / 1048576.0 : 0.0);
+      if (total_ms >= best[0]) continue;
+      best[0] = total_ms, best[1] = read_ms, best[2] = r.times.unpack_ms, best[3] = r.times.decode_ms, best[4] = r.times.axes_ms, best[5] = r.times.validate_ms;
+      best[6] = r.times.setup_ms;
+    }
+    if (got != (size_t)n) rep.note(strprintf("PROBLEM: %s gave %zu of %d splats", f.name, got, n));
+    rep.row({f.name, std::to_string(got), f1((double)f.bytes / 1048576.0), f1(best[1]), f1(best[2]), f1(best[6]), f1(best[3]), f1(best[4]), f1(best[5]), f1(best[0]),
+             f2((double)got / std::max(best[0], 1e-6) / 1000.0), f1(mb), f1(growth)});
+  }
+  rep.note("Times are measurements (ADR 0056): printed, never asserted; the best of three reads.");
+}
+
+/* The same files through the editor: `import <file>` on a headless editor with its jobs on workers, as a file dropped
+ * on the window is read (round 413). The budget is ADR 0105's: 50 ms a frame while the job runs, and one frame of at
+ * most 100 ms for what can't be split. The landing frame also draws the cloud for the first time, so the frames that
+ * follow are given beside it: what is over there is the draw's (rounds 557, 566), not the import's. */
+static void measure_import_editor(Report &rep, const std::vector<BigFile> &files, int n) {
+  rep.note(strprintf("Round 567: the same %d-splat files through the editor's import (headless, 1280 x 720, jobs on workers; the file is copied into the "
+                     "scratch project's Assets as a dropped file is). While reading: the longest frame as the worker reads, unpacks and decodes. "
+                     "Landing: the frame the cloud becomes an object in (it also draws it for the first time). After: the median of the next 5 frames, "
+                     "the view redrawn each time - the draw alone.",
+                     n));
+  rep.table({"file", "total s", "frames while reading", "longest frame while reading ms", "landing frame ms", "frames after, median ms", "splats in the scene", "budget (50 reading / 100 landing)"});
+  for (const BigFile &f : files) {
+    if (!f.bytes) continue;
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.set_async_jobs_for_test(true);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ScopedTimer whole;
+    double reading = 0.0, landing = 0.0;
+    int frames = 0;
+    {
+      ScopedTimer fr;
+      ed.command("import " + f.path);
+      ed.step_frame_headless();
+      reading = fr.ms(), frames = 1;
+    }
+    while (ed.import_job_running_for_test() && whole.ms() < 300000.0) {
+      ScopedTimer fr;
+      ed.step_frame_headless();
+      reading = std::max(reading, fr.ms()), frames++;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));  // (a headless frame with nothing to draw takes no time: don't spin a core the worker could use)
+    }
+    {
+      ScopedTimer fr;
+      ed.step_frame_headless();  // (import_job_poll: the landing)
+      landing = fr.ms();
+    }
+    const double total = whole.ms();
+    std::vector<double> after;
+    ed.command("redraw always");
+    for (int k = 0; k < 5; k++) {
+      ScopedTimer fr;
+      ed.step_frame_headless();
+      after.push_back(fr.ms());
+    }
+    std::sort(after.begin(), after.end());
+    size_t splats = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      const PointCloudObject *pc = g.get<PointCloudObject>();
+      if (pc && pc->data) splats += pc->data->count();
+    });
+    if (splats != (size_t)n) rep.note(strprintf("PROBLEM: %s through the editor left %zu of %d splats in the scene", f.name, splats, n));
+    const bool over = reading > 50.0 || landing - after[2] > 100.0;
+    rep.row({f.name, f2(total / 1000.0), std::to_string(frames), f1(reading), f1(landing), f1(after[2]), std::to_string(splats), over ? "OVER" : "within"});
+  }
+  rep.note("The budget's verdict takes the draw out of the landing frame (landing less the frames after it); times are measurements, never asserted.");
+}
+
+static void measure_import_million(Report &rep, const Options &o) {
+  const int n = o.quick ? 100000 : 1000000;
+  const std::string project = std::getenv("BLENDITY_PROJECT") ? std::getenv("BLENDITY_PROJECT") : ".";
+  const std::string dir = fs::join(project, "stress_splats");
+  fs::make_dirs(dir);
+  const std::vector<BigFile> files = write_big_files(dir, n);
+  measure_import_big(rep, files, n);
+  measure_import_editor(rep, files, n);
+  /* What is left: the files, and the copies the editor's import made of them under the scratch project's Assets
+   * (review 567: a quarter of a gigabyte a run, and a later section's editor would list them). */
+  std::error_code ec;
+  std::filesystem::remove_all(std::filesystem::path(dir), ec);
+  std::vector<std::filesystem::path> copies;
+  const std::filesystem::path assets = std::filesystem::path(fs::join(project, "Assets"));
+  for (std::filesystem::recursive_directory_iterator it(assets, ec), end; !ec && it != end; it.increment(ec))
+    if (it->path().filename().string().rfind(kBigStem, 0) == 0) copies.push_back(it->path());
+  for (const std::filesystem::path &c : copies) std::filesystem::remove_all(c, ec);
+}
+
 static void test_splats(Report &rep, const Options &o) {
   rep.title("splats", "The Gaussian splat / point cloud readers (PLY, SPZ v1-v4, glTF) on damaged files: every result is a clean refusal with a reason or a "
                       "consistent cloud of finite values.");
@@ -573,6 +780,7 @@ static void test_splats(Report &rep, const Options &o) {
                      ply.cases + spz.cases + v4.cases + gltf.cases + glb.cases, problems));
 
   measure_import(rep);
+  measure_import_million(rep, o);
 }
 
 }  // namespace splatstress
