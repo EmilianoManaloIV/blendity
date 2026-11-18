@@ -33,6 +33,9 @@ under load for another worker; and a fifth, round 543's Preferences hover test, 
   The hover is made again from the row's rectangle of the moment until the row holds still (twenty tries at most), and a
   failed try prints where the row was; the check is unchanged.
 
+- `stress/sweep_commands.inc` regenerated: the F12 test's new `samples 8` became the inventory sweep's example for
+  `samples` (it was `samples 16`), and CI's "command table is current" check on #466 was red for it.
+
 **Found, for other owners (not changed here)**
 - **The editor:** `Editor::pick_part_target` keeps the remembered spot after its pair of clicks is used. Click a window's
   frame (the window), click again (the Frame), select the window again in the Hierarchy, click that spot once: the Frame at

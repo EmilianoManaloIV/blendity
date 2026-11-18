@@ -146,7 +146,7 @@ static const SweepCommand kSweepCommands[] = {
   {"research", "research", ""},
   {"rig", "rig humanoid", ""},
   {"rotate", "rotate 0 90 0", ""},
-  {"samples", "samples 16", ""},
+  {"samples", "samples 8", ""},
   {"save", "", "writes the scene (the files rows have it)"},
   {"saverender", "", "writes a file"},
   {"scale", "scale 2", ""},
