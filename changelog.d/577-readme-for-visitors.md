@@ -1,4 +1,4 @@
-## 2026-11-18 (round 576): A README for a first visit, with current pictures
+## 2026-11-18 (round 577): A README for a first visit, with current pictures
 
 **Asked:** "Make sure README in the GitHub has updated graphics and keep it simple and ready for people who will see
 it" (the 1.0.0 release).
