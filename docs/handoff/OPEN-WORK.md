@@ -150,6 +150,16 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   of them as the new image rolls out, and none passing once the old image is gone. The image's other toolset, 14.44,
   is no way out: it stops at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` (C2026, a string literal too long
   for that compiler). The fault itself is still there for anyone who builds with 14.52.
+- **MSVC 14.44 as the way out (round 580, branch `task/0562-long-string-literals`, parked, not merged):** with the long
+  literals cut (`tools/dev/split_long_literals.py`; the 65 strings' hashes unchanged) 14.44 compiles the tree; CI run
+  44380568201 (started by hand on that branch): `windows-stress` passes, `modifiers_ngon` included; `windows-unit` runs
+  the whole suite without a crash (3,801 tests, 100,021 checks) with 4 failed checks, all in one test - "subdivision
+  chain (ADR 0075) ... equals the full subdivision bit for bit" (`tests/test_modeling.cpp:8300`): Catmull-Clark only,
+  one last bit (cube level 3: 27 of 386 vertices, worst 2.98e-08; uv sphere levels 2 and 3: 5 and 14, 1.49e-08). Taken
+  for `/fp:fast` compiling the chain's local update and the full subdivision differently under 14.44 (not confirmed in
+  the code). To finish: make the Catmull-Clark point arithmetic compile the same in both paths under MSVC -
+  `#pragma float_control(precise, on, push)` around it in the subdivision and the chain, or one shared helper that is
+  not inlined - run CI on the branch again, then merge it: the pin becomes 14.44, which every runner has.
 - **Next step:** build with MSVC 14.52 (Visual Studio 2026 18.12 or newer, or a CI run with the pin taken off) and
   `BLENDITY_PDB=1`, which keeps the symbols beside the programs: `blendity_stress.exe --quick --only modifiers_ngon` then
   names its crash's frames, and `cdb -g -G -o dist\windows\blendity_tests.exe` with `BLENDITY_TEST_RANGE=1-650` catches

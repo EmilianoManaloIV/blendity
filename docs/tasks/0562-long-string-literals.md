@@ -1,6 +1,7 @@
 # 0562: The long string literals are cut so MSVC 14.44 builds the tree (round 580)
 
-- **Status:** in progress (insurance for the 1.0.0 release; not for merging unless the hub says so)
+- **Status:** parked (2026-11-18: the release went out on round 579's 14.51 pin; this branch is where the 14.44 pin is
+  picked up - see "Where it stands")
 - **Requirements:** the release plan of 2026-11-18; `docs/handoff/OPEN-WORK.md` item 19
 - **Decisions:** none needed (the strings' bytes don't change)
 - **Model:** main session (W1 of Pass 28), code-reviewer
@@ -40,6 +41,19 @@ tree; and pins CI and the release to 14.44, which every runner has.
 - A new lesson over the limit: CI's `--check` step names the file and line, and the tool fixes it.
 - A tool that reads `lessons.cpp` as text sees `)" R"(` at a cut: `make_books.py` is the only one that reads the bodies
   (the two HCI audits skip the file).
+
+## Where it stands (2026-11-18)
+CI run 44380568201, started by hand on this branch (`Toolset: 14.44.35207`):
+- Criterion 1 and 2: met (the 65 hashes equal before and after; the three tool checks pass).
+- Criterion 3: the build compiles; `windows-stress` passes; `windows-unit` runs the whole suite without a crash (3,801
+  tests, 100,021 checks) but 4 checks fail, all in "subdivision chain (ADR 0075) ... bit for bit"
+  (`tests/test_modeling.cpp:8300`): Catmull-Clark only, one last bit (worst 2.98e-08). Not met.
+- Criterion 4: met with 14.51 here (hci 2,025, editor 3,873) and on Linux (hci 2,020, editor 3,847), 0 failed.
+- Not reviewed by the code-reviewer yet.
+
+What is left: make the Catmull-Clark point arithmetic compile the same in the chain's local update and the full
+subdivision under MSVC with `/fp:fast` (`#pragma float_control(precise, on, push)` around it, or one shared helper that
+is not inlined); CI on the branch again; review; then it can be merged and the pin is 14.44 on every runner.
 
 ## Documentation to update
 - `changelog.d/580-long-string-literals.md`; this task; OPEN-WORK item 19 when this round is merged (the pin's line).

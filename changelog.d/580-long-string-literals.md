@@ -12,4 +12,9 @@ bytes).
 - `tools/make_books.py` joins the pieces when it reads the lessons.
 - CI's `windows-build` and the release's Windows job ask for 14.44 (strictly); CI checks the literals' length.
 
-**Checked:** CHECKS_580
+**Checked:** the 65 strings' hashes are the same before and after; `make_books.py --check-cited` 182 of 182. With 14.51
+here `hci` 2,025 and `editor` 3,873 checks, on Linux 2,020 and 3,847, 0 failed. On CI with 14.44 (run 44380568201,
+started by hand on the branch): the build compiles, `windows-stress` passes, `windows-unit` runs whole with 4 failed
+checks in one test (the ADR 0075 chain's bit-for-bit check, Catmull-Clark, one last bit).
+
+**Not done:** that test under 14.44; the code review. The branch is parked until after the release.
