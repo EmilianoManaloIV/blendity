@@ -47,7 +47,9 @@ round 521 (PR #458: "tests for the in-place shell against a fresh hull and for t
    between frames with no input, and a control Tab had just scrolled to the dialog's bottom edge sat a line below it.
    Seen in an instrumented copy: the focused control's bottom at 1017-1019 in the 1000-high dialog, then jumping 20
    pixels back and forth with no events; with the cap off, 8 of 8 clean under the load that failed 2 of 8. The test now
-   runs `fps unlimited` first (neither sentence is shown). **This one is a product fault** - the rows jitter for
+   runs `fps unlimited` first (neither sentence is shown); so does round 505's "Tab walks the Inspector's stops ... the
+   Preferences dialog's likewise", which failed 3 of 10 Linux hci group runs under load for the same reason once the
+   first was cured. **This one is a product fault** - the rows jitter for
    everyone, and a keyboard-focused control can leave the dialog - reported to the hub, not fixed here.
 
 The first three are not product bugs: every order is valid, and the editor handles them.

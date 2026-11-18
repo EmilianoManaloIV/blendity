@@ -1024,6 +1024,10 @@ void run_hci_tests() {
       if (size) ed.set_ui_scale_for_test(1.5f);
       ed.set_guides_for_test(false);
       ed.record_buttons_for_test(true);
+      /* Round 569: no frame cap, so no Over / Within budget sentence re-wraps under the walk (the reason is at round
+       * 509's Preferences walk below; this one failed 3 of 10 hci group runs on Linux under load, a stop "focused out
+       * of sight"). */
+      ed.command("fps unlimited");
       ed.command("preferences");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
       for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)

@@ -21,7 +21,8 @@ and add the two outline-shell tests Pass 26's reviewer left for round 521 (PR #4
   failed on Linux in a group run and 1 of 3 alone): the dialog's frame rate section prints "Over budget ..." or "Within
   budget ..." from the measured frame cost, word-wrapped sentences of different lengths, so where frames straddle the
   cap's budget the controls below move a text line between frames and one Tab had just scrolled to the bottom edge
-  ended below it. The test runs `fps unlimited` first (neither sentence shown).
+  ended below it. The test runs `fps unlimited` first (neither sentence shown); so does round 505's "Tab walks ... the
+  Preferences dialog's likewise", which failed 3 of 10 Linux hci group runs under load for the same reason.
 - The first three were not product bugs (every order is valid and handled). The fourth is one, reported and not fixed
   here: Preferences' rows move by a line while the frame cost hovers at the cap's budget, and a keyboard-focused
   control can be pushed out of the dialog (`Editor::draw_performance_settings`).
