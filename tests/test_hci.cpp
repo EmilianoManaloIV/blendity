@@ -629,6 +629,175 @@ void tests_round570_adjust_key() {
   });
 }
 
+/* Round 573 (task 0555): Preferences' measured frame-rate sentences keep their rows, and a focused control pushed out of its scroll area is brought back. */
+namespace R573 {
+/* Preferences open with a 60 fps cap (16.7 ms a frame), its background search over. */
+void open(Editor &ed) {
+  ed.init_headless(1366, 1000);
+  ed.set_guides_for_test(false);
+  ed.record_buttons_for_test(true);
+  ed.command("fps 60");
+  ed.command("preferences");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
+    ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+}
+
+/* Two frames drawn with the last 60 frames' cost forced to `ms` (the pointer moved, so each frame is drawn), then every control the dialog drew, with its place. */
+std::string drawn_with(Editor &ed, float ms, int *count = nullptr) {
+  for (int i = 0; i < 2; i++) {
+    ed.set_frame_history_for_test(ms);
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, 5 + i, 5)});
+  }
+  std::string out;
+  int n = 0;
+  for (const auto &c : ed.ui_for_test().controls) {
+    if (c.layer < 1) continue;
+    out += std::string(c.kind) + " " + rect_str(c.r) + "; ";
+    n++;
+  }
+  if (count) *count = n;
+  return out;
+}
+}  // namespace R573
+
+void tests_round573() {
+  test("hci: Preferences' rows under the frame-rate sentence stay where they are when a frame's cost crosses the cap's budget - 5 ms, 40 ms, 5 ms at a 60 fps cap, no input (round 573, task 0555)", [] {
+    Editor ed;
+    R573::open(ed);
+    int n = 0;
+    const std::string within = R573::drawn_with(ed, 5.0f, &n);
+    const std::string over = R573::drawn_with(ed, 40.0f);
+    const std::string back = R573::drawn_with(ed, 5.0f);
+    const std::string hover = R573::drawn_with(ed, 16.6f), hover2 = R573::drawn_with(ed, 16.8f);
+    std::printf("    %d controls in the dialog; over budget %s, back within %s, at the budget %s\n", n, over == within ? "the same places" : "MOVED", back == within ? "the same places" : "MOVED",
+                hover == within && hover2 == within ? "the same places" : "MOVED");
+    CHECK(n >= 10);
+    CHECK(over == within);
+    CHECK(back == within);
+    CHECK(hover == within && hover2 == within);
+  });
+
+  test("hci: a control reached with Tab in Preferences stays in the dialog, in its place, while a frame's cost crosses the budget - the product no longer jitters there (round 573, task 0555)", [] {
+    /* (Round 569 had made the Tab walks' own tests run `fps unlimited`, which takes the budget sentence away; with this round's fix they run at the default cap again. This one crosses
+     * the budget on purpose.) */
+    Editor ed;
+    R573::open(ed);
+    int outside = 0, moved = 0;
+    for (int k = 0; k < 40; k++) {
+      platform::Event tab = ev(platform::EventType::KeyDown, 5, 5, platform::KEY_TAB);
+      ed.step_frame_headless({tab});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      R573::drawn_with(ed, 5.0f);
+      const Recti at = ed.ui_for_test().focus_rect_for_test();
+      R573::drawn_with(ed, 40.0f);
+      const Recti then = ed.ui_for_test().focus_rect_for_test();
+      const Recti dlg = ed.top_popup_rect_for_test();
+      if (then.w <= 0 || then.y < dlg.y || then.bottom() > dlg.bottom()) outside++;
+      if (rect_str(at) != rect_str(then)) moved++;
+    }
+    std::printf("    40 Tabs, the budget crossed after each: %d times the focus was outside the dialog, %d times it moved\n", outside, moved);
+    CHECK(outside == 0);
+    CHECK(moved == 0);
+  });
+
+  test("hci: rows that appear above the keyboard-focused control and push it out of its scroll area bring it back into view; scrolled away with the wheel it stays away (round 573, task 0555)", [] {
+    ui::Context u;
+    Image img;
+    img.resize(300, 200);
+    const Recti area{10, 10, 200, 100};
+    const int rh = 20, n = 12;
+    int extra = 0;  // (rows above the buttons: a sentence that wraps to more lines)
+    double t = 0.0;
+    const auto frame = [&] {
+      t += 0.1;
+      u.begin_frame(&img, t);
+      const int off = u.begin_scroll(u.id("r573_area"), area, (extra + n) * rh);
+      for (int k = 0; k < n; k++) u.button({area.x, area.y - off + (extra + k) * rh, 150, rh - 2}, "Button " + std::to_string(k));
+      u.end_scroll();
+      u.end_frame();
+      u.in.wheel_y = 0;
+    };
+    const auto whole_in_area = [&] {
+      const Recti f = u.focus_rect_for_test();
+      return f.w > 0 && f.y >= area.y && f.bottom() <= area.bottom();
+    };
+    frame();
+    u.focus_first_in(area);
+    for (int i = 0; i < 3; i++) frame();
+    std::printf("    the first button focused: %s\n", rect_str(u.focus_rect_for_test()).c_str());
+    CHECK(whole_in_area());
+    for (int i = 0; i < 8; i++) frame();  // (long past the four frames a Tab's own reveal lasts)
+    extra = 6;  // (120 px of rows above: the focused button is now under the area's bottom)
+    frame();
+    const bool pushed = !whole_in_area();
+    for (int i = 0; i < 4; i++) frame();
+    std::printf("    six rows appeared above it: pushed out %s, then %s (offset %d)\n", pushed ? "yes" : "no", rect_str(u.focus_rect_for_test()).c_str(), u.scroll_offset(u.id("r573_area")));
+    CHECK(pushed);
+    CHECK(whole_in_area());
+    /* The wheel takes it out of view: the user's own scroll is left alone. */
+    u.in.mx = area.x + 50, u.in.my = area.y + 50;
+    u.in.wheel_y = -3.0f;
+    frame();
+    const bool scrolled_away = !whole_in_area();
+    for (int i = 0; i < 6; i++) frame();
+    std::printf("    wheeled away: out of view %s, six frames later %s\n", scrolled_away ? "yes" : "no", whole_in_area() ? "BROUGHT BACK" : "still away");
+    CHECK(scrolled_away);
+    CHECK(!whole_in_area());
+  });
+
+  test("hci: a list inside a scrolling panel - wheeling the panel until the list's focused row is partly out of view leaves the list's own scroll alone (round 573, task 0555, the review)", [] {
+    /* (The focused row leaves the clip while the list's own offset is the same; the panel's offset changed, and that is the user's scroll: the list is not scrolled against the wheel.) */
+    ui::Context u;
+    Image img;
+    img.resize(300, 400);
+    const Recti outer{10, 10, 220, 300};
+    const int rh = 20, n = 12;
+    Recti inner{};
+    double t = 0.0;
+    const auto frame = [&] {
+      t += 0.1;
+      u.begin_frame(&img, t);
+      const int oo = u.begin_scroll(u.id("r573_outer"), outer, 600);
+      inner = Recti{outer.x, outer.y - oo + 300, 200, 100};
+      const int io = u.begin_scroll(u.id("r573_inner"), inner, 40 + n * rh);
+      for (int k = 0; k < n; k++) u.button({inner.x, inner.y - io + 40 + k * rh, 150, rh - 2}, "Row " + std::to_string(k));  // (40 px of text above the first row)
+      u.end_scroll();
+      u.end_scroll();
+      u.end_frame();
+      u.in.wheel_y = 0;
+    };
+    const auto whole = [&] {
+      const Recti f = u.focus_rect_for_test();
+      return f.w > 0 && f.y >= std::max(outer.y, inner.y) && f.bottom() <= std::min(outer.bottom(), inner.bottom());
+    };
+    const auto wheel_panel = [&](int px) {  // (the pointer on the panel beside the list: the panel takes the wheel; a positive `px` moves its content up)
+      u.in.mx = outer.x + 210, u.in.my = outer.y + 20;
+      u.in.wheel_y = -(float)px / (float)(u.row_h() * 3);
+      frame();
+    };
+    frame();
+    wheel_panel(150);
+    for (int i = 0; i < 2; i++) frame();
+    u.focus_first_in(inner);
+    for (int i = 0; i < 10; i++) frame();  // (the focus taken, and long past the four frames of its own reveal)
+    std::printf("    the panel at %d, the list at y %d: its first row focused at %s\n", u.scroll_offset(u.id("r573_outer")), inner.y, rect_str(u.focus_rect_for_test()).c_str());
+    CHECK(whole());
+    CHECK(u.scroll_offset(u.id("r573_inner")) == 0);
+    wheel_panel(-100);  // (the list slides down: its focused row crosses the panel's bottom edge)
+    const bool partly_out = !whole() && u.focus_rect_for_test().y < outer.bottom();
+    for (int i = 0; i < 6; i++) frame();
+    std::printf("    the panel wheeled to %d: the row at %s, partly out %s; six frames later the list's own offset is %d\n", u.scroll_offset(u.id("r573_outer")),
+                rect_str(u.focus_rect_for_test()).c_str(), partly_out ? "yes" : "no", u.scroll_offset(u.id("r573_inner")));
+    CHECK(partly_out);
+    CHECK(u.scroll_offset(u.id("r573_inner")) == 0);
+    CHECK(!whole());
+  });
+}
+
 void run_hci_tests() {
   test("hci: the live sweep (task 0293) - every layout, window, menu, submenu, dialog and component Inspector opened; their controls checked for clipped labels, overlaps, popups outside the window, help, disabled reasons; the themes' contrast", [] {
     const bool full = env_or("BLENDITY_SWEEP", "") == "full";
@@ -1051,10 +1220,9 @@ void run_hci_tests() {
       if (size) ed.set_ui_scale_for_test(1.5f);
       ed.set_guides_for_test(false);
       ed.record_buttons_for_test(true);
-      /* Round 569: no frame cap, so no Over / Within budget sentence re-wraps under the walk (the reason is at round
-       * 509's Preferences walk below; this one failed 3 of 10 hci group runs on Linux under load, a stop "focused out
-       * of sight"). */
-      ed.command("fps unlimited");
+      /* (Round 569 ran this walk with no frame cap, because the Over / Within budget sentence re-wrapped under it - 3 of
+       * 10 hci group runs on Linux under load ended with a stop "focused out of sight". Round 573 fixed the product:
+       * the sentence keeps its rows, so the walk runs at the default cap again.) */
       ed.command("preferences");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
       for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
@@ -1363,15 +1531,14 @@ void run_hci_tests() {
     ed.init_headless(1366, 1000);
     ed.set_guides_for_test(false);
     ed.record_buttons_for_test(true);
-    /* Round 569: no frame cap for this walk. With a cap the dialog's frame rate section says "Over budget ..." or
-     * "Within budget ..." by the last 60 frames' measured cost - sentences of different lengths that wrap to a
-     * different number of lines - so on a machine whose frames straddle the cap's budget (Linux's CPU frames of this
-     * 1366 x 1000 window under load: about 8 ms at the default 120) every control below moves a text line up or down
-     * between frames with no input, and a control Tab had just scrolled to the dialog's bottom edge ended a line below
-     * it: "N steps outside the dialog", in some runs and not others (8 of 8 clean with the cap off under the same load
-     * that failed 2 of 8 with it). Unlimited shows neither sentence. What the walk pins is unchanged; that the rows
-     * move under a focused control at all is the product's, reported to the hub, not this test's to judge by chance. */
-    ed.command("fps unlimited");
+    /* (Round 569 ran this walk with no frame cap. With a cap the dialog's frame rate section says "Over budget ..." or
+     * "Within budget ..." by the last 60 frames' measured cost - sentences that wrapped to a different number of
+     * lines - so on a machine whose frames straddle the cap's budget (Linux's CPU frames of this 1366 x 1000 window
+     * under load: about 8 ms at the default 120) every control below moved a text line up or down between frames with
+     * no input, and a control Tab had just scrolled to the dialog's bottom edge ended a line below it: "N steps outside
+     * the dialog", in 2 of 8 runs. Round 573 fixed the product - the sentence keeps its rows, and a focused control
+     * pushed out of view is brought back - so the walk runs at the default cap again; round 573's own tests cross the
+     * budget on purpose.) */
     ed.command("preferences");
     Kb::settle(ed);
     for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
@@ -3797,4 +3964,5 @@ void run_hci_tests() {
 
   tests_round559_layout();
   tests_round570_adjust_key();
+  tests_round573();
 }
