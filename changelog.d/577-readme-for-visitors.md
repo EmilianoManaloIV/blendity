@@ -3,7 +3,7 @@
 **Asked:** "Make sure README in the GitHub has updated graphics and keep it simple and ready for people who will see
 it" (the 1.0.0 release).
 
-**Changed**
+**Changed (task 0559)**
 - `README.md` is a page read in a minute: what Blendity is, four pictures, the three download links, what you can do,
   the first minute, where to learn more, building in two lines, the licence. It was 480 lines.
 - The long material moved, word for word, to `docs/`: the stage-by-stage feature list and the machines table to
