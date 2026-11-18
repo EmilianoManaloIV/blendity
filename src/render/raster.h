@@ -278,7 +278,19 @@ struct DrawItem {
   bool flattened = false;
   bool view_shaped = false;  // (round 339: its mesh is a camera view's - View Angle Shapes - the plain mesh's topology and UVs)
   Mat4 shade_model;
+  /* Round 519 (ADR 0146): a skinned mesh the card poses. `mesh` is then the card's stand-in (the rest's render mesh, whose
+   * serial and triangles are the rest's: a pose never changes them), `skin` the posed mesh the CPU makes the vertices from
+   * if the card can't (Editor::skin_item_cpu), `skin_box` a box holding every posed vertex (culling and the shadow fit read
+   * it through draw_bounds), `skin_stamp` what the pose is (a hash of its palette: part of the item's words). Only a card
+   * view's gather makes such items; every other reader gets the posed render mesh in `mesh`. */
+  const struct Mesh *skin = nullptr;
+  bool skin_tangents = false;
+  AABB skin_box;
+  uint64_t skin_stamp = 0;
+  const char *skin_note = nullptr;  // a skinned mesh left on the CPU: why (listed in the view's notes)
 };
+/* The item's bounds in its mesh's space: the card's skin box while the card poses it, else the mesh's own. */
+inline AABB draw_bounds(const DrawItem &it) { return it.skin_box.valid() ? it.skin_box : it.mesh->bounds; }
 
 /* Round 334: a placement squashed along the unit direction d about the pivot p, keeping `keep` (0..1] of the depth:
  * T(p) . (I + (keep - 1) d d^T) . T(-p). */

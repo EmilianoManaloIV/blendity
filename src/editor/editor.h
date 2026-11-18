@@ -63,6 +63,7 @@
 #include "../scene/sequence.h"
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
+#include "../scene/skin_render.h"  // (round 519: SkinBinding, the card's weights and boxes)
 #include "paint_automask.h"  // (task 0525: what Weight Paint and Vertex Paint share)
 #include "ui.h"
 #include "livelink.h"
@@ -255,6 +256,11 @@ struct FrameProfile {
    * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
   uint64_t gpu_views = 0, gpu_fallbacks = 0, gpu_mesh_uploads = 0, gpu_mesh_updates = 0;
   uint64_t gpu_upload_bytes = 0;  // task 0098: what the meshes sent to the card took
+  /* Round 519 (ADR 0146): skinned meshes the card poses - drawn from the card's, palettes sent (a changed one), skins sent
+   * to the card (their rest vertices and weights, once), and skinned meshes that were posed on the CPU instead. */
+  uint64_t skin_items = 0, skin_palettes = 0, skin_uploads = 0, skin_cpu = 0;
+  /* Round 521: a skin's rest moved by shape keys - the updates sent (ranges of vertices, not the skin again), their ranges and vertices. */
+  uint64_t skin_rest_updates = 0, skin_rest_ranges = 0, skin_rest_vertices = 0, skin_rest_tris = 0;  // (tris: index ranges, a quad's diagonal that flipped)
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
@@ -307,6 +313,8 @@ struct FrameProfile {
     gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
     ms_gpu_instances += o.ms_gpu_instances, ms_gpu_corners += o.ms_gpu_corners, ms_gpu_see += o.ms_gpu_see, ms_gpu_render += o.ms_gpu_render;
     gpu_upload_bytes += o.gpu_upload_bytes;
+    skin_items += o.skin_items, skin_palettes += o.skin_palettes, skin_uploads += o.skin_uploads, skin_cpu += o.skin_cpu;
+    skin_rest_updates += o.skin_rest_updates, skin_rest_ranges += o.skin_rest_ranges, skin_rest_vertices += o.skin_rest_vertices, skin_rest_tris += o.skin_rest_tris;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
@@ -968,6 +976,12 @@ class Editor {
   };
   const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
   void clear_toasts_for_test() { toasts_.clear(); }
+  /* Round 564: where the last draw put the toasts (a test compares a view's picture outside them). */
+  std::vector<Recti> toast_frames_for_test() const {
+    std::vector<Recti> out;
+    for (const ToastRects &t : toast_rects_) out.push_back(t.frame);
+    return out;
+  }
   Vec3 scene_view_pivot_for_test() const { return cam_.pivot; }  // (round 374)
   struct JobView {  // (task 0253: one running job as the tray shows it)
     std::string label;
@@ -976,12 +990,26 @@ class Editor {
     bool cancellable = false, cancelled = false;  // (cancelled: the job's own flag is set - by the tray, Esc or a console verb)
     std::function<void()> cancel;
     std::function<void()> now;  // (review 354: a waiting export's Export Now)
+    std::string key;            // (round 564: what the tray follows the job by when its label changes with its phase - a bake; empty: the label)
   };
   std::vector<JobView> jobs_for_test() { return jobs_running(); }
+  static constexpr const char *kBakeJobKey = "Generate Lighting";  // (round 564: the bake's name in the tray, through its phases)
+  /* Round 564: the running job of this key as if it had started `secs` earlier (a test's job that "ran a second or more" without waiting one). */
+  void jobs_age_for_test(const std::string &key, double secs) {
+    for (JobSeen &s : jobs_seen_)
+      if (s.key == key) s.started -= secs, s.label_started -= secs;
+  }
+  /* How long the tray has followed the job of this key, in seconds; -1 when it follows none. */
+  double jobs_ran_for_test(const std::string &key) const {
+    for (const JobSeen &s : jobs_seen_)
+      if (s.key == key) return clock_now() - s.started;
+    return -1.0;
+  }
   /* Round 411 (ADR 0105): the last frame's time with its deferred work, the last 240 frames, and `perf mark`'s
    * bookkeeping - what the responsiveness rows and tools/bench_world.py read. */
   float last_frame_ms() const { return frame_ms_; }
   const std::vector<float> &frame_history() const { return frame_history_; }
+  void set_frame_history_for_test(float ms) { frame_history_.assign(60, ms); }  // (round 573: the last 60 frames' cost as Preferences reads it; each frame after adds its own)
   std::string perf_status_text() const;
   /* Round 468 (task 0444): the posing frame's parts (ms) and counts as the one text every printer shares - `perf status`,
    * `perf drag`, the windowed check - over a span of `frames` frames, a mean a frame. Items are "<name> <number>" after
@@ -1373,6 +1401,7 @@ class Editor {
     paint_end_stroke();
   }
   bool raycast_scene_for_test(const Ray &ray, Vec3 &hit) { return raycast_scene(ray, hit); }
+  bool raycast_surface_for_test(const Ray &ray, Vec3 &hit, Vec3 &normal) { return raycast_surface(ray, hit, normal, {}); }  // (round 520)
   void collect_bake_scene_for_test(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) { collect_bake_scene(objects, lights); }
   void attach_lightmap_for_test(const GameObject &g, const Mesh &m, DrawItem &it) { attach_lightmap(g, m, it); }
   bool vr_tube_for_test() const { return vr_tube_; }
@@ -1468,6 +1497,14 @@ class Editor {
   Vec3 sculpt_last_hit_for_test() const { return sculpt_last_hit_; }
   float sculpt_last_radius_for_test() const { return sculpt_last_radius_; }
   bool sculpt_hit_for_test(float x, float y, Vec3 &world, float &dist) { return sculpt_hit(scene_rect_, x, y, world, dist); }
+  /* Round 562 (task 0544): the pixel's ray against the sculpted mesh - through the face grid, or every face (`brute`) -
+   * as an object-space distance, -1 off the mesh; the grid used from `faces` faces up (a test's small mesh through it);
+   * the Scene view's depth plane scaled by up to `rel` either way, pixel by pixel (what a rasterizer's rounding does). */
+  float sculpt_ray_for_test(float x, float y, bool brute);
+  void sculpt_ray_grid_from_for_test(size_t faces) { sculpt_ray_grid_from_ = faces, sculpt_ray_.uid = 0; }
+  size_t sculpt_ray_builds_for_test() const { return sculpt_ray_.builds; }
+  size_t sculpt_ray_entries_for_test() const { return sculpt_ray_.entries; }
+  void noise_scene_depth_for_test(float rel, uint32_t seed);
   size_t sculpt_last_gathered_for_test() const { return sculpt_last_gathered_; }
   size_t sculpt_dabs_for_test() const { return sculpt_dab_px_.size(); }  // (task 0237)
   const std::vector<Vec3> *sculpt_colors_for_test(const Mesh &m) { return sculpt_colors(m, m.render_mesh(), Vec3(0.8f)); }  // (task 0238)
@@ -1902,6 +1939,62 @@ class Editor {
     std::string err;
     return gpu_view_ && it != gpu_meshes_.end() && it->second.id >= 0 && gpu_view_->read_mesh(it->second.id, v, indices, &err);
   }
+  gpu::Raster *gpu_raster_for_test() { return gpu_view_.get(); }  // (round 519: the card's skin counters, a skin's posed buffer)
+  /* Round 519: the card's mesh id of the skin a skinned object was last drawn from - its most lately gathered stand-in (-1: that
+   * one isn't on the card, or a moved rest has it posed on the CPU for now). */
+  int skin_card_mesh_for_test(const GameObject *g) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return -1;
+    const SkinStand *last = nullptr;
+    for (const auto &st : s->second.slots)
+      if (!last || st->seen > last->seen) last = st.get();
+    if (!last || last->moving > 0 || !last->mesh) return -1;
+    const auto e = gpu_meshes_.find(last->mesh.get());
+    return e != gpu_meshes_.end() ? e->second.id : -1;
+  }
+  /* Round 519: a skinned object's stand-ins, one a line (kind, last gather, gathers left on the CPU, the rest's serial). */
+  std::string skin_stands_text_for_test(const GameObject *g) const {
+    std::string out;
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return "no stand-ins";
+    for (const auto &st : s->second.slots) {
+      const auto e = st->mesh ? gpu_meshes_.find(st->mesh.get()) : gpu_meshes_.end();
+      out += strprintf("[kind %d seen %llu moving %d moved %zu loose %d rest %llu card %d] ", st->kind, (unsigned long long)st->seen, st->moving, st->moved.size(), st->boxes_loose, (unsigned long long)st->rest_serial,
+                       e != gpu_meshes_.end() ? e->second.id : -1);
+    }
+    return out + strprintf("(gather %llu)", (unsigned long long)skin_builds_);
+  }
+  /* Round 521: what the stand-in of `kind` (0 the Scene view's body, 2 its outline shell) holds for the card since it was last sent a rest:
+   * the moved ranges, their vertices and the stand-in's render vertices. False without that stand-in. */
+  bool skin_moved_for_test(const GameObject *g, int kind, size_t &ranges, size_t &vertices, size_t &total) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return false;
+    for (const auto &st : s->second.slots) {
+      if (st->kind != kind || !st->mesh) continue;
+      ranges = st->moved.size(), vertices = 0, total = st->mesh->positions.size();
+      for (const auto &rg : st->moved) vertices += rg.second;
+      return true;
+    }
+    return false;
+  }
+  /* Round 521 (review): the stand-in of `kind`'s weights (what the card's skin was made with), and the card mesh id it is drawn from (-1: none). */
+  const gpu::SkinWeights *skin_weights_for_test(const GameObject *g, int kind) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return nullptr;
+    for (const auto &st : s->second.slots)
+      if (st->kind == kind && st->mesh) return &st->weights;
+    return nullptr;
+  }
+  int skin_card_id_for_test(const GameObject *g, int kind) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return -1;
+    for (const auto &st : s->second.slots) {
+      if (st->kind != kind || !st->mesh) continue;
+      const auto e = gpu_meshes_.find(st->mesh.get());
+      return e != gpu_meshes_.end() ? e->second.id : -1;
+    }
+    return -1;
+  }
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
@@ -1980,6 +2073,49 @@ class Editor {
     lod_view_.on = false;
     return items;
   }
+  /* Round 519 (ADR 0146): the gather a card view makes - a skinned mesh the card poses is its rest render mesh in `mesh`, the posed
+   * Mesh in `skin` - made without a card; the same items with the posed render meshes (the CPU's); the kept stand-ins; the last
+   * reason a skinned mesh was left on the CPU; and `on`: render_deferred makes such items without a card (it turns them back). */
+  std::vector<DrawItem> collect_items_card_for_test(bool game = false, bool tangents = true, const Vec3 *outline_eye = nullptr) {
+    uint64_t gen = 0;
+    items_card_skin_ = true;
+    if (outline_eye) outline_view_ = {true, *outline_eye, 500.0f, false};  // (as a view's frame sets it: the outlines' width by distance)
+    std::vector<DrawItem> items = collect_items_ref(game, tangents, &gen);
+    items_card_skin_ = false;
+    outline_view_.on = false;
+    return items;
+  }
+  /* Round 522: the Game view's gather as a card view makes it - the flatten view on (render_deferred turns it on for every Game
+   * view frame), from `eye` looking at `target` - without a card. The LOD and outline-distance views stay off. */
+  std::vector<DrawItem> collect_game_items_card_for_test(Vec3 eye, Vec3 target) {
+    uint64_t gen = 0;
+    items_card_skin_ = true;
+    set_flatten_view(Mat4::look_at(eye, target, {0, 1, 0}), Mat4::perspective(50.0f * kDeg2Rad, 1.6f, 0.1f, 100.0f), eye, 0, nullptr);
+    std::vector<DrawItem> items = collect_items_ref(true, true, &gen);
+    flatten_view_.on = false;
+    items_card_skin_ = false;
+    return items;
+  }
+  /* Round 520: Solid shading's items as a card view gathers them (a posed skin its rest render mesh), without a card. */
+  std::vector<DrawItem> solid_items_card_for_test(bool game = false) {
+    items_card_skin_ = true;
+    std::vector<DrawItem> items = solid_items(*scene_, game);
+    items_card_skin_ = false;
+    return items;
+  }
+  static std::vector<DrawItem> skin_items_to_cpu_for_test(const std::vector<DrawItem> &items) { return skin_items_to_cpu(items); }
+  /* Round 520: every stand-in not gathered since is let go, as 600 gathers without them would (the kept lists go with them). */
+  void skin_age_stands_for_test() { skin_builds_ += 700; skin_prune_stands(); }
+  size_t skin_stands_for_test() const { return skin_stands_.size(); }
+  /* Round 563: `n` gathers of a card view that found none of the stand-ins (another view's, of another rest): each counts and prunes. */
+  void skin_gathers_elsewhere_for_test(int n) {
+    for (int i = 0; i < n; i++) skin_prune_stands();
+  }
+  size_t solid_kept_stands_for_test(bool game = false) const { return solid_cache_[game].valid ? solid_cache_[game].stands.size() : 0; }
+  const std::string &skin_reason_for_test() const { return skin_reason_; }
+  void skin_items_for_test(bool on) { skin_items_for_test_ = on; }
+  void skin_cards_off_for_test(bool off) { skin_cards_off_for_test_ = off; }
+  void skin_ranges_off_for_test(bool off) { skin_ranges_off_for_test_ = off; }
   /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
    * asset path and the layer, or -1. */
   std::pair<std::string, int> texture_upto_for_test() const { return texture_upto_; }
@@ -2396,7 +2532,65 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
-  std::vector<DrawItem> collect_items(bool game, bool want_tangents);  // (a copy of collect_items_ref's)
+  std::vector<DrawItem> collect_items(bool game, bool want_tangents);  // (a copy of collect_items_ref's; always the posed render meshes: round 519's card-skin items are for render_deferred's card path alone)
+  /* Round 519 (ADR 0146, task 0502; gpu_skin.cpp): a skinned mesh the card poses. The card view's gather (collect_items_ref
+   * under items_card_skin_) keeps such a mesh as its rest render mesh - a stand-in kept per object - and says which posed Mesh
+   * it follows (DrawItem::skin); the card holds it once (add_skin) and is sent its palette a frame. Nothing there runs the CPU
+   * kernel (Mesh::render_mesh of a posed mesh). Every other reader, and a card view that can't take it, gets the posed render
+   * mesh (skin_item_cpu). */
+  struct SkinStand {
+    std::shared_ptr<RenderMesh> mesh;                // what the items point at: a copy of the rest's render mesh (its own bounds, the rest's)
+    std::shared_ptr<const SkinBinding> binding;      // the weights below are made from it
+    uint64_t rest_serial = 0, seen = 0;              // the rest render mesh's serial; the gather it was last used in
+    bool tangents = false;
+    gpu::SkinWeights weights;                        // per render vertex, for add_skin
+    SkinBoneBoxes boxes;                             // the bounds' pieces
+    std::vector<float> palette;                      // this gather's
+    std::vector<float> sent;                         // the palette the card holds for this skin
+    int sent_mesh = -1;                              // ... and the card mesh it is the palette of
+    const void *refused_card = nullptr;              // the card that couldn't hold it (for rest_serial's skin): not asked again until the rest changes
+    uint64_t refused_serial = 0;
+    std::weak_ptr<const Mesh> rest;                  // the mesh before the skin this stands for (SkinPose::rest)
+    int moving = 0;                                  // gathers left before a rest that moved (shape keys) goes back to the card
+    int kind = 0;                                    // the view kind that made it (0 the Scene view, 1 the Game view and renders)
+    uint64_t rest_hash = 0;                          // what the last rest seen held (a copy of the same rest is not a move)
+    /* Round 521: a rest whose vertices moved with the topology held (a blink): the render vertices that changed since the card last
+     * got the skin (ranges, first and count, sorted and joined), sent by gpu_skin_mesh as update_skin_rest; the bone boxes grown to
+     * hold them until the rest has held still (boxes_loose gathers) and they are made whole again. */
+    std::vector<std::pair<uint32_t, uint32_t>> moved;
+    bool tris_changed = false;                       // ... and its triangles (a diagonal flipped, same count): the card's indices are written in ranges too
+    std::vector<uint32_t> card_idx;                  // the indices the card holds for it (as card_indices made them), to find those ranges
+    int boxes_loose = 0;
+    const void *ranges_refused = nullptr;            // the card that said no to update_skin_rest: the CPU poses a rest that moves there
+  };
+  /* By object id, a stand-in a rest it is drawn from (review 519: the Scene and Game views each pose their own rest when a
+   * modifier runs before the Skin; views that share a rest share its stand-in and its skin on the card). */
+  struct SkinStands {
+    std::vector<std::unique_ptr<SkinStand>> slots;
+  };
+  static constexpr size_t kSkinStandsAnObject = 6;  // (round 521: the outline shells have their own: the Scene and Game views' body and shell, each rest)
+  static constexpr int kSkinRestStill = 3;            // gathers a moved rest must hold still for before it goes back to the card
+  std::unordered_map<uint32_t, SkinStands> skin_stands_;
+  SkinStand &skin_stand_for(const GameObject &g, const std::shared_ptr<const Mesh> &rest, int kind);
+  int skin_kind_ = 0;                                 // the view kind collect_items_build is gathering (skin_stand_for)
+  bool skin_settling_ = false;                        // this gather left a moved rest on the CPU: the list isn't kept (it counts gathers)
+  SkinStand *skin_stand_of(const DrawItem &it);
+  void skin_drop_card(SkinStand &st);
+  void skin_rest_moved(SkinStand &st, const RenderMesh &r, const SkinPose &sp);
+  bool items_card_skin_ = false;                      // collect_items_build makes card-skin items (set by render_deferred's gather alone)
+  bool skin_ranges_off_for_test_ = false;             // a test: a rest that moves is posed on the CPU, as for a card that refuses update_skin_rest (round 519's behaviour)
+  bool skin_cards_off_for_test_ = false;              // a test: skinning stays on the CPU
+  bool skin_items_for_test_ = false;                  // a test: card-skin items are made without a card (to read them)
+  uint64_t skin_builds_ = 0;
+  std::string skin_reason_;                           // why the last skinned mesh left the card (the Profiler lists it)
+  bool skin_on_card_wanted() const;
+  bool skin_card_item(const GameObject &g, const Mesh &m, bool want_tangents, DrawItem &it);
+  void skin_prune_stands();
+  int gpu_skin_mesh(const DrawItem &it, std::string &err);
+  bool skin_item_card_ok(const DrawItem &it) const;
+  static DrawItem skin_item_cpu(const DrawItem &it);
+  static bool skin_items_any(const std::vector<DrawItem> &items);
+  static std::vector<DrawItem> skin_items_to_cpu(const std::vector<DrawItem> &items);
   /* Round 506 (keep 4): the list itself - a reference into items_cache_, valid until the next gather of the same variant (no nested
    * collect_items(game, tangents) may run while it is held) - and its generation (0: not a kept list: a Camera Flatten or an LOD level). */
   const std::vector<DrawItem> &collect_items_ref(bool game, bool want_tangents, uint64_t *gen);
@@ -2448,7 +2642,11 @@ class Editor {
     bool flattening = false;  // (a Camera Flatten or View Angle Shapes was in the scene: the gather filled side tables - never kept)
     bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
     std::vector<DrawItem> items;
+    std::vector<SkinStand *> stands;  // (round 563: the card stand-ins a kept list's items point at - read only while `valid`, which every stand-in let go clears)
   } items_cache_[3][2];  // (round 506: [0 Scene view, 1 Game view (its LOD levels), 2 any other game gather - the Camera Preview, VR, renders][tangents]: the Game view and the preview each keep theirs)
+  void skin_forget_kept_lists();
+  void skin_list_stands(ItemsCache &c);         // (round 563, render_view.cpp)
+  void skin_stamp_kept(const ItemsCache &c);
   ItemsCache solid_cache_[2];  // (round 506: Solid shading's [game])
   mutable view_keeps::PerEditor keeps_;  // (round 506: what the Scene view's keeps hold between frames)
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
@@ -4128,6 +4326,11 @@ class Editor {
   std::string card_view_key_;
   /* Round 362: the world kit (world_kit.cpp). */
   void update_collider_fits();
+  /* Round 520 (ADR 0146 1(c)): Sculpt and Weight Paint work on a skinned mesh's posed vertices on the CPU, so the object they
+   * hold gets no skin_pose (GameObject::skin_pose_off); every other object keeps its pose. Called every frame and by both modes. */
+  void sync_skin_pose_off();
+  const Scene *skin_off_scene_ = nullptr;
+  uint64_t skin_off_ids_[2] = {0, 0};
   void draw_colliders();
   void draw_light_volumes();  // (round 397)
   void budget_light_volume_rows(ui::Context &u, ui::Layout &lay, const BudgetCounts &c);
@@ -4434,6 +4637,7 @@ class Editor {
     uint64_t part = 0;
     int x = 0, y = 0;
   } pick_part_spot_;
+  void pick_part_spot_watch();  // (round 571: once a frame, from frame_body - the spot is forgotten when the selection is anything but its opening alone)
   void blockout_part_command(const std::vector<std::string> &t);  // (round 547: blockout part select [frame|glass|leaf] | opening)
   void blockout_parts_select(bool to_parts, int kind, const char *command);
   void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
@@ -5178,6 +5382,32 @@ class Editor {
   bool set_sculpt(bool on);
   Mesh *sculpt_mesh();
   bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist, uint64_t obj = 0);  // (obj 0: the sculpted object; task 0519: Weight Paint's)
+  /* Round 562 (task 0544): the sculpted mesh's faces by the cells their boxes overlap, for the pixel's ray (sculpt.cpp:
+   * sculpt_ray_cast). Right for one mesh at one version and deform_version; a dab notes the faces it moved, and the
+   * next ray files them again. */
+  struct SculptRayGrid {
+    uint64_t uid = 0, version = 0, deform_version = 0;  // (the mesh it is right for; uid 0: none)
+    float cell = 1.0f;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> cells;
+    std::vector<uint32_t> big;     // (faces over too many cells: every ray tests them)
+    std::vector<uint8_t> is_big;   // (per face)
+    std::vector<uint32_t> stamp;   // (per face: the cast that tested it last)
+    uint32_t pass = 0;
+    std::vector<int32_t> range;    // (per face, six: the cells it was filed in last - low x, y, z, high x, y, z)
+    std::vector<uint32_t> moved;   // (faces a dab moved since the last cast: filed again before the next)
+    std::vector<uint8_t> is_moved;
+    Vec3 lo, hi;                   // (the box the cells cover: where all but stray faces lie)
+    size_t entries = 0, built_entries = 0, built_big = 0, builds = 0;
+  } sculpt_ray_;
+  size_t sculpt_ray_grid_from_ = 4096;  // (fewer faces: every face tested, no grid)
+  void sculpt_ray_build(const Mesh &m);
+  void sculpt_ray_file(const Mesh &m, uint32_t f);
+  void sculpt_ray_moved(const Mesh &m, const std::vector<uint32_t> &ids);
+  void sculpt_ray_cell(const Mesh &m, const Ray &r, bool cull, uint64_t key, float &best);
+  float sculpt_ray_cast(const Mesh &m, const Ray &r, bool cull, bool brute = false);
+  bool sculpt_ray_fits(const GameObject &g, const Mesh &m) const;
+  bool sculpt_ray_culls(const GameObject &g) const;
+  bool sculpt_ray_hit(float x, float y, Vec3 &world, float &dist, bool any_stack);
   float sculpt_world_radius(float px, float dist) const;
   void sculpt_build_grid(const Mesh &m, float cell);
   void sculpt_gather(const Mesh &m, Vec3 centre, float radius, std::vector<uint32_t> &ids, std::vector<float> &d) const;
@@ -5256,8 +5486,6 @@ class Editor {
   /* Task 0239: Dynamic Subdivision - a Subdivision Surface on the sculpted object (ADR 0075). */
   int sculpt_subdiv_levels() const;
   void sculpt_set_subdiv(int levels);
-  bool sculpt_cage_hit(float x, float y, Vec3 &world, float &dist);
-  bool sculpt_cage_ = false;         // (this stroke: a Subdivision Surface is drawn over the mesh - the pick moves onto the cage)
   int sculpt_subdiv_pending_ = -1;   // (the panel's field while it is dragged: applied, one step, at the release)
   uint64_t sculpt_subdiv_pending_obj_ = 0;  // (the object the pending value is for)
   /* Task 0240: DynaMesh (ADR 0076) - the mesh retopologized evenly at a resolution, one ordinary step. */
@@ -7503,8 +7731,12 @@ class Editor {
     std::string label;
     double started = 0.0;
     bool cancelled = false, alive = true;
+    std::string key;             // (round 564: JobView::key, or the label)
+    double label_started = 0.0;  // (when the label it has now was first seen: the tray's time and estimate are the phase's)
   };
   std::vector<JobSeen> jobs_seen_;
+  void jobs_note_cancelled(const std::string &key);  // (round 564: a cancel made past the tray, before the job leaves it)
+  void jobs_end(const JobSeen &s, double now);       // (its end toast and HCI log line)
   std::string busy_label_;  // (a main-thread job about to block: shown for a frame first)
   /* The History window and the unsaved-changes prompt (task 0254, editor/history_window.cpp). */
   void draw_history_window(const Recti &r);

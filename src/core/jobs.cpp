@@ -160,6 +160,16 @@ std::shared_ptr<JobSystem> JobSystem::background_pool() {
   return background_;
 }
 
+void JobSystem::isolate(const std::function<void()> &fn) {
+#ifdef BL_WITH_TBB
+  if (backend_ == Backend::TBB) {
+    tbb::this_task_arena::isolate(fn);
+    return;
+  }
+#endif
+  fn();
+}
+
 void JobSystem::run_background(const std::function<void()> &fn) {
   const bool was = tl_background;
   tl_background = true;  // (in_background says so on either backend)

@@ -103,9 +103,11 @@ rebuild meshes. The pose you get is the same as before.
     (16.7~ms) on an avatar of a real one's size (about 140{,}000 triangles on 15 skinned meshes). On the test avatar a
     hand's IK drag measured 10 to 13~ms a frame against 48 to 56 before.
   \item \textbf{Whole-body poses} (a Puppet handle, turning the chest, scrubbing a clip, Play with springs on a whole
-    avatar) move every mesh and cost more: 35 to 53~ms on the test avatar, which feels like 20 to 30~fps. Nothing is
-    wrong; what is left is the moved meshes sent to the card, their normals, and the outline shells. The Learn lesson below shows how to see which part
-    of a frame it is.
+    avatar) move every mesh. Since the graphics card does the skinning they are 7 to 12~ms on the test avatar by itself
+    (the chest 6.9, a Puppet handle 12.3, a scrub 7.9, Play with the springs 9.7; they were 37 to 70), and in a big world the
+    card also draws they are 11 to 25~ms, because what is left is the card drawing the world, not the pose. A mesh the card
+    cannot skin (a Skin with a vertex-group limit, Edit Mode, a see-through material) is posed on the processor and costs
+    more. The Learn lesson below shows how to see which part of a frame it is.
   \item \textbf{Where a slow frame goes.} The Profiler (\menu{Window > Profiler}) shows a \emph{Posing} block while a rig is
     posed: the constraint solve, the full-body solver, skinning, the in-place moves, the uploads. A frame that costs much
     more than the block adds up to is the drawing, not the pose. The Learn lesson \emph{Where a Posing Frame Goes} walks

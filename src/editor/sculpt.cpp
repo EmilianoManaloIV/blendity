@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Sculpt Mode (task 0236, ADR 0074): brushes that touch only what is under them. A stroke builds a uniform grid over
-// the mesh's vertices; a dab reads the object and depth under the cursor from the Scene view's planes, turns the
-// screen radius into a world radius at that depth and walks the cells inside it; the vertices there move along their
+// the mesh's vertices; a dab reads the object under the cursor from the Scene view's planes and the point from the
+// mesh itself (the pixel's ray's first face: round 562), turns the screen radius into a world radius at that distance
+// and walks the cells inside it; the vertices there move along their
 // normals (Draw), toward their neighbours (Smooth) or with the drag (Grab). The mesh is written in place, positions
 // only; the stroke's undo is a delta of the touched vertices. Blender: editors/sculpt_paint/sculpt.cc (the brush
 // radius from the cursor's depth, SCULPT_vertex_neighbors, the draw / smooth / grab brushes); ZBrush: the circle on
@@ -112,6 +113,7 @@ bool Editor::set_sculpt(bool on) {
     sculpt_obj_ = 0;
     sculpt_scene_ = nullptr;
     sculpt_cache_mesh_ = nullptr;
+    sync_skin_pose_off();
     if (!on) Log::info("Sculpt off");
     if (!on) fold_edit_shape();  // (round 406: the shape being edited takes the strokes)
   }
@@ -138,6 +140,7 @@ bool Editor::set_sculpt(bool on) {
   show_edit_shape_full(*g);  // (round 406: a shape opened in the Inspector shows in full while sculpted)
   sculpt_scene_ = scene_.get();
   sculpt_cache_mesh_ = nullptr;
+  sync_skin_pose_off();  // (round 520: its skinned mesh is posed whole from here, not by a pose the card shares)
   Log::info("Sculpt on '%s': drag over it (Shift smooths, Alt carves; Esc leaves)", g->name.c_str());
   ui_.redraw = true;
   return true;
@@ -163,7 +166,10 @@ bool Editor::sculpt_own_mesh(GameObject *g, MeshFilter *mf) {
 
 /* ---- the brush's place ---- */
 
-/* The world point under the Scene view pixel (x, y) when the sculpted object is there: the depth plane's value turned
+/* The world point under the Scene view pixel (x, y) when the sculpted object is there (the id plane says so): the
+ * mesh's own point on the pixel's ray (round 562: sculpt_ray_hit - not a value a rasterizer rounded). Where the ray
+ * misses the mesh, where a modifier other than a Subdivision Surface or a shape key draws the object somewhere else
+ * (sculpt_ray_fits), and for another object, the depth plane's value turned
  * into a distance along the pixel's ray by bisection on the renderer's own projection (the depth grows with the
  * distance whatever the projection's form), forty halvings from a millimetre to ten kilometres. False over nothing or
  * another object. `obj` names another object to hit (task 0519: Weight Paint's stroke start). */
@@ -172,6 +178,7 @@ bool Editor::sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float 
   if (ix < 0 || iy < 0 || ix >= view.w || iy >= view.h) return false;
   ensure_scene_planes();  // (task 0204: the GPU view keeps them on the card until a CPU reader asks)
   if (scene_rt_.id_at(ix, iy) != (uint32_t)(obj ? obj : sculpt_obj_)) return false;
+  if (!obj && sculpt_ && sculpt_ray_hit(x, y, world, dist, false)) return true;  // (Sculpt's own object: Paint's hit comes through here with Sculpt off)
   const float z = scene_rt_.depth_at(ix, iy);
   const Ray ray = scene_r3d_.screen_ray(x, y);
   auto depth_at = [&](float t, float &out) {
@@ -192,7 +199,287 @@ bool Editor::sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float 
   dist = 0.5f * (lo + hi);
   if (!(dist > 1e-4f) || !std::isfinite(dist)) return false;
   world = ray.origin + ray.dir * dist;
+  /* (ADR 0075, as before round 562: with a Subdivision Surface among other modifiers the planes' point is inside the
+   * cage - moved onto the base mesh where the ray finds it.) */
+  if (!obj && sculpt_ && sculpt_subdiv_levels() > 0) sculpt_ray_hit(x, y, world, dist, true);
   return true;
+}
+
+/* ---- the pointer's ray against the mesh (round 562, task 0544) ---- */
+
+/* Why: the depth plane's value at a pixel is the three edge values times the corners' depths over the triangle's area,
+ * all float - on triangles under a pixel across the sum's rounding is 1e-5 to 1e-4 of the depth, which at 8 m is
+ * centimetres to decimetres along the ray (a 44-pixel sphere of 6,000 faces: the brush's centre up to 0.18 off a 0.5
+ * sphere's surface, dabs that gathered nothing), and which pixel a row's stepping starts at reshuffles it (rounds 554 /
+ * 556: a wider span margin in the rasterizer broke two sculpt tests with every pixel's triangle and coverage the same).
+ * So the planes say only that the sculpted object is under the pointer; where, the mesh itself says: the first face on
+ * the pixel's ray, from the positions as they are now. The same on the CPU and the card, whatever drew the view. */
+
+namespace {
+
+constexpr int kRayBigCells = 64;       // (a face over more cells than this is tested by every ray instead)
+constexpr double kRayMaxCells = 1024.0;  // (the grid's box's longest side in cells: what a ray walks at most)
+constexpr size_t kRaySample = 4096;    // (faces the box and the cell size are measured from)
+/* A cell is this many middle-sized faces across. Coarse on purpose: a frame casts a ray or two but a dab moves
+ * thousands of faces, each filed again - in cells a few faces wide a full-strength dab carried most of them into new
+ * cells (the dabs' time on a 500k-face sphere doubled); in wide cells most stay where they were filed and a ray tests a
+ * few hundred triangles, microseconds. */
+constexpr double kRayCellFaces = 16.0;
+
+/* A face's box; false for a tombstone (Dyntopo's: one vertex repeated), a face under three corners or one with a NaN
+ * or infinite corner. */
+bool ray_face_box(const Mesh &m, uint32_t f, Vec3 &lo, Vec3 &hi) {
+  const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+  if (n < 3 || fv[0] == fv[1]) return false;
+  lo = hi = m.positions[fv[0]];
+  for (uint32_t k = 1; k < n; k++) lo = vmin(lo, m.positions[fv[k]]), hi = vmax(hi, m.positions[fv[k]]);
+  return std::isfinite(lo.x + lo.y + lo.z + hi.x + hi.y + hi.z);
+}
+
+/* The nearest of a face's triangles (a fan from its first corner) the ray goes through, if nearer than `best`. With
+ * `cull`, a triangle facing away from the ray's start is let through, as the view leaves it undrawn. One function for
+ * the grid's walk and the every-face test: the same triangles through the same arithmetic, so both agree to the bit. */
+void ray_face(const Mesh &m, uint32_t f, const Ray &r, bool cull, float &best) {
+  const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
+  if (n < 3 || fv[0] == fv[1] || m.face_hidden(f)) return;  // (a hidden face isn't drawn: the brush goes through it)
+  const Vec3 a = m.positions[fv[0]];
+  for (uint32_t k = 1; k + 1 < n; k++) {
+    const Vec3 b = m.positions[fv[k]], c = m.positions[fv[k + 1]];
+    if (cull && !(dot(cross(b - a, c - a), r.dir) < 0.0f)) continue;
+    const float t = ray_triangle_tolerant(r, a, b, c);
+    if (t > 0.0f && t < best) best = t;
+  }
+}
+
+/* The value a hundredth of the way in from each end of `v` (sorted in part), and the middle one. */
+void ray_spread(std::vector<float> &v, float &lo, float &mid, float &hi) {
+  const size_t n = v.size(), cut = n / 100;
+  std::nth_element(v.begin(), v.begin() + (std::ptrdiff_t)cut, v.end());
+  lo = v[cut];
+  std::nth_element(v.begin(), v.begin() + (std::ptrdiff_t)(n - 1 - cut), v.end());
+  hi = v[n - 1 - cut];
+  std::nth_element(v.begin(), v.begin() + (std::ptrdiff_t)(n / 2), v.end());
+  mid = v[n / 2];
+}
+
+}  // namespace
+
+/* One face into the cells its box overlaps now and didn't at its last filing (the cells of filings before stay: a stale
+ * entry costs a test, never a miss). Outside the grid's box, over kRayBigCells cells or past a cell number an int holds,
+ * it goes to the list every ray tests, for good. */
+void Editor::sculpt_ray_file(const Mesh &m, uint32_t f) {
+  SculptRayGrid &g = sculpt_ray_;
+  Vec3 lo, hi;
+  if (g.is_big[f] || !ray_face_box(m, f, lo, hi)) return;
+  const Vec3 pad(g.cell * 1e-2f);  // (a face in a cell's wall is filed on both sides; the triangle test's own slack at an edge is far inside it)
+  lo -= pad, hi += pad;
+  const double c = g.cell;
+  const double at[6] = {std::floor(lo.x / c), std::floor(lo.y / c), std::floor(lo.z / c), std::floor(hi.x / c), std::floor(hi.y / c), std::floor(hi.z / c)};
+  const bool inside = lo.x >= g.lo.x && lo.y >= g.lo.y && lo.z >= g.lo.z && hi.x <= g.hi.x && hi.y <= g.hi.y && hi.z <= g.hi.z;
+  const bool fits = std::fabs(at[0]) < 1e9 && std::fabs(at[1]) < 1e9 && std::fabs(at[2]) < 1e9 && std::fabs(at[3]) < 1e9 && std::fabs(at[4]) < 1e9 && std::fabs(at[5]) < 1e9;
+  if (!inside || !fits || (at[3] - at[0] + 1.0) * (at[4] - at[1] + 1.0) * (at[5] - at[2] + 1.0) > (double)kRayBigCells) {
+    g.is_big[f] = 1, g.big.push_back(f);
+    return;
+  }
+  int32_t *was = &g.range[(size_t)f * 6];
+  const int32_t now[6] = {(int32_t)at[0], (int32_t)at[1], (int32_t)at[2], (int32_t)at[3], (int32_t)at[4], (int32_t)at[5]};
+  if (std::memcmp(was, now, sizeof(now)) == 0) return;
+  for (int32_t z = now[2]; z <= now[5]; z++)
+    for (int32_t y = now[1]; y <= now[4]; y++)
+      for (int32_t x = now[0]; x <= now[3]; x++) {
+        if (x >= was[0] && x <= was[3] && y >= was[1] && y <= was[4] && z >= was[2] && z <= was[5]) continue;  // (filed there last time)
+        g.cells[meshops::grid_key(x, y, z)].push_back(f), g.entries++;
+      }
+  std::memcpy(was, now, sizeof(now));
+}
+
+/* The grid over the mesh as it is. Its box and cell come from a sample of the faces: the box is where all but the
+ * outermost hundredth of them lie, half as wide again on every side - one stray face a thousand sizes away would
+ * otherwise set the box, and with it a cell that holds the whole sculpt; the cell is kRayCellFaces middle faces across,
+ * never under a kRayMaxCells-th of the box. Faces outside the box are few: every ray tests them. */
+void Editor::sculpt_ray_build(const Mesh &m) {
+  SculptRayGrid &g = sculpt_ray_;
+  const size_t builds = g.builds + 1;
+  g = SculptRayGrid{};
+  g.builds = builds;
+  g.uid = m.uid.v, g.version = m.version, g.deform_version = m.deform_version;
+  const uint32_t faces = (uint32_t)m.face_count();
+  g.is_big.assign(faces, 0), g.stamp.assign(faces, 0), g.is_moved.assign(faces, 0);
+  g.range.assign((size_t)faces * 6, 0);
+  for (size_t f = 0; f < faces; f++) g.range[f * 6] = 1;  // (lowest x past highest: in no cell yet)
+  std::vector<float> at[3], size;
+  Vec3 lo, hi;
+  /* (Scattered by a multiplier, not every n-th face: on a terrain stored row by row a stride that divides the row
+   * would sample one column.) */
+  for (size_t i = 0, n = std::min<size_t>(faces, kRaySample); i < n; i++) {
+    const uint32_t f = faces <= kRaySample ? (uint32_t)i : (uint32_t)((i * 2654435761ull) % faces);
+    if (!ray_face_box(m, f, lo, hi)) continue;
+    at[0].push_back(0.5f * (lo.x + hi.x)), at[1].push_back(0.5f * (lo.y + hi.y)), at[2].push_back(0.5f * (lo.z + hi.z));
+    size.push_back(std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z}));
+  }
+  if (size.empty()) return;  // (nothing a ray could hit: no cells, and no face is tested)
+  float unused, mid, last;
+  ray_spread(size, unused, mid, last);
+  const float face = mid > 0.0f ? mid : last;  // (most faces without size: the largest of the inner ones)
+  float from[3], to[3], longest = 0.0f;
+  for (int a = 0; a < 3; a++) ray_spread(at[a], from[a], unused, to[a]), longest = std::max(longest, to[a] - from[a]);
+  for (int a = 0; a < 3; a++) {
+    /* (A flat or thin side gets a quarter of the longest too: a stroke raising a plane stays inside the box.) */
+    const float room = std::max(0.5f * (to[a] - from[a]), 0.25f * longest) + 2.0f * face;
+    (a == 0 ? g.lo.x : a == 1 ? g.lo.y : g.lo.z) = from[a] - room;
+    (a == 0 ? g.hi.x : a == 1 ? g.hi.y : g.hi.z) = to[a] + room;
+  }
+  const double side = std::max({(double)g.hi.x - g.lo.x, (double)g.hi.y - g.lo.y, (double)g.hi.z - g.lo.z});
+  const double cell = std::max({kRayCellFaces * (double)face, side / kRayMaxCells, 1e-9});
+  g.cell = std::isfinite(cell) && std::isfinite(side) ? (float)std::min(cell, 1e30) : 1.0f;
+  g.cells.reserve(faces);
+  for (uint32_t f = 0; f < faces; f++) sculpt_ray_file(m, f);
+  g.built_entries = g.entries, g.built_big = g.big.size();
+}
+
+/* After `m.deform_version++` moved `ids` alone (a dab, Grab's follow, Drag Dot's take-back, an undo of a sculpt step):
+ * their faces are noted, to be filed where they are when the next ray is cast - where Grab dragged them through in
+ * between doesn't matter - and the grid is right for the new version. Any other bump leaves the grid behind: the next
+ * ray builds it. */
+void Editor::sculpt_ray_moved(const Mesh &m, const std::vector<uint32_t> &ids) {
+  SculptRayGrid &g = sculpt_ray_;
+  if (!g.uid || g.uid != m.uid.v || g.version != m.version || g.deform_version + 1 != m.deform_version || g.is_big.size() != m.face_count()) return;
+  const Mesh::VertexFaces &vf = m.vertex_faces();
+  for (uint32_t v : ids) {
+    if ((size_t)v + 1 >= vf.offsets.size()) continue;
+    for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++) {
+      const uint32_t f = vf.faces[k];
+      if (g.is_moved[f]) continue;
+      g.is_moved[f] = 1, g.moved.push_back(f);
+    }
+  }
+  g.deform_version = m.deform_version;
+}
+
+/* One cell's faces against the ray, each once a cast. */
+void Editor::sculpt_ray_cell(const Mesh &m, const Ray &r, bool cull, uint64_t key, float &best) {
+  SculptRayGrid &g = sculpt_ray_;
+  auto it = g.cells.find(key);
+  if (it == g.cells.end()) return;
+  for (uint32_t f : it->second) {
+    if (g.stamp[f] == g.pass) continue;
+    g.stamp[f] = g.pass;
+    ray_face(m, f, r, cull, best);
+  }
+}
+
+/* How far along the ray (object space, a unit direction) the mesh's first shown face is; -1 off the mesh. Under
+ * sculpt_ray_grid_from_ faces, with Dyntopo on (its faces change with every dab) or with `brute`, every face is
+ * tested; else the grid's cells along the ray, nearest first, until the next cell begins past the hit. */
+float Editor::sculpt_ray_cast(const Mesh &m, const Ray &r, bool cull, bool brute) {
+  float best = 1e30f;
+  const uint32_t faces = (uint32_t)m.face_count();
+  if (!std::isfinite(r.origin.x + r.origin.y + r.origin.z + r.dir.x + r.dir.y + r.dir.z)) return -1.0f;
+  if (brute || faces < sculpt_ray_grid_from_ || sculpt_dyn_ || sculpt_dyntopo_) {
+    for (uint32_t f = 0; f < faces; f++) ray_face(m, f, r, cull, best);
+    return best < 1e30f ? best : -1.0f;
+  }
+  SculptRayGrid &g = sculpt_ray_;
+  /* (Built again when it is another mesh's or version's.) */
+  if (g.uid != m.uid.v || g.version != m.version || g.deform_version != m.deform_version || g.is_big.size() != faces) sculpt_ray_build(m);
+  for (uint32_t f : g.moved) g.is_moved[f] = 0, sculpt_ray_file(m, f);
+  g.moved.clear();
+  /* (Built again when the faces filed again have tripled its entries, or a sixteenth of the mesh has left its box.) */
+  if (g.entries > 3 * g.built_entries + 1024 || g.big.size() > g.built_big + faces / 16 + 64) sculpt_ray_build(m);
+  if (++g.pass == 0) std::fill(g.stamp.begin(), g.stamp.end(), 0u), g.pass = 1;
+  for (uint32_t f : g.big) ray_face(m, f, r, cull, best);
+  if (g.cells.empty()) return best < 1e30f ? best : -1.0f;
+  /* The ray's stretch inside the grid's box (slabs, in double), then cell by cell: each wall's distance from the cell's
+   * whole number, not summed step by step, so the thousandth cell of the walk is as exact as the first. */
+  const double c = g.cell, o[3] = {r.origin.x, r.origin.y, r.origin.z}, d[3] = {r.dir.x, r.dir.y, r.dir.z};
+  const double lo[3] = {g.lo.x - c, g.lo.y - c, g.lo.z - c}, hi[3] = {g.hi.x + c, g.hi.y + c, g.hi.z + c};
+  double t0 = 0.0, t1 = 1e30;
+  bool outside = false;
+  for (int a = 0; a < 3; a++) {
+    if (d[a] == 0.0) {
+      outside = outside || o[a] < lo[a] || o[a] > hi[a];
+      continue;
+    }
+    const double ta = (lo[a] - o[a]) / d[a], tb = (hi[a] - o[a]) / d[a];
+    t0 = std::max(t0, std::min(ta, tb)), t1 = std::min(t1, std::max(ta, tb));
+  }
+  if (outside || !(t0 <= t1)) return best < 1e30f ? best : -1.0f;
+  int64_t at[3];
+  for (int a = 0; a < 3; a++) at[a] = meshops::grid_cell((o[a] + d[a] * t0) / c);
+  for (int steps = 0; steps < 4 * ((int)kRayMaxCells + 8); steps++) {  // (three sides of the box at most)
+    sculpt_ray_cell(m, r, cull, meshops::grid_key(at[0], at[1], at[2]), best);
+    /* The wall the ray leaves this cell by: the nearest of the three ahead. */
+    int axis = -1;
+    double leave = 1e300;
+    for (int a = 0; a < 3; a++) {
+      const double wall = d[a] == 0.0 ? 1e300 : ((double)(at[a] + (d[a] > 0.0 ? 1 : 0)) * c - o[a]) / d[a];
+      if (wall < leave) leave = wall, axis = a;
+    }
+    if (axis < 0 || leave > t1 || leave > (double)best) break;  // (out of the box, or the next cell begins past the hit)
+    at[axis] += d[axis] > 0.0 ? 1 : -1;
+  }
+  return best < 1e30f ? best : -1.0f;
+}
+
+/* Whether the sculpted object is drawn as its mesh is, or as a Subdivision Surface of it (the brush works the cage:
+ * task 0239, ADR 0075) - then the ray against the mesh is the brush's point. Another modifier's surface (an array's
+ * copy in front, a posed skin, a mirrored half) or a shape key with a weight is not where the mesh is: the planes' depth places
+ * the brush there, as before round 562. */
+bool Editor::sculpt_ray_fits(const GameObject &g, const Mesh &m) const {
+  const MeshRenderer *mr = m.shape_keys.empty() ? nullptr : g.mesh_renderer();
+  if (mr && std::any_of(mr->shape_weights.begin(), mr->shape_weights.end(), [](const std::pair<std::string, float> &w) { return w.second != 0.0f; })) return false;
+  for (const auto &c : g.components)
+    if (c->enabled && c->is_modifier() && !dynamic_cast<const SubdivisionSurface *>(c.get())) return false;
+  return true;
+}
+
+/* Whether the view leaves the object's faces that look away undrawn (the raster's culling, unless a material is double
+ * sided - with any of its materials double sided the ray takes the nearest face, turned either way) - the ray then goes
+ * through them too. */
+bool Editor::sculpt_ray_culls(const GameObject &g) const {
+  const MeshRenderer *mr = g.mesh_renderer();
+  if (!raster_opt_.backface_culling || !mr) return false;
+  for (const MaterialPtr &mat : mr->materials)
+    if (mat && mat->double_sided) return false;
+  return true;
+}
+
+/* The sculpted mesh's point on the Scene view pixel's ray and its distance along that ray; false, and nothing
+ * changed, off the mesh or - unless `any_stack` - when the object isn't drawn as its mesh is (sculpt_ray_fits). */
+bool Editor::sculpt_ray_hit(float x, float y, Vec3 &world, float &dist, bool any_stack) {
+  GameObject *g = scene_->find(sculpt_obj_);
+  Mesh *m = sculpt_mesh();
+  if (!g || !m || !(any_stack || sculpt_ray_fits(*g, *m))) return false;
+  const Mat4 &W = g->world_matrix();
+  const Mat4 inv = W.inverse();
+  const Ray ray = scene_r3d_.screen_ray(x, y);
+  const Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
+  const float t = sculpt_ray_cast(*m, lr, !any_stack && sculpt_ray_culls(*g));  // (another stack's faces may be turned: the nearest, as before)
+  if (!(t > 0.0f)) return false;
+  const Vec3 p = W.point(lr.origin + lr.dir * t);
+  const float d = length(p - ray.origin);
+  if (!(d > 1e-4f) || !std::isfinite(d)) return false;
+  world = p, dist = d;
+  return true;
+}
+
+float Editor::sculpt_ray_for_test(float x, float y, bool brute) {
+  GameObject *g = scene_->find(sculpt_obj_);
+  Mesh *m = sculpt_mesh();
+  if (!g || !m) return -1.0f;
+  const Mat4 inv = g->world_matrix().inverse();
+  const Ray ray = scene_r3d_.screen_ray(x, y);
+  return sculpt_ray_cast(*m, Ray{inv.point(ray.origin), normalize(inv.dir(ray.dir))}, sculpt_ray_culls(*g), brute);
+}
+
+/* A test's stand-in for a rasterizer's rounding: every depth of the Scene view's plane scaled by up to `rel` either way. */
+void Editor::noise_scene_depth_for_test(float rel, uint32_t seed) {
+  ensure_scene_planes();
+  uint64_t s = seed * 0x9E3779B97F4A7C15ull + 1u;
+  for (float &z : scene_rt_.depth) {
+    s = s * 6364136223846793005ull + 1442695040888963407ull;
+    if (z < 1.0f) z = std::min(0.9999999f, z * (1.0f + rel * ((float)(s >> 40) / 8388608.0f - 1.0f)));
+  }
 }
 
 /* The brush's radius in world units at a distance: the circle on screen is what the user set. */
@@ -269,8 +556,6 @@ bool Editor::sculpt_begin_stroke(const Recti &view, float x, float y) {
   Vec3 hit;
   float dist;
   if (!sculpt_hit(view, x, y, hit, dist)) return false;
-  sculpt_cage_ = sculpt_subdiv_levels() > 0;  // (decided once a stroke: no evaluation per dab)
-  if (sculpt_cage_) sculpt_cage_hit(x, y, hit, dist);
   commit_undo();  // (a pending change is a step before the stroke's)
   if (!sculpt_own_mesh(g, mf_of(g))) return false;  // (a duplicate made since shares the mesh: the object gets its own)
   m = sculpt_mesh();
@@ -516,7 +801,7 @@ void Editor::sculpt_restore_delta() {
   }
   for (size_t i = 0; i < d.ids.size(); i++)
     if (d.ids[i] < m->vert_count()) m->positions[d.ids[i]] = d.before[i];
-  if (!d.ids.empty()) m->deform_version++, m->note_moved(d.ids), edit_epoch::bump();
+  if (!d.ids.empty()) m->deform_version++, m->note_moved(d.ids), sculpt_ray_moved(*m, d.ids), edit_epoch::bump();
 }
 
 /* One dab at (x, y) in the Scene view's pixels with the pen's pressure: the instances symmetry asks for are gathered
@@ -566,7 +851,6 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   else {
     Vec3 hit;
     if (!sculpt_hit(view, x, y, hit, dist)) return;  // (over nothing, or another object)
-    if (sculpt_cage_) sculpt_cage_hit(x, y, hit, dist);  // (a Subdivision Surface drawn over the mesh: the point moved onto the cage - task 0239)
     hit_local = inv.point(hit);
     if (kind == kSnake) sculpt_snake_pos_ = hit_local, sculpt_snake_set_ = true, sculpt_grab_.dist = dist;
   }
@@ -625,6 +909,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
       ids.reserve(moves.size());
       for (const auto &mv : moves) ids.push_back(mv.first);
       m.note_moved(ids);
+      sculpt_ray_moved(m, ids);  // (round 562: the next dab's ray finds these faces where they are now)
     }
   }
   sculpt_dabbed_ = true;
@@ -695,6 +980,7 @@ void Editor::sculpt_grab_follow(Mesh &m, const Mat4 &inv, Vec2 px) {
   noted.reserve(at.size());
   for (const auto &kv : at) noted.push_back(kv.first);
   m.note_moved(noted);
+  sculpt_ray_moved(m, noted);
   edit_epoch::bump();
   sculpt_dabbed_ = true;
   ui_.redraw = true;
@@ -1331,32 +1617,6 @@ void Editor::sculpt_set_subdiv(int levels) {
   Log::info("Dynamic Subdivision: level %d (the brush works the cage)", levels);
 }
 
-/* With a Subdivision Surface drawn over the mesh, the planes' point lies on the subdivided surface - inside the cage for
- * Catmull-Clark - and a small brush around it would reach no cage vertex. The brush works the cage, so the point is
- * moved onto it: the pixel's ray's first hit on the base mesh's triangles (Blender sculpts against the base mesh's
- * PBVH the same way). Only for a subdivision (another modifier's surface - a posed armature's, a displacement's - is
- * not a cage around the base), decided once a stroke (`sculpt_cage_`): nothing is evaluated per dab. False, and
- * nothing changed, when the ray misses the cage. */
-bool Editor::sculpt_cage_hit(float x, float y, Vec3 &world, float &dist) {
-  GameObject *g = scene_->find(sculpt_obj_);
-  Mesh *m = sculpt_mesh();
-  if (!g || !m) return false;
-  const Mat4 &W = g->world_matrix();
-  const Mat4 inv = W.inverse();
-  const Ray ray = scene_r3d_.screen_ray(x, y);
-  const Ray lr{inv.point(ray.origin), normalize(inv.dir(ray.dir))};
-  const RenderMesh &rm = m->render_mesh();
-  float best = 1e30f;
-  for (size_t t = 0; t < rm.tri_count(); t++) {
-    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
-    if (d > 0.0f && d < best) best = d;
-  }
-  if (best >= 1e30f) return false;
-  world = W.point(lr.origin + lr.dir * best);
-  dist = length(world - ray.origin);
-  return true;
-}
-
 /* ---- DynaMesh (task 0240, ADR 0076) ---- */
 
 /* The sculpted (or active) object's mesh retopologized evenly at `resolution` cells along its longest side, as one
@@ -1604,6 +1864,7 @@ void Editor::apply_sculpt_delta(UndoState s, std::vector<UndoState> &into, const
     for (size_t i = 0; i < s.delta->ids.size(); i++) m.positions[s.delta->ids[i]] = src[i];
     m.deform_version++;
     m.note_moved(s.delta->ids);
+    sculpt_ray_moved(m, s.delta->ids);  // (round 562: the ray's grid follows the step, when it is this mesh's)
     edit_epoch::bump();
     sculpt_cache_mesh_ = nullptr;  // (the grid is stale)
     settle_meshes();

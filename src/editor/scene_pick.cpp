@@ -81,10 +81,12 @@ bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
     Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};  // unnormalised: t stays a world parameter
-    const RenderMesh &rm = m->render_mesh();
-    if (ray_aabb({lr.origin, normalize(lr.dir)}, rm.bounds) < 0) return;
-    for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    const MeshTris mt = mesh_tris(*m);  // (round 520: a posed skin by its own positions - no CPU skin kernel for a click)
+    if (ray_aabb({lr.origin, normalize(lr.dir)}, mt.bounds) < 0) return;
+    for (size_t t = 0; t < mt.count(); t++) {
+      Vec3 a, b, c;
+      mt.tri(t, a, b, c);
+      const float d = ray_triangle(lr, a, b, c);
       if (d > 0 && d < best) best = d;
     }
   });
@@ -214,14 +216,16 @@ bool Editor::origin_snap_target(const Recti &view, int mx, int my, Vec3 &world, 
   const Ray ray = scene_r3d_.screen_ray(mouse.x, mouse.y);
   const Mat4 inv = w.inverse();
   const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
-  const RenderMesh &rm = m->render_mesh();
+  const MeshTris mt = mesh_tris(*m);  // (round 520: a posed skin by its own positions)
   float t_best = 1e30f;
   uint32_t face = UINT32_MAX;
-  for (size_t t = 0; t < rm.tri_count(); t++) {
-    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+  for (size_t t = 0; t < mt.count(); t++) {
+    Vec3 a, b, c;
+    mt.tri(t, a, b, c);
+    const float d = ray_triangle(lr, a, b, c);
     if (d > 0 && d < t_best) {
       t_best = d;
-      face = t < rm.tri_face.size() ? rm.tri_face[t] : UINT32_MAX;
+      face = mt.face(t);
     }
   }
   if (face == UINT32_MAX || face >= m->face_count()) return false;
@@ -293,11 +297,24 @@ uint64_t Editor::pick_part_target(uint64_t hit, int mx, int my) {
   if (is_selected(hit)) return hit;  // (the part is the selection: a click on it keeps it)
   const int slop = ui_.px(6);
   const std::vector<GameObject *> now = selected_objects(false);
-  const bool only_opening = now.size() == 1 && now[0] == opening;  // (another way of changing the selection - the Hierarchy, a box - ends the pair of clicks)
+  const bool only_opening = now.size() == 1 && now[0] == opening;  // (another way of changing the selection - the Hierarchy, a box - ends the pair of clicks: pick_part_spot_watch)
   const bool again = only_opening && pick_part_spot_.part == hit && std::abs(mx - pick_part_spot_.x) <= slop && std::abs(my - pick_part_spot_.y) <= slop;
-  if (again) return hit;
+  if (again) {
+    pick_part_spot_ = {};  // (round 571: the pair is used - the next click on this spot is a first click again)
+    return hit;
+  }
   pick_part_spot_ = {hit, mx, my};
   return opening->id;
+}
+
+/* Round 571 (task 0553): the first click's spot is kept only while its opening alone stays selected. Looked at once a frame (Editor::frame_body), because some thirty places write the selection
+ * (the Hierarchy, a box, the console, Undo): whichever did, the next click on the spot selects the opening again, not the part at once. */
+void Editor::pick_part_spot_watch() {
+  if (!pick_part_spot_.part) return;
+  const GameObject *part = scene_->find(pick_part_spot_.part);
+  const GameObject *opening = part ? part->parent : nullptr;
+  if (opening && selection_.size() == 1 && selection_[0] == opening->id) return;  // (the ids as stored, stricter than pick_part_target's selected_objects: a stale id beside the opening ends the pair too)
+  pick_part_spot_ = {};
 }
 
 /* Wire and Bounds objects have no pixels in the id buffer: pick them by
@@ -384,7 +401,7 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
       }
     };
     if (mr->display_as == 2) {
-      const AABB b = m->render_mesh().bounds;
+      const AABB b = render_bounds(*m);
       Vec3 c[8];
       for (int k = 0; k < 8; k++) c[k] = {k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z};
       static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};

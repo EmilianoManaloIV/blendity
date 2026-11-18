@@ -458,6 +458,10 @@ class Context {
   void focus_walk(bool back);
   void focus_resolve_walk();
   void focus_reveal(const Recti &r);
+  void focus_watch(Id i, const Recti &r);  // (round 573: the focused control pushed out of its scroll area with no scroll is revealed again)
+  Id watch_id_ = 0;  // (the focused control as focus_watch last saw it: whole in its clip, and its area's scroll offset then)
+  bool watch_seen_ = false;
+  int watch_offset_ = 0;
   void focus_ring(const Recti &r);
   Recti popup_scrollbar_thumb(const Recti &r, int content_h, int scroll_max, int scroll) const;  // (round 560)
   void popup_scrollbar_drag(size_t k, const Recti &r, int content_h, int scroll_max);

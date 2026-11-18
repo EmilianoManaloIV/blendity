@@ -3377,8 +3377,9 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
       }
       {
         Recti nr = lay.row();
-        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper (" + key("edit.adjust_last") + ") when you use it.", u.theme.text_dim);
-        u.tooltip(std::string("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (") + key("edit.adjust_last") + ", bottom left\n"
+        const std::string adjust = key("edit.adjust_last");  // (round 571: with no key bound, no key and no empty bracket)
+        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper" + (adjust.empty() ? std::string() : " (" + adjust + ")") + " when you use it.", u.theme.text_dim);
+        u.tooltip(std::string("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (") + (adjust.empty() ? std::string() : adjust + ", ") + "bottom left\n"
                   "of the Scene view) after a tool runs, and in the drag helper while Bevel, Inset, Array, Grid, Pipe, Taper\n"
                   "or Recess is dragged. Changing them re-runs the tool, and they are kept for its next use.");
       }
@@ -3695,16 +3696,36 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
     Recti r = u.popup_row(h);
     return Recti{r.x + u.px(12), r.y, r.w - u.px(24), r.h};
   };
-  auto text = [&](const std::string &t, uint32_t c) {
+  /* How many rows a sentence takes word-wrapped to `w` (the same rule as `text` below, nothing drawn; not for a "- " bullet, whose later lines are indented). */
+  auto wrapped_rows = [&](const std::string &t, int w) {
+    int rows = 0;
+    std::string line, word;
+    for (size_t i = 0; i <= t.size(); i++) {
+      if (i < t.size() && t[i] != ' ') {
+        word += t[i];
+        continue;
+      }
+      const std::string next = line.empty() ? word : line + " " + word;
+      if (!line.empty() && u.font.text_width(next) > w) rows++, line = word;
+      else line = next;
+      word.clear();
+    }
+    return rows + (line.empty() ? 0 : 1);
+  };
+  /* `widest` (round 573): a measured sentence's longest form. The sentence takes that form's rows whatever its numbers are now, so the rows below it do not jump as the numbers change. */
+  auto text = [&](const std::string &t, uint32_t c, const std::string &widest = std::string()) {
     /* Word-wrapped to the row's width (continuation lines indented under a "- " bullet). */
     Recti r = row();
     const bool bullet = t.size() > 2 && t[0] == '-' && t[1] == ' ';
     const int indent = bullet ? u.font.text_width("- ") : 0;
+    const int keep = widest.empty() ? 0 : wrapped_rows(widest, r.w);
+    int drawn = 0;
     std::string line, word;
     bool first = true;
     auto flush = [&] {
       u.label({r.x + (first ? 0 : indent), r.y, r.w - (first ? 0 : indent), r.h}, line, c);
       first = false;
+      drawn++;
       line.clear();
     };
     for (size_t i = 0; i <= t.size(); i++) {
@@ -3722,6 +3743,7 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
       word.clear();
     }
     if (!line.empty()) flush();
+    for (int k = std::max(1, drawn); k < keep; k++) row();  // (the rows the widest form would take, left empty)
   };
   /* Pen and touch (tasks 0216-0218): what a 2-in-1 needs. */
   {
@@ -3854,16 +3876,18 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
   }
   avg = n ? avg / (float)n : 0.0f;
   const float reachable = avg > 0.01f ? 1000.0f / avg : 0.0f;
-  text(strprintf("Now: %.0f fps; a frame costs %.1f ms on average (worst %.1f ms) at %d x %d", measured_fps_, avg, worst, fb_.width, fb_.height),
-       u.theme.text);
+  /* Round 573 (task 0555): these two sentences are measured each frame. Each keeps the rows of its longest form (four digits everywhere), and the budget sentence is there whenever a cap
+   * is set: when a frame's cost hovered at the budget, "Over budget" and "Within budget" wrapped to different numbers of rows and every row below jumped up and down with no input. */
+  static const char *kNow = "Now: %.0f fps; a frame costs %.1f ms on average (worst %.1f ms) at %d x %d";
+  static const char *kOver = "Over budget: %d fps leaves %.1f ms a frame, this machine needs ~%.1f ms here, so it tops out near %.0f fps.";
+  static const char *kWithin = "Within budget: %d fps leaves %.1f ms a frame; this machine could draw about %.0f fps here.";
+  const auto shown = [](float v) { return std::min(v, 9999.0f); };  // (no number printed longer than the widest form's: a ten-second stall among the 60 frames reads 9999.0 ms)
+  text(strprintf(kNow, shown(measured_fps_), shown(avg), shown(worst), fb_.width, fb_.height), u.theme.text, strprintf(kNow, 8888.0f, 8888.8f, 8888.8f, 88888, 88888));
   const float budget = max_fps_ > 0 ? 1000.0f / (float)max_fps_ : 0.0f;
-  if (max_fps_ > 0 && avg > budget)
-    text(strprintf("Over budget: %d fps leaves %.1f ms a frame, this machine needs ~%.1f ms here, so it tops out near %.0f fps.", max_fps_, budget, avg,
-                   reachable),
-         u.theme.warning);
-  else if (max_fps_ > 0 && avg > 0.01f)
-    text(strprintf("Within budget: %d fps leaves %.1f ms a frame; this machine could draw about %.0f fps here.", max_fps_, budget, reachable),
-         u.theme.text_dim);
+  const std::string widest_budget = strprintf(kOver, 8888, 8888.8f, 8888.8f, 8888.0f);  // (the longer of the two forms)
+  if (max_fps_ > 0 && avg > budget) text(strprintf(kOver, max_fps_, budget, shown(avg), reachable), u.theme.warning, widest_budget);
+  else if (max_fps_ > 0 && avg > 0.01f) text(strprintf(kWithin, max_fps_, budget, shown(reachable)), u.theme.text_dim, widest_budget);
+  else if (max_fps_ > 0) text(strprintf("Within budget: %d fps leaves %.1f ms a frame; no frame measured yet.", max_fps_, budget), u.theme.text_dim, widest_budget);
   const uint32_t dim = u.theme.text_dim;
   text("What it costs:", u.theme.text);
   text(gpu_view_wanted() && gpu_view_ ? "- The views' 3D and overlays are drawn on the GPU, which shows the window; the UI and picking on the CPU."

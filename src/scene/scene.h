@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -688,7 +689,16 @@ struct Outline : ComponentBase<Outline> {
     uint64_t serial = 0;
     float offset = -1.0f;
     std::string group;  // the thickness group it was built with (task 0149)
+    /* A posed skin's source (round 521): the shell of its rest (rest_shell, built for this rest at these versions, offset and
+     * group) and the copy of it posed by this pose, which `mesh` is - keyed by the pose and the versions it was stamped for. */
+    std::weak_ptr<const SkinPose> pose;
+    uint64_t pose_version = 0, pose_deform = 0;
+    MeshPtr rest_shell;
+    std::shared_ptr<std::mutex> rest_lock;  // (SkinPose::rest_lock of the poses made from rest_shell)
+    std::weak_ptr<const Mesh> rest_owner;
+    uint64_t rest_version = 0, rest_deform = 0, rest_topo = 0;
   };
+  const Mesh *posed_shell(const Mesh &src, ShellCache &c, float offset) const;
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;
   mutable Vec3 mats_color_{-1.0f, -1.0f, -1.0f};
@@ -1838,6 +1848,9 @@ class GameObject {
   /* Round 469 (ADR 0124): bumped when this object's local transform or one anywhere below it is written
    * (mark_dirty walks up): "did anything under this character move?" is one comparison. */
   uint64_t below_version = 1;
+  /* Round 520 (ADR 0146 1(c)): set by the editor on the object Sculpt or Weight Paint works on: its evaluated mesh gets no skin_pose
+   * (built whole, as before round 518), for those modes read and write the posed vertices on the CPU. */
+  bool skin_pose_off = false;
   /* The render hash this object last produced and the inputs it came from (ADR 0015): when they all
    * compare equal the hash is reused instead of re-hashing the world matrix and the materials. */
   struct RenderHashMemo {

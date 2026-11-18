@@ -597,7 +597,9 @@ void Editor::frame_body(std::vector<Event> &events) {
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
+  pick_part_spot_watch();  // (round 571: a selection changed some other way ends a pair of clicks on a window's frame - here, not in the Scene view, so a hidden Scene tab does not keep the pair)
   process_events(events);
+  sync_skin_pose_off();  // (round 520: before anything evaluates this frame)
   upload_bytes_frame_ = 0;
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
   texture_stream_poll();  // (round 447: what the views found missing, loading on a worker)
@@ -875,6 +877,12 @@ std::string Editor::perf_status_text() const {
   for (const JobView &j : const_cast<Editor *>(this)->jobs_running()) jobs += (jobs.empty() ? "" : ", ") + j.label;
   s += "; jobs: " + (jobs.empty() ? std::string("none") : jobs);
   s += "; views: " + gpu_view_status();
+  /* Round 519 (ADR 0146): the card's skins this frame, and why a skinned mesh was left to the CPU. */
+  s += strprintf("; skins on the card: %llu (palettes sent %llu, sent to the card %llu), posed on the CPU %llu", (unsigned long long)p.skin_items,
+                 (unsigned long long)p.skin_palettes, (unsigned long long)p.skin_uploads, (unsigned long long)p.skin_cpu);
+  if (p.skin_rest_updates)
+    s += strprintf(" (rest updates %llu: %llu ranges, %llu vertices)", (unsigned long long)p.skin_rest_updates, (unsigned long long)p.skin_rest_ranges, (unsigned long long)p.skin_rest_vertices);
+  if (!skin_reason_.empty()) s += " (last: " + skin_reason_ + ")";
   return s;
 }
 
@@ -887,6 +895,7 @@ Editor::PosingList Editor::posing_parts(const FrameProfile &p, const PoseCounts 
       {"skin keys", pc.ms_skin_keys}, {"shape key hashes", pc.ms_shape_hashes}, {"skin setup", pc.ms_skin_setup},
       {"skinning", pc.ms_skin_deforms}, {"shape keys", pc.ms_shape_applies}, {"evaluations", pc.ms_evaluations},
       {"in place", mc.ms_in_place}, {"normals", mc.ms_in_place_normals}, {"tangents", mc.ms_in_place_tangents},
+      {"render meshes posed by the skin", mc.ms_skinned},  // (round 518, ADR 0146)
       {"outlines", pc.ms_outline_shells}, {"mesh uploads", p.ms_mesh_uploads}, {"scene hashes", p.ms_hash},
       {"draw items", p.ms_collect}, {"instances", p.ms_gpu_instances}, {"overlays", p.ms_overlays}, {"rig overlay", p.ms_rig_overlay},
       {"puppet controls", p.ms_puppet}, {"lighting key", p.ms_lighting_key}, {"record", p.ms_record}, {"clip", pc.ms_clip_applies},
@@ -930,7 +939,11 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
       {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
       {"corners split in place", (double)mc.in_place_split}, {"meshes settled", (double)mc.settled}, {"render meshes built whole", (double)mc.full_builds},
-      {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies}};
+      {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies},
+      {"render meshes skinned", (double)mc.skinned},
+      {"skins on the card", (double)p.skin_items}, {"palettes sent", (double)p.skin_palettes},  // (round 519, ADR 0146)
+      {"skins sent to the card", (double)p.skin_uploads}, {"skins posed on the CPU", (double)p.skin_cpu},
+      {"skin rest updates", (double)p.skin_rest_updates}, {"skin rest ranges sent", (double)p.skin_rest_ranges}, {"skin rest vertices sent", (double)p.skin_rest_vertices}, {"skin triangle ranges sent", (double)p.skin_rest_tris}};
 }
 
 std::string Editor::posing_counts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames) {
@@ -2880,6 +2893,7 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
   job->mesh_uid = mf->mesh->uid.v;
   job->version = mf->mesh->version, job->deform_version = mf->mesh->deform_version;
   job->input = mesh_copy_bare(source);
+  if (source.skin_pose_holds()) job->input->skin_pose = source.skin_pose;  // (round 520: a posed skin's bake keeps the pose - the views' rest triangulation and turned tangents; the worker poses it from the shared rest, under its lock)
   job->model = g->world_matrix();
   if (mr)
     for (const MaterialPtr &mp : mr->materials) job->materials.push_back(snapshot_material(mp));
@@ -3060,6 +3074,7 @@ bool Editor::eval_job_request(const GameObject &g, int kind, uint64_t key) {
   job->copy = std::make_unique<GameObject>();
   job->copy->id = g.id;
   job->copy->name = g.name;
+  job->copy->skin_pose_off = g.skin_pose_off;  // (round 520: the worker's result is the same mesh the main thread's would be)
   for (const auto &c : g.components) {
     if (dynamic_cast<const Blockout *>(c.get())) continue;  // (round 502: the stack reads the mesh, not the pieces' build state - its face origins are not copied at every landing)
     job->copy->add_component(c->clone());
@@ -3642,6 +3657,7 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
     for (ExportItem &it : job->items) {
       if (it.mesh) {
         std::shared_ptr<Mesh> bare = mesh_copy_bare(*it.mesh);
+        if (it.mesh->skin_pose_holds()) bare->skin_pose = it.mesh->skin_pose;  // (round 520: a posed skin keeps its pose for the texture bake)
         it.mesh = bare.get();
         job->keep.push_back(std::move(bare));
       }
@@ -4414,7 +4430,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     GameObject *g = scene_->create(name, parent);
     g->add<Lattice>();
     if (tm && !parent) {
-      const AABB b = tm->render_mesh().bounds;  // in the mesh's own space, so the box turns with it
+      const AABB b = render_bounds(*tm);  // in the mesh's own space, so the box turns with it
       const Vec3 size = b.max - b.min;
       g->set_world_matrix(target->world_matrix() *
                           Mat4::trs(b.center(), Quat(), Vec3(std::max(size.x, 0.01f), std::max(size.y, 0.01f), std::max(size.z, 0.01f)) * 1.05f));

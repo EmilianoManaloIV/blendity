@@ -99,7 +99,7 @@ def jobs_seen(log_path):
     seen = set()
     with open(log_path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            m = re.search(r"(Mesh Maps|Quad Remesh|Baking lighting|Unpacking [^:]+|Writing [^:]+|Render|Skin|Surface|Rendering animation) (done|took|finished|cancelled)", line)
+            m = re.search(r"(Mesh Maps|Quad Remesh|Baking lighting|Generate Lighting|Unpacking [^:]+|Writing [^:]+|Render|Skin|Surface|Rendering animation) (done|took|finished|cancelled)", line)
             if m:
                 seen.add(m.group(1))
     return sorted(seen)

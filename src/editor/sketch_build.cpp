@@ -195,7 +195,8 @@ bool Editor::sketch_build_box() {
           MeshPtr &mp = *edit_mesh_ptr();
           last_op_size_ = {l[which[0]], l[which[1]], dot(d[which[2]], z) * l[which[2]]};
           begin_redoable_op("sketch_box", *g, mp);
-          Log::info("Box from the construction: %.3g x %.3g x %.3g (F9 for the numbers)", last_op_size_.x, last_op_size_.y, std::fabs(last_op_size_.z));
+          Log::info("Box from the construction: %.3g x %.3g x %.3g (%s for the numbers)", last_op_size_.x, last_op_size_.y, std::fabs(last_op_size_.z),
+                    hint_key("edit.adjust_last", "Adjust Last Operation").c_str());  // (round 570: the keymap's key; the panel's name with none bound)
           return true;
         }
       }
@@ -255,7 +256,8 @@ void Editor::sketch_build_frustum(Vec3 base, Vec3 n, float r0, float r1, float h
   MeshPtr &mp = *edit_mesh_ptr();
   last_op_size_ = {r0, height, r1};
   begin_redoable_op("sketch_cylinder", *g, mp);
-  Log::info("%s from the construction: radius %.3g%s, height %.3g (F9 for the numbers)", r1 < 1e-5f ? "Cone" : "Cylinder", r0, r1 < 1e-5f ? "" : strprintf(" to %.3g", r1).c_str(), height);
+  Log::info("%s from the construction: radius %.3g%s, height %.3g (%s for the numbers)", r1 < 1e-5f ? "Cone" : "Cylinder", r0, r1 < 1e-5f ? "" : strprintf(" to %.3g", r1).c_str(), height,
+            hint_key("edit.adjust_last", "Adjust Last Operation").c_str());  // (round 570: the keymap's key; the panel's name with none bound)
 }
 
 /* The box and cylinder operators' meshes, from their numbers (run_last_op). */
@@ -486,7 +488,7 @@ bool Editor::sketch_build_pull() {
     const float distance = dot(to - from, n) / per_unit;
     pp_last_distance_ = distance;
     begin_redoable_op("push_pull", *g, *mp);
-    Log::info("Push/Pull from the construction: %.3g (F9 for the distance)", distance);
+    Log::info("Push/Pull from the construction: %.3g (%s for the distance)", distance, hint_key("edit.adjust_last", "Adjust Last Operation").c_str());  // (round 570)
     return true;
   }
   Log::warn("sketchbuild pull: draw a line along the face's normal (on a wall canvas through it) for the distance");

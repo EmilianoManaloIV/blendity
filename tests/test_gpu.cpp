@@ -1634,7 +1634,7 @@ static void tests_round181() {
     gpu::drop_ready_renderers_for_test();  // (a spare opened under the hook would sleep for the next test)
   });
 
-  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames short while the render goes on - under 10 ms but for the ones that merge and resolve the picture - and finishes (skipped without a GPU)", [] {
+  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames coming while the render goes on - Stop lands what it had, and a short render finishes (skipped without a GPU)", [] {
     if (!gpu::available()) {
       std::printf("    (no GPU here: skipped)\n");
       return;
@@ -1647,11 +1647,19 @@ static void tests_round181() {
       r34_open(ed);
       ed.command("engine path");
       ed.command("device gpu");
-      ed.command("samples 400");
+      /* Round 568: this counted the frames that fit before a 400-sample render ended and asked for twenty. How many fit
+       * is the machine's load, not the editor: at below-normal priority beside other sessions' builds the frames are
+       * slow, the card's worker is not, and the render was over after fewer (round 555 saw it fail so). Now the render
+       * cannot end by itself (100,000 samples, as round 412's Stop check renders), exactly twenty frames are stepped
+       * and each must come back with the render still going on the card - a render that held the main thread would
+       * not return from the first - then Stop lands what it had and a short render shows one finishes. What the check
+       * was written for is kept; only the race against the card's speed is gone. The frames' times are a stress row
+       * (round 411). */
+      ed.command("samples 100000");
       ed.command("render");
       ScopedTimer total;
       bool on_card = false;
-      while (!on_card && total.ms() < 20000.0) {  // (the device opens on a worker; the CPU traces meanwhile)
+      while (!on_card && total.ms() < 120000.0) {  // (the device opens on a worker; the CPU traces meanwhile. Round 568: 20 s was a budget a starved or cold card missed; the cap only ends a hang)
         ed.step_frame_headless();
         on_card = ed.render_status_for_test().find("GPU") != std::string::npos && ed.render_status_for_test().find("starting") == std::string::npos;
         if (!ed.rendering_for_test()) ed.command("render");
@@ -1659,28 +1667,39 @@ static void tests_round181() {
       CHECK(on_card);
       for (int i = 0; i < 5 && ed.rendering_for_test(); i++) ed.step_frame_headless();  // (the card settles: its upload and the first merge)
       double worst = 0.0;
-      int frames = 0;
+      int frames = 0, quick = 0;
       std::string times;
-      while (ed.rendering_for_test() && frames < 20 && total.ms() < 30000.0) {
+      for (int i = 0; i < 20; i++) {  // (a fixed count of frames, each with the render still going: no clock decides how many)
         ScopedTimer f;
         ed.step_frame_headless();
-        if (!ed.rendering_for_test()) break;  // (the finishing frame denoises and resolves: not a poll)
+        if (!ed.rendering_for_test()) break;
         worst = std::max(worst, f.ms());
+        quick += f.ms() < 10.0 ? 1 : 0;
         times += strprintf("%.1f ", f.ms());
         frames++;
       }
-      int quick = 0;
-      for (size_t at = 0; at < times.size();) {  // (the frames under 10 ms)
-        const size_t sp = times.find(' ', at);
-        quick += std::atof(times.substr(at, sp - at).c_str()) < 10.0 ? 1 : 0;
-        at = sp == std::string::npos ? times.size() : sp + 1;
-      }
       std::printf("    frames: %s(%d of them under 10 ms; a frame that merges new samples resolves the 1280x720 picture, about 12 ms more)\n", times.c_str(), quick);
-      while (ed.rendering_for_test() && total.ms() < 40000.0) ed.step_frame_headless();
-      std::printf("    %d frames measured, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
+      std::printf("    %d frames stepped with the render going, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
       CHECK(frames == 20);
+      CHECK(ed.rendering_for_test() && ed.render_status_for_test().find("GPU") != std::string::npos);  // (still the card's, twenty frames on)
       std::printf("    quick frames %d of 20, the worst %.1f ms (a stress row since round 411, not a check)\n", quick, worst);
+      /* Stop lands what the card had; then a render short enough to end is waited for, however long the machine takes
+       * (the cap is against a hang, not a budget). */
+      ed.stop_render_for_test();
       CHECK(!ed.rendering_for_test());
+      ScopedTimer stopping;  // (its own timer: the card's opening above may have taken a minute of `total`)
+      while (ed.render_job_running_for_test() && stopping.ms() < 120000.0) ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::printf("    stopped: %s\n", ed.render_status_for_test().c_str());
+      CHECK(!ed.render_job_running_for_test() && ed.render_status_for_test().find("(stopped)") != std::string::npos);
+      ed.command("samples 8");
+      ed.command("render");
+      CHECK(ed.rendering_for_test());
+      ScopedTimer last;
+      int last_frames = 0;
+      for (; ed.rendering_for_test() && last.ms() < 120000.0; last_frames++) ed.step_frame_headless();
+      std::printf("    8 samples: finished in %d frame(s); %s\n", last_frames, ed.render_status_for_test().c_str());
+      CHECK(!ed.rendering_for_test() && last_frames >= 1);
     }
     set_env("BLENDITY_GPU_FAKE_SLOW", "");
     for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -6249,55 +6268,127 @@ static void tests_round506_engineer_gpu() {
   });
 }
 
+/* Round 564 (task 0546): a picture of the Scene view with where its toasts were drawn. The job tray says "Baking lighting done in
+ * 1.3 s" in a toast over the view when a bake's worker took a second or more - which it does on a busy machine and not on an idle
+ * one - so a test that compares whole pictures while a bake's pages go up failed there by the toast's box alone (4,586 pixels,
+ * x 166..318, y 10..39: read as "mixed frames"). The lighting is what ADR 0140 is about: the pictures are compared outside the
+ * toasts of either. */
+namespace r564 {
+
+struct Pic {
+  std::vector<uint32_t> px;
+  std::vector<Recti> toasts;  // (in the view's pixels, two pixels wider each way)
+  int w = 0;
+};
+
+static Pic view(Editor &ed) {
+  Pic p;
+  const Recti r = ed.scene_view_rect();
+  p.px = r34_crop(ed, r), p.w = r.w;
+  for (const Recti &t : ed.toast_frames_for_test()) p.toasts.push_back({t.x - r.x - 2, t.y - r.y - 2, t.w + 4, t.h + 4});
+  return p;
+}
+
+static bool under_toast(const Pic &p, int x, int y) {
+  for (const Recti &t : p.toasts)
+    if (x >= t.x && x < t.right() && y >= t.y && y < t.bottom()) return true;
+  return false;
+}
+
+/* The pixels that differ outside both pictures' toasts; `all` counts those under a toast too. */
+static size_t differ(const Pic &a, const Pic &b, size_t *all = nullptr) {
+  size_t n = 0, every = a.px.size() != b.px.size() ? 1 : 0;
+  for (size_t i = 0; i < a.px.size() && i < b.px.size() && a.w > 0; i++) {
+    if ((a.px[i] & 0xFFFFFF) == (b.px[i] & 0xFFFFFF)) continue;
+    every++;
+    const int x = (int)(i % (size_t)a.w), y = (int)(i / (size_t)a.w);
+    n += !under_toast(a, x, y) && !under_toast(b, x, y);
+  }
+  if (all) *all = every;
+  return n + (a.px.size() != b.px.size() ? 1 : 0);
+}
+
+/* Whether a toast of the bake's job (by its name or a phase's) says `end` (" done in ", " cancelled in "). */
+static bool bake_toast(const Editor &ed, const char *end) {
+  for (const auto &t : ed.toasts_for_test()) {
+    const bool bake = t.text.rfind("Generate Lighting ", 0) == 0 || t.text.rfind("Baking ", 0) == 0 || t.text.rfind("Sending ", 0) == 0;
+    if (bake && t.text.find(end) != std::string::npos) return true;
+  }
+  return false;
+}
+
+/* Until the card has caught up - no mesh waiting for it, no texture streaming, no bake running - and the Scene view is the same
+ * picture (outside toasts) two frames running. It waits on that state, not on a count of frames or seconds: under a load that
+ * starves the editor the 121 meshes of the scene below were still going up after r555_card_settle's 20 s (58 waiting), and
+ * every frame after was read as "not still" or "mixed". The ten minutes are only there so a broken editor ends the test; false
+ * then. */
+static bool settle(Editor &ed) {
+  Pic last;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(600);
+  for (int f = 1; std::chrono::steady_clock::now() < deadline; f++) {
+    ed.step_frame_headless();
+    Pic now = view(ed);
+    const bool same = !last.px.empty() && differ(last, now) == 0;
+    last = std::move(now);
+    if (f >= 2 && same && ed.mesh_queue_for_test() == 0 && !ed.texture_stream_busy_for_test() && !ed.baking_for_test()) return true;
+  }
+  std::printf("    r564::settle: not settled in ten minutes (%zu meshes waiting)\n", ed.mesh_queue_for_test());
+  return false;
+}
+
+/* A still scene on the card that bakes to more than one page (worldlike's view changes every frame while it bakes, so no picture
+ * there can be compared): a floor and 120 cubes at 48 texels a metre. */
+static void still_scene(Editor &ed, bool workers) {
+  ed.init_headless(800, 450);
+  if (workers) ed.set_async_jobs_for_test(true);
+  ed.viewport_device_for_test(2);
+  GameObject *floor = ed.scene().create("Floor");
+  floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+  floor->add<MeshRenderer>()->contribute_gi = true;
+  for (int i = 0; i < 120; i++) {
+    GameObject *box = ed.scene().create("Box" + std::to_string(i));
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->set_local_position({(float)(i % 12) - 5.5f, 0.5f, (float)(i / 12) - 4.5f});
+    box->set_local_scale({0.5f, 0.5f, 0.5f});
+    box->add<MeshRenderer>()->contribute_gi = true;
+  }
+  ed.command("create Directional Light");
+  ed.commit_change("r508 scene");
+  ed.command("camera 30 35 16 0 0 0");
+  ed.command("shading shaded");
+  r34_steps(ed, 3);
+  r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+  r34_steps(ed, 3);
+  CHECK(settle(ed));  // (round 555: 121 meshes go up to the card a few a frame - the view still before the bake starts)
+  ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
+}
+
+}  // namespace r564
+
 static void tests_round508_gpu() {
   test("Generate Lighting with the views on the card (round 508, ADR 0140): the pages go up before the bake lands, a few a frame; the view shows the old lighting whole until then; the landing frame sends none; the lightmaps and the landed picture are the one-frame landing's (skipped without a GPU)", [] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
     }
-    auto make = [](Editor &ed, bool workers) {
-      ed.init_headless(800, 450);
-      if (workers) ed.set_async_jobs_for_test(true);
-      ed.viewport_device_for_test(2);
-      /* A still scene (worldlike's view changes every frame while it bakes, so no picture there can be compared): a floor and
-       * 120 cubes at 48 texels a metre - more than one page. */
-      GameObject *floor = ed.scene().create("Floor");
-      floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
-      floor->add<MeshRenderer>()->contribute_gi = true;
-      for (int i = 0; i < 120; i++) {
-        GameObject *box = ed.scene().create("Box" + std::to_string(i));
-        box->add<MeshFilter>()->mesh = primitives::cube();
-        box->set_local_position({(float)(i % 12) - 5.5f, 0.5f, (float)(i / 12) - 4.5f});
-        box->set_local_scale({0.5f, 0.5f, 0.5f});
-        box->add<MeshRenderer>()->contribute_gi = true;
-      }
-      ed.command("create Directional Light");
-      ed.commit_change("r508 scene");
-      ed.command("camera 30 35 16 0 0 0");
-      ed.command("shading shaded");
-      r34_steps(ed, 3);
-      r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
-      r34_steps(ed, 3);
-      r555_card_settle(ed);  // (round 555: 121 meshes go up to the card a few a frame - the view still before the bake starts)
-      ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 4;
-    };
+    const auto make = r564::still_scene;  // (round 564: the scene is round 564's tests' too)
     std::vector<std::vector<Vec3>> one_frame;
-    std::vector<uint32_t> one_frame_pic;
+    r564::Pic one_frame_pic;  // (round 564: the pictures here are compared outside the toasts - see r564::Pic for why)
     {
       Editor ed;
       make(ed, false);  // (no workers: the bake lands in the frame that started it, pages and all - the old behaviour)
       ed.command("bake start");
       for (int i = 0; i < 4000 && ed.baking_for_test(); i++) ed.step_frame_headless();
       r34_steps(ed, 6);
-      r555_card_settle(ed);  // (round 555: the reference picture settled too)
+      CHECK(r564::settle(ed));  // (round 555: the reference picture settled too; round 564: waited for, however long the machine takes)
       for (const Lightmap &p : ed.lighting_data_for_test().pages) one_frame.push_back(p.texels);
-      one_frame_pic = r34_crop(ed, ed.scene_view_rect());
+      one_frame_pic = r564::view(ed);
     }
     Editor ed;
     make(ed, true);
     const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
     ed.command("bake start");
-    std::vector<uint32_t> before_pages, last_before;
+    r564::Pic before_pages, last_before;
     size_t frames_sending = 0, mixed = 0, unsteady = 0;  // (unsteady: frames before any page went up that differ from the one before)
     size_t tray_said = 0;  // (frames sending pages whose job tray named that step)
     bool still = false;  // (the last two frames before the first page are the same picture: the view is still, so `mixed` means a frame showed something new)
@@ -6306,16 +6397,16 @@ static void tests_round508_gpu() {
     while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
       const uint64_t ahead = view_perf::counters.lightmap_pages_before_landing, sent = view_perf::counters.lightmap_pages_sent;
       if (ahead == ahead0) {  // (the last picture before any page went up)
-        before_pages = r34_crop(ed, ed.scene_view_rect());
-        still = !last_before.empty() && r458_differ(last_before, before_pages) == 0;
-        if (!last_before.empty() && !still) unsteady++;  // (said, not checked: the first frames after `bake start` settle - the toolbar's state, the status line)
+        before_pages = r564::view(ed);
+        still = !last_before.px.empty() && r564::differ(last_before, before_pages) == 0;
+        if (!last_before.px.empty() && !still) unsteady++;  // (said, not checked: the first frames after `bake start` settle - the toolbar's state, the status line)
         last_before = before_pages;
       }
       ed.step_frame_headless();
       if (view_perf::counters.lightmap_pages_before_landing != ahead) {
         frames_sending++;
         for (const Editor::JobView &jv : ed.jobs_for_test()) tray_said += jv.label == "Sending the bake to the card";
-        if (!before_pages.empty() && r458_differ(before_pages, r34_crop(ed, ed.scene_view_rect())) != 0) mixed++;
+        if (!before_pages.px.empty() && r564::differ(before_pages, r564::view(ed)) != 0) mixed++;
       }
       if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
     }
@@ -6331,16 +6422,16 @@ static void tests_round508_gpu() {
     CHECK(sent_in_landing == 0);
     CHECK(tray_said == frames_sending);  // (the job tray says what the bake is doing while its pages go up)
     r34_steps(ed, 6);
-    const std::vector<uint32_t> at_six = r34_crop(ed, ed.scene_view_rect());
+    const r564::Pic at_six = r564::view(ed);
     const int settle_frames = r555_card_settle(ed);  // (round 555: the landed picture once the card shows it)
     std::printf("    after the landing and 6 frames: %d more frame(s) to settle; %zu pixels changed meanwhile\n", settle_frames,
-                r458_differ(at_six, r34_crop(ed, ed.scene_view_rect())));
+                r564::differ(at_six, r564::view(ed)));
     CHECK(pages == one_frame.size());
     for (size_t k = 0; k < pages && k < one_frame.size(); k++) {
       const std::vector<Vec3> &t = ed.lighting_data_for_test().pages[k].texels;
       CHECK(t.size() == one_frame[k].size() && std::memcmp(t.data(), one_frame[k].data(), t.size() * sizeof(Vec3)) == 0);
     }
-    const size_t differ = r458_differ(one_frame_pic, r34_crop(ed, ed.scene_view_rect()));
+    const size_t differ = r564::differ(one_frame_pic, r564::view(ed));
     std::printf("    the landed picture against the one-frame landing's: %zu pixels differ\n", differ);
     CHECK(differ == 0);
   });
@@ -6627,6 +6718,10 @@ static void tests_round543_gpu() {
     ed.init_headless(1400, 900);
     ed.prefs_for_test(prefs);
     ed.force_cpu_views_for_test("no Vulkan GPU (a test)");
+    /* (The test clock from the first frame: the scroll below can rest the pointer on the row, and a hover started on the
+     * process's own clock keeps its start - in a full suite past 300.8 s (macOS CI once Pass 26's tests ran before it) the
+     * tooltip would be due after the reads below. A hover started at 0 is due long before them.) */
+    ed.set_clock_for_test(0.0);
     ed.record_buttons_for_test(true);  // (the rectangles and tooltips each frame drew)
     for (int i = 0; i < 2; i++) ed.step_frame_headless();
     ed.command("preferences");
@@ -6675,12 +6770,28 @@ static void tests_round543_gpu() {
     /* The row found again before hovering it (the window-status lines above it may change between frames). */
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(find(r));
-    const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
-    ed.set_clock_for_test(300.0);
-    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
-    ed.set_clock_for_test(300.8);
-    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
-    const std::string tip = ed.ui_for_test().tooltip_text_for_test();
+    /* Round 568: with the clock pinned (the two notes above) the tooltip still came back empty once in macOS's whole
+     * suite (#462) and not in the run before it. The clock is no longer in it: a hover's timer starts again when the
+     * row's rectangle changes, and the lines above this row are the window's status, which something still landing
+     * from an earlier test (a device opening, a job ending) can change between the two frames of one hover - that is
+     * the reading, not a proof: the failed run printed only the empty text. So the hover is made again from the row's
+     * rectangle of the moment until the row has held still for one (twenty tries at most), and a try that fails says
+     * where the row was before and after. The check is unchanged: hovering the row says why. */
+    std::string tip;
+    double at = 300.0;
+    for (int attempt = 0; attempt < 20 && tip.empty() && find(r); attempt++, at += 2.0) {
+      const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
+      ed.set_clock_for_test(at);
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+      ed.set_clock_for_test(at + 0.8);
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+      tip = ed.ui_for_test().tooltip_text_for_test();
+      Recti after{};
+      const bool still_there = find(after);
+      if (tip.empty())
+        std::printf("    hover %d at %d %d: no tooltip; the row was at %d %d %dx%d, after the hover %s %d %d %dx%d\n", attempt, hx, hy, r.x, r.y, r.w, r.h, still_there ? "at" : "gone, last", after.x, after.y, after.w,
+                    after.h);
+    }
     std::printf("    the greyed row's tooltip: '%s'\n", tip.c_str());
     /* The spec's wording for a card without ray queries is "This graphics card has no ray tracing (Vulkan ray queries): the
      * views use the shadow map."; with the views on the CPU the code says the views draw on the CPU instead (same keywords). */
@@ -7239,6 +7350,1751 @@ static void tests_round545b2_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 519 (task 0502, ADR 0146): the card's skin pass.
+ * Written without a card to run them on - skipped without a GPU, as the others. */
+
+/* A skinned tube: `nbones` bones in a chain up the y axis (each `step` above the last), a tube of rings round them, each ring's
+ * vertices weighted to the bones nearest its height. Posed by turning every bone a little. */
+static const Mesh *r519_tube(Scene &s, int nbones, float step, int dq, int influences, int variant, GameObject **tube_out = nullptr) {
+  GameObject *rig = s.create("Rig519");
+  rig->add<Armature>()->deform = dq;
+  std::vector<GameObject *> bones;
+  GameObject *parent = rig;
+  for (int i = 0; i < nbones; i++) {
+    const Vec3 at(0.0f, i == 0 ? 0.0f : step, 0.0f);
+    parent = s.create("B" + std::to_string(i), parent);
+    parent->set_local_position(at);
+    parent->add<Bone>()->rest_position = at;
+    bones.push_back(parent);
+  }
+  MeshPtr m = std::make_shared<Mesh>();
+  const int rings = std::max(12, nbones * 3 / 2), seg = 10;
+  const float height = step * (float)nbones;
+  for (int r = 0; r < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const float a = (float)k * 2.0f * kPi / (float)seg;
+      m->add_vert({0.3f * std::cos(a), height * (float)r / (float)(rings - 1), 0.3f * std::sin(a)});
+    }
+  for (int r = 0; r + 1 < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+      m->add_face({a, a + (uint32_t)seg, b + (uint32_t)seg, b});
+    }
+  for (int gi = 0; gi < nbones; gi++) {
+    VertexGroup g{"B" + std::to_string(gi), {}};
+    for (const Vec3 &p : m->positions) g.weights.push_back(std::max(0.0f, 1.0f - std::fabs(p.y / step - (float)gi) / 2.5f));
+    m->vertex_groups.push_back(g);
+  }
+  m->touch();
+  GameObject *tube = s.create("Tube519");
+  tube->add<MeshFilter>()->mesh = m;
+  tube->add<SkinModifier>()->object = "Rig519";
+  tube->get<SkinModifier>()->max_influences = influences;
+  if (variant == 1) tube->set_local_scale({1.0f, 2.0f, 0.5f}), tube->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.6f));  // (an uneven owner)
+  if (variant == 2 && nbones > 3) bones[2]->set_local_scale({-1.0f, 1.0f, 1.0f});                                              // (a mirrored bone)
+  for (int i = 0; i < nbones; i++)
+    bones[(size_t)i]->set_local_rotation(Quat::axis_angle(normalize(Vec3(1.0f, (float)(i % 5) * 0.3f, 0.5f)), nbones > 100 ? 0.004f * (float)(i % 7) : 0.15f + 0.05f * (float)(i % 6)));
+  if (tube_out) *tube_out = tube;
+  return tube->evaluated_mesh();
+}
+
+/* The rest render mesh as the card is given it (with tangents made up where `tangents`: the skin pass turns them too). */
+static std::vector<gpu::RasterVertex> r519_vertices(const RenderMesh &r) {
+  std::vector<gpu::RasterVertex> v(r.positions.size());
+  for (size_t i = 0; i < v.size(); i++) {
+    const Vec3 p = r.positions[i], n = i < r.normals.size() ? r.normals[i] : Vec3(0, 1, 0);
+    v[i] = {{p.x, p.y, p.z}, {n.x, n.y, n.z}};
+    if (i < r.uvs.size()) v[i].uv[0] = r.uvs[i].x, v[i].uv[1] = r.uvs[i].y;
+    if (i < r.tangents.size()) v[i].t[0] = r.tangents[i].x, v[i].t[1] = r.tangents[i].y, v[i].t[2] = r.tangents[i].z, v[i].t[3] = r.tangents[i].w;
+  }
+  return v;
+}
+
+/* One frame of one instance of `mesh` on a slot (what makes the card run its skin passes). */
+static bool r519_frame(gpu::Raster &g, const std::vector<int> &meshes, int slot, std::string &err) {
+  std::vector<gpu::RasterInstance> inst;
+  for (size_t k = 0; k < meshes.size(); k++) {
+    gpu::RasterInstance in;
+    const Mat4 model = Mat4::translate({(float)k * 0.1f, 0.0f, 0.0f});
+    std::memcpy(in.model, model.m, 64);
+    in.mesh = (uint32_t)meshes[k];
+    in.id = (uint32_t)k + 1;
+    inst.push_back(in);
+  }
+  g.set_instances(inst);
+  gpu::RasterFrame fr;
+  fr.slot = slot, fr.width = 64, fr.height = 64, fr.shadow_size = 0;
+  const Mat4 vp = Mat4::perspective(40 * kDeg2Rad, 1.0f, 0.1f, 200.0f) * Mat4::look_at({0, 2, 12}, {0, 2, 0}, {0, 1, 0});
+  std::memcpy(fr.view_proj, vp.m, 64);
+  std::memcpy(fr.sun_view_proj, vp.m, 64);
+  fr.eye[1] = 2, fr.eye[2] = 12;
+  return g.render(fr, &err);
+}
+
+static void tests_round519_gpu() {
+  test("the card's skin pass poses a mesh as the CPU kernel does (round 519): positions within 1e-5 of the diagonal, normals and tangents within 1e-4 - linear and dual quaternion, 1 to 8 influences, an unevenly scaled owner, a mirrored bone, 292 bones (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    size_t cases = 0, off = 0;
+    double worst_pos = 0.0, worst_dir = 0.0;
+    struct Case {
+      int bones, dq, influences, variant;
+    };
+    std::vector<Case> all;
+    for (int dq = 0; dq < 2; dq++)
+      for (int influences : {1, 4, 8})
+        for (int variant = 0; variant < 3; variant++) all.push_back({8, dq, influences, variant});
+    all.push_back({292, 0, 8, 0}), all.push_back({292, 1, 8, 0});
+    for (const Case &c : all) {
+      Scene s;
+      const Mesh *em = r519_tube(s, c.bones, c.bones > 100 ? 0.01f : 1.0f, c.dq, c.influences, c.variant);
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) continue;
+      const SkinPose &sp = *em->skin_pose;
+      RenderMesh r = sp.rest->render_mesh();  // (a copy: tangents added)
+      r.tangents.resize(r.positions.size());
+      for (size_t i = 0; i < r.positions.size(); i++) {
+        const Vec3 n = r.normals[i];
+        Vec3 t = cross(n, Vec3(0.3f, 1.0f, 0.2f));
+        t = length(t) > 1e-3f ? normalize(t) : Vec3(1, 0, 0);
+        r.tangents[i] = Vec4(t, (i & 1) ? -1.0f : 1.0f);
+      }
+      std::vector<uint32_t> table;
+      skin_render_vertex_table(*sp.rest, r, table);
+      gpu::SkinWeights w;
+      std::string why;
+      CHECK(skin_card_weights(sp, table, true, w, &why));
+      std::vector<float> pal;
+      skin_card_palette(sp, pal);
+      const int id = g->add_skin(r519_vertices(r), r.indices, w, &err);
+      CHECK(id >= 0);
+      if (id < 0) continue;
+      CHECK(g->set_skin_palette(id, pal, &err));
+      CHECK(r519_frame(*g, {id}, 0, err));
+      std::vector<gpu::RasterVertex> got;
+      std::vector<uint32_t> idx;
+      CHECK(g->read_mesh(id, got, idx, &err));
+      RenderMesh ref;
+      const AABB box = skin_render_vertices(sp, r, table, ref);
+      const float diag = std::max(1e-3f, length(box.max - box.min));
+      double wp = 0.0, wd = 0.0;
+      bool ok = got.size() == ref.positions.size() && idx == r.indices;
+      for (size_t i = 0; ok && i < got.size(); i++) {
+        const Vec3 p(got[i].p[0], got[i].p[1], got[i].p[2]), n(got[i].n[0], got[i].n[1], got[i].n[2]), t(got[i].t[0], got[i].t[1], got[i].t[2]);
+        wp = std::max(wp, (double)length(p - ref.positions[i]));
+        wd = std::max(wd, (double)length(n - ref.normals[i]));
+        wd = std::max(wd, (double)length(t - ref.tangents[i].xyz()) + std::fabs(got[i].t[3] - ref.tangents[i].w));
+        wd = std::max(wd, (double)std::fabs(length(n) - 1.0f));  // (unit length)
+      }
+      cases++;
+      if (!ok || !(wp <= 1e-5 * diag) || !(wd <= 1e-4)) off++, std::printf("    %d bones, dq %d, %d influences, variant %d: position %.3g of a %.3g diagonal, direction %.3g\n", c.bones, c.dq, c.influences, c.variant, wp, (double)diag, wd);
+      worst_pos = std::max(worst_pos, wp / diag), worst_dir = std::max(worst_dir, wd);
+      g->remove_skin(id);
+    }
+    std::printf("    %zu cases on the card, %zu off; worst position %.3g of the diagonal, worst direction %.3g\n", cases, off, worst_pos, worst_dir);
+    CHECK(cases == all.size() && off == 0);
+    CHECK(g->skin_count() == 0);
+  });
+
+  test("the card's skin pass runs once a frame for the skins whose palette changed, a second view adds none, a skin keeps its rest until it has a palette, and M2's hook lists the dispatched meshes and flags the posed buffer (round 519; skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    const RenderMesh &r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+    constexpr uint32_t kExtra = 0x100;  // (VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT: a flag the posed buffer has no other reason to carry)
+    const int plain = g->add_skin(rest, r.indices, w, &err);
+    g->set_skin_extra_usage(kExtra);
+    const int flagged_a = g->add_skin(rest, r.indices, w, &err), flagged_b = g->add_skin(rest, r.indices, w, &err);
+    CHECK(plain >= 0 && flagged_a >= 0 && flagged_b >= 0 && g->skin_count() == 3);
+    CHECK((g->skin_usage(plain) & kExtra) == 0 && (g->skin_usage(flagged_a) & kExtra) == kExtra && (g->skin_usage(flagged_b) & kExtra) == kExtra);
+    CHECK(g->skin_usage(-1) == 0);
+    /* Until it has a palette the posed buffer is the rest. */
+    std::vector<gpu::RasterVertex> got;
+    std::vector<uint32_t> idx;
+    CHECK(r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    CHECK(g->skin_dispatches() == 0 && g->take_skin_writes().empty());
+    CHECK(g->read_mesh(plain, got, idx, &err) && got.size() == rest.size() && std::memcmp(got.data(), rest.data(), got.size() * sizeof(gpu::RasterVertex)) == 0);
+    /* Two of the three get a palette: one dispatch each, the list names exactly those. */
+    CHECK(g->set_skin_palette(plain, pal, &err) && g->set_skin_palette(flagged_b, pal, &err));
+    CHECK(!g->set_skin_palette(flagged_a, std::vector<float>(5, 0.0f), &err));  // (a palette of the wrong size)
+    CHECK(r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    std::vector<int> wrote = g->take_skin_writes();
+    std::sort(wrote.begin(), wrote.end());
+    std::vector<int> want = {plain, flagged_b};
+    std::sort(want.begin(), want.end());
+    CHECK(wrote == want && g->skin_dispatches() == 2);
+    CHECK(g->take_skin_writes().empty());  // (taken)
+    /* A second view of the same frame, and the same palette again: nothing. */
+    CHECK(r519_frame(*g, {plain, flagged_a, flagged_b}, 1, err));
+    CHECK(g->set_skin_palette(plain, pal, &err) && r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    CHECK(g->skin_dispatches() == 2 && g->take_skin_writes().empty());
+    /* One pose changes: one dispatch, its mesh alone in the list; the posed buffer moved off the rest. */
+    std::vector<float> pal2 = pal;
+    for (size_t b = 0; b < sp.mats.size(); b++) pal2[gpu::kSkinPaletteHeader + b * gpu::kSkinPaletteBone + 9] += 0.5f;  // (a bone's translation)
+    CHECK(g->set_skin_palette(flagged_b, pal2, &err) && r519_frame(*g, {plain, flagged_a, flagged_b}, 0, err));
+    wrote = g->take_skin_writes();
+    CHECK(wrote.size() == 1 && wrote[0] == flagged_b && g->skin_dispatches() == 3);
+    std::vector<gpu::RasterVertex> moved;
+    CHECK(g->read_mesh(flagged_b, moved, idx, &err) && g->read_mesh(plain, got, idx, &err));
+    CHECK(moved.size() == got.size() && std::memcmp(moved.data(), got.data(), got.size() * sizeof(gpu::RasterVertex)) != 0);
+    /* Removing a skin takes it out of the list and the card; a removed mesh id may come back as another skin. */
+    g->set_skin_palette(flagged_a, pal, &err);
+    g->remove_skin(flagged_a);
+    CHECK(g->skin_count() == 2 && r519_frame(*g, {plain, flagged_b}, 0, err) && g->take_skin_writes().empty());
+    std::printf("    3 skins, %llu dispatches in all, the extra usage 0x%X on the posed buffers made after the setting\n", (unsigned long long)g->skin_dispatches(), kExtra);
+  });
+
+  test("a posed character in a view on the card sends palettes, not meshes (round 519): after the first frame no mesh upload for the skinned meshes, none skinned on the CPU, one dispatch a pose and none for a second view of it; the picture matches the CPU's to 1 / 255 (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    /* The first frames put the skins on the card. */
+    const FrameProfile f0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    const uint64_t d0 = g->skin_dispatches();
+    const int frames = 12;
+    for (int i = 0; i < frames; i++) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.05f * (float)(i + 1)));
+      ed.mark_changed_for_test("R519 pose");
+      r34_steps(ed, 1);
+    }
+    const FrameProfile f1 = ed.frame_profile_totals();
+    const MeshCounts md = mesh_counts() - m0;
+    const uint64_t dispatches = g->skin_dispatches() - d0;
+    std::printf("    %d posed frames: %llu skins drawn from the card, %llu palettes sent, %llu skins sent whole, %llu meshes sent or updated, %llu render meshes skinned on the CPU, %llu dispatches\n", frames,
+                (unsigned long long)(f1.skin_items - f0.skin_items), (unsigned long long)(f1.skin_palettes - f0.skin_palettes), (unsigned long long)(f1.skin_uploads - f0.skin_uploads),
+                (unsigned long long)(f1.gpu_mesh_uploads - f0.gpu_mesh_uploads + f1.gpu_mesh_updates - f0.gpu_mesh_updates), (unsigned long long)md.skinned, (unsigned long long)dispatches);
+    CHECK(f1.skin_items > f0.skin_items && f1.skin_palettes >= (uint64_t)frames);
+    CHECK(f1.skin_uploads == f0.skin_uploads);  // (the skins went up once, before)
+    CHECK(md.skinned == 0);  // (the outlines' shells read the posed positions, never the posed render mesh - round 519's review)
+    CHECK(dispatches > 0 && dispatches <= (uint64_t)frames * 8);  // (the skinned meshes of the stand-in, a pose a frame - not a second view's, which finds the posed buffers)
+    /* A toon outline's shell is still made on the CPU from the posed positions and sent each pose (on the card in round
+     * 521, task 0501): with the outlines off, a pose sends no mesh at all. */
+    int outlines_off = 0;
+    ed.scene().for_each([&](GameObject &o) {
+      if (Outline *ol = o.get<Outline>()) ol->enabled = false, outlines_off++;
+    });
+    ed.mark_changed_for_test("R519 outlines off");
+    r34_steps(ed, 3);
+    const FrameProfile f2 = ed.frame_profile_totals();
+    for (int i = 0; i < frames; i++) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.05f * (float)(i + 1)));
+      ed.mark_changed_for_test("R519 pose, no outlines");
+      r34_steps(ed, 1);
+    }
+    const FrameProfile f3 = ed.frame_profile_totals();
+    std::printf("    with %d outlines off, %d posed frames: %llu meshes sent or updated\n", outlines_off, frames,
+                (unsigned long long)(f3.gpu_mesh_uploads - f2.gpu_mesh_uploads + f3.gpu_mesh_updates - f2.gpu_mesh_updates));
+    CHECK(f3.gpu_mesh_uploads == f2.gpu_mesh_uploads && f3.gpu_mesh_updates == f2.gpu_mesh_updates);  // (no mesh sent for the skinned ones; the plain prop is unchanged)
+    CHECK(f3.skin_palettes - f2.skin_palettes >= (uint64_t)frames);
+    /* The picture: the card's against the CPU's. */
+    chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.4f));
+    ed.mark_changed_for_test("R519 picture");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> card = r34_crop(ed, ed.scene_view_rect());
+    CHECK(ed.scene_on_gpu_for_test());
+    ed.viewport_device_for_test(1);
+    ed.mark_changed_for_test("R519 picture, CPU");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> cpu = r34_crop(ed, ed.scene_view_rect());
+    size_t within = 0, n = 0;
+    for (size_t i = 0; i < card.size() && i < cpu.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((card[i] >> k) & 255) - (int)((cpu[i] >> k) & 255)));
+      n++, within += worst <= 3;
+    }
+    std::printf("    the card's picture against the CPU's: %.3f %% of %zu pixels within 3 / 255\n", n ? 100.0 * (double)within / (double)n : 0.0, n);
+    CHECK(n > 0 && (double)within >= 0.99 * (double)n);  // (ADR 0036's tolerance over the whole view: silhouettes may fall a pixel either way; ADR 0108's approximations aside)
+  });
+}
+
+/* ---------------------------------------------------------------- round 519, the test engineer's card checks (task 0502): the pass at its
+ * edges, and a character's skin on the card through a shared mesh, a re-bind and the rest-position switch. Skipped without a GPU. */
+
+/* A skinned tube whose every vertex has 12 bones (weights from a permutation, so the 8 heaviest are well defined). */
+static const Mesh *r519m_many(Scene &s, int dq, int influences) {
+  GameObject *rig = s.create("RigMany");
+  rig->add<Armature>()->deform = dq;
+  std::vector<GameObject *> bones;
+  GameObject *parent = rig;
+  for (int i = 0; i < 12; i++) {
+    const Vec3 at(0.0f, i == 0 ? 0.0f : 1.0f, 0.0f);
+    parent = s.create("M" + std::to_string(i), parent);
+    parent->set_local_position(at);
+    parent->add<Bone>()->rest_position = at;
+    bones.push_back(parent);
+  }
+  MeshPtr m = std::make_shared<Mesh>();
+  const int rings = 34, seg = 8;
+  for (int r = 0; r < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const float a = (float)k * 2.0f * kPi / (float)seg;
+      m->add_vert({0.3f * std::cos(a), 11.0f * (float)r / (float)(rings - 1), 0.3f * std::sin(a)});
+    }
+  for (int r = 0; r + 1 < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+      m->add_face({a, a + (uint32_t)seg, b + (uint32_t)seg, b});
+    }
+  for (size_t gi = 0; gi < 12; gi++) {
+    VertexGroup g{"M" + std::to_string(gi), {}};
+    for (const Vec3 &p : m->positions) g.weights.push_back(0.05f + 0.07f * (float)((gi * 7 + (size_t)std::floor(p.y * 3.0f + 0.5f)) % 12));
+    m->vertex_groups.push_back(g);
+  }
+  m->touch();
+  GameObject *tube = s.create("TubeMany");
+  tube->add<MeshFilter>()->mesh = m;
+  tube->add<SkinModifier>()->object = "RigMany";
+  tube->get<SkinModifier>()->max_influences = influences;
+  for (size_t i = 0; i < bones.size(); i++) bones[i]->set_local_rotation(Quat::axis_angle(normalize(Vec3(1.0f, 0.2f * (float)i, 0.4f)), 0.12f + 0.03f * (float)(i % 5)));
+  return tube->evaluated_mesh();
+}
+
+/* Whether the card's posed buffer `id` is the CPU kernel's posing of `em`'s pose (positions within 1e-5 of the diagonal). */
+static bool r519m_card_equals_cpu(gpu::Raster &g, int id, const Mesh &em, double &worst) {
+  worst = 1e9;
+  if (id < 0 || !em.skin_pose) return false;
+  const SkinPose &sp = *em.skin_pose;
+  std::vector<gpu::RasterVertex> got;
+  std::vector<uint32_t> idx;
+  std::string err;
+  if (!g.read_mesh(id, got, idx, &err)) return false;
+  const RenderMesh *r = &sp.rest->render_mesh(false);
+  if (r->positions.size() != got.size()) r = &sp.rest->render_mesh_tangents(false);
+  if (r->positions.size() != got.size()) return false;
+  std::vector<uint32_t> table;
+  skin_render_vertex_table(*sp.rest, *r, table);
+  RenderMesh ref;
+  const AABB box = skin_render_vertices(sp, *r, table, ref);
+  const double diag = std::max(1e-3f, box.valid() ? length(box.max - box.min) : 1.0f);
+  worst = 0.0;
+  for (size_t i = 0; i < got.size(); i++) worst = std::max(worst, (double)length(Vec3(got[i].p[0], got[i].p[1], got[i].p[2]) - ref.positions[i]) / diag);
+  return worst <= 1e-5;
+}
+
+static void tests_round519_more_gpu() {
+  test("the card's skin pass at its edges (round 519): vertices with no bone stay at rest bit for bit, 8 influences on every vertex match the kernel, and a skin of the same rest with another palette is its own (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    for (int dq = 0; dq < 2; dq++) {
+      Scene s;
+      const Mesh *em = r519m_many(s, dq, 8);
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) continue;
+      const SkinPose &sp = *em->skin_pose;
+      RenderMesh r = sp.rest->render_mesh();
+      std::vector<uint32_t> table;
+      skin_render_vertex_table(*sp.rest, r, table);
+      gpu::SkinWeights w;
+      CHECK(skin_card_weights(sp, table, false, w, nullptr));
+      size_t eight = 0;
+      for (uint8_t n : w.count) eight += n == 8;
+      CHECK(eight > 0);
+      std::vector<float> pal;
+      skin_card_palette(sp, pal);
+      const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+      /* Every third vertex has no bone: it must be the rest, exactly. */
+      gpu::SkinWeights holed = w;
+      for (size_t i = 0; i < holed.count.size(); i += 3) holed.count[i] = 0;
+      const int a = g->add_skin(rest, r.indices, holed, &err);
+      CHECK(a >= 0);
+      if (a < 0) continue;
+      CHECK(g->set_skin_palette(a, pal, &err) && r519_frame(*g, {a}, 0, err));
+      std::vector<gpu::RasterVertex> got;
+      std::vector<uint32_t> idx;
+      CHECK(g->read_mesh(a, got, idx, &err) && got.size() == rest.size());
+      RenderMesh ref;
+      const AABB box = skin_render_vertices(sp, r, table, ref);
+      const double diag = std::max(1e-3f, length(box.max - box.min));
+      size_t still_bad = 0, moved_bad = 0, moved = 0;
+      for (size_t i = 0; i < got.size() && i < rest.size(); i++) {
+        if (i % 3 == 0) {
+          still_bad += std::memcmp(&got[i], &rest[i], sizeof(gpu::RasterVertex)) != 0;
+          continue;
+        }
+        moved++;
+        moved_bad += !(length(Vec3(got[i].p[0], got[i].p[1], got[i].p[2]) - ref.positions[i]) <= 1e-5 * diag);
+      }
+      std::printf("    %s: %zu unbound vertices off the rest, %zu of %zu 8-bone vertices off the kernel\n", dq ? "dual quaternion" : "linear", still_bad, moved_bad, moved);
+      CHECK(still_bad == 0 && moved_bad == 0);
+      /* The same rest again with the full weights and another palette: its own buffer, the first untouched. */
+      const int b = g->add_skin(rest, r.indices, w, &err);
+      CHECK(b >= 0 && b != a);
+      if (b < 0) continue;
+      std::vector<float> pal2 = pal;
+      for (size_t k = 0; k < sp.mats.size(); k++) pal2[gpu::kSkinPaletteHeader + k * gpu::kSkinPaletteBone + 10] += 0.25f;
+      CHECK(g->set_skin_palette(b, pal2, &err) && r519_frame(*g, {a, b}, 0, err));
+      std::vector<gpu::RasterVertex> got_a, got_b;
+      CHECK(g->read_mesh(a, got_a, idx, &err) && g->read_mesh(b, got_b, idx, &err));
+      CHECK(got_a.size() == got.size() && std::memcmp(got_a.data(), got.data(), got.size() * sizeof(gpu::RasterVertex)) == 0);  // (a's buffer is what it was)
+      CHECK(got_b.size() == got.size() && std::memcmp(got_b.data(), got.data(), got.size() * sizeof(gpu::RasterVertex)) != 0);
+      /* Removed and made again (the id may come back): a fresh skin is the rest, never the old pose. */
+      g->remove_skin(a);
+      g->remove_skin(b);
+      CHECK(g->skin_count() == 0);
+      const int c = g->add_skin(rest, r.indices, w, &err);
+      CHECK(c >= 0 && r519_frame(*g, {c}, 0, err));
+      CHECK(g->read_mesh(c, got, idx, &err) && got.size() == rest.size() && std::memcmp(got.data(), rest.data(), got.size() * sizeof(gpu::RasterVertex)) == 0);
+      g->remove_skin(c);
+    }
+  });
+
+  test("the card refuses what its skin pass can't hold and goes on drawing (round 519): 65,536 bones, weights that don't fit the vertices, an empty rest, a palette for a mesh that isn't a skin, a bone index past the palette (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    const RenderMesh &r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+    const size_t before = g->skin_count();
+    gpu::SkinWeights big = w;
+    big.bones = 65536;
+    std::string why;
+    CHECK(g->add_skin(rest, r.indices, big, &why) < 0 && !why.empty());
+    gpu::SkinWeights shorter = w;
+    shorter.count.pop_back();
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, shorter, &why) < 0 && !why.empty());
+    gpu::SkinWeights thin = w;
+    thin.weight.pop_back();
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, thin, &why) < 0 && !why.empty());
+    gpu::SkinWeights nine = w;
+    nine.slots = 9;
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, nine, &why) < 0 && !why.empty());
+    gpu::SkinWeights nobones = w;
+    nobones.bones = 0;
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, nobones, &why) < 0 && !why.empty());
+    why.clear();
+    CHECK(g->add_skin(std::vector<gpu::RasterVertex>(), std::vector<uint32_t>(), gpu::SkinWeights(), &why) < 0 && !why.empty());
+    CHECK(g->skin_count() == before);
+    /* A palette for a plain mesh, for nothing, of the wrong size; removing what isn't there. */
+    const int plain = g->add_mesh(rest, r.indices, &err);
+    CHECK(plain >= 0);
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    CHECK(!g->set_skin_palette(plain, pal, &why) && !g->set_skin_palette(-1, pal, &why) && !g->set_skin_palette(100000, pal, &why));
+    const int id = g->add_skin(rest, r.indices, w, &err);
+    CHECK(id >= 0);
+    if (id < 0) return;
+    CHECK(!g->set_skin_palette(id, std::vector<float>(), &why) && !g->set_skin_palette(id, std::vector<float>(pal.size() + 24, 0.0f), &why));
+    g->remove_skin(-1);
+    g->remove_skin(100000);
+    g->remove_skin(id);
+    g->remove_skin(id);  // (twice)
+    CHECK(g->skin_count() == before);
+    CHECK(!g->set_skin_palette(id, pal, &why));  // (a removed skin takes no palette)
+    /* A bone index one past the palette, and a vertex with more bones than slots: refused with a reason (review 519). */
+    gpu::SkinWeights past = w;
+    for (size_t i = 0; i < past.count.size(); i++)
+      if (past.count[i]) {
+        past.bone[i * past.slots] = (uint16_t)past.bones;
+        break;
+      }
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, past, &why) < 0 && !why.empty());
+    std::printf("    a bone index past the palette: refused: %s\n", why.c_str());
+    gpu::SkinWeights crowded = w;
+    crowded.count[0] = (uint8_t)(crowded.slots + 1);
+    why.clear();
+    CHECK(g->add_skin(rest, r.indices, crowded, &why) < 0 && !why.empty());
+    std::printf("    more bones than slots: refused: %s\n", why.c_str());
+    CHECK(g->skin_count() == before);
+    g->remove_mesh(plain);
+    /* The card still skins and draws. */
+    const int ok = g->add_skin(rest, r.indices, w, &err);
+    CHECK(ok >= 0 && g->set_skin_palette(ok, pal, &err) && r519_frame(*g, {ok}, 0, err));
+    double worst = 0.0;
+    CHECK(g->can_skin() && r519m_card_equals_cpu(*g, ok, *em, worst));
+    g->remove_skin(ok);
+  });
+
+  test("a character's skin on the card is never stale (round 519): two characters sharing one mesh asset, a re-pose, the rest-position switch, a re-bind and a Skin taken out and put back each leave the card's posed buffer equal to the CPU's (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("camera 0 2 10 3 2 0");
+    ed.viewport_device_for_test(2);
+    Scene &s = ed.scene();
+    GameObject *tubes[2] = {nullptr, nullptr};
+    std::vector<GameObject *> bones[2];
+    MeshPtr shared;
+    std::vector<std::string> names;
+    for (int k = 0; k < 2; k++) {
+      GameObject *rig = s.create(k ? "RigB" : "RigA");
+      rig->set_local_position({(float)k * 4.0f, 0, 0});
+      rig->add<Armature>();
+      GameObject *parent = rig;
+      names.clear();
+      for (int i = 0; i < 4; i++) {
+        names.push_back("C" + std::to_string(i));
+        const Vec3 at(0.0f, i == 0 ? 0.0f : 1.0f, 0.0f);
+        parent = s.create(names.back(), parent);
+        parent->set_local_position(at);
+        parent->add<Bone>()->rest_position = at;
+        bones[k].push_back(parent);
+      }
+      if (!shared) {
+        shared = std::make_shared<Mesh>();
+        for (int r = 0; r < 21; r++)
+          for (int j = 0; j < 12; j++) {
+            const float a = (float)j * 2.0f * kPi / 12.0f;
+            shared->add_vert({0.3f * std::cos(a), 4.0f * (float)r / 20.0f, 0.3f * std::sin(a)});
+          }
+        for (int r = 0; r < 20; r++)
+          for (int j = 0; j < 12; j++) {
+            const uint32_t a = (uint32_t)(r * 12 + j), b = (uint32_t)(r * 12 + (j + 1) % 12);
+            shared->add_face({a, a + 12, b + 12, b});
+          }
+        for (size_t gi = 0; gi < names.size(); gi++) {
+          VertexGroup vg{names[gi], {}};
+          for (const Vec3 &p : shared->positions) vg.weights.push_back(std::max(0.0f, 1.0f - std::fabs(p.y - (float)gi) / 1.5f));
+          shared->vertex_groups.push_back(vg);
+        }
+        shared->touch();
+      }
+      tubes[k] = s.create(k ? "TubeB" : "TubeA");
+      tubes[k]->add<MeshFilter>()->mesh = shared;
+      tubes[k]->add<SkinModifier>()->object = k ? "RigB" : "RigA";
+      tubes[k]->set_local_position({(float)k * 4.0f, 0, 0});
+      tubes[k]->add<MeshRenderer>();
+    }
+    auto pose = [&](int k, float a) {
+      for (size_t i = 1; i < bones[k].size(); i++) bones[k][i]->set_local_rotation(Quat::axis_angle({0, 0, 1}, a));
+    };
+    auto settle = [&](const char *why) {
+      ed.mark_changed_for_test(why);
+      r34_steps(ed, 4);
+    };
+    pose(0, 0.6f), pose(1, -0.9f);
+    settle("R519m card shared");
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    auto both_equal = [&](const char *what) {
+      for (int k = 0; k < 2; k++) {
+        const int id = ed.skin_card_mesh_for_test(tubes[k]);
+        double worst = 0.0;
+        const bool ok = tubes[k]->evaluated_mesh() && r519m_card_equals_cpu(*g, id, *tubes[k]->evaluated_mesh(), worst);
+        if (!ok) std::printf("    %s: %s is not the CPU's pose on the card (mesh %d, worst %.3g of the diagonal); %s\n", what, tubes[k]->name.c_str(), id, worst, ed.skin_stands_text_for_test(tubes[k]).c_str());
+        CHECK(ok);
+      }
+    };
+    both_equal("two characters, one mesh");
+    const int id_a = ed.skin_card_mesh_for_test(tubes[0]), id_b = ed.skin_card_mesh_for_test(tubes[1]);
+    CHECK(id_a >= 0 && id_b >= 0 && id_a != id_b);  // (a skin an object, not a skin a mesh asset)
+    pose(0, -0.3f);
+    settle("R519m card re-pose A");
+    both_equal("A re-posed");
+    /* The rest-position switch and back, with another pose: the card's copy is not the old pose. */
+    ed.scene().find_by_name("RigA")->get<Armature>()->rest_position = true;
+    settle("R519m card rest position");
+    ed.scene().find_by_name("RigA")->get<Armature>()->rest_position = false;
+    pose(0, 1.1f);
+    settle("R519m card rest position off");
+    both_equal("rest position off");
+    /* A re-bind: the weights the card holds are the new ones. */
+    {
+      Mesh &m = *mesh_make_mutable(tubes[0]->mesh_filter()->mesh);
+      for (VertexGroup &vg : m.vertex_groups)
+        for (size_t i = 0; i < vg.weights.size(); i++) vg.weights[i] = (i % 5 == 0) ? 1.0f - vg.weights[i] : vg.weights[i] * 0.5f + 0.1f;
+      m.touch();
+    }
+    settle("R519m card re-bind");
+    both_equal("re-bound");
+    /* Review 519, M1: Max Influences changed and a bone's Deform off, the rest the same - the card's weights are made again. */
+    tubes[0]->get<SkinModifier>()->max_influences = 1;
+    settle("R519m card influences");
+    both_equal("Max Influences 1");
+    bones[0][1]->get<Bone>()->deform = false;
+    settle("R519m card deform off");
+    both_equal("Bone Deform off");
+    bones[0][1]->get<Bone>()->deform = true;
+    tubes[0]->get<SkinModifier>()->max_influences = 4;
+    settle("R519m card back");
+    both_equal("weights back");
+    /* Review 519, M3: a shape key moving the rest under the Skin - posed on the CPU while it moves, on the card again once it holds. */
+    {
+      Mesh &m = *mesh_make_mutable(tubes[0]->mesh_filter()->mesh);
+      std::vector<Vec3> d(m.vert_count());
+      for (size_t i = 0; i < d.size(); i++) d[i] = Vec3(0.1f * std::sin((float)i), 0.0f, 0.05f);
+      m.shape_keys.push_back(ShapeKey{"Bulge", d});
+      m.touch();
+    }
+    for (int i = 0; i < 4; i++) {
+      tubes[0]->get<MeshRenderer>()->shape_weights = {{"Bulge", 0.2f * (float)(i + 1)}};
+      settle("R519m card shape key");
+    }
+    /* The key held: back on the card after three drawn gathers. A frame where nothing changed draws and gathers nothing (even
+     * one marked changed: the view keeps its picture), so the mesh stays posed on the CPU - a right picture - until the view
+     * is drawn again; the pose moves here so each frame is drawn. Until the countdown ends the card's copy may lag (it isn't
+     * drawn); both_equal below reads the card's copy after it ends. */
+    for (int i = 0; i < 4; i++) {
+      pose(0, -0.3f + 0.05f * (float)(i + 1));
+      settle("R519m card shape key held");
+    }
+    both_equal("shape key held");
+    /* One character's Skin taken out and put back. */
+    tubes[1]->remove_component(tubes[1]->get<SkinModifier>());
+    settle("R519m card skin removed");
+    tubes[1]->add<SkinModifier>()->object = "RigB";
+    pose(1, 0.45f);
+    settle("R519m card skin added");
+    both_equal("skin put back");
+    const FrameProfile f0 = ed.frame_profile_totals();
+    settle("R519m card quiet");
+    const FrameProfile f1 = ed.frame_profile_totals();
+    CHECK(f1.skin_uploads == f0.skin_uploads);  // (nothing is sent whole on a quiet frame)
+  });
+
+  test("a skinned mesh the card can't draw from its posed buffer is posed on the CPU, counted and said, while the others stay on the card (round 519): a see-through material (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    GameObject *victim = nullptr;
+    ed.scene().for_each([&](GameObject &obj) {
+      GameObject *o = &obj;
+      if (!victim && o->mesh_filter() && o->get<SkinModifier>() && o->get<MeshRenderer>() && !o->get<MeshRenderer>()->materials.empty()) victim = o;
+    });
+    CHECK(victim != nullptr);
+    if (!victim) return;
+    const FrameProfile f0 = ed.frame_profile_totals();
+    chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.3f));
+    ed.mark_changed_for_test("R519m before");
+    r34_steps(ed, 3);
+    const FrameProfile f1 = ed.frame_profile_totals();
+    CHECK(f1.skin_items > f0.skin_items);
+    MaterialPtr veil = make_material("veil", {0.9f, 0.3f, 0.2f});
+    veil->surface = (int)MaterialSurface::Transparent;
+    veil->alpha = 0.5f;
+    veil->touch();
+    victim->get<MeshRenderer>()->materials[0] = veil;
+    chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+    ed.mark_changed_for_test("R519m see-through");
+    r34_steps(ed, 3);
+    const FrameProfile f2 = ed.frame_profile_totals();
+    std::printf("    with %s see-through: %llu skinned items on the card, %llu posed on the CPU; reason: %s\n", victim->name.c_str(), (unsigned long long)(f2.skin_items - f1.skin_items),
+                (unsigned long long)(f2.skin_cpu - f1.skin_cpu), ed.skin_reason_for_test().c_str());
+    CHECK(f2.skin_cpu > f1.skin_cpu);                // (that one on the CPU ...)
+    CHECK(f2.skin_items > f1.skin_items);            // (... the rest of the character still skinned by the card)
+    CHECK(!ed.skin_reason_for_test().empty());
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+
+  test("take_skin_writes lists the last recorded frame's dispatches alone (round 519 review): two frames with dispatches and one take gives only the second's, a quiet frame gives none (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    const RenderMesh &r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    const std::vector<gpu::RasterVertex> rest = r519_vertices(r);
+    const int a = g->add_skin(rest, r.indices, w, &err), b = g->add_skin(rest, r.indices, w, &err);
+    CHECK(a >= 0 && b >= 0);
+    if (a < 0 || b < 0) return;
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    std::vector<float> pal2 = pal;
+    for (size_t k = 0; k < sp.mats.size(); k++) pal2[gpu::kSkinPaletteHeader + k * gpu::kSkinPaletteBone + 10] += 0.25f;
+    CHECK(g->set_skin_palette(a, pal, &err) && g->set_skin_palette(b, pal, &err) && r519_frame(*g, {a, b}, 0, err));  // (frame 1: both)
+    CHECK(g->set_skin_palette(b, pal2, &err) && r519_frame(*g, {a, b}, 0, err));                                         // (frame 2: b alone)
+    std::vector<int> wrote = g->take_skin_writes();  // (one take after both frames)
+    CHECK(wrote.size() == 1 && wrote[0] == b);
+    CHECK(g->skin_dispatches() == 3);
+    CHECK(r519_frame(*g, {a, b}, 0, err));  // (a quiet frame)
+    CHECK(g->take_skin_writes().empty());
+    g->remove_skin(a);
+    g->remove_skin(b);
+  });
+}
+
+/* ---------------------------------------------------------------- round 520 (task 0503): the traced shadows (round 543)
+ * meet the skin pass (round 519) - a posed skin's bottom level is built from the posed buffer the frame the pose changes. */
+static void tests_round520_gpu() {
+  test("a posed skin's traced shadow follows the pose (round 520): the bone raised, the floor point its shadow now reaches goes dark, the bottom level rebuilt; a still frame rebuilds nothing (skipped without a card with ray queries or skinning)", [] {
+    r543::Scene s;
+    if (!s.open()) return;
+    if (!s.g->can_skin()) {
+      std::printf("    skipped: this card can't skin\n");
+      return;
+    }
+    /* The cube as a skin of one bone, every vertex on it. */
+    const MeshPtr cube = primitives::cube(1.0f);  // (held: render_mesh() is the mesh's own cache)
+    const RenderMesh &rm = cube->render_mesh();
+    std::vector<gpu::RasterVertex> rest(rm.positions.size());
+    for (size_t i = 0; i < rest.size(); i++)
+      rest[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+    gpu::SkinWeights w;
+    w.slots = 1, w.bones = 1;
+    w.count.assign(rest.size(), 1);
+    w.bone.assign(rest.size(), 0);
+    w.weight.assign(rest.size(), 1.0f);
+    std::string err;
+    const int skin = s.g->add_skin(rest, rm.indices, w, &err);
+    CHECK(skin >= 0);
+    if (skin < 0) {
+      std::printf("    add_skin: %s\n", err.c_str());
+      return;
+    }
+    auto pose = [&](float up) {
+      SkinPose sp;
+      sp.owner = sp.owner_inv = Mat4::identity();
+      sp.mats = {Mat4::translate({0, up, 0})};
+      sp.duals = {skin_to_dual(sp.mats[0])};
+      sp.rigid = {1};
+      std::vector<float> pal;
+      skin_card_palette(sp, pal);
+      return s.g->set_skin_palette(skin, pal, &err);
+    };
+    r543::cube_over_floor(s);
+    s.inst[1].mesh = (uint32_t)skin;  // (the skin in the cube's place)
+    CHECK(pose(0.0f));
+    CHECK(s.draw(true, false));
+    const float lit_before = s.lum({1.5f, 0, 0}), lit_ref = s.lum({-3.1f, 0, 0});  // (as round 543's update_mesh test)
+    const gpu::RtShadowStats a = s.g->rt_shadow_stats();
+    CHECK(pose(1.0f));
+    CHECK(s.draw(true, false));
+    const float dark_after = s.lum({1.5f, 0, 0});
+    const gpu::RtShadowStats b = s.g->rt_shadow_stats();
+    CHECK(s.draw(true, false));  // (no new palette: the posed buffer and its bottom level stay)
+    const gpu::RtShadowStats c = s.g->rt_shadow_stats();
+    std::printf("    the point at x 1.5: %.0f at rest, %.0f raised (lit reference %.0f); BLAS builds %llu -> %llu -> %llu (still frame)\n", lit_before, dark_after, lit_ref,
+                (unsigned long long)a.blas_builds, (unsigned long long)b.blas_builds, (unsigned long long)c.blas_builds);
+    CHECK(lit_before > 0.8f * lit_ref);
+    CHECK(dark_after < 0.7f * lit_ref);
+    CHECK(b.blas_builds > a.blas_builds);
+    CHECK(c.blas_builds == b.blas_builds);
+    s.g->remove_skin(skin);
+  });
+
+  test("a real card Solid frame of a posed skin builds no render mesh on the CPU and is drawn on the card (round 520); Shaded then Solid share the stand-ins (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    auto pose = [&](float a, const char *why) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, a));
+      ed.mark_changed_for_test(why);
+      r34_steps(ed, 3);
+    };
+    pose(0.2f, "R520 shaded");
+    const size_t stands = ed.skin_stands_for_test();
+    CHECK(stands > 0);
+    ed.command("shading solid");
+    pose(0.3f, "R520 solid warm");  // (the first Solid frame gathers its items)
+    const FrameProfile f0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    for (int i = 0; i < 4; i++) pose(0.35f + 0.1f * (float)i, "R520 solid");
+    const MeshCounts d = mesh_counts() - m0;
+    const FrameProfile f1 = ed.frame_profile_totals();
+    std::printf("    four posed Solid frames on the card: %llu render meshes skinned on the CPU, %llu skinned items drawn by the card, stand-ins %zu -> %zu\n", (unsigned long long)d.skinned,
+                (unsigned long long)(f1.skin_items - f0.skin_items), stands, ed.skin_stands_for_test());
+    CHECK(d.skinned == 0);
+    CHECK(f1.skin_items > f0.skin_items);
+    CHECK(ed.scene_on_gpu_for_test());
+    CHECK(ed.skin_stands_for_test() == stands);  // (Shaded's stand-ins are the ones Solid draws)
+    ed.command("shading shaded");
+    pose(0.9f, "R520 shaded again");
+    CHECK(ed.skin_stands_for_test() == stands);
+  });
+}
+
+/* ---------------------------------------------------------------- round 521 (task 0504): shape keys under a skin go up in ranges,
+ * and a posed outline is a skin on the card. */
+static void tests_round521_gpu() {
+  test("the card writes a skin's moved rest vertices in ranges and poses from them (round 521): the posed buffer is the kernel on the new rest within 1e-5 of the diagonal, one more dispatch with the same palette, a range past the skin or a skin that isn't there is refused (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g || !g->can_skin()) {
+      std::printf("    skipped: %s\n", g ? "this card can't skin" : err.c_str());
+      return;
+    }
+    Scene s;
+    const Mesh *em = r519_tube(s, 8, 1.0f, 0, 4, 0);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const SkinPose &sp = *em->skin_pose;
+    RenderMesh r = sp.rest->render_mesh();
+    std::vector<uint32_t> table;
+    skin_render_vertex_table(*sp.rest, r, table);
+    gpu::SkinWeights w;
+    CHECK(skin_card_weights(sp, table, false, w, nullptr));
+    std::vector<float> pal;
+    skin_card_palette(sp, pal);
+    const int id = g->add_skin(r519_vertices(r), r.indices, w, &err);
+    CHECK(id >= 0);
+    if (id < 0) return;
+    CHECK(g->set_skin_palette(id, pal, &err));
+    CHECK(r519_frame(*g, {id}, 0, err));
+    const uint64_t d0 = g->skin_dispatches();
+    CHECK(r519_frame(*g, {id}, 0, err));
+    CHECK(g->skin_dispatches() == d0);  // (nothing changed: no dispatch)
+    /* Two ranges of the rest move. */
+    const size_t n = r.positions.size();
+    CHECK(n > 60);
+    const std::vector<std::pair<uint32_t, uint32_t>> ranges = {{4u, 9u}, {(uint32_t)(n / 2), 7u}};
+    std::vector<gpu::RasterVertex> sent;
+    for (const auto &rg : ranges)
+      for (uint32_t i = rg.first; i < rg.first + rg.second; i++) r.positions[i] = r.positions[i] + Vec3(0.05f, 0.1f, -0.03f);
+    const std::vector<gpu::RasterVertex> all = r519_vertices(r);
+    for (const auto &rg : ranges) sent.insert(sent.end(), all.begin() + rg.first, all.begin() + rg.first + rg.second);
+    CHECK(!g->update_skin_rest(id + 100, sent, ranges, &err));                       // (no such skin)
+    CHECK(!g->update_skin_rest(id, sent, {{(uint32_t)n - 2, 5u}}, &err));            // (a range past the skin)
+    CHECK(!g->update_skin_rest(id, std::vector<gpu::RasterVertex>(3), ranges, &err));  // (vertices for other ranges)
+    CHECK(g->update_skin_rest(id, sent, ranges, &err));
+    CHECK(r519_frame(*g, {id}, 0, err));
+    CHECK(g->skin_dispatches() == d0 + 1);  // (the same palette, run again from the new rest)
+    std::vector<gpu::RasterVertex> got;
+    std::vector<uint32_t> idx;
+    CHECK(g->read_mesh(id, got, idx, &err));
+    RenderMesh ref;
+    const AABB box = skin_render_vertices(sp, r, table, ref);
+    const float diag = std::max(1e-3f, length(box.max - box.min));
+    double worst = 0.0;
+    bool ok = got.size() == ref.positions.size();
+    for (size_t i = 0; ok && i < got.size(); i++) worst = std::max(worst, (double)length(Vec3(got[i].p[0], got[i].p[1], got[i].p[2]) - ref.positions[i]));
+    std::printf("    %zu of %zu vertices written; the posed buffer is %.3g of the diagonal from the kernel's\n", (size_t)(9 + 7), n, worst / diag);
+    CHECK(ok && worst <= 1e-5 * diag);
+    /* Triangles too: two triangles trade places (a diagonal that flipped changes indices the same way), written in a range. */
+    std::vector<uint32_t> swapped = r.indices;
+    CHECK(swapped.size() >= 12);
+    for (size_t k = 0; k < 3; k++) std::swap(swapped[k], swapped[6 + k]);
+    CHECK(!g->update_skin_triangles(id, std::vector<uint32_t>(swapped.begin(), swapped.end() - 3), {{0u, 9u}}, &err));  // (another size)
+    CHECK(!g->update_skin_triangles(id, swapped, {{(uint32_t)swapped.size() - 3, 6u}}, &err));                           // (a range past the skin)
+    CHECK(g->update_skin_triangles(id, swapped, {{0u, 9u}}, &err));
+    CHECK(r519_frame(*g, {id}, 0, err));
+    CHECK(g->read_mesh(id, got, idx, &err));
+    CHECK(idx == swapped);
+    g->remove_skin(id);
+  });
+
+  test("on a real card a posed outlined avatar's frames build no shell and skin nothing on the CPU, and a blink while posing goes up in ranges (round 521): no skin posed on the CPU, no skin sent again, the frame times printed (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    auto pose = [&](float a, const char *why) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, a));
+      ed.mark_changed_for_test(why);
+      r34_steps(ed, 3);
+    };
+    pose(0.2f, "R521 warm");
+    pose(0.25f, "R521 warm 2");
+    const PoseCounts p0 = pose_counts_this_thread();
+    const MeshCounts m0 = mesh_counts();
+    const FrameProfile f0 = ed.frame_profile_totals();
+    for (int i = 0; i < 4; i++) pose(0.3f + 0.1f * (float)i, "R521 posed");
+    const PoseCounts pd = pose_counts_this_thread() - p0;
+    const MeshCounts md = mesh_counts() - m0;
+    const FrameProfile f1 = ed.frame_profile_totals();
+    std::printf("    four posed frames: %llu outline shells built, %llu render meshes skinned on the CPU, %llu skinned items drawn by the card, %llu posed on the CPU\n",
+                (unsigned long long)pd.outline_shells, (unsigned long long)md.skinned, (unsigned long long)(f1.skin_items - f0.skin_items), (unsigned long long)(f1.skin_cpu - f0.skin_cpu));
+    CHECK(pd.outline_shells == 0 && md.skinned == 0 && f1.skin_cpu == f0.skin_cpu);
+    CHECK(f1.skin_items > f0.skin_items && ed.scene_on_gpu_for_test());
+    /* The outlines' stand-ins (kind 2) hold what the CPU kernel gives the shell: the posed buffer read back against shell->render_mesh(). */
+    {
+      const Vec3 eye(0.0f, 1.0f, 4.5f);
+      const std::vector<DrawItem> items = ed.collect_items_card_for_test(false, true, &eye);
+      size_t compared = 0, off = 0;
+      double worst = 0.0;
+      for (const DrawItem &it : items) {
+        GameObject *go = it.always_cull && it.skin ? ed.scene().find((uint64_t)it.id) : nullptr;
+        const int id = go ? ed.skin_card_id_for_test(go, 2) : -1;
+        if (id < 0) continue;
+        std::vector<gpu::RasterVertex> got;
+        std::vector<uint32_t> idx;
+        std::string rerr;
+        if (!g->read_mesh(id, got, idx, &rerr)) {
+          off++;
+          continue;
+        }
+        const RenderMesh &cpu = it.skin->render_mesh();
+        const float diag = std::max(1e-3f, length(cpu.bounds.max - cpu.bounds.min));
+        bool ok = got.size() == cpu.positions.size();
+        double w = 0.0;
+        for (size_t i = 0; ok && i < got.size(); i++) w = std::max(w, (double)length(Vec3(got[i].p[0], got[i].p[1], got[i].p[2]) - cpu.positions[i]));
+        compared++;
+        if (!ok || !(w <= 1e-5 * diag)) off++;
+        worst = std::max(worst, ok ? w / diag : 1.0);
+      }
+      std::printf("    %zu outline shells read back from the card, %zu off; worst %.3g of the diagonal\n", compared, off, worst);
+      CHECK(compared > 0 && off == 0);
+    }
+    /* A blink: the first object with a Skin and shape keys, its first key's weight moved while the pose is held. */
+    GameObject *face = nullptr;
+    std::string key;
+    ed.scene().for_each([&](GameObject &o) {
+      const MeshFilter *mf = o.get<MeshFilter>();
+      if (!face && mf && mf->mesh && !mf->mesh->shape_keys.empty() && o.get<SkinModifier>() && o.get<MeshRenderer>()) face = &o, key = mf->mesh->shape_keys[0].name;
+    });
+    CHECK(face != nullptr);
+    if (!face) return;
+    const FrameProfile b0 = ed.frame_profile_totals();
+    const PoseCounts bp0 = pose_counts_this_thread();
+    double blink_ms = 0.0, still_ms = 0.0;
+    for (int i = 0; i < 6; i++) {
+      face->get<MeshRenderer>()->shape_weights.clear();
+      for (const ShapeKey &k : face->get<MeshFilter>()->mesh->shape_keys) face->get<MeshRenderer>()->shape_weights.push_back({k.name, i % 2 ? 0.0f : 1.0f});  // (every key: some of them move nothing)
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f + 0.02f * (float)i));
+      ed.mark_changed_for_test("R521 blink");
+      const auto t0 = std::chrono::steady_clock::now();
+      r34_steps(ed, 1);
+      blink_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 6.0;
+    }
+    const FrameProfile b1 = ed.frame_profile_totals();
+    const uint64_t blink_hulls = (pose_counts_this_thread() - bp0).outline_shells;  // (the blinks and their poses: the rest shell follows in place)
+    for (int i = 0; i < 6; i++) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.9f + 0.02f * (float)i));
+      ed.mark_changed_for_test("R521 no blink");
+      const auto t0 = std::chrono::steady_clock::now();
+      r34_steps(ed, 1);
+      still_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 6.0;
+    }
+    std::printf("    six blink frames: %llu rest updates (%llu ranges, %llu vertices sent), %llu skins sent whole, %llu posed on the CPU; %.2f ms a frame (%.2f ms a posed frame without a blink)\n",
+                (unsigned long long)(b1.skin_rest_updates - b0.skin_rest_updates), (unsigned long long)(b1.skin_rest_ranges - b0.skin_rest_ranges),
+                (unsigned long long)(b1.skin_rest_vertices - b0.skin_rest_vertices), (unsigned long long)(b1.skin_uploads - b0.skin_uploads),
+                (unsigned long long)(b1.skin_cpu - b0.skin_cpu), blink_ms, still_ms);
+    std::printf("    the blink frames built %llu outline hulls\n", (unsigned long long)blink_hulls);
+    CHECK(blink_hulls == 0);
+    CHECK(b1.skin_rest_updates > b0.skin_rest_updates);
+    CHECK(b1.skin_cpu == b0.skin_cpu && b1.skin_uploads == b0.skin_uploads);
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+}
+
+/* ---------------------------------------------------------------- round 565 (task 0547): what a card frame costs, by part, and the
+ * see-through corners kept on the card. Nothing here asserts a time (ADR 0056). */
+namespace r565 {
+
+/* A raster of its own with a cube and a floor on it; the frames and instances the tests share. */
+struct Rig {
+  std::unique_ptr<gpu::Raster> g;
+  int cube = -1, plane = -1;
+  static constexpr int W = 160, H = 120;
+  Mat4 vp, sun_vp;
+
+  static void set_see_env(bool resend) {
+    if (resend) set_env("BLENDITY_CARD_SEE", "resend");
+    else clear_env("BLENDITY_CARD_SEE");
+  }
+  /* False (with the reason printed) when there is no card. resend_see: the device is made with BLENDITY_CARD_SEE=resend (the
+   * see-through corners go to the card every frame); the variable is cleared again as soon as the device is made, whatever
+   * came of it. */
+  bool open(bool resend_see = false) {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return false;
+    }
+    std::string err;
+    set_see_env(resend_see);  // (cleared for the keeping device too: a run with the variable exported must not change it)
+    g = gpu::Raster::create(0, &err);
+    set_see_env(false);
+    if (!g) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return false;
+    }
+    auto upload = [&](const MeshPtr &mp) {
+      const RenderMesh &rm = mp->render_mesh();
+      std::vector<gpu::RasterVertex> vs(rm.positions.size());
+      for (size_t i = 0; i < vs.size(); i++)
+        vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      return g->add_mesh(vs, rm.indices, &err);
+    };
+    cube = upload(primitives::cube(1.0f));
+    plane = upload(primitives::plane(20.0f, 1));
+    vp = Mat4::perspective(50 * kDeg2Rad, (float)W / (float)H, 0.1f, 100.0f) * Mat4::look_at({0, 7, 9}, {0, 0, 0}, {0, 1, 0});
+    sun_vp = Mat4::ortho(12.0f, 1.0f, 0.1f, 60.0f) * Mat4::look_at(normalize(Vec3(1, -2, -0.5f)) * -20.0f, {0, 0, 0}, {0, 0, 1});
+    return cube >= 0 && plane >= 0;
+  }
+  gpu::RasterInstance make(int mesh, Vec3 at, Vec3 scale, uint32_t id) const {
+    gpu::RasterInstance in;
+    const Mat4 m = Mat4::translate(at) * Mat4::scale(scale);
+    std::memcpy(in.model, m.m, 64);
+    in.mesh = (uint32_t)mesh;
+    in.id = id;
+    return in;
+  }
+  /* A floor and `cubes` cubes in a row, all the same material (ids 1, 2, ...). */
+  std::vector<gpu::RasterInstance> plain(int cubes) const {
+    std::vector<gpu::RasterInstance> v = {make(plane, {0, 0, 0}, {1, 1, 1}, 1)};
+    for (int k = 0; k < cubes; k++) v.push_back(make(cube, {-2.0f + 2.0f * (float)k, 0.5f, 0}, {1, 1, 1}, (uint32_t)k + 2));
+    return v;
+  }
+  /* A floor and six cubes that differ in albedo, roughness, metallic and emission (ids 1 to 7). */
+  std::vector<gpu::RasterInstance> rich() const {
+    std::vector<gpu::RasterInstance> v = plain(6);
+    for (int k = 0; k < 6; k++) {
+      gpu::RasterInstance &in = v[(size_t)k + 1];
+      const float f = (float)k / 5.0f;
+      const Mat4 m = Mat4::translate({-5.0f + 2.0f * (float)k, 0.5f, 0.5f * (float)(k % 3) - 0.5f});
+      std::memcpy(in.model, m.m, 64);
+      in.albedo_rough[0] = 0.9f - 0.7f * f, in.albedo_rough[1] = 0.2f + 0.6f * f, in.albedo_rough[2] = 0.3f + 0.5f * (float)(k % 2), in.albedo_rough[3] = 0.15f + 0.8f * f;
+      in.metal_spec[0] = (k % 3 == 1) ? 1.0f : 0.0f;
+      if (k == 4) in.emission[0] = 2.0f, in.emission[1] = 0.8f;
+    }
+    return v;
+  }
+  /* A sun, a point light and a spot light. */
+  static std::vector<gpu::RasterLight> three_lights() {
+    gpu::RasterLight sun;
+    sun.type = 0;
+    const Vec3 d = normalize(Vec3(1, -2, -0.5f));
+    sun.direction[0] = d.x, sun.direction[1] = d.y, sun.direction[2] = d.z;
+    sun.intensity = 1.5f;
+    gpu::RasterLight point;
+    point.type = 1;
+    point.position[0] = 0, point.position[1] = 3, point.position[2] = 2;
+    point.color[0] = 1.0f, point.color[1] = 0.5f, point.color[2] = 0.4f;
+    point.intensity = 40.0f, point.range = 30.0f;
+    gpu::RasterLight spot;
+    spot.type = 2;
+    spot.position[0] = 3, spot.position[1] = 5, spot.position[2] = 3;
+    const Vec3 sd = normalize(Vec3(-3, -5, -3));
+    spot.direction[0] = sd.x, spot.direction[1] = sd.y, spot.direction[2] = sd.z;
+    spot.color[0] = 0.4f, spot.color[1] = 0.6f, spot.color[2] = 1.0f;
+    spot.intensity = 80.0f, spot.range = 30.0f;
+    spot.spot_cos_outer = std::cos(35.0f * kDeg2Rad), spot.spot_cos_inner = std::cos(20.0f * kDeg2Rad);
+    return {sun, point, spot};
+  }
+  gpu::RasterFrame frame(const std::vector<gpu::RasterLight> &lights, int shadow_size, bool outline) const {
+    gpu::RasterFrame fr;
+    fr.width = W, fr.height = H;
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, sun_vp.m, 64);
+    fr.eye[0] = 0, fr.eye[1] = 7, fr.eye[2] = 9;
+    fr.shadow_size = shadow_size;
+    fr.shadow_light = 0;
+    fr.lights = lights;
+    fr.env_mode = 1;
+    fr.env_color[0] = fr.env_color[1] = fr.env_color[2] = 0.05f;
+    if (outline) {  // (cubes 3 and 5, ids sorted; one outline run)
+      gpu::OverlayOutline o;
+      o.ids = {3, 5};
+      o.color = 0xFFFFE000u;
+      o.width = 2;
+      fr.outlines.push_back(o);
+      fr.overlay_runs.push_back({2u, 0u, 1u});
+    }
+    return fr;
+  }
+};
+
+struct Pic {
+  std::vector<uint32_t> color, ids;
+  std::vector<float> depth;
+  void size() { color.assign((size_t)Rig::W * Rig::H, 0u), ids.assign(color.size(), 0u), depth.assign(color.size(), 0.0f); }
+  bool same(const Pic &o) const {
+    return color.size() == o.color.size() && std::memcmp(color.data(), o.color.data(), color.size() * 4) == 0 &&
+           std::memcmp(ids.data(), o.ids.data(), ids.size() * 4) == 0 && std::memcmp(depth.data(), o.depth.data(), depth.size() * 4) == 0;
+  }
+  /* The picture holds something: more than one colour and an object's id. */
+  bool shows_objects() const {
+    bool two_colours = false, object = false;
+    for (size_t i = 1; i < color.size(); i++) two_colours = two_colours || color[i] != color[0];
+    for (uint32_t id : ids) object = object || id != 0;
+    return two_colours && object;
+  }
+};
+
+/* Draws the frame with the instances and reads colour, depth and ids back. */
+inline bool draw(Rig &r, const std::vector<gpu::RasterInstance> &inst, const gpu::RasterFrame &fr, Pic &pic) {
+  std::string err;
+  pic.size();
+  r.g->set_instances(inst);
+  const bool ok = r.g->render_read(fr, pic.color.data(), pic.depth.data(), pic.ids.data(), &err);
+  if (!ok) std::printf("    render_read failed: %s\n", err.c_str());
+  return ok;
+}
+
+}  // namespace r565
+
+static void tests_round565_gpu() {
+  test("a card frame's parts are counted: frames, draws, binds, instances, lights and pixels rise by what each frame held, the card's and the host's times are finite and never fall, and the parts add up to the frame's own time (round 565; skipped without a GPU)", [] {
+    r565::Rig rig;
+    if (!rig.open()) return;
+    std::string err;
+    const std::vector<gpu::RasterInstance> inst = rig.plain(3);
+    const std::vector<gpu::RasterLight> lights = {r565::Rig::three_lights()[0], r565::Rig::three_lights()[1]};
+    const gpu::RasterFrame fr = rig.frame(lights, 512, false);
+    rig.g->set_instances(inst);
+    r565::Pic pic;
+    pic.size();
+    /* A first frame makes the targets, tables and descriptor sets; the counts below are of the frames after it. */
+    CHECK(rig.g->render_read(fr, pic.color.data(), pic.depth.data(), pic.ids.data(), &err));
+    const gpu::RasterDetail d0 = rig.g->detail();
+    CHECK(d0.frames == 1 && d0.frames_read == 1);
+    const int N = 3;
+    gpu::RasterDetail prev = d0;
+    uint64_t draws = 0, mesh_binds = 0, pipeline_binds = 0;
+    bool timed = false, finite = true, monotone = true, parts_add_up = true;
+    for (int k = 0; k < N; k++) {
+      CHECK(rig.g->render_read(fr, pic.color.data(), pic.depth.data(), pic.ids.data(), &err));
+      const gpu::RasterDetail cur = rig.g->detail();
+      const uint64_t dd = cur.draws - prev.draws, dm = cur.mesh_binds - prev.mesh_binds, dp = cur.pipeline_binds - prev.pipeline_binds;
+      if (k == 0) draws = dd, mesh_binds = dm, pipeline_binds = dp;
+      CHECK(dd > 0 && dm > 0 && dp > 0);
+      CHECK(dd == draws && dm == mesh_binds && dp == pipeline_binds);  // (the same frame again: the same calls)
+      for (int p = 0; p < gpu::RasterDetail::kGpu; p++) {
+        finite = finite && std::isfinite(cur.gpu[p]);
+        monotone = monotone && cur.gpu[p] >= prev.gpu[p];
+      }
+      for (int p = 0; p < gpu::RasterDetail::kHost; p++) {
+        finite = finite && std::isfinite(cur.host[p]);
+        monotone = monotone && cur.host[p] >= prev.host[p];
+      }
+      const gpu::RasterTimes t = rig.g->times();
+      if (t.total > 0) {
+        timed = true;
+        double sum = 0;
+        for (int p = gpu::RasterDetail::Shadow; p <= gpu::RasterDetail::Post; p++) sum += cur.gpu[p] - prev.gpu[p];
+        if (!(std::fabs(sum - t.total) <= 1e-3)) {
+          parts_add_up = false;
+          std::printf("    frame %d: parts add up to %.6f ms, times().total %.6f ms\n", k, sum, t.total);
+        }
+        /* (The Profiler's three numbers keep their meaning: the shadow maps; the g-buffer with the toon and baked planes; the
+         * lighting to the filters.) */
+        const auto part = [&](int p) { return cur.gpu[p] - prev.gpu[p]; };
+        const double gb = part(gpu::RasterDetail::Gbuffer) + part(gpu::RasterDetail::Toon) + part(gpu::RasterDetail::Baked);
+        double lit = 0;
+        for (int p = gpu::RasterDetail::Light; p <= gpu::RasterDetail::Post; p++) lit += part(p);
+        if (!(std::fabs(t.shadow - part(gpu::RasterDetail::Shadow)) <= 1e-3 && std::fabs(t.gbuffer - gb) <= 1e-3 && std::fabs(t.lighting - lit) <= 1e-3)) {
+          parts_add_up = false;
+          std::printf("    frame %d: shadow %.6f / g-buffer %.6f / lighting %.6f ms against the parts' %.6f / %.6f / %.6f\n", k, t.shadow, t.gbuffer, t.lighting,
+                      part(gpu::RasterDetail::Shadow), gb, lit);
+        }
+      }
+      prev = cur;
+    }
+    const gpu::RasterDetail d1 = rig.g->detail();
+    CHECK(finite);
+    CHECK(monotone);
+    CHECK(parts_add_up);
+    CHECK(d1.frames == d0.frames + (uint64_t)N && d1.frames_read == d0.frames_read + (uint64_t)N);
+    CHECK(d1.instances == d0.instances + (uint64_t)N * inst.size());
+    CHECK(d1.lights == d0.lights + (uint64_t)N * lights.size());
+    CHECK(d1.pixels == d0.pixels + (uint64_t)N * r565::Rig::W * r565::Rig::H);
+    CHECK(d1.set_writes == d0.set_writes);  // (identical frames: the targets are kept)
+    if (timed) CHECK(d1.gpu[gpu::RasterDetail::Light] > d0.gpu[gpu::RasterDetail::Light]);
+    std::printf("    %d frames: %llu draws, %llu mesh binds, %llu pipeline binds a frame; %s", N, (unsigned long long)draws, (unsigned long long)mesh_binds, (unsigned long long)pipeline_binds,
+                timed ? "card timestamps:" : "this card reports no timestamps\n");
+    if (timed) {
+      for (int p = 0; p < gpu::RasterDetail::kGpu; p++) std::printf(" %s %.3f", gpu::RasterDetail::gpu_name(p), (d1.gpu[p] - d0.gpu[p]) / N);
+      std::printf(" (ms a frame)\n");
+    }
+    /* A frame left running counts as a frame but not as one that was read; read_back settles it. */
+    const r565::Pic last = pic;
+    const gpu::RasterDetail a0 = rig.g->detail();
+    CHECK(rig.g->render_async(fr, &err));
+    r565::Pic after;
+    after.size();
+    CHECK(rig.g->read_back(0, after.color.data(), after.depth.data(), after.ids.data(), &err));
+    const gpu::RasterDetail a1 = rig.g->detail();
+    CHECK(a1.frames == a0.frames + 1);
+    CHECK(a1.frames_read == a0.frames_read);
+    CHECK(after.same(last));  // (the same frame drawn the other way)
+  });
+
+  test("see-through corners are sent to the card once and kept while they stay the same: a second frame sends none, a changed corner sends them again, two views keep their own, and the picture is the one a card that resends every frame draws (round 565; skipped without a GPU)", [] {
+    r565::Rig keep, resend;
+    if (!keep.open()) return;
+    if (!resend.open(true)) return;  // (the variable is cleared again by now: `keep` was made without it)
+    if (!keep.g->can_draw_see_through()) {
+      std::printf("    skipped: the card has no dual-source blending\n");
+      return;
+    }
+    /* A floor, three cubes and one Transparent instance the see-through triangles point at. */
+    std::vector<gpu::RasterInstance> inst = keep.plain(3);
+    const uint32_t see_inst = (uint32_t)inst.size();
+    gpu::RasterInstance glassy = keep.make(keep.cube, {0, 0, 0}, {1, 1, 1}, 20);
+    glassy.surface = 2;
+    glassy.albedo_rough[0] = 0.9f, glassy.albedo_rough[1] = 0.1f, glassy.albedo_rough[2] = 0.2f;
+    glassy.metal_spec[3] = 0.6f;
+    inst.push_back(glassy);
+    /* `n` triangles in front of the cubes, shifted by dx along x, each a little higher than the one before. */
+    const auto tris = [&](int n, float dx) {
+      std::vector<gpu::SeeCorner> v((size_t)n * 3);
+      const uint32_t white = 0x3C00u | (0x3C00u << 16);
+      for (int k = 0; k < n; k++) {
+        const float x = -4.0f + dx + 1.6f * (float)k, y = 1.0f + 0.2f * (float)k;
+        const float pos[3][3] = {{x, y, 2.5f}, {x + 1.8f, y, 2.5f}, {x + 0.9f, y + 1.5f, 2.0f}};
+        for (int q = 0; q < 3; q++) {
+          gpu::SeeCorner &c = v[(size_t)k * 3 + (size_t)q];
+          std::memset(&c, 0, sizeof c);
+          std::memcpy(c.p, pos[q], 12);
+          c.n[1] = 0.3f, c.n[2] = 0.95f;
+          c.inst = see_inst;
+          std::memcpy(&c.pad[0], &white, 4);
+          std::memcpy(&c.pad[1], &white, 4);
+        }
+      }
+      return v;
+    };
+    /* Draws the corners in a slot of a raster. */
+    const auto draw = [&](r565::Rig &r, const std::vector<gpu::SeeCorner> &see, int slot, r565::Pic &pic) {
+      gpu::RasterFrame fr = r.frame({r565::Rig::three_lights()[0]}, 0, false);
+      fr.slot = slot;
+      fr.see_through = see;
+      return r565::draw(r, inst, fr, pic);
+    };
+    const auto counts = [](const r565::Rig &r) { return std::make_pair((uint64_t)r.g->detail().see_sent, (uint64_t)r.g->detail().see_kept); };
+
+    const std::vector<gpu::SeeCorner> A = tris(6, 0.0f), B = tris(6, 0.7f), none;
+    CHECK(A.size() == B.size() && A.size() == 18 && !!std::memcmp(A.data(), B.data(), A.size() * sizeof(gpu::SeeCorner)));
+
+    /* 1: the see-through pixels show. */
+    r565::Pic bare, a1, a2, ra1, ra2;
+    CHECK(draw(keep, none, 0, bare));
+    const auto c0 = counts(keep);
+    CHECK(draw(keep, A, 0, a1));
+    CHECK(bare.shows_objects() && a1.shows_objects());
+    CHECK(!a1.same(bare));
+
+    /* 2: the second identical frame sends nothing. */
+    const auto c1 = counts(keep);
+    CHECK(c1.first == c0.first + 1 && c1.second == c0.second);
+    CHECK(draw(keep, A, 0, a2));
+    const auto c2 = counts(keep);
+    CHECK(c2.first == c1.first && c2.second == c1.second + 1);
+    CHECK(a2.same(a1));
+    const auto r0 = counts(resend);
+    CHECK(draw(resend, A, 0, ra1) && draw(resend, A, 0, ra2));
+    const auto r1 = counts(resend);
+    CHECK(r1.first == r0.first + 2 && r1.second == r0.second);
+    CHECK(ra1.same(a1) && ra2.same(a1));
+
+    /* 3: one corner moved: sent again, a different picture, the resend raster's picture; then kept. */
+    std::vector<gpu::SeeCorner> A2 = A;
+    A2[2].p[0] += 1.5f, A2[2].p[1] += 1.0f;
+    r565::Pic a3, a3b, ra3;
+    CHECK(draw(keep, A2, 0, a3));
+    const auto c3 = counts(keep);
+    CHECK(c3.first == c2.first + 1 && c3.second == c2.second);
+    CHECK(!a3.same(a2));
+    CHECK(draw(resend, A2, 0, ra3));
+    CHECK(a3.same(ra3));
+    CHECK(draw(keep, A2, 0, a3b));
+    const auto c3b = counts(keep);
+    CHECK(c3b.first == c3.first && c3b.second == c3.second + 1);
+    CHECK(a3b.same(a3));
+
+    /* 4: a shorter list is sent (its size differs) and draws as the resend raster does. */
+    std::vector<gpu::SeeCorner> A3(A2.begin(), A2.end() - 3);
+    r565::Pic a4, ra4;
+    CHECK(draw(keep, A3, 0, a4));
+    const auto c4 = counts(keep);
+    CHECK(c4.first == c3b.first + 1 && c4.second == c3b.second);
+    CHECK(draw(resend, A3, 0, ra4));
+    CHECK(a4.same(ra4) && !a4.same(a3));
+
+    /* 5: two views, each keeps its own list. */
+    r565::Pic pa, pb, pa2, pb2, rpa, rpb;
+    CHECK(draw(keep, A, 0, pa) && draw(keep, B, 1, pb));
+    const auto c5 = counts(keep);
+    CHECK(c5.first == c4.first + 2 && c5.second == c4.second);
+    CHECK(draw(keep, A, 0, pa2) && draw(keep, B, 1, pb2));
+    const auto c5b = counts(keep);
+    CHECK(c5b.first == c5.first && c5b.second == c5.second + 2);
+    CHECK(pa2.same(pa) && pb2.same(pb));
+    CHECK(!pa.same(pb));
+    CHECK(draw(resend, A, 0, rpa) && draw(resend, B, 1, rpb));
+    CHECK(pa.same(rpa) && pb.same(rpb));
+
+    /* 6: a frame without see-through surfaces between two with them: no count, and the slot's copy survives it. */
+    r565::Pic empty0, a6;
+    CHECK(draw(keep, none, 0, empty0));
+    const auto c6 = counts(keep);
+    CHECK(c6.first == c5b.first && c6.second == c5b.second);
+    CHECK(empty0.same(bare));
+    CHECK(draw(keep, A, 0, a6));
+    const auto c6b = counts(keep);
+    CHECK(c6b.first == c6.first && c6b.second == c6.second + 1);
+    CHECK(a6.same(pa));
+
+    /* 7: a list that outgrows slot 0's buffer: sent; the other view's copy is still there. */
+    std::vector<gpu::SeeCorner> big((size_t)20000 * 3);
+    for (int k = 0; k < 20000; k++) {
+      const float x = -5.0f + 0.05f * (float)(k % 200), y = 0.3f + 0.05f * (float)(k / 200);
+      const float pos[3][3] = {{x, y, 2.5f}, {x + 0.04f, y, 2.5f}, {x + 0.02f, y + 0.04f, 2.5f}};
+      for (int q = 0; q < 3; q++) {
+        gpu::SeeCorner &c = big[(size_t)k * 3 + (size_t)q];
+        c = A[(size_t)q];
+        std::memcpy(c.p, pos[q], 12);
+      }
+    }
+    r565::Pic pbig, rbig, pb3;
+    CHECK(draw(keep, big, 0, pbig));
+    const auto c7 = counts(keep);
+    CHECK(c7.first == c6b.first + 1 && c7.second == c6b.second);
+    CHECK(draw(keep, B, 1, pb3));
+    const auto c7b = counts(keep);
+    CHECK(c7b.first == c7.first && c7b.second == c7.second + 1);
+    CHECK(pb3.same(pb));
+    CHECK(draw(resend, big, 0, rbig));
+    CHECK(pbig.same(rbig) && !pbig.same(pa));
+    /* 8: a frame that fails after its send was recorded (its filters' targets, its submission) never ran the copy: the same
+     * list drawn next is sent again, not taken as held, and draws as the resend raster draws it. */
+    r565::Pic lost, pa8, ra8;
+    keep.g->fail_next_frame_for_test();
+    CHECK(!draw(keep, A, 0, lost));  // (slot 0 held the long list: A is staged and its send recorded, then the frame fails)
+    const auto c8 = counts(keep);
+    CHECK(draw(keep, A, 0, pa8));
+    const auto c8b = counts(keep);
+    CHECK(c8b.first == c8.first + 1 && c8b.second == c8.second);
+    CHECK(draw(resend, A, 0, ra8));
+    CHECK(pa8.same(ra8) && pa8.same(pa));
+    CHECK(draw(keep, A, 0, pa8));  // (and now it is held)
+    const auto c8c = counts(keep);
+    CHECK(c8c.first == c8b.first && c8c.second == c8b.second + 1);
+    /* The resend raster never keeps. */
+    const auto r2 = counts(resend);
+    CHECK(r2.second == r0.second);
+    std::printf("    keep raster: %llu sent, %llu kept; resend raster: %llu sent, %llu kept\n", (unsigned long long)c7b.first, (unsigned long long)c7b.second,
+                (unsigned long long)r2.first, (unsigned long long)r2.second);
+  });
+}
+
+/* ---------------------------------------------------------------- round 563 (task 0545): a kept draw list stamps the card
+ * stand-ins its items point at as seen, so a view that keeps its list holds them as one that gathers does (review 520's follow-up). */
+namespace r563 {
+
+/* Solid shading of the small avatar, its list kept and its stand-ins made (without a card when `card` is false). */
+static bool open(Editor &ed, bool card) {
+  r34_open(ed, false);
+  ed.command("benchscene avatarlikequick");
+  ed.command("camera 0 1.0 4.5 0 0.9 0");
+  if (card) ed.viewport_device_for_test(2);
+  else ed.skin_items_for_test(true);  // (Solid makes card-skin items without a card, then turns them back for the CPU raster)
+  ed.command("shading solid");
+  ed.mark_changed_for_test("R563 solid");
+  r34_steps(ed, 6);
+  if (!card) return true;
+  gpu::Raster *g = ed.gpu_raster_for_test();
+  if (g && g->can_skin() && ed.scene_on_gpu_for_test()) return true;
+  std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+  return false;
+}
+
+/* One frame that draws the Scene view again with the scene as it is (the camera turned a little: the scene's hash holds). */
+static void draw_again(Editor &ed, int i) {
+  ed.command(strprintf("camera %.4f 1.0 4.5 0 0.9 0", 0.5f * (float)(i % 50 + 1)));
+  r34_steps(ed, 1);
+}
+
+}  // namespace r563
+
+static void tests_round563_gpu() {
+  test("a kept Solid list keeps its stand-ins through 700 gathers of another view (round 563): the list is never made again and no stand-in is let go; before, they aged out after 600", [] {
+    Editor ed;
+    r563::open(ed, false);
+    const size_t stands = ed.skin_stands_for_test(), held = ed.solid_kept_stands_for_test();
+    CHECK(stands > 0 && held > 0);
+    r563::draw_again(ed, 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds, h0 = view_perf::counters.hit[view_perf::SolidItems];
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);  // (the other view's gathers: each counts, none finds these stand-ins)
+    }
+    const uint64_t b1 = view_perf::counters.solid_item_builds, h1 = view_perf::counters.hit[view_perf::SolidItems];
+    std::printf("    70 frames with 700 gathers elsewhere: Solid's list made %llu times, used kept %llu times; stand-ins %zu -> %zu (%zu in the kept list)\n", (unsigned long long)(b1 - b0),
+                (unsigned long long)(h1 - h0), stands, ed.skin_stands_for_test(), ed.solid_kept_stands_for_test());
+    CHECK(h1 - h0 >= 60);  // (the frames drew from the kept list)
+    CHECK(b1 == b0);
+    CHECK(ed.skin_stands_for_test() == stands && ed.solid_kept_stands_for_test() == held);
+    ed.skin_items_for_test(false);
+  });
+
+  test("a kept list that is not drawn still lets its stand-ins go, and is made again before it is read (round 563, a guard: the stamp must not hold them for a view that does not draw): 700 gathers elsewhere with the view still, then a frame", [] {
+    Editor ed;
+    r563::open(ed, false);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    ed.skin_gathers_elsewhere_for_test(700);  // (nothing drew the kept list meanwhile: a closed or still view holds no stand-in)
+    CHECK(ed.skin_stands_for_test() == 0);
+    CHECK(ed.solid_kept_stands_for_test() == 0);  // (the list went with them)
+    r563::draw_again(ed, 0);
+    r34_steps(ed, 2);
+    CHECK(view_perf::counters.solid_item_builds > b0);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    ed.skin_items_for_test(false);
+  });
+
+  test("on the card a kept Solid list's skins are not sent again while another view gathers (round 563), and a stand-in dropped between two frames is drawn from a new one: the same picture (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    if (!r563::open(ed, true)) return;
+    const GameObject *body = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!body && ed.skin_card_mesh_for_test(&g) >= 0) body = &g;
+    });
+    CHECK(body != nullptr);
+    if (!body) return;
+    r563::draw_again(ed, 0);
+    const size_t stands = ed.skin_stands_for_test();
+    const FrameProfile s0 = ed.frame_profile_totals();
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);
+    }
+    const FrameProfile s1 = ed.frame_profile_totals();
+    std::printf("    70 frames with 700 gathers elsewhere: %llu skins sent, Solid's list made %llu times, stand-ins %zu -> %zu\n", (unsigned long long)(s1.skin_uploads - s0.skin_uploads),
+                (unsigned long long)(view_perf::counters.solid_item_builds - b0), stands, ed.skin_stands_for_test());
+    CHECK(s1.skin_uploads == s0.skin_uploads);
+    CHECK(view_perf::counters.solid_item_builds == b0);
+    CHECK(ed.skin_stands_for_test() == stands);
+    CHECK(ed.scene_on_gpu_for_test());
+    /* A stand-in dropped between two frames (every one, as age does): the next frame gathers, sends the skins again and shows the same picture. */
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const Recti view = ed.window_rect_for_test(WindowKind::Scene);
+    const std::vector<uint32_t> before = r34_crop(ed, view);
+    ed.skin_age_stands_for_test();
+    CHECK(ed.skin_stands_for_test() == 0 && ed.solid_kept_stands_for_test() == 0);
+    CHECK(ed.skin_card_mesh_for_test(body) < 0);
+    ed.command("camera 3 1.0 4.5 0 0.9 0");
+    r34_steps(ed, 2);
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const FrameProfile s2 = ed.frame_profile_totals();
+    const std::vector<uint32_t> after = r34_crop(ed, view);
+    size_t differ = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); i++) differ += before[i] != after[i];
+    std::printf("    after the drop: %llu skins sent, stand-ins %zu, %zu of %zu pixels differ\n", (unsigned long long)(s2.skin_uploads - s1.skin_uploads), ed.skin_stands_for_test(), differ, before.size());
+    CHECK(s2.skin_uploads > s1.skin_uploads);
+    CHECK(ed.skin_stands_for_test() == stands && ed.skin_card_mesh_for_test(body) >= 0);
+    CHECK(before.size() == after.size() && differ == 0);
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+}
+
+/* ---------------------------------------------------------------- round 564 (task 0546, ADR 0140): what round 508's test read as
+ * mixed frames on a busy machine was the job tray's toast over the view; here the pages are made to go up one a frame, over an
+ * older bake, with a toast up throughout - what a starved machine does, without needing one. */
+static void tests_round564_gpu() {
+  test("a bake says done once, when it has landed (round 564): the job tray follows Generate Lighting through its phases as one job - no \"done\" toast while it is still baking its reflection probes, one \"Generate Lighting done\" after", [] {
+    Editor ed;
+    r34_open(ed, false);
+    GameObject *probe = ed.scene().create("R564 Probe");
+    probe->set_local_position(Vec3(0, 1, 0));
+    probe->add<ReflectionProbeComponent>()->resolution = 16;
+    /* Something to bake for a good many frames: a floor and 40 boxes at 48 texels a metre. */
+    GameObject *floor = ed.scene().create("R564 Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+    floor->add<MeshRenderer>()->contribute_gi = true;
+    for (int i = 0; i < 40; i++) {
+      GameObject *box = ed.scene().create("R564 Box" + std::to_string(i));
+      box->add<MeshFilter>()->mesh = primitives::cube();
+      box->set_local_position({(float)(i % 8) - 3.5f, 0.5f, (float)(i / 8) - 2.0f});
+      box->set_local_scale({0.5f, 0.5f, 0.5f});
+      box->add<MeshRenderer>()->contribute_gi = true;
+    }
+    ed.commit_change("r564 probe");
+    ed.scene().lighting.texels_per_unit = 48, ed.scene().lighting.indirect_samples = 8;
+    ed.set_async_jobs_for_test(true);
+    ed.clear_toasts_for_test();
+    ed.command("bake start");
+    ed.step_frame_headless();
+    CHECK(ed.baking_for_test() && !ed.jobs_for_test().empty());  // (the tray has seen the job)
+    ed.jobs_age_for_test(Editor::kBakeJobKey, 2.0);  // (the bake as if it had run two seconds: a phase that ends is worth a toast, without waiting)
+    std::set<std::string> labels;
+    size_t early = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
+      for (const Editor::JobView &j : ed.jobs_for_test()) labels.insert(j.label);
+      ed.step_frame_headless();
+      if (ed.baking_for_test()) early += r564::bake_toast(ed, " done in ");
+    }
+    /* (Read in the landing frame, or the one after: a toast lives three seconds of wall time, which a test must not count on.) */
+    bool done = r564::bake_toast(ed, "Generate Lighting done in ");
+    if (!done) ed.step_frame_headless(), done = r564::bake_toast(ed, "Generate Lighting done in ");
+    std::string seen;
+    for (const std::string &l : labels) seen += (seen.empty() ? "" : ", ") + l;
+    std::printf("    the tray's labels while it baked: %s; frames with a \"done\" toast while baking %zu; \"Generate Lighting done\" at the landing: %d\n", seen.c_str(), early, (int)done);
+    CHECK(!ed.baking_for_test());
+    CHECK(labels.size() >= 2);  // (the tray saw the job change its phase - or "none while baking" below says nothing)
+    CHECK(early == 0);
+    CHECK(done);
+  });
+
+  test("a bake that is cancelled says cancelled, never done (round 564): the tray's Cancel by the job's name, `bake cancel` (the Lighting window's Cancel), Clear Baked Data and a new scene", [] {
+    for (const char *how : {"jobs cancel Generate Lighting", "bake cancel", "bake clear", "newscene"}) {
+      Editor ed;
+      r34_open(ed, false);
+      GameObject *floor = ed.scene().create("R564 Floor");
+      floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+      floor->add<MeshRenderer>()->contribute_gi = true;
+      ed.commit_change("r564 floor");
+      ed.scene().lighting.texels_per_unit = 128, ed.scene().lighting.indirect_samples = 64;  // (long enough to be cancelled in)
+      ed.set_async_jobs_for_test(true);
+      ed.clear_toasts_for_test();
+      ed.command("bake start");
+      ed.step_frame_headless();
+      CHECK(ed.baking_for_test() && !ed.jobs_for_test().empty());
+      ed.jobs_age_for_test(Editor::kBakeJobKey, 2.0);  // (as if it had run two seconds: its end is worth a toast)
+      ed.command(how);
+      bool cancelled = false, done = false;
+      for (int k = 0; k < 3; k++) {
+        ed.step_frame_headless();
+        cancelled = cancelled || r564::bake_toast(ed, "Generate Lighting cancelled in ");
+        done = done || r564::bake_toast(ed, " done in ");
+      }
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+      while (ed.bake_job_running_for_test() && std::chrono::steady_clock::now() < deadline) {  // (the worker stops at its next slice)
+        ed.step_frame_headless();
+        done = done || r564::bake_toast(ed, " done in ");
+      }
+      std::printf("    %s: a \"cancelled\" toast %d, a \"done\" toast %d, still baking %d\n", how, (int)cancelled, (int)done, (int)ed.baking_for_test());
+      CHECK(!ed.baking_for_test());
+      CHECK(cancelled && !done);
+    }
+  });
+
+  test("a bake cancelled and started again in one frame is a new job (round 564): the cancelled one says cancelled at once, and the tray shows the new one from its own start", [] {
+    Editor ed;
+    r34_open(ed, false);
+    GameObject *floor = ed.scene().create("R564 Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(12.0f, 4);
+    floor->add<MeshRenderer>()->contribute_gi = true;
+    ed.commit_change("r564 floor");
+    ed.scene().lighting.texels_per_unit = 128, ed.scene().lighting.indirect_samples = 64;
+    ed.set_async_jobs_for_test(true);
+    ed.clear_toasts_for_test();
+    ed.command("bake start");
+    ed.step_frame_headless();
+    CHECK(ed.baking_for_test() && !ed.jobs_for_test().empty());
+    ed.jobs_age_for_test(Editor::kBakeJobKey, 100.0);
+    ed.command("bake cancel");
+    CHECK(r564::bake_toast(ed, "Generate Lighting cancelled in "));  // (in the call that cancels, not a frame later)
+    ed.command("bake start");
+    ed.step_frame_headless();
+    const std::vector<Editor::JobView> jobs = ed.jobs_for_test();
+    CHECK(ed.baking_for_test() && jobs.size() == 1);
+    const double ran = ed.jobs_ran_for_test(Editor::kBakeJobKey);
+    std::printf("    the new bake's job has run %.2f s in the tray (the cancelled one was aged 100 s), cancelled flag %d\n", ran, jobs.empty() ? -1 : (int)jobs[0].cancelled);
+    CHECK(ran >= 0.0 && ran < 50.0);
+    CHECK(!jobs.empty() && !jobs[0].cancelled);
+    ed.command("bake cancel");
+  });
+
+  test("Generate Lighting again with a page a frame and a toast over the view (round 564, ADR 0140): every frame while the pages go up is the old bake's picture outside the toast, then the new bake's in one frame, and the tray's \"done\" toast comes with it, not while the pages go up (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r564::still_scene(ed, true);
+    auto bake = [&](const std::function<void()> &each_frame) {
+      ed.command("bake start");
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+      while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) each_frame();
+      CHECK(!ed.baking_for_test());
+    };
+    /* The sun baked (Light Mode Baked: its direct light and shadows are in the lightmaps - a Realtime light is in no bake, and the
+     * second bake's picture would be the first's). */
+    GameObject *sun = ed.scene().find_by_name("Directional Light");
+    CHECK(sun && sun->get<Light>());
+    if (!sun || !sun->get<Light>()) return;
+    sun->get<Light>()->mode = 2;
+    ed.commit_change("r564 baked sun");
+    bake([&] { ed.step_frame_headless(); });  // (the older bake: its pages are what the view draws while the next one's go up)
+    r34_steps(ed, 6);
+    CHECK(r564::settle(ed));
+    const size_t pages = ed.lighting_data_for_test().pages.size();
+    CHECK(pages > 1);
+    /* The sun turned and reddened: the next bake's light is not this one's, and until it lands the view keeps the old one's. */
+    sun->set_local_euler(Vec3(35.0f, 140.0f, 0.0f));
+    sun->get<Light>()->color = Vec3(1.0f, 0.25f, 0.1f);
+    ed.commit_change("r564 sun");
+    r34_steps(ed, 6);
+    CHECK(r564::settle(ed));
+    ed.clear_toasts_for_test();  // (the first bake's own "done" toast)
+    ed.mesh_budget_for_test(16u << 20, 0.0);  // (no time left after a frame's first page: one page a frame, as a starved frame sends them)
+    const uint64_t ahead0 = view_perf::counters.lightmap_pages_before_landing;
+    r564::Pic before;
+    size_t frames_sending = 0, mixed = 0, toasted = 0, worst = 0, early_done = 0;
+    uint64_t sent_in_landing = 0;
+    bool aged = false;
+    bake([&] {
+      ed.command("toast R564: a toast over the view");  // (said again every frame: it stays up, its count changing)
+      const uint64_t ahead = view_perf::counters.lightmap_pages_before_landing, sent = view_perf::counters.lightmap_pages_sent;
+      if (ahead == ahead0) before = r564::view(ed);  // (the last picture before any page went up)
+      ed.step_frame_headless();
+      if (!aged) ed.jobs_age_for_test(Editor::kBakeJobKey, 2.0), aged = true;  // (as if the bake had run two seconds: the tray toasts a job that ran one)
+      if (ed.baking_for_test()) early_done += r564::bake_toast(ed, " done in ");
+      if (view_perf::counters.lightmap_pages_before_landing != ahead) {
+        frames_sending++;
+        size_t all = 0;
+        const size_t d = r564::differ(before, r564::view(ed), &all);
+        mixed += d != 0, toasted += all != 0, worst = std::max(worst, d);
+      }
+      if (!ed.baking_for_test()) sent_in_landing = view_perf::counters.lightmap_pages_sent - sent - (view_perf::counters.lightmap_pages_before_landing - ahead);
+    });
+    const uint64_t ahead_sent = view_perf::counters.lightmap_pages_before_landing - ahead0;
+    ed.mesh_budget_for_test(16u << 20);
+    bool done_toast = r564::bake_toast(ed, "Generate Lighting done in ");  // (the landing frame's, or the one after: never a count of seconds)
+    if (!done_toast) ed.step_frame_headless(), done_toast = r564::bake_toast(ed, "Generate Lighting done in ");
+    CHECK(early_done == 0);   // (before: "Baking lighting done" while the pages went up and the view showed the old bake)
+    CHECK(done_toast);
+    ed.clear_toasts_for_test();
+    r34_steps(ed, 6);
+    CHECK(r564::settle(ed));
+    size_t landed_all = 0;
+    const size_t landed = r564::differ(before, r564::view(ed), &landed_all);
+    std::printf("    %llu page(s) sent before the landing over %zu frame(s), %llu in the landing frame; %zu of those frames differ from the old bake's picture outside the toast (worst %zu pixels), %zu under it; the landed picture differs in %zu pixels\n",
+                (unsigned long long)ahead_sent, frames_sending, (unsigned long long)sent_in_landing, mixed, worst, toasted, landed);
+    CHECK(ahead_sent >= pages);
+    CHECK(frames_sending == ahead_sent);  // (a page a frame: the upload spread over as many frames as there are pages)
+    CHECK(frames_sending >= 2);
+    CHECK(mixed == 0);                    // (no frame shows the new bake's texels, nor the old one's with the new UVs)
+    CHECK(toasted > 0);                   // (the toast was over those frames: a whole-picture comparison would have failed here)
+    CHECK(sent_in_landing == 0);
+    CHECK(landed > 1000);                 // (the new bake is another picture: the comparison above could see a change of light)
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -7283,4 +9139,11 @@ void run_gpu_tests() {
   tests_round508_gpu();
   tests_round543_gpu();
   tests_round545b2_gpu();
+  tests_round519_gpu();
+  tests_round519_more_gpu();
+  tests_round520_gpu();
+  tests_round521_gpu();
+  tests_round565_gpu();
+  tests_round563_gpu();
+  tests_round564_gpu();
 }

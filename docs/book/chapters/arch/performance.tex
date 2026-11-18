@@ -44,8 +44,8 @@ the shadow map, the UI, the present; the parts inside an Edit Mode drag), shown 
 suite and the tests; \code{MeshCounts} tallies the mesh caches' work process-wide. The Profiler's Budget ranks a scene
 or avatar against VRChat's PC and Quest performance ranks \cite{VRChatCreators2026}.
 
-\section{Since the books were first written: Passes 16 to 25}
-Rounds 411 to 515 kept the same rule and added the following (the numbers are in \code{docs/PERFORMANCE.md}, each naming its
+\section{Since the books were first written: Passes 16 to 26}
+Rounds 411 to 523 kept the same rule and added the following (the numbers are in \code{docs/PERFORMANCE.md}, each naming its
 machine).
 \begin{itemize}
   \item \textbf{Never halt the editor} (rounds 411--415): a render, a bake, a geometry operation or a file import runs on a
@@ -62,12 +62,30 @@ machine).
     full-body solver reads the scene into a pose buffer, solves and writes each changed joint once; the springs in Play
     no longer build meshes whole. The pose that results is the one the solver gave before (the goldens stand). On the
     stand-in avatar of a real one's size (292 bones, about 140{,}000 triangles) an IK drag met 16.7~ms (Q-07; 48--56~ms
-    before, 10--13 after); whole-body poses are still 35--53~ms, the rest being the moved meshes sent to the card, their
-    normals and the outline shells, and skinning on the card is left to the owner as an open decision. The Profiler's Posing
+    before, 10--13 after); whole-body poses were 35--53~ms, the rest being the moved meshes sent to the card, their
+    normals and the outline shells, which Pass~26 (below) took to the card. The Profiler's Posing
     block shows each part and \code{perf drag} plays a drag as real events.
   \item \textbf{Pass 23: the Blockout} (rounds 476--515): its stress rows (\code{blockout} section, interiors of 100 and
     400 pieces) are the measurement of B-06; a build of the 100-piece interior is still about 180~ms on a worker, which is
     why nothing builds in a frame.
+  \item \textbf{Pass 26: skinning on the card} (rounds 518--523, \adr{0146}). A posed character is its rest render mesh
+    moved by the skin. The CPU kernel (\code{skin\_render\_vertices}) is the \emph{reference}: the Skin modifier and the
+    kernel share one blend, and normals and tangents are turned by the bones as Unity does. The card's \emph{compute pass}
+    is written from it line for line and checked against it (worst position 5.4e-7 of the mesh's diagonal): a skin goes up
+    once as its rest vertices and weights, then only a palette (96 bytes a bone, 28~KB for 292), and one dispatch per
+    changed palette before the frame's first pass writes the buffer every pass and both views draw. The Scene and Game
+    views keep a \emph{stand-in} (the rest render mesh) per object and rest, so the kernel never runs for a card view.
+    What needs positions without a posed render mesh (picking, snapping, colliders, exports, bounds) reads the evaluated
+    mesh's \emph{CPU positions on demand}, which the deform makes anyway; only a render or a bake builds the posed render
+    mesh. A toon \emph{outline is a skin}: the shell is built once for the rest and posed by the body's bones, an
+    approximation of at most 44\,\% of the thickness where bones blend. \emph{Shape keys} under a skin go up as ranges of
+    the rest, so a blink stays on the card. Round 522's timed run on the stand-in avatar (the card, ms a frame, round 518
+    $\to$ 522): the chest's Rotate gizmo 37.3 $\to$ 6.9, a Puppet handle 55.6 $\to$ 12.3, a scrub 47.3 $\to$ 7.9, a scrub with
+    the Game view beside 70.1 $\to$ 10.8, Play with the springs 45.6 $\to$ 9.7: every row alone meets 16.7~ms (Q-07). In the
+    world the card also draws, the chest is 11.1, an IK target 9.4, but a Puppet handle 20.8, a scrub 20.5 and Play 24.7:
+    those frames are the card drawing the world (render call 6--15~ms, lighting 3--6, 9 with two views), not skinning (under 2~ms), and
+    they are named for the Speed / render stream. The owner's avatar in the owner's world: the chest 50.0 $\to$ 16.9~ms
+    windowed, a scrub 38.0 $\to$ 15.4. The CPU views are as fast or faster in every row.
   \item \textbf{Pass 25: the speed survey} (rounds 504--511). Seven new named-only stress sections time what had no row
     (\code{image\_edit}, \code{sculpt\_paint}, \code{sequencer}, \code{importers}, \code{unity\_export},
     \code{asset\_windows}, \code{cold\_first\_use}) and an eighth the Scene view (\code{scene\_views}); each row ends in ok or
@@ -86,7 +104,7 @@ machine).
 \section{What is still over budget}
 A part with no row has no time on record, so the lists are the survey's. Still over at the time of writing: the Scene
 view and the Game view both drawn at 50{,}000 cubes and one object moved every frame at that size (their cost is the work per
-object that changes, not the kept work), a Unity scene's import at 10{,}000 objects, whole-body posing, the Blockout
+object that changes, not the kept work), a Unity scene's import at 10{,}000 objects, whole-body posing in a world (alone it meets the budget since Pass~26), the Blockout
 kernel at 100 interior pieces, and a few first uses (the Render and Textures windows). Round 511's timed run confirms
 each, adds Noise Reduction's slider (18.1--19.4~ms), the four filters' whole-picture results at 4096 pixels and a render
 to video's start frame (185~ms), and puts the whole suite at 51 rows over budget before and 51 after. Its tables are \code{docs/perf/verify-511.md}.

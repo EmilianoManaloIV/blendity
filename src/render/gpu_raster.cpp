@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 
 #if defined(BL_WITH_VULKAN)
 #  include "gpu_vk.h"
@@ -2860,6 +2861,119 @@ void main() {
 }
 )";
 
+/* ---------------------------------------------------------------- the skin pass */
+
+/* Round 519 (ADR 0146): skin_render_vertices (src/scene/skin_render.cpp) in GLSL, a vertex a thread, line for line from
+ * skin_blend_point / skin_blend_dir: the same order of operations, dual quaternions only when every bone of the vertex is
+ * rigid, a vertex with no bone (or a degenerate turn) left as it is, a non-finite position kept at rest. Standalone: it
+ * shares nothing with the views' shaders. The weights are the CPU's (divided by their sum there). */
+const char *kSkinComp = R"(
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer Rest { float rest[]; };       // RasterVertex: p, n, uv, t (12 floats)
+layout(std430, set = 0, binding = 1) writeonly buffer Posed { float posed[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Bones { uint bone_words[]; };   // 16-bit palette indices, two a word
+layout(std430, set = 0, binding = 3) readonly buffer Weights { float wts[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Counts { uint counts[]; };      // slots used a vertex, four a word
+layout(std430, set = 0, binding = 5) readonly buffer Palette { float pal[]; };       // this frame's (a dynamic offset)
+layout(push_constant) uniform Push { uint verts; uint slots; uint tangents; uint bones; } pc;
+const uint HEAD = 32u, REC = 24u;  // gpu_raster.h's kSkinPaletteHeader, kSkinPaletteBone
+uint gb[8];
+float gw[8];
+
+vec3 pcol(uint base, uint c) { return vec3(pal[base + c * 3u], pal[base + c * 3u + 1u], pal[base + c * 3u + 2u]); }
+vec3 mpoint(uint base, vec3 p) { return pcol(base, 0u) * p.x + pcol(base, 1u) * p.y + pcol(base, 2u) * p.z + pcol(base, 3u); }
+vec3 mdir(uint base, vec3 d) { return pcol(base, 0u) * d.x + pcol(base, 1u) * d.y + pcol(base, 2u) * d.z; }
+vec4 qmul(vec4 a, vec4 b) {  // Quat::operator*
+  return vec4(a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+              a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+              a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+              a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+vec3 qrot(vec4 q, vec3 v) {  // Quat::rotate
+  vec3 u = q.xyz;
+  vec3 t = cross(u, v) * 2.0;
+  return v + t * q.w + cross(u, t);
+}
+bool bad3(vec3 v) { return any(isnan(v)) || any(isinf(v)); }
+
+/* skin_blend_dir */
+bool skin_dir(vec3 dir, bool dq, vec4 turn, uint n, out vec3 res) {
+  res = dir;
+  vec3 nw = mdir(0u, dir);
+  vec3 on = vec3(0.0);
+  if (dq) on = qrot(turn, nw);
+  else
+    for (uint k = 0u; k < n; k++) on += mdir(HEAD + REC * gb[k], nw) * gw[k];
+  on = mdir(12u, on);
+  float len = length(on);
+  if (isnan(len) || isinf(len) || !(len > 1e-12)) return false;
+  res = on / len;
+  return true;
+}
+
+void main() {
+  uint r = gl_GlobalInvocationID.x;
+  if (r >= pc.verts) return;
+  uint o = r * 12u;
+  vec3 p = vec3(rest[o], rest[o + 1u], rest[o + 2u]);
+  vec3 nrm = vec3(rest[o + 3u], rest[o + 4u], rest[o + 5u]);
+  vec4 tan = vec4(rest[o + 8u], rest[o + 9u], rest[o + 10u], rest[o + 11u]);
+  uint n = min((counts[r >> 2u] >> ((r & 3u) * 8u)) & 255u, min(pc.slots, 8u));  // (add_skin refuses more; the clamps keep every read in range)
+  if (n > 0u) {
+    uint e0 = r * pc.slots;
+    bool all_rigid = pal[24] != 0.0;
+    for (uint k = 0u; k < n; k++) {
+      uint e = e0 + k;
+      gb[k] = min((bone_words[e >> 1u] >> ((e & 1u) * 16u)) & 0xFFFFu, pc.bones - 1u);
+      gw[k] = wts[e];
+    }
+    for (uint k = 0u; k < n && all_rigid; k++) all_rigid = pal[HEAD + REC * gb[k] + 20u] != 0.0;
+    vec3 pw = mpoint(0u, p);  // the character's space
+    vec3 ob = vec3(0.0);
+    vec4 turn = vec4(0.0, 0.0, 0.0, 1.0);
+    bool ok = true;
+    if (all_rigid) {
+      /* Dual quaternion blend, each kept on the first's side. */
+      uint b0 = HEAD + REC * gb[0];
+      vec4 q0r = vec4(pal[b0 + 12u], pal[b0 + 13u], pal[b0 + 14u], pal[b0 + 15u]);
+      vec4 rr = vec4(0.0), dd = vec4(0.0);
+      for (uint k = 0u; k < n; k++) {
+        uint qb = HEAD + REC * gb[k];
+        vec4 qr = vec4(pal[qb + 12u], pal[qb + 13u], pal[qb + 14u], pal[qb + 15u]);
+        vec4 qd = vec4(pal[qb + 16u], pal[qb + 17u], pal[qb + 18u], pal[qb + 19u]);
+        float w = gw[k];
+        if (qr.x * q0r.x + qr.y * q0r.y + qr.z * q0r.z + qr.w * q0r.w < 0.0) w = -w;
+        rr += qr * w;
+        dd += qd * w;
+      }
+      float len = sqrt(rr.x * rr.x + rr.y * rr.y + rr.z * rr.z + rr.w * rr.w);
+      if (!(len > 1e-8)) ok = false;
+      else {
+        rr /= len;
+        dd /= len;
+        vec4 t = qmul(dd, vec4(-rr.xyz, rr.w));  // translation = 2 d r*
+        ob = qrot(rr, pw) + t.xyz * 2.0;
+        turn = rr;
+      }
+    }
+    else
+      for (uint k = 0u; k < n; k++) ob += mpoint(HEAD + REC * gb[k], pw) * gw[k];
+    if (ok) {
+      vec3 moved = mpoint(12u, ob);  // back into the mesh's space
+      if (!bad3(moved)) p = moved;
+      vec3 d;
+      if (skin_dir(nrm, all_rigid, turn, n, d)) nrm = d;
+      if (pc.tangents != 0u && skin_dir(tan.xyz, all_rigid, turn, n, d)) tan = vec4(d, tan.w);
+    }
+  }
+  posed[o] = p.x, posed[o + 1u] = p.y, posed[o + 2u] = p.z;
+  posed[o + 3u] = nrm.x, posed[o + 4u] = nrm.y, posed[o + 5u] = nrm.z;
+  posed[o + 6u] = rest[o + 6u], posed[o + 7u] = rest[o + 7u];
+  posed[o + 8u] = tan.x, posed[o + 9u] = tan.y, posed[o + 10u] = tan.z, posed[o + 11u] = tan.w;
+}
+)";
+
 /* ---------------------------------------------------------------- the device */
 
 struct Buf {
@@ -2902,6 +3016,12 @@ struct Slot {
   std::vector<VkDescriptorSet> post_sets;
   size_t post_sets_used = 0;
   VkDescriptorSet set = VK_NULL_HANDLE;
+  /* Round 565: this view's see-through corners - on the card (`see`), and the host's copy of what was last sent
+   * (`see_stage`, which is also what a send copies from). see_bytes: how much of `see` holds see_stage's bytes (0: nothing
+   * sent yet, or a send that was not recorded); see_send: a send this frame's recording still owes. */
+  Buf see, see_stage;
+  size_t see_bytes = 0, see_send = 0;
+  bool see_cached = false;  // (see_stage is in cached memory: it can be compared with)
 };
 
 /* The frame's uniform block, as kCommon declares it. */
@@ -2996,6 +3116,10 @@ class VulkanRaster final : public Raster {
     ts_period_ns_ = props.limits.timestampPeriod;
     max_storage_ = props.limits.maxStorageBufferRange;
     f_.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
+    {
+      const char *see = std::getenv("BLENDITY_CARD_SEE");  // (=resend: the see-through corners sent every frame, as before round 565 - write_see)
+      see_keep_ = !(see && std::string(see) == "resend");
+    }
     uint32_t qn = 0;
     f_.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
     std::vector<VkQueueFamilyProperties> qs(qn);
@@ -3005,6 +3129,7 @@ class VulkanRaster final : public Raster {
       if (qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) qfam_ = i;
     if (qfam_ == UINT32_MAX) return fail(err, info_.name + " has no graphics queue");
     timestamps_ = qs[qfam_].timestampValidBits > 0;
+    ts_mask_ = qs[qfam_].timestampValidBits >= 64 ? ~0ull : (1ull << qs[qfam_].timestampValidBits) - 1;
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = qfam_;
@@ -3049,12 +3174,12 @@ class VulkanRaster final : public Raster {
     for (VkFence &pf : pfence_) f_.vkCreateFence(dev_, &fci, nullptr, &pf);
     VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    qpi.queryCount = 4;
-    f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_);
+    qpi.queryCount = kStamps;  // (round 565: a stamp after each part of the frame)
+    if (f_.vkCreateQueryPool(dev_, &qpi, nullptr, &queries_) != VK_SUCCESS) timestamps_ = false;  // (no pool: no times, as a card without timestamps)
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
-    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532, 557)
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532, 557)
       if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
@@ -3127,6 +3252,7 @@ class VulkanRaster final : public Raster {
   bool update_mesh(int mesh, const std::vector<RasterVertex> &v, const std::vector<uint32_t> *idx, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    if (is_skin(mesh)) return fail(err, "a skinned mesh is written by the card's skin pass");
     Mesh &m = meshes_[(size_t)mesh];
     if (v.size() != m.vertices || (idx && idx->size() != m.indices)) return fail(err, "a mesh of another size");
     m.rt_content = ++rt_content_serial_;
@@ -3137,6 +3263,7 @@ class VulkanRaster final : public Raster {
   bool update_mesh_ranges(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &vr,
                           const std::vector<uint32_t> &idx, const std::vector<std::pair<uint32_t, uint32_t>> &ir, std::string *err) override {
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such mesh");
+    if (is_skin(mesh)) return fail(err, "a skinned mesh is written by the card's skin pass");
     Mesh &m = meshes_[(size_t)mesh];
     if (idx.size() != m.indices) return fail(err, "a mesh of another size");
     size_t nv = 0;
@@ -3187,6 +3314,285 @@ class VulkanRaster final : public Raster {
     }
     free_buffer(host);
     return ok;
+  }
+
+  /* ------------------------------------------------------------ the skin pass (round 519, ADR 0146)
+   * Its own compute pipeline, descriptor layout and pool, made by the first add_skin - the views' layout (set 0) and the
+   * pipelines made at init are not touched. A skin is a mesh in meshes_ whose vertex buffer the pass writes. */
+  struct Skin {
+    Buf rest, bones, weights, counts;  // device-local storage, written once
+    Buf pal;                           // host-visible: a ring of kSkinRing regions, one a dispatch
+    VkDeviceSize region = 0;           // a ring region's bytes (aligned for a dynamic offset)
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    uint32_t verts = 0, slots = 0, bone_count = 0, tangents = 0, ring = 0, usage = 0;
+    std::vector<float> palette;  // the last given
+    bool dirty = false;          // a palette not yet dispatched
+  };
+  static constexpr uint32_t kSkinRing = 3;  // (every recording settles the frame before, so one region would do; three are spare room should frames overlap)
+  std::map<int, Skin> skins_;
+  std::vector<int> skin_written_;  // (take_skin_writes: the meshes dispatched since)
+  uint64_t skin_dispatches_ = 0;
+  uint32_t skin_extra_usage_ = 0;
+  bool skin_failed_ = false;
+  VkDescriptorSetLayout skin_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout skin_layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool skin_pool_ = VK_NULL_HANDLE;
+  VkPipeline skin_pipeline_ = VK_NULL_HANDLE;
+  PFN_vkCreateComputePipelines skin_create_pipelines_ = nullptr;
+  PFN_vkCmdDispatch skin_dispatch_ = nullptr;
+  static constexpr uint32_t kSkinPoolSets = 256;
+
+  bool can_skin() const override { return dev_ != VK_NULL_HANDLE && !skin_failed_ && !lost_; }
+  uint64_t skin_dispatches() const override { return skin_dispatches_; }
+  size_t skin_count() const override { return skins_.size(); }
+  void set_skin_extra_usage(uint32_t flags) override { skin_extra_usage_ = flags; }
+  uint32_t skin_usage(int mesh) const override {
+    const auto it = skins_.find(mesh);
+    return it == skins_.end() ? 0u : it->second.usage;
+  }
+  std::vector<int> take_skin_writes() override {
+    std::vector<int> out;
+    out.swap(skin_written_);
+    return out;
+  }
+  void remove_skin(int mesh) override { remove_mesh(mesh); }
+  void drop_skin(int mesh) {
+    const auto it = skins_.find(mesh);
+    if (it == skins_.end()) return;
+    free_skin_buffers(it->second, true);
+    skin_written_.erase(std::remove(skin_written_.begin(), skin_written_.end(), mesh), skin_written_.end());
+    skins_.erase(it);
+  }
+  bool is_skin(int mesh) const { return skins_.count(mesh) != 0; }
+
+  /* The pass's pipeline, layout and pool, once (a refusal is remembered: not tried every frame). */
+  bool make_skin_pass(std::string *err) {
+    if (skin_pipeline_) return true;
+    if (skin_failed_) return fail(err, "the card's skin pass couldn't be made");
+    skin_failed_ = true;  // (until it is made)
+    skin_create_pipelines_ = (PFN_vkCreateComputePipelines)f_.vkGetDeviceProcAddr(dev_, "vkCreateComputePipelines");
+    skin_dispatch_ = (PFN_vkCmdDispatch)f_.vkGetDeviceProcAddr(dev_, "vkCmdDispatch");
+    if (!skin_create_pipelines_ || !skin_dispatch_) return fail(err, info_.name + " has no compute dispatch");
+    std::string cerr;
+    const std::vector<uint32_t> spv = vk::compile(kSkinComp, shaderc_compute_shader, &cerr);
+    if (spv.empty()) return fail(err, "the skin shader: " + cerr);
+    VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smi.codeSize = spv.size() * 4;
+    smi.pCode = spv.data();
+    VkShaderModule sm = VK_NULL_HANDLE;
+    if (f_.vkCreateShaderModule(dev_, &smi, nullptr, &sm) != VK_SUCCESS) return fail(err, "the skin shader module");
+    VkDescriptorSetLayoutBinding b[6];
+    for (uint32_t i = 0; i < 6; i++)
+      b[i] = {i, i == 5 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dli.bindingCount = 6;
+    dli.pBindings = b;
+    const VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &skin_set_layout_;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kSkinPoolSets}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, kSkinPoolSets}};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = kSkinPoolSets;
+    dpi.poolSizeCount = 2;
+    dpi.pPoolSizes = ps;
+    VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = sm;
+    cpi.stage.pName = "main";
+    const bool made = f_.vkCreateDescriptorSetLayout(dev_, &dli, nullptr, &skin_set_layout_) == VK_SUCCESS &&
+                      f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &skin_layout_) == VK_SUCCESS &&
+                      f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &skin_pool_) == VK_SUCCESS;
+    cpi.layout = skin_layout_;
+    const bool piped = made && skin_create_pipelines_(dev_, VK_NULL_HANDLE, 1, &cpi, nullptr, &skin_pipeline_) == VK_SUCCESS;
+    f_.vkDestroyShaderModule(dev_, sm, nullptr);
+    if (!piped) {
+      destroy_skin_pass();
+      return fail(err, "the skin pass's pipeline");
+    }
+    skin_failed_ = false;
+    return true;
+  }
+  void destroy_skin_pass() {
+    for (auto &kv : skins_) free_skin_buffers(kv.second, false);
+    skins_.clear();
+    if (skin_pipeline_) f_.vkDestroyPipeline(dev_, skin_pipeline_, nullptr);
+    if (skin_pool_) f_.vkDestroyDescriptorPool(dev_, skin_pool_, nullptr);
+    if (skin_layout_) f_.vkDestroyPipelineLayout(dev_, skin_layout_, nullptr);
+    if (skin_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, skin_set_layout_, nullptr);
+    skin_pipeline_ = VK_NULL_HANDLE, skin_pool_ = VK_NULL_HANDLE, skin_layout_ = VK_NULL_HANDLE, skin_set_layout_ = VK_NULL_HANDLE;
+  }
+  void free_skin_buffers(Skin &s, bool free_set) {
+    if (free_set && s.set && skin_pool_) f_.vkFreeDescriptorSets(dev_, skin_pool_, 1, &s.set);
+    for (Buf *b : {&s.rest, &s.bones, &s.weights, &s.counts, &s.pal}) free_buffer(*b);
+    s.set = VK_NULL_HANDLE;
+  }
+
+  /* The skin's static buffers: its rest vertices, bones (16-bit, two a word), weights and counts (a byte each, four a word). */
+  bool make_skin_buffers(Skin &s, const std::vector<RasterVertex> &rest, const SkinWeights &w, std::string *err) {
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const VkBufferUsageFlags st = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const size_t slots = w.bone.size();  // (the vertices' slots, all of them)
+    std::vector<uint32_t> words((slots + 1) / 2, 0u), counts((w.count.size() + 3) / 4, 0u);
+    for (size_t e = 0; e < slots; e++) words[e >> 1] |= (uint32_t)w.bone[e] << ((e & 1) * 16);
+    for (size_t v = 0; v < w.count.size(); v++) counts[v >> 2] |= (uint32_t)w.count[v] << ((v & 3) * 8);
+    s.region = (VkDeviceSize)((skin_palette_floats(w.bones) * 4 + 255) / 256 * 256);
+    if (!make_buffer(s.rest, rest.size() * sizeof(RasterVertex), st, local) || !make_buffer(s.bones, words.size() * 4, st, local) ||
+        !make_buffer(s.weights, slots * 4, st, local) || !make_buffer(s.counts, counts.size() * 4, st, local) ||
+        !make_buffer(s.pal, s.region * kSkinRing, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
+      return fail(err, info_.name + ": out of memory for a skin");
+    if (!upload(s.rest, rest.data(), rest.size() * sizeof(RasterVertex), err) || !upload(s.bones, words.data(), words.size() * 4, err) ||
+        !upload(s.weights, w.weight.data(), slots * 4, err) || !upload(s.counts, counts.data(), counts.size() * 4, err))
+      return false;
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = skin_pool_;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &skin_set_layout_;
+    if (f_.vkAllocateDescriptorSets(dev_, &dai, &s.set) != VK_SUCCESS) return fail(err, "too many skins on the card");
+    return true;
+  }
+  void bind_skin(const Skin &s, const Buf &posed) {
+    const VkDescriptorBufferInfo info[6] = {{s.rest.buf, 0, VK_WHOLE_SIZE}, {posed.buf, 0, VK_WHOLE_SIZE}, {s.bones.buf, 0, VK_WHOLE_SIZE},
+                                            {s.weights.buf, 0, VK_WHOLE_SIZE}, {s.counts.buf, 0, VK_WHOLE_SIZE}, {s.pal.buf, 0, s.region}};
+    VkWriteDescriptorSet w[6];
+    for (uint32_t i = 0; i < 6; i++) {
+      w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      w[i].dstSet = s.set;
+      w[i].dstBinding = i;
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = i == 5 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      w[i].pBufferInfo = &info[i];
+    }
+    f_.vkUpdateDescriptorSets(dev_, 6, w, 0, nullptr);
+  }
+
+  int add_skin(const std::vector<RasterVertex> &rest, const std::vector<uint32_t> &idx, const SkinWeights &w, std::string *err) override {
+    if (!settle(err)) return -1;
+    const size_t nv = rest.size();
+    if (!nv || idx.empty()) return fail(err, "an empty skin"), -1;
+    if (w.slots < 1 || w.slots > 8 || w.bones < 1 || w.bones > 65535 || w.count.size() != nv || w.bone.size() != nv * w.slots || w.weight.size() != nv * w.slots)
+      return fail(err, "skin weights that don't fit the card's pass"), -1;
+    if ((VkDeviceSize)nv * sizeof(RasterVertex) > max_storage_ || (VkDeviceSize)nv * w.slots * 4 > max_storage_ || nv > 65535u * 64u)  // (a dispatch's 65,535 groups of 64)
+      return fail(err, "a skin too large for the card's storage buffers"), -1;
+    for (size_t v = 0; v < nv; v++) {  // (every used slot names a bone of the palette: the pass reads it unchecked otherwise)
+      if (w.count[v] > w.slots) return fail(err, "skin weights with more bones a vertex than slots"), -1;
+      for (size_t k = 0; k < w.count[v]; k++)
+        if (w.bone[v * w.slots + k] >= w.bones) return fail(err, "skin weights naming a bone the palette doesn't hold"), -1;
+    }
+    if (!make_skin_pass(err)) return -1;
+    Mesh m;
+    m.vertices = (uint32_t)nv;
+    m.indices = (uint32_t)idx.size();
+    const VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;  // (SRC: read_mesh)
+    /* (mesh_usage: on a device with ray queries the traced shadows' bottom levels read the posed buffer too - round 543
+     * met round 519 in the merge) */
+    const VkBufferUsageFlags vb_usage = mesh_usage(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | copies) | (VkBufferUsageFlags)skin_extra_usage_;
+    Skin s;
+    s.verts = (uint32_t)nv, s.slots = w.slots, s.bone_count = w.bones, s.tangents = w.tangents ? 1u : 0u, s.usage = (uint32_t)vb_usage;
+    const VkMemoryPropertyFlags local = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const bool made = make_buffer(m.vb, nv * sizeof(RasterVertex), vb_usage, local) &&
+                      make_buffer(m.ib, idx.size() * sizeof(uint32_t), mesh_usage(VK_BUFFER_USAGE_INDEX_BUFFER_BIT | copies), local) &&
+                      make_skin_buffers(s, rest, w, err) && upload(m.vb, rest.data(), nv * sizeof(RasterVertex), err) &&
+                      upload(m.ib, idx.data(), idx.size() * sizeof(uint32_t), err);
+    if (!made) {
+      if (err && err->empty()) *err = info_.name + ": out of memory for a skin";
+      free_skin_buffers(s, true);
+      free_mesh(m);
+      return -1;
+    }
+    bind_skin(s, m.vb);
+    m.live = true;
+    resources_gen_++;
+    int id = -1;
+    for (size_t i = 0; i < meshes_.size() && id < 0; i++)
+      if (!meshes_[i].live) id = (int)i;
+    if (id < 0) id = (int)meshes_.size(), meshes_.push_back(m);
+    else meshes_[(size_t)id] = m;
+    skins_[id] = std::move(s);
+    return id;
+  }
+
+  bool set_skin_palette(int mesh, const std::vector<float> &palette, std::string *err) override {
+    const auto it = skins_.find(mesh);
+    if (it == skins_.end()) return fail(err, "no such skin");
+    Skin &s = it->second;
+    if (palette.size() != skin_palette_floats(s.bone_count)) return fail(err, "a palette of the wrong size");
+    if (!s.dirty && s.palette == palette) return true;  // (the same pose: nothing to dispatch)
+    s.palette = palette;
+    s.dirty = true;
+    return true;
+  }
+
+  bool update_skin_rest(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &ranges, std::string *err) override {
+    const auto it = skins_.find(mesh);
+    if (it == skins_.end()) return fail(err, "no such skin");
+    Skin &s = it->second;
+    size_t nv = 0;
+    for (const auto &r : ranges) {
+      if ((uint64_t)r.first + r.second > s.verts) return fail(err, "a vertex range past the skin");
+      nv += r.second;
+    }
+    if (nv != v.size()) return fail(err, "vertices for other ranges");
+    if (!nv) return true;
+    size_t from = 0;  // (the vertices come one range after another; copied before the frame's passes, with the barrier of uploaded())
+    for (const auto &r : ranges) {
+      queue_copy(s.rest.buf, v.data() + from, (size_t)r.first * sizeof(RasterVertex), (size_t)r.second * sizeof(RasterVertex));
+      from += r.second;
+    }
+    s.dirty = true;  // (the posed buffer is written again from the new rest)
+    return true;
+  }
+
+  bool update_skin_triangles(int mesh, const std::vector<uint32_t> &idx, const std::vector<std::pair<uint32_t, uint32_t>> &ranges, std::string *err) override {
+    if (!skins_.count(mesh) || mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such skin");
+    Mesh &m = meshes_[(size_t)mesh];
+    if (idx.size() != m.indices) return fail(err, "a skin of another size");
+    for (const auto &r : ranges)
+      if ((uint64_t)r.first + r.second > idx.size()) return fail(err, "an index range past the skin");
+    if (ranges.empty()) return true;
+    for (const auto &r : ranges) queue_copy(m.ib.buf, idx.data() + r.first, (size_t)r.first * 4, (size_t)r.second * 4);
+    m.rt_content = ++rt_content_serial_;  // (the traced shadows' bottom level reads the triangles too)
+    return true;
+  }
+
+  /* Before the frame's first pass: the pass for each skin whose palette changed, then one barrier (shader write -> the
+   * vertex fetches and everything after it). A second view of the frame finds nothing dirty. */
+  void record_skins() {
+    bool any = false;
+    skin_written_.clear();  // (this frame's alone: M2's refit reads the frame it is recorded in)
+    for (auto &kv : skins_) {
+      Skin &s = kv.second;
+      if (!s.dirty || !skin_pipeline_) continue;
+      if (!any) {
+        // The posed buffer is one buffer, and an earlier submission on the queue may still be reading it as vertices: its
+        // reads come before this frame's write (an execution dependency is enough for a write after a read; the barrier
+        // after the dispatches orders a write after a write).
+        f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
+                                nullptr, 0, nullptr);
+        f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, skin_pipeline_);
+      }
+      any = true;
+      s.ring = (s.ring + 1) % kSkinRing;
+      std::memcpy((uint8_t *)s.pal.mapped + (size_t)s.ring * s.region, s.palette.data(), s.palette.size() * sizeof(float));
+      const uint32_t offset = (uint32_t)(s.ring * s.region);
+      f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, skin_layout_, 0, 1, &s.set, 1, &offset);
+      const uint32_t pc[4] = {s.verts, s.slots, s.tangents, s.bone_count};
+      f_.vkCmdPushConstants(cmd_, skin_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, pc);
+      skin_dispatch_(cmd_, (s.verts + 63) / 64, 1, 1);
+      s.dirty = false;
+      skin_dispatches_++;
+      skin_written_.push_back(kv.first);
+      if ((size_t)kv.first < meshes_.size()) meshes_[(size_t)kv.first].rt_content = ++rt_content_serial_;  // (the traced shadows' bottom level follows the pose)
+    }
+    if (!any) return;
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    f_.vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
   }
 
   bool can_draw_cage() const override { return pl_cage_line_ && pl_cage_point_; }
@@ -3357,6 +3763,7 @@ class VulkanRaster final : public Raster {
   void remove_mesh(int mesh) override {
     settle();  // (task 0204: a frame left running on the card finishes first)
     if (mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return;
+    drop_skin(mesh);  // (round 519: a skin's own buffers go with its mesh)
     free_mesh(meshes_[(size_t)mesh]);  // (no wait: every submission here is waited for before its call returns)
     if (rt_ok_) rt_.forget_mesh((uint64_t)mesh);
   }
@@ -3392,8 +3799,12 @@ class VulkanRaster final : public Raster {
   }
 
   bool render(const RasterFrame &fr, std::string *err) override {
-    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
-    if (!record_frame(fr, err) || !submit_wait(err)) return rt_abandoned();
+    if (!settle_timed(err)) return false;  // (task 0204: a frame left running on the card finishes first)
+    if (!record_frame(fr, err)) return rt_abandoned();
+    stamp(kStampCopies);
+    if (frame_fails_for_test(err) || !submit_wait(err)) return rt_abandoned();
+    see_submitted();
+    frame_waited();
     read_times();
     return true;
   }
@@ -3401,8 +3812,10 @@ class VulkanRaster final : public Raster {
   /* Task 0204: the frame recorded and submitted, not waited for. Every entry point settles first (the command buffer,
    * the frame's uniforms and the staging the frame reads stay untouched until the card is done with them). */
   bool render_async(const RasterFrame &fr, std::string *err) override {
-    if (!settle(err)) return false;
+    if (!settle_timed(err)) return false;
     if (!record_frame(fr, err)) return rt_abandoned();
+    stamp(kStampCopies);
+    if (frame_fails_for_test(err)) return false;
     submits_++;
     ScopedTimer wall;
     f_.vkEndCommandBuffer(cmd_);
@@ -3411,10 +3824,23 @@ class VulkanRaster final : public Raster {
     si.pCommandBuffers = &cmd_;
     f_.vkResetFences(dev_, 1, &fence_);
     if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS) return fail(err, info_.name + ": the GPU refused the frame");
+    see_submitted();
     in_flight_ = true;
     times_ = RasterTimes{};
     times_.submit_wall = wall.ms();  // (the submission alone; the card's own times come by take_async_times once it is done)
+    detail_.host[RasterDetail::Submit] += times_.submit_wall;
     return true;
+  }
+  RasterDetail detail() const override { return detail_; }
+  void frame_waited() {  // (round 565: a frame's own submission and fence - submit_wait serves the uploads too, which aren't counted)
+    detail_.host[RasterDetail::Submit] += submit_ms_, detail_.host[RasterDetail::Wait] += times_.submit_wall - submit_ms_;
+    detail_.frames_read++;
+  }
+  bool settle_timed(std::string *err) {  // (round 565: a render call's wait for the frame before, counted)
+    ScopedTimer t;
+    const bool ok = settle(err);
+    detail_.host[RasterDetail::Settle] += t.ms();
+    return ok;
   }
   RasterTimes take_async_times() override {
     const RasterTimes t = async_done_;
@@ -3440,15 +3866,20 @@ class VulkanRaster final : public Raster {
 
   /* Task 0160: the frame's passes and the copies out in one command buffer, one wait. */
   bool render_read(const RasterFrame &fr, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
-    if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
+    if (!settle_timed(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     const size_t px = (size_t)fr.width * fr.height;
     if (!readback_buffer(px, err)) return false;  // (before the frame is recorded: record_frame takes the queued mesh copies)
     if (!record_frame(fr, err)) return rt_abandoned();
     const Slot &sl = slots_[fr.slot];
     record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
-    if (!submit_wait(err)) return false;
+    stamp(kStampCopies);
+    if (frame_fails_for_test(err) || !submit_wait(err)) return false;
+    see_submitted();
+    frame_waited();
     read_times();
+    ScopedTimer unpack;
     unpack_planes(px, color, depth, ids);
+    detail_.host[RasterDetail::Unpack] += unpack.ms();
     return true;
   }
 
@@ -3464,7 +3895,17 @@ class VulkanRaster final : public Raster {
         if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
     }
     Slot &sl = slots_[fr.slot];
-    if (!targets(sl, fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err) || !send_tex_tables(err) || !stage_pending(err)) return false;
+    ScopedTimer step;
+    const auto took = [&](RasterDetail::Host h) { detail_.host[h] += step.ms(), step = ScopedTimer(); };
+    if (!targets(sl, fr.width, fr.height, fr.shadow_size, err)) return false;
+    took(RasterDetail::Targets);
+    if (!write_frame(fr, err)) return false;
+    took(RasterDetail::Write);
+    if (!send_tex_tables(err) || !stage_pending(err)) return false;
+    took(RasterDetail::Tables);
+    detail_.frames++, detail_.instances += instances_.size(), detail_.lights += fr.lights.size(), detail_.see_corners += fr.see_through.size();
+    detail_.overlay_prims += fr.overlay_lines.size() + fr.overlay_points.size(), detail_.pixels += (uint64_t)fr.width * fr.height;
+    for (const OverlayOutline &o : fr.outlines) detail_.outline_ids += o.ids.size();
     /* (Round 506: which passes the instances need - read from the array once a generation.) */
     if (!uses_known_ || !validated) {
       uses_toon_maps_ = std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return (in.flags & RasterInstance::ToonMaps) != 0; });
@@ -3486,25 +3927,30 @@ class VulkanRaster final : public Raster {
       validated_instances_ = instances_gen_, validated_resources_ = resources_gen_;
     }
     begin();
+    if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, kStamps);
+    stamp(kStampStart);
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
+    record_see(sl);    // (round 565: this view's see-through corners, when they are not the ones it holds)
+    record_skins();    // (round 519: the skinned meshes' posed vertices, one barrier after, before the first pass)
     bool traced = rt_wanted(fr);
     if (traced && !record_rt_shadows(sl, err)) traced = rt_give_up(err);  // (round 543: after the copies, before any set is bound)
-    if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 4);
-    stamp(0);
+    stamp(kStampSkin);
     draw_pass(rp_shadow_, sl.fb_shadow, sl.shadow.w, sl.shadow.h, sl.set, 1, fr.shadow_size > 0 ? DrawShadow : DrawNothing, false);  // (cleared even when unused)
     barrier();
-    stamp(1);
+    stamp(kStampShadow);
     draw_pass(rp_gbuf_, sl.fb_gbuf, fr.width, fr.height, sl.set, 7, DrawGbuffer, fr.cull_backfaces);
     barrier();
+    stamp(kStampGbuffer);
     if (toon) {  // (task 0196: the toon objects' painted maps, at the pixels they won)
       draw_pass(rp_toon_, sl.fb_toon, fr.width, fr.height, sl.set, 7, DrawToon, fr.cull_backfaces);  // (round 416: six planes and the depth)
       barrier();
     }
+    stamp(kStampToon);
     if (baked) {  // (task 0197: the baked-lit objects' ambient source, at the pixels they won)
       draw_pass(rp_baked_, sl.fb_baked, fr.width, fr.height, sl.set, 3, DrawBaked, fr.cull_backfaces);
       barrier();
     }
-    stamp(2);
+    stamp(kStampBaked);
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rb.renderPass = rp_light_;
     rb.framebuffer = sl.fb_light;
@@ -3514,12 +3960,16 @@ class VulkanRaster final : public Raster {
     f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced ? pl_light_rt_ : pl_light_);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+    stamp(kStampLight);
     if (splat_drawn_ && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
+    stamp(kStampSplats);
     if (!fr.see_through.empty() && can_draw_see_through()) draw_see_through(fr, sl);
+    stamp(kStampSee);
     if (can_draw_overlays()) draw_overlays(fr);
     if (fr.cage && can_draw_cage()) draw_cage(fr);
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
+    stamp(kStampOverlays);
     if (fr.want_hdr) {  // (task 0197: the lighting again in linear light, for a camera's bloom)
       VkRenderPassBeginInfo hb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
       hb.renderPass = rp_hdr_;
@@ -3537,8 +3987,10 @@ class VulkanRaster final : public Raster {
       f_.vkCmdEndRenderPass(cmd_);
       barrier();
     }
+    stamp(kStampHdr);
     if (!fr.post.empty() && post_ok_ && !record_post(fr, sl, err)) return false;  // (round 416: the camera's filters over the picture)
-    stamp(3);
+    stamp(kStampPost);
+    took(RasterDetail::Record);
     return true;
   }
 
@@ -3546,6 +3998,13 @@ class VulkanRaster final : public Raster {
   /* (A traced variant that didn't compile, or a build that failed, leaves the map: the option then reads as unavailable.) */
   bool can_trace_shadows() const override { return rt_ok_ && !rt_failed_ && (!rt_pipelines_tried_ || pl_light_rt_); }
   void fail_rt_shadows_for_test() override { rt_force_fail_ = true; }
+  void fail_next_frame_for_test() override { fail_frame_once_ = true; }
+  bool frame_fails_for_test(std::string *err) {
+    if (!fail_frame_once_) return false;
+    fail_frame_once_ = false;
+    fail(err, "a test made the frame fail");
+    return true;
+  }
   RtShadowStats rt_shadow_stats() const override {
     const rt::Counters &c = rt_.counters();
     RtShadowStats s;
@@ -4190,6 +4649,13 @@ class VulkanRaster final : public Raster {
   bool timestamps_ = false;
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
+  /* Round 565: a timestamp after each part of a frame, in the frame's order (every one written every frame: a part not
+   * drawn takes no time between its neighbours). */
+  enum { kStampStart, kStampSkin, kStampShadow, kStampGbuffer, kStampToon, kStampBaked, kStampLight, kStampSplats, kStampSee, kStampOverlays, kStampHdr, kStampPost, kStampCopies, kStamps };
+  static_assert(RasterDetail::kGpu == kStamps - 1, "a RasterDetail part is the gap after each stamp, in the stamps' order");
+  RasterDetail detail_;
+  uint64_t ts_mask_ = ~0ull;   // (the timestamp counter's valid bits)
+  double submit_ms_ = 0;       // (the last submit_wait's submission alone)
   Buf ubo_, inst_buf_, staging_, readback_, lut_buf_;
   Buf hl_buf_;  // the face highlight's bits (task 0166)
   bool geometry_ = false;  // the geometryShader feature: gl_PrimitiveID in the g-buffer pass (task 0166)
@@ -4197,7 +4663,10 @@ class VulkanRaster final : public Raster {
   Buf ov_lines_, ov_points_, ov_outlines_;  // task 0192: the frame's overlays (host-visible, written each frame)
   Buf light_buf_;                            // task 0195: the frame's lights, as many as there are
   Buf vcol_buf_;                             // task 0195: Weight Paint's vertex colours (RasterFrame::vertex_colors)
-  Buf see_buf_;                              // task 0195: the see-through triangles' corners (RasterFrame::see_through)
+  bool see_keep_ = true;                     // (round 565: a slot's see-through corners stay on the card while they are the same - write_see)
+  int see_owed_slot_ = -1;                   // (the slot whose send the frame being recorded holds, until the frame is on the queue)
+  size_t see_owed_bytes_ = 0;
+  bool fail_frame_once_ = false;             // (fail_next_frame_for_test)
   /* Round 532, 557: the Gaussian splats - bindings 40 the static splats and 42 their SH (device-local, kept while
    * splat_key_ holds), 41 the clouds' pick ids, 43 the frame's order, 44 the clouds' values (host-visible, written each frame). */
   Buf splat_src_buf_, splat_ids_buf_, splat_sh_buf_, splat_ord_buf_, splat_cl_buf_;
@@ -4405,10 +4874,12 @@ class VulkanRaster final : public Raster {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd_;
     f_.vkResetFences(dev_, 1, &fence_);
-    if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS ||
-        f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS)
+    if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS) return fail(err, info_.name + ": the GPU stopped responding");
+    const double submitted = wall.ms();
+    if (f_.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, 10ull * 1000 * 1000 * 1000) != VK_SUCCESS)
       return fail(err, info_.name + ": the GPU stopped responding");
     times_.submit_wall = wall.ms();
+    submit_ms_ = submitted;
     return true;
   }
   bool upload(Buf &dst, const void *data, size_t bytes, std::string *err) {
@@ -4748,13 +5219,19 @@ class VulkanRaster final : public Raster {
     if (timestamps_) f_.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, i);
   }
   void read_times() {
-    uint64_t t[4] = {0, 0, 0, 0};
-    if (!timestamps_ || f_.vkGetQueryPoolResults(dev_, queries_, 0, 4, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+    uint64_t t[kStamps] = {};
+    if (!timestamps_ || f_.vkGetQueryPoolResults(dev_, queries_, 0, kStamps, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
     const double k = ts_period_ns_ * 1e-6;
-    times_.shadow = (t[1] - t[0]) * k;
-    times_.gbuffer = (t[2] - t[1]) * k;
-    times_.lighting = (t[3] - t[2]) * k;
-    times_.total = (t[3] - t[0]) * k;
+    /* (Round 565: three stamps sit inside a render pass, where a tiled card need not order them, and a card's counter may
+     * have fewer than 64 bits: a stamp that reads earlier than the one before is taken as that one, so a part is 0, never a
+     * wrapped 1e19.) */
+    for (int i = 0; i < kStamps; i++) t[i] &= ts_mask_;
+    for (int i = 1; i < kStamps; i++) t[i] = std::max(t[i], t[i - 1]);
+    times_.shadow = (t[kStampShadow] - t[kStampSkin]) * k;
+    times_.gbuffer = (t[kStampBaked] - t[kStampShadow]) * k;  // (with the toon and baked planes, as before round 565)
+    times_.lighting = (t[kStampPost] - t[kStampBaked]) * k;
+    times_.total = (t[kStampPost] - t[kStampSkin]) * k;
+    for (int g = 0; g < RasterDetail::kGpu; g++) detail_.gpu[g] += (t[g + 1] - t[g]) * k;  // (the parts are the stamps' gaps, in order)
   }
   void viewport(int w, int h) {
     VkViewport vp{0, 0, (float)w, (float)h, 0.0f, 1.0f};
@@ -4799,7 +5276,7 @@ class VulkanRaster final : public Raster {
       }
       const VkPipeline pl = draw_pipeline(instances_[i], what, cull);
       const size_t run = draw_run(i, what, cull, pl);
-      if (pl != bound) f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = pl);
+      if (pl != bound) f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = pl), detail_.pipeline_binds++;
       const RasterInstance &in = instances_[i];  // (render() checked each part lies within its mesh)
       const Mesh &m = meshes_[in.mesh];
       if (in.mesh != bound_mesh) {  // (round 448: the buffers bound once per mesh, not once per instance)
@@ -4807,9 +5284,10 @@ class VulkanRaster final : public Raster {
         f_.vkCmdBindVertexBuffers(cmd_, 0, 1, &m.vb.buf, &off);
         f_.vkCmdBindIndexBuffer(cmd_, m.ib.buf, 0, VK_INDEX_TYPE_UINT32);
         bound_mesh = in.mesh;
+        detail_.mesh_binds++;
       }
       f_.vkCmdDrawIndexed(cmd_, in.index_count ? in.index_count : m.indices, (uint32_t)run, in.index_count ? in.first_index : 0, 0, (uint32_t)i);
-      draw_calls_++;
+      draw_calls_++, detail_.draws++;
       i += run;
     }
     f_.vkCmdEndRenderPass(cmd_);
@@ -5055,6 +5533,67 @@ class VulkanRaster final : public Raster {
            write_points(fr, err) &&
            write_array(ov_outlines_, ot.data(), ot.size() * 4, err);
   }
+  /* Round 565 (task 0547): the see-through triangles' corners. A world has many (SideRail's stand-in 113,000: 7 MB), sorted
+   * back to front for the view, and while the camera stands still - a pose dragged, a clip playing - they are the same
+   * every frame. They were written whole into a buffer in the host's memory each frame (0.5 ms) for the card to fetch
+   * across (0.6 ms of its frame at full clock, 3 ms in its lowest power state). Now each view's slot keeps its own on the
+   * card: the frame's corners are compared with the host's copy of what the slot last sent, and only a list that differs
+   * is copied there and sent (one buffer copy at the frame's start). Two views have different lists; each keeps its own.
+   * A frame without see-through surfaces sends and draws none: the slot's stay for the next that has them. */
+  bool make_see(Buf &b, size_t bytes) {
+    return make_buffer(b, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  }
+  bool write_see(const RasterFrame &fr, Slot &sl, std::string *err) {
+    const size_t bytes = fr.see_through.size() * sizeof(SeeCorner);
+    sl.see_send = 0;
+    see_owed_slot_ = -1;
+    if (!bytes) return true;
+    if (bytes > max_storage_) return fail(err, "see-through surfaces over the card's storage buffer limit");  // (the CPU draws the view)
+    const size_t roomy = (size_t)std::min<uint64_t>((uint64_t)bytes * 2, max_storage_);
+    if (bytes > sl.see.size) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_buffer(sl.see);
+      sl.see_bytes = 0;
+      const bool made = make_see(sl.see, roomy) || make_see(sl.see, bytes);
+      if (!made) make_see(sl.see, 16);  // (a placeholder back: no set is left with a buffer that is gone)
+      bind_buffers(sl.set);
+      if (!made) return fail(err, "out of memory for the see-through surfaces");
+    }
+    if (bytes > sl.see_stage.size) {  // (the host's copy: cached memory - it is read back to compare)
+      free_buffer(sl.see_stage);
+      sl.see_bytes = 0;
+      const VkMemoryPropertyFlags cached = host_props() | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+      sl.see_cached = make_buffer(sl.see_stage, roomy, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, cached) || make_buffer(sl.see_stage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, cached);
+      /* (A card with no cached memory the host can write: its uncached kind is slow to read back, so nothing is compared
+       * and the corners go every frame, as before.) */
+      if (!sl.see_cached && !make_buffer(sl.see_stage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props()))
+        return fail(err, "out of memory for the see-through surfaces");
+    }
+    if (see_keep_ && sl.see_cached && sl.see_bytes == bytes && std::memcmp(sl.see_stage.mapped, fr.see_through.data(), bytes) == 0) {
+      detail_.see_kept++;
+      return true;
+    }
+    sl.see_bytes = 0;  // (until the send is recorded: a frame that fails before then sends again)
+    std::memcpy(sl.see_stage.mapped, fr.see_through.data(), bytes);
+    sl.see_send = bytes;
+    detail_.see_sent++;
+    return true;
+  }
+  /* (In the frame's command buffer, before anything draws. The slot holds the corners only once that frame is on the
+   * queue - see_submitted: a frame that fails after this, its filters' targets or its submission, never runs the copy,
+   * and the next frame must send again.) */
+  void record_see(Slot &sl) {
+    if (!sl.see_send) return;
+    const VkBufferCopy c{0, 0, sl.see_send};
+    f_.vkCmdCopyBuffer(cmd_, sl.see_stage.buf, sl.see.buf, 1, &c);
+    uploaded();
+    see_owed_slot_ = (int)(&sl - slots_), see_owed_bytes_ = sl.see_send;
+    sl.see_send = 0;
+  }
+  void see_submitted() {
+    if (see_owed_slot_ >= 0) slots_[see_owed_slot_].see_bytes = see_owed_bytes_;
+    see_owed_slot_ = -1;
+  }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
     if (instances_.size() * sizeof(InstGpu) > inst_buf_.size) {
@@ -5102,7 +5641,11 @@ class VulkanRaster final : public Raster {
     const int nl = (int)fr.lights.size(), np = (int)fr.probes.size();  // (task 0195: every light, in their own buffer; round 401: the reflection probes after them)
     if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
-    if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
+    {
+      ScopedTimer see_time;
+      if (!write_see(fr, slots_[fr.slot], err)) return false;
+      detail_.host[RasterDetail::WriteSee] += see_time.ms();
+    }
     if (!write_splats(fr, err)) return false;  // (rounds 532, 557)
     if (!write_toon_table(err) || !write_baked_table(err) || !write_lil_tables(err)) return false;
     /* (Round 415: the corners live in blocks on the card; a frame's own array - a card without blocks - is written over
@@ -5241,6 +5784,7 @@ class VulkanRaster final : public Raster {
       dai.descriptorSetCount = 1;
       dai.pSetLayouts = &set_layout_;
       if (f_.vkAllocateDescriptorSets(dev_, &dai, &sl.set) != VK_SUCCESS) return fail(err, "could not make the descriptor sets");
+      if (!make_see(sl.see, 16)) return fail(err, "out of memory");  // (a placeholder until the view has see-through surfaces)
       bind_buffers(sl.set);
     }
     return true;
@@ -5253,7 +5797,10 @@ class VulkanRaster final : public Raster {
                                             {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo hb{hl_buf_.buf, 0, VK_WHOLE_SIZE};
     const VkDescriptorBufferInfo ov[3] = {{ov_lines_.buf, 0, VK_WHOLE_SIZE}, {ov_points_.buf, 0, VK_WHOLE_SIZE}, {ov_outlines_.buf, 0, VK_WHOLE_SIZE}};
-    const VkDescriptorBufferInfo lb2[7] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see_buf_.buf, 0, VK_WHOLE_SIZE},
+    VkBuffer see = VK_NULL_HANDLE;  // (round 565: the set's own slot's see-through corners)
+    for (const Slot &sl : slots_)
+      if (sl.set == set) see = sl.see.buf;
+    const VkDescriptorBufferInfo lb2[7] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see, 0, VK_WHOLE_SIZE},
                                            {toon_buf_.buf, 0, VK_WHOLE_SIZE}, {baked_buf_.buf, 0, VK_WHOLE_SIZE}, {corner_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {probe_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo lil2[2] = {{lil_buf_.buf, 0, VK_WHOLE_SIZE}, {lilmap_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 416: bindings 32, 33)
@@ -5309,6 +5856,7 @@ class VulkanRaster final : public Raster {
       w[i].pBufferInfo = &splat5[i - 22];
     }
     f_.vkUpdateDescriptorSets(dev_, 27, w, 0, nullptr);
+    detail_.set_writes++;
   }
   void bind_images(Slot &sl) {
     const bool toon = sl.fb_toon != VK_NULL_HANDLE, baked = sl.fb_baked != VK_NULL_HANDLE;
@@ -5328,6 +5876,7 @@ class VulkanRaster final : public Raster {
       w[i].pImageInfo = &ii[i];
     }
     f_.vkUpdateDescriptorSets(dev_, 15, w, 0, nullptr);
+    detail_.set_writes++;
   }
 
   /* Render passes whose attachments end in GENERAL: read by the next pass and copied out without other moves. */
@@ -5978,9 +6527,11 @@ class VulkanRaster final : public Raster {
     if (post_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, post_set_layout_, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_, rp_post16_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
+    destroy_skin_pass();  // (round 519: the skins' buffers and sets, the pass's pipeline and pool)
     for (Mesh &m : meshes_) free_mesh(m);
+    for (Slot &sl : slots_) free_buffer(sl.see), free_buffer(sl.see_stage);  // (round 565)
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);
@@ -6037,6 +6588,7 @@ bool warm_shaders(const std::string &dir, std::string *report) {
   std::string err;
   bool ok = compile_kernels(devices()[0].hardware_rt, &err);
   ok = Raster::create(0, &err) != nullptr && ok;
+  ok = !vk::compile(kSkinComp, shaderc_compute_shader, &err).empty() && ok;  // (round 519: the skin pass, made by a raster's first add_skin)
   /* Only the SPIR-V travels with the build: the driver's pipeline cache belongs to its card. */
   size_t kept = 0;
   std::error_code ec;

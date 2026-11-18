@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "mesh.h"
 #include "mesh_internal.h"
+#include "skin_render.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -431,7 +432,7 @@ void Mesh::edges(std::vector<std::pair<uint32_t, uint32_t>> &out) const {
 
 namespace {
 /* MeshCounts' tallies (atomic: render meshes are also built on worker threads), microseconds for the times. */
-enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatCount };
+enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatSkinned, kStatCount };  // (round 518: kStatSkinned, render meshes posed by skin_render_vertices)
 std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
 std::atomic<uint64_t> g_partial_normals{0};
 std::atomic<uint64_t> g_in_place_normals_us{0}, g_in_place_tangents_us{0};  // (round 468: parts of kStatInPlace's time)
@@ -455,8 +456,8 @@ struct StatTimer {
 
 MeshCounts mesh_counts() {
   MeshCounts c;
-  uint64_t *n[kStatCount] = {&c.copies, &c.full_builds, &c.in_place, &c.tangent_builds, &c.edge_builds};
-  double *ms[kStatCount] = {&c.ms_copies, &c.ms_full_builds, &c.ms_in_place, &c.ms_tangents, &c.ms_edges};
+  uint64_t *n[kStatCount] = {&c.copies, &c.full_builds, &c.in_place, &c.tangent_builds, &c.edge_builds, &c.skinned};
+  double *ms[kStatCount] = {&c.ms_copies, &c.ms_full_builds, &c.ms_in_place, &c.ms_tangents, &c.ms_edges, &c.ms_skinned};
   for (int i = 0; i < kStatCount; i++) {
     *n[i] = g_stat_count[i].load(std::memory_order_relaxed);
     *ms[i] = g_stat_us[i].load(std::memory_order_relaxed) / 1000.0;
@@ -487,6 +488,7 @@ MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
   d.ms_in_place_bounds = ms_in_place_bounds - o.ms_in_place_bounds;
   d.in_place_refused = in_place_refused - o.in_place_refused, d.in_place_split = in_place_split - o.in_place_split;
   d.settled = settled - o.settled;
+  d.skinned = skinned - o.skinned, d.ms_skinned = ms_skinned - o.ms_skinned;
   return d;
 }
 
@@ -542,6 +544,7 @@ void Mesh::forget_caches() const {
   cache_version_[0] = cache_version_[1] = 0;
   cache_approx_[0] = cache_approx_[1] = false;
   cache_split_[0] = cache_split_[1] = false;
+  cache_skinned_[0] = cache_skinned_[1] = false;
   edges_version_ = 0;
   sides_topo_ = tri_topo_ = vf_topo_ = share_.cv_topo = 0;
   share_.tess_version = 0;
@@ -564,8 +567,34 @@ const Mesh::VertexFaces &Mesh::vertex_faces() const {
   return vf_;
 }
 
+bool Mesh::needs_settle() const {
+  if (tangents_approximate() || cache_split_[0] || cache_split_[1]) return true;
+  if (!skin_pose || !skin_pose->rest) return false;
+  bool needs = false;
+  JobSystem::global().isolate([&] {
+    std::lock_guard<std::mutex> lock(*skin_pose->rest_lock);
+    needs = skin_pose->rest->needs_settle();
+  });
+  return needs;
+}
+
 bool Mesh::settle() const {
-  if (!needs_settle()) return false;
+  /* Round 518 (review): a skin's rest mesh that followed a shape key in place has quick tangents and split corners of
+   * its own; settled here, and the posed caches made from it again on the next read. */
+  bool rest_settled = false;
+  if (skin_pose && skin_pose->rest)
+    JobSystem::global().isolate([&] {
+      std::lock_guard<std::mutex> lock(*skin_pose->rest_lock);
+      rest_settled = skin_pose->rest->settle();
+    });
+  if (rest_settled)
+    for (int ci = 0; ci < 2; ci++)
+      if (cache_skinned_[ci]) cache_version_[ci] = 0;
+  const bool own = tangents_approximate() || cache_split_[0] || cache_split_[1];
+  if (!own) {
+    if (rest_settled) looks++, edit_epoch::bump();
+    return rest_settled;
+  }
   for (int ci = 0; ci < 2; ci++) {
     if (!cache_approx_[ci] && !cache_split_[ci]) continue;
     cache_version_[ci] = 0;  // (the next read builds it: vertices shared anew, tangents with MikkTSpace)
@@ -596,6 +625,7 @@ size_t Mesh::memory_bytes() const {
        topo_.loose_edges.capacity()) * 8;
   b += sides_.capacity() * sizeof(EdgeSides) + edges_.capacity() * 8 + tri_start_.capacity() * 4;
   for (const auto &crv : corner_rv_) b += crv.capacity() * 4;
+  for (const auto &rv : skin_rv_) b += rv.capacity() * 4;  // (round 518; the pose's rest mesh is shared by the frames' copies and not counted here)
   b += (vside_off_.capacity() + vside_.capacity()) * 4 + nstate_[0].bytes() + nstate_[1].bytes();  // (task 0099)
   b += share_.bytes();  // (task 0185)
   return b + sizeof(Mesh);
@@ -1363,6 +1393,9 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
 bool Mesh::render_cache_warm(bool force_flat) const {
   const bool has_smooth = any_smooth();
   const int ci = force_flat && has_smooth ? 1 : 0;
+  if (cache_skinned_[ci])  // (round 518: a posed cache is warm only while its pose holds - else render_mesh builds whole)
+    return skin_pose && skin_pose->for_version == version && skin_pose->for_deform == deform_version && cache_version_[ci] == version &&
+           cache_deform_[ci] == deform_version;
   return cache_version_[ci] == version && cache_deform_[ci] == deform_version;
 }
 
@@ -1370,7 +1403,9 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   const bool has_smooth = any_smooth();
   bool flat = force_flat || !has_smooth;
   const int ci = force_flat && has_smooth ? 1 : 0;
-  if (cache_version_[ci] == version && cache_deform_[ci] == deform_version) return cache_[ci];
+  if (skin_pose)
+    if (const RenderMesh *posed = skinned_render_mesh(ci, force_flat, false)) return *posed;
+  if (cache_version_[ci] == version && cache_deform_[ci] == deform_version && !cache_skinned_[ci]) return cache_[ci];
   /* Only the positions changed since the build (a deform, an Edit Mode drag): follow them in place (ADR 0034). */
   const uint64_t topo = topology_serial();
   if (cache_version_[ci] != 0 && cache_topo_[ci] == topo && cache_flat_[ci] == flat && update_in_place(ci, flat)) {
@@ -1407,9 +1442,71 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   cache_tangents_[ci] = false;
   cache_approx_[ci] = false;
   cache_split_[ci] = false;
+  cache_skinned_[ci] = false;
   cache_topo_[ci] = topo;
   cache_flat_[ci] = flat;
   return rm;
+}
+
+/* Round 518 (ADR 0146): the rest's render mesh, posed. Its triangles, UVs and corners are the rest's (copied when the
+ * rest was built again, or moved in place and split again); its positions, normals and tangents are the kernel's, from
+ * the rest's - so a pose never rebuilds a render mesh, works out normals again or redoes MikkTSpace, and the card's
+ * skin pass (round 519) gives the same vertices. */
+bool Mesh::skin_pose_holds() const {
+  if (!skin_pose) return false;
+  const SkinPose &sp = *skin_pose;
+  if (!sp.rest || !sp.rest_lock || !sp.binding || sp.for_version != version || sp.for_deform != deform_version) return false;
+  const Mesh &rest = *sp.rest;
+  return rest.positions.size() == positions.size() && rest.corner_verts.size() == corner_verts.size() &&
+         rest.face_offsets.size() == face_offsets.size() && sp.binding->n.size() == positions.size() && rest.any_smooth() == any_smooth();
+}
+
+const RenderMesh *Mesh::skinned_render_mesh(int ci, bool force_flat, bool tangents) const {
+  if (!skin_pose_holds()) return nullptr;
+  const SkinPose &sp = *skin_pose;
+  const Mesh &rest = *sp.rest;
+  RenderMesh &rm = cache_[ci];
+  if (cache_skinned_[ci] && cache_version_[ci] == version && cache_deform_[ci] == deform_version && (!tangents || cache_tangents_[ci])) return &rm;
+  StatTimer st{kStatSkinned, {}};
+  /* The rest is shared by every copy of this mesh at this pose (a snapshot, a render job's): its caches are filled and
+   * read under its own lock, isolated (SkinPose::rest_lock). */
+  JobSystem::global().isolate([&] {
+  std::lock_guard<std::mutex> lock(*sp.rest_lock);
+  const RenderMesh &r = tangents ? rest.render_mesh_tangents(force_flat) : rest.render_mesh(force_flat);
+  const bool same_build = cache_skinned_[ci] && skin_build_[ci] == r.build_serial && rm.positions.size() == r.positions.size() &&
+                          rm.indices.size() == r.indices.size();
+  if (!same_build) {  // (a new rest build: the triangles and the table again; copies elsewhere take it whole)
+    rm.uvs = r.uvs, rm.indices = r.indices, rm.tri_face = r.tri_face, rm.tri_material = r.tri_material, rm.tri_corner = r.tri_corner;
+    skin_render_vertex_table(rest, r, skin_rv_[ci]);
+    rm.moved_from = 0;
+    rm.moved_vertices.clear(), rm.moved_indices.clear();
+    rm.build_serial = next_render_serial();
+  }
+  else {  // (the same triangles: copies elsewhere take the vertices, and the indices when the rest split a face again)
+    rm.moved_from = rm.serial;
+    rm.moved_vertices.assign(1, {0u, (uint32_t)rm.positions.size()});
+    rm.moved_indices.clear();
+    if (skin_rest_[ci] != r.serial && rm.indices != r.indices) {
+      rm.indices = r.indices, rm.tri_corner = r.tri_corner;
+      rm.moved_indices.assign(1, {0u, (uint32_t)rm.indices.size()});
+    }
+  }
+  rm.bounds = skin_render_vertices(sp, r, skin_rv_[ci], rm);
+  rm.serial = next_render_serial();
+  rm.shape = shape_key(uid.v, version, deform_version);
+  nstate_[ci].reset();
+  cache_version_[ci] = version;
+  cache_deform_[ci] = deform_version;
+  cache_tangents_[ci] = r.tangents.size() == r.positions.size();
+  cache_approx_[ci] = false;
+  cache_split_[ci] = false;
+  cache_skinned_[ci] = true;
+  cache_topo_[ci] = 0;  // (never followed in place: its corners are the rest's)
+  cache_flat_[ci] = rest.any_smooth() ? force_flat : true;
+  skin_build_[ci] = r.build_serial;
+  skin_rest_[ci] = r.serial;
+  });
+  return &rm;
 }
 
 /* The build before task 0109, on one thread: kept for the tests that compare the threaded one with it. */
@@ -1751,6 +1848,8 @@ struct MikkAdapter {
 }  // namespace
 
 const RenderMesh &Mesh::render_mesh_tangents(bool force_flat) const {
+  if (skin_pose)
+    if (const RenderMesh *posed = skinned_render_mesh(force_flat && any_smooth() ? 1 : 0, force_flat, true)) return *posed;
   const RenderMesh &rm0 = render_mesh(force_flat);
   const int ci = force_flat && any_smooth() ? 1 : 0;
   if (cache_tangents_[ci]) return rm0;

@@ -11,6 +11,7 @@
 #include "blockout_object.h"  // (Blockout's and BlockoutPiece's registration)
 #include "pointcloud_object.h"  // (PointCloud's registration and hash, round 530)
 #include "pose_counts.h"
+#include "skin_render.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -1896,11 +1897,117 @@ float Outline::outline_distance_scale(float distance, float px_per_m, float worl
   return std::exp(idx * step);
 }
 
+/* The inverted hull of `faces`' surface with `positions`: each vertex pushed out along its area-weighted smoothed normal by
+ * offset x its thickness-group weight (`gw`, null: 1), the faces flipped. */
+static void outline_hull_positions(const Mesh &faces, const std::vector<Vec3> &positions, float offset, const std::vector<float> *gw, std::vector<Vec3> &out) {
+  /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
+  std::vector<Vec3> vn(positions.size(), Vec3(0.0f));
+  for (size_t f = 0; f < faces.face_count(); f++) {
+    const uint32_t *v = faces.face_verts(f);
+    const uint32_t n = faces.face_size(f);
+    Vec3 fn(0.0f);
+    for (uint32_t k = 0; k < n; k++) fn += cross(positions[v[k]], positions[v[(k + 1) % n]]);  // Newell
+    if (!finite_bits(fn.x) || !finite_bits(fn.y) || !finite_bits(fn.z)) continue;
+    for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
+  }
+  out.clear();
+  out.reserve(positions.size());
+  for (size_t i = 0; i < positions.size(); i++) {
+    const float len = length(vn[i]);
+    const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
+    const float w = gw ? clampf(finite_bits((*gw)[i]) ? (*gw)[i] : 0.0f, 0.0f, 1.0f) : 1.0f;
+    out.push_back(positions[i] + d * (offset * w));
+  }
+}
+
+static std::shared_ptr<Mesh> outline_hull(const Mesh &faces, const std::vector<Vec3> &positions, float offset, const std::vector<float> *gw) {
+  auto m = std::make_shared<Mesh>();
+  m->name = "Outline";
+  m->smooth = true;
+  outline_hull_positions(faces, positions, offset, gw, m->positions);
+  std::vector<uint32_t> rev;
+  for (size_t f = 0; f < faces.face_count(); f++) {
+    const uint32_t *v = faces.face_verts(f);
+    const uint32_t n = faces.face_size(f);
+    rev.assign(v, v + n);
+    std::reverse(rev.begin(), rev.end());  // flipped: its outside faces in
+    m->add_face(rev.data(), rev.size());
+  }
+  return m;
+}
+
+/* Round 521 (ADR 0146): the shell of a posed skin is the shell of its *rest*, skinned: built once for a rest, an offset and a
+ * group (a pose never rebuilds it), then one cheap copy a pose that carries the pose's bones and weights - so on the card it is a
+ * skin of its own, and on the CPU its render mesh is the kernel's on the rest shell. Its vertices are the source's one for one
+ * (the binding applies unchanged) and its positions are the posed ones, for whoever reads them. */
+const Mesh *Outline::posed_shell(const Mesh &src, ShellCache &c, float offset) const {
+  const std::shared_ptr<const SkinPose> &pose = src.skin_pose.p;
+  const Mesh &rest = *pose->rest;
+  const bool same_key = c.rest_shell && c.offset == offset && c.group == thickness_group;
+  const bool same_rest = same_key && !c.rest_owner.owner_before(pose->rest) && !pose->rest.owner_before(c.rest_owner) && c.rest_version == rest.version &&
+                         c.rest_deform == rest.deform_version;
+  /* Only the rest's positions moved (a shape key's blink: the topology and the version held): the shell's positions are worked out
+   * again from the new rest and the group's weights read fresh from `src`. The rest's identity and version guard the whole reuse
+   * above - a weight edit touch()es the base mesh, which makes a new rest version. The shell follows in place
+   * - its render mesh follows in place after it, and the card's stand-in takes ranges - instead of the hull being built again. */
+  const bool moved_only = same_key && !same_rest && c.rest_version == rest.version && c.rest_topo == rest.topology_serial() && c.rest_shell->positions.size() == rest.positions.size();
+  const bool same_pose = same_rest && c.mesh && !c.pose.owner_before(pose) && !pose.owner_before(c.pose) && c.pose_version == src.version && c.pose_deform == src.deform_version;
+  if (same_pose) return c.mesh.get();
+  const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
+  const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == rest.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
+  if (moved_only) {
+    c.mesh.reset();  // (its pose held the rest shell: written in place when nothing else does, else a copy that keeps the render caches)
+    const bool alone = c.rest_shell.use_count() == 1;
+    MeshPtr r = c.rest_shell;
+    if (!alone) {  // (a render job's shell still reads its caches under the old lock: copied under it - a Mesh copy runs no parallel loop)
+      std::lock_guard<std::mutex> old(*c.rest_lock);
+      r = std::make_shared<Mesh>(*c.rest_shell);
+    }
+    std::shared_ptr<std::mutex> lock = alone ? c.rest_lock : std::make_shared<std::mutex>();
+    {
+      std::lock_guard<std::mutex> guard(*lock);
+      outline_hull_positions(rest, rest.positions, offset, gw, r->positions);
+      r->deform_version++;
+    }
+    c.rest_shell = r, c.rest_lock = lock;
+    c.rest_owner = pose->rest, c.rest_deform = rest.deform_version;
+  }
+  else if (!same_rest) {
+    BL_ZONE("outline shell");
+    PoseTimer timer(PoseStat::OutlineShell);  // (round 468: shells built, not the cache hits)
+    c.rest_shell = outline_hull(rest, rest.positions, offset, gw);
+    c.rest_lock = std::make_shared<std::mutex>();
+    c.rest_owner = pose->rest, c.rest_version = rest.version, c.rest_deform = rest.deform_version;
+    c.rest_topo = rest.topology_serial();
+    c.offset = offset;
+    c.group = thickness_group;
+  }
+  /* The rest shell's faces and positions, bare (no caches, no pose: a copy that is posed below), then its posed positions. */
+  std::shared_ptr<Mesh> m;
+  {
+    MeshCopyBare bare;
+    m = std::make_shared<Mesh>(*c.rest_shell);
+  }
+  auto sp = std::make_shared<SkinPose>(*pose);
+  sp->rest = c.rest_shell;
+  sp->rest_lock = c.rest_lock;
+  sp->for_version = m->version, sp->for_deform = m->deform_version;
+  skin_pose_positions(*sp, m->positions);
+  m->skin_pose = std::move(sp);
+  c.mesh = m;
+  c.serial = 0;
+  c.pose = pose;
+  c.pose_version = src.version, c.pose_deform = src.deform_version;
+  return c.mesh.get();
+}
+
 const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float thickness_scale) const {
   const float s = world_space ? (finite_bits(world_scale) && world_scale > 1e-6f ? world_scale : 1.0f) : 1.0f;
   const float offset = thickness / s * (finite_bits(thickness_scale) && thickness_scale > 0.0f ? thickness_scale : 1.0f);
   if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
   ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
+  /* A posed skin (round 521) has the shell of its rest, skinned; anything else the hull of its own positions. */
+  if (src.skin_pose && src.skin_pose_holds()) return posed_shell(src, c, offset);
   const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
   if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset && c.group == thickness_group) return c.mesh.get();
   BL_ZONE("outline shell");
@@ -1908,36 +2015,9 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float t
   /* The per-vertex width (task 0149): the thickness group's weight, 1 without one (or one the mesh hasn't). */
   const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
   const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == src.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
-  /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
-  std::vector<Vec3> vn(src.positions.size(), Vec3(0.0f));
-  for (size_t f = 0; f < src.face_count(); f++) {
-    const uint32_t *v = src.face_verts(f);
-    const uint32_t n = src.face_size(f);
-    Vec3 fn(0.0f);
-    for (uint32_t k = 0; k < n; k++) fn += cross(src.positions[v[k]], src.positions[v[(k + 1) % n]]);  // Newell
-    if (!finite_bits(fn.x) || !finite_bits(fn.y) || !finite_bits(fn.z)) continue;
-    for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
-  }
-  auto m = std::make_shared<Mesh>();
-  m->name = "Outline";
-  m->smooth = true;
-  m->positions.reserve(src.positions.size());
-  for (size_t i = 0; i < src.positions.size(); i++) {
-    const float len = length(vn[i]);
-    const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
-    const float w = gw ? clampf(finite_bits((*gw)[i]) ? (*gw)[i] : 0.0f, 0.0f, 1.0f) : 1.0f;
-    m->positions.push_back(src.positions[i] + d * (offset * w));
-  }
-  std::vector<uint32_t> rev;
-  for (size_t f = 0; f < src.face_count(); f++) {
-    const uint32_t *v = src.face_verts(f);
-    const uint32_t n = src.face_size(f);
-    rev.assign(v, v + n);
-    std::reverse(rev.begin(), rev.end());  // flipped: its outside faces in
-    m->add_face(rev.data(), rev.size());
-  }
-  c.mesh = m;
+  c.mesh = outline_hull(src, src.positions, offset, gw);
   c.serial = serial;
+  c.pose.reset(), c.rest_shell.reset(), c.rest_lock.reset(), c.rest_owner.reset();
   c.offset = offset;
   c.group = thickness_group;
   return c.mesh.get();
@@ -3291,6 +3371,17 @@ static bool blockout_stack_follows(const GameObject &g, bool has_result, const s
   return true;
 }
 
+/* Round 518 (ADR 0146): whether `rest` is the mesh before the skin as `m` is now - the same positions and custom
+ * normals on the same counts (the caller knows the topology is the same): the pose's rest, and its render mesh, are
+ * then kept from the last frame. */
+static bool same_rest(const Mesh &rest, const Mesh &m) {
+  auto same = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(Vec3)) == 0);
+  };
+  return rest.corner_verts.size() == m.corner_verts.size() && rest.face_offsets.size() == m.face_offsets.size() &&
+         same(rest.positions, m.positions) && same(rest.custom_normals, m.custom_normals);
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 8));
   const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
@@ -3343,6 +3434,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
   if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime, head_topo_key = (head_topo_key ^ shape_hash) * kFnvPrime;
   if (shaped) mix(shape_hash), smix(shape_hash);
+  if (skin_pose_off) mix(0x5C17B05EULL), smix(0x5C17B05EULL);  // (round 520: the same mesh without its pose is another result)
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
   if (!any && !shaped) {  // (nothing drawn over the mesh: the caches go with it - a chain's tables are not kept for nothing)
     eval_mesh_[kind] = nullptr, eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
@@ -3379,6 +3471,56 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
       if (on(*components[i])) run_modifier(*components[i], m);
+  };
+  /* Round 518 (ADR 0146): the tail [split, end), and - when its last modifier drawn is a Skin without a limit group,
+   * outside Edit Mode's cage - the pose it skinned by and the mesh before it, for the render mesh to be posed from
+   * (Mesh::skin_pose). `prev`: the last result's pose, whose rest is kept while the mesh before the skin is the same
+   * (`same_topology`: the caller knows the topology held). The caller stamps the pose once the mesh's version is final. */
+  auto run_tail = [&](Mesh &m, const std::shared_ptr<const SkinPose> &prev, bool same_topology) -> std::shared_ptr<SkinPose> {
+    m.skin_pose = nullptr;
+    size_t last = components.size();
+    while (last > split && !on(*components[last - 1])) last--;
+    const auto *skin = last > split && mods != 2 && !skin_pose_off ? dynamic_cast<const SkinModifier *>(components[last - 1].get()) : nullptr;
+    if (!skin || !skin->vertex_group.empty()) {
+      run(m, split, components.size());
+      return nullptr;
+    }
+    run(m, split, last - 1);
+    std::shared_ptr<const Mesh> rest;
+    std::shared_ptr<std::mutex> rest_lock;  // (SkinPose::rest_lock: kept with the rest it guards)
+    if (prev && prev->rest && prev->rest_lock && same_topology && same_rest(*prev->rest, m)) rest = prev->rest, rest_lock = prev->rest_lock;
+    else if (prev && prev->rest && prev->rest_lock && same_topology) {  // (only the positions before the skin moved - a shape key: the rest's render mesh follows in place)
+      std::lock_guard<std::mutex> lock(*prev->rest_lock);  // (a copy of a Mesh runs no parallel loop: no isolation needed)
+      const bool alone = prev.use_count() == 1 && prev->rest.use_count() == 1;
+      /* Written in place when nothing else holds the last pose or its rest (no snapshot, no copy on a worker); else
+       * copied, render caches included, so the copy still follows in place (review 518: not a whole copy a frame). */
+      std::shared_ptr<Mesh> r = alone ? std::const_pointer_cast<Mesh>(prev->rest) : std::make_shared<Mesh>(*prev->rest);
+      r->positions = m.positions, r->custom_normals = m.custom_normals;
+      r->deform_version++;
+      rest = r;
+      rest_lock = alone ? prev->rest_lock : std::make_shared<std::mutex>();
+    }
+    else {
+      MeshCopyBare bare;  // (no caches; and no skin_pose: SkinPoseRef)
+      auto r = std::make_shared<Mesh>(m);
+      /* What the rest's render mesh never reads (review 518: the weights alone are megabytes on an avatar). */
+      std::vector<VertexGroup>().swap(r->vertex_groups);
+      r->shape_keys.clear();
+      r->edit_basis.clear(), r->edit_shape.clear();
+      rest = r;
+      rest_lock = std::make_shared<std::mutex>();
+    }
+    SkinPoseSink sink(&m);
+    run(m, last - 1, last);
+    if (!sink.pose) return nullptr;
+    sink.pose->rest = std::move(rest);
+    sink.pose->rest_lock = std::move(rest_lock);
+    return sink.pose;
+  };
+  auto stamp = [](Mesh &m, std::shared_ptr<SkinPose> pose) {
+    if (!pose) return;
+    pose->for_version = m.version, pose->for_deform = m.deform_version;
+    m.skin_pose = std::move(pose);
   };
   /* The head: built whole when its key changed - or, for one Subdivision Surface whose base only moved (ADR 0075),
    * followed in place by its chain, the moved vertices' footprint recomputed level by level. */
@@ -3472,20 +3614,23 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);  // (no head: the basis shaped here)
     m->deform_version++, edit_epoch::bump();  // before the tail runs: a deformer reading render_mesh() must not get last frame's
-    run(*m, split, components.size());
+    const std::shared_ptr<const SkinPose> prev = m->skin_pose.p;
+    std::shared_ptr<SkinPose> pose = run_tail(*m, prev, true);
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
         m->face_offsets.size() == head->face_offsets.size())
       m->version = v;  // the deformers touch() it; only the positions moved
     else
-      m->touch();  // a modifier that claims to deform changed topology: rebuild as usual
+      m->touch(), pose = nullptr;  // a modifier that claims to deform changed topology: rebuild as usual
+    stamp(*m, std::move(pose));
   }
   else {
     m = std::make_shared<Mesh>(*head);
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();
     m->edit_basis.clear(), m->edit_shape.clear(), m->edit_show_full = false;  // (round 406)
-    run(*m, split, components.size());
+    std::shared_ptr<SkinPose> pose = run_tail(*m, nullptr, false);
     m->touch();
+    stamp(*m, std::move(pose));
   }
   eval_mesh_[kind] = m;
   eval_key_[kind] = key;
@@ -3512,6 +3657,9 @@ AABB GameObject::world_bounds() const {
     b.add(world_position());
     return b;
   }
+  /* A posed skin's box from its posed positions (round 519): its render mesh would run the CPU skin kernel, which a view on
+   * the card spares - and a toon outline's width asks for this box every frame. */
+  if (m->skin_pose && m->skin_pose_holds()) return m->bounds().transformed(world_matrix());
   return m->render_mesh().bounds.transformed(world_matrix());
 }
 
@@ -3773,6 +3921,7 @@ std::unique_ptr<Scene> Scene::clone() const {
     auto c = std::make_unique<GameObject>();
     c->name = o->name;
     c->active = o->active;
+    c->skin_pose_off = o->skin_pose_off;  // (round 520: a snapshot evaluates the held object as the scene does)
     c->local_ = o->local_;
     c->world_ = o->world_;
     c->world_dirty_ = o->world_dirty_;

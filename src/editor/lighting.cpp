@@ -27,10 +27,14 @@ std::string Editor::lighting_dir() const {
   return fs::join(fs::parent(scene_->path), name);
 }
 
+/* Round 520: the key a mesh's hash is remembered by - its render mesh's serial; 0 (not remembered: the hash is made from the
+ * mesh's own positions, which are the pose) for a posed skin, whose render mesh would run the CPU skin kernel every posed frame. */
+static uint64_t hash_serial(const Mesh &m) { return m.skin_pose_holds() ? 0 : m.render_mesh().serial; }
+
 /* lightmap_content_hash() of a drawn mesh at g's place. The mesh part is remembered by its render
  * mesh's serial (new for every rebuild, never reused), so a drag only rehashes the matrix. */
 uint64_t Editor::mesh_hash_of(const Mesh &m) {
-  const uint64_t serial = m.render_mesh().serial;
+  const uint64_t serial = hash_serial(m);
   auto it = serial ? lm_mesh_hash_.find(serial) : lm_mesh_hash_.end();
   if (it != lm_mesh_hash_.end()) return it->second;
   const uint64_t mh = lightmap_mesh_hash(m);
@@ -327,7 +331,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
   JobSystem::global().parallel_for((int64_t)meshes.size(), 2, [&](int64_t a, int64_t b) {
     for (int64_t i = a; i < b; i++) {
       MeshWork &w = meshes[(size_t)i];
-      const uint64_t serial = w.m->render_mesh().serial;
+      const uint64_t serial = hash_serial(*w.m);
       const auto known = serial ? lm_mesh_hash_.find(serial) : lm_mesh_hash_.end();  // (only read here: filled below)
       w.hash = known != lm_mesh_hash_.end() ? known->second : lightmap_mesh_hash(*w.m);
       w.copy = mesh_copy_bare(*w.m);
@@ -335,7 +339,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
   });
   if (lm_mesh_hash_.size() > 8192) lm_mesh_hash_.clear();  // (as mesh_hash_of: old meshes' serials never come back)
   for (const MeshWork &w : meshes)
-    if (const uint64_t serial = w.m->render_mesh().serial) lm_mesh_hash_[serial] = w.hash;
+    if (const uint64_t serial = hash_serial(*w.m)) lm_mesh_hash_[serial] = w.hash;
   const double mesh_ms = pass_t.ms() - eval_ms;
   std::vector<MaterialPtr> used;
   for (const Part &p : parts) used.insert(used.end(), p.mr->materials.begin(), p.mr->materials.end());
@@ -706,6 +710,7 @@ void Editor::bake_cancel(bool discard) {
     if (!bake_job_) baker_.cancel();  // nothing left behind either way
     return;
   }
+  jobs_note_cancelled(kBakeJobKey);  // (round 564: the bake leaves the tray with `baking_` below - its end must not read "done")
   baking_ = false;
   bake_status_ = "Baking cancelled";
   Log::info("Generate Lighting cancelled");

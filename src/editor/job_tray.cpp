@@ -68,6 +68,9 @@ void Editor::export_waits_drop(const char *why) {
   export_waits_.clear();
 }
 
+/* Round 564: what the tray follows a job by - its key when it has one (a bake, whose label names its phase), else its label. */
+static const std::string &job_key(const Editor::JobView &j) { return j.key.empty() ? j.label : j.key; }
+
 /* The running jobs, newest state each frame; `started` from the tray's own record (jobs_poll). */
 std::vector<Editor::JobView> Editor::jobs_running() {
   std::vector<JobView> jobs;
@@ -119,6 +122,10 @@ std::vector<Editor::JobView> Editor::jobs_running() {
     const int phase = bake_job_->phase.load();
     add(phase == 0 ? "Baking lighting" : phase == 1 ? "Baking probes" : phase == 2 ? "Baking Light Volumes" : phase == 5 ? "Sending the bake to the card" : "Baking reflection probes", bake_job_->progress.load(),
         [this] { bake_cancel(); }, bake_job_->cancel.load());
+    /* Round 564: one job from the first phase to the landing. Followed by its label, each phase was a job of its own that "ended"
+     * when the next began - so a bake whose lightmaps took a second said "Baking lighting done" in a toast while its probes were
+     * still baking, or (round 508) while its pages were still going up to the card and the views showed the old lighting. */
+    jobs.back().key = kBakeJobKey;
   }
   if (rendering_ && mr_job_) {
     const float p = mr_job_->progress.load();
@@ -159,8 +166,8 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   if (ranim_.encode) add("Encoding video", -1.0f, nullptr);  // (no Cancel: an external FFmpeg cannot be told)
 
   for (JobView &j : jobs) {
-    const auto seen = std::find_if(jobs_seen_.begin(), jobs_seen_.end(), [&](const JobSeen &s) { return s.label == j.label; });
-    if (seen != jobs_seen_.end()) j.started = seen->started;
+    const auto seen = std::find_if(jobs_seen_.begin(), jobs_seen_.end(), [&](const JobSeen &s) { return s.key == job_key(j); });
+    if (seen != jobs_seen_.end()) j.started = seen->label == j.label ? seen->label_started : seen->started;  // (a phase the poll has not seen yet: the job's own start for a frame)
   }
   return jobs;
 }
@@ -172,14 +179,16 @@ void Editor::jobs_poll() {
   const std::vector<JobView> jobs = jobs_running();
   for (JobSeen &s : jobs_seen_) s.alive = false;
   for (const JobView &j : jobs) {
-    const auto seen = std::find_if(jobs_seen_.begin(), jobs_seen_.end(), [&](const JobSeen &s) { return s.label == j.label; });
+    const auto seen = std::find_if(jobs_seen_.begin(), jobs_seen_.end(), [&](const JobSeen &s) { return s.key == job_key(j); });
     if (seen != jobs_seen_.end()) {
       seen->alive = true;
       seen->cancelled = seen->cancelled || j.cancelled;  // (a cancel made another way - Esc, a console verb - counts)
+      if (seen->label != j.label) seen->label = j.label, seen->label_started = now, hci_log("job\tphase " + j.label);  // (round 564: the same job, its next phase)
       continue;
     }
-    jobs_seen_.push_back({j.label, now, false, true});
-    hci_log("job\tstart " + j.label);
+    jobs_seen_.push_back({j.label, now, false, true, job_key(j), now});
+    hci_log("job\tstart " + job_key(j));
+    if (!j.key.empty()) hci_log("job\tphase " + j.label);  // (its first phase)
   }
   for (size_t i = 0; i < jobs_seen_.size();) {
     if (jobs_seen_[i].alive) {
@@ -188,13 +197,18 @@ void Editor::jobs_poll() {
     }
     const JobSeen s = jobs_seen_[i];
     jobs_seen_.erase(jobs_seen_.begin() + (std::ptrdiff_t)i);
-    const double secs = now - s.started;
-    const char *end = s.cancelled ? "cancelled" : "done";
-    /* A toast for a cancel, or for a job that ran a second or more; never for the Live Preview's renders. */
-    const bool worth_a_toast = s.cancelled || (secs >= 1.0 && s.label != "Preview render");
-    if (worth_a_toast) toast(LogLevel::Info, strprintf("%s %s in %.1f s", s.label.c_str(), end, secs));
-    hci_log(strprintf("job\t%s %s %.3f", end, s.label.c_str(), secs));
+    jobs_end(s, now);
   }
+}
+
+/* A job that has left the tray: an Info toast saying how long it took or that it was cancelled, and the HCI log's line. */
+void Editor::jobs_end(const JobSeen &s, double now) {
+  const double secs = now - s.started;
+  const char *end = s.cancelled ? "cancelled" : "done";
+  /* A toast for a cancel, or for a job that ran a second or more; never for the Live Preview's renders. */
+  const bool worth_a_toast = s.cancelled || (secs >= 1.0 && s.label != "Preview render");
+  if (worth_a_toast) toast(LogLevel::Info, strprintf("%s %s in %.1f s", s.key.c_str(), end, secs));  // (round 564: the job's name, not its last phase's)
+  hci_log(strprintf("job\t%s %s %.3f", end, s.key.c_str(), secs));
 }
 
 /* The tray in the status bar: the newest job's label, percentage, time run and estimate left, a bar behind the text
@@ -254,17 +268,31 @@ int Editor::draw_job_tray(int right_x, int y, int h, const std::vector<JobView> 
 /* Cancel by label, from the tray or the console: the job's own flag, and the end toast says "cancelled". */
 bool Editor::jobs_cancel(const std::string &label) {
   const std::vector<JobView> jobs = jobs_running();
-  const auto it = std::find_if(jobs.begin(), jobs.end(), [&](const JobView &j) { return j.label == label; });
+  /* (Round 564: by its name or its phase's - the tray's Cancel sends the label it drew, which the worker may have left since.) */
+  const auto it = std::find_if(jobs.begin(), jobs.end(), [&](const JobView &j) { return j.label == label || job_key(j) == label; });
   if (it == jobs.end()) return false;
   if (!it->cancellable) {
     Log::warn("%s cannot be cancelled", label.c_str());
     return true;
   }
   for (JobSeen &s : jobs_seen_)
-    if (s.label == label) s.cancelled = true;
-  hci_log("job\tcancel " + label);
+    if (s.key == job_key(*it)) s.cancelled = true;
+  hci_log("job\tcancel " + job_key(*it));
   it->cancel();
   return true;
+}
+
+/* Round 564: a job cancelled another way than the tray's Cancel whose flag the poll will not see - a bake leaves the tray in the
+ * call that cancels it (bake_cancel clears `baking_`), so without this its end read "done". The job ends here, not at the next
+ * poll: a bake started again in the same frame (`bake cancel` then `bake start` from a script) is a new job with its own start,
+ * not the cancelled one carried on (review). */
+void Editor::jobs_note_cancelled(const std::string &key) {
+  const auto it = std::find_if(jobs_seen_.begin(), jobs_seen_.end(), [&](const JobSeen &s) { return s.key == key; });
+  if (it == jobs_seen_.end()) return;
+  JobSeen s = *it;
+  jobs_seen_.erase(it);
+  s.cancelled = true;
+  jobs_end(s, clock_now());
 }
 
 /* jobs | jobs cancel [label] */

@@ -4,6 +4,10 @@ rem Usage: build.bat [release|debug] [app|stress|tests|check|all|installer]
 rem   all: the editor, the stress tests and the unit tests from one compile (round 492, ADR 0133: every source once,
 rem   the three linked from the same objects; it compiled everything three times before).
 rem   check: the unit and stress tests the same way, without the editor.
+rem   BLENDITY_VCVARS_VER=14.51: build with that MSVC toolset when Visual Studio has it (round 579: CI pins it - a new
+rem   runner image's default compiler, 14.52, built programs that crashed); without it, the default toolset.
+rem   BLENDITY_VCVARS_STRICT=1: when that toolset is not installed, stop instead of building with the default one.
+rem   BLENDITY_PDB=1: a release build with its symbols beside each program (.pdb), so a crash report names its frames.
 rem   BLENDITY_NO_LTCG=1: no whole-program optimization (/GL, /LTCG) - a faster build for quick local runs, not for checks:
 rem   with /fp:fast, MSVC then compiles two code paths differently that some tests compare bit for bit.
 rem   installer: the app, then dist\installers\Blendity-Setup-<VERSION>.exe with Inno Setup 6 (task 0076).
@@ -30,8 +34,34 @@ if errorlevel 1 (
     echo [blendity] Could not find Visual Studio C++ tools. Install "Desktop development with C++".
     exit /b 1
   )
-  call "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" >nul
+  rem Round 579 (task 0561): BLENDITY_VCVARS_VER names a toolset (14.51, or a whole version); the newest installed one
+  rem that starts with it is asked of vcvars by its whole version. Not installed: said loudly, and the default toolset
+  rem builds - or, with BLENDITY_VCVARS_STRICT=1 (CI, the release), nothing is built: a program from a compiler nobody
+  rem saw pass is worse than a red job that is run again.
+  set "VCVER_FOUND="
+  set "VCVER_ARG="
+  if not "%BLENDITY_VCVARS_VER%"=="" (
+    for /d %%t in ("!VSDIR!\VC\Tools\MSVC\%BLENDITY_VCVARS_VER%*") do set "VCVER_FOUND=%%~nxt"
+    if "!VCVER_FOUND!"=="" (
+      echo [blendity] WARNING: BLENDITY_VCVARS_VER=%BLENDITY_VCVARS_VER% is not installed under "!VSDIR!\VC\Tools\MSVC". Installed:
+      dir /b "!VSDIR!\VC\Tools\MSVC"
+      if "%BLENDITY_VCVARS_STRICT%"=="1" (
+        echo [blendity] ERROR: BLENDITY_VCVARS_STRICT=1 - not building with another compiler. On CI: run this job again, it may land on a runner that has the toolset.
+        exit /b 1
+      )
+      echo [blendity] WARNING: building with the DEFAULT toolset.
+    ) else (
+      set "VCVER_ARG=-vcvars_ver=!VCVER_FOUND!"
+    )
+  )
+  call "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" !VCVER_ARG! >nul
+  if not "!VCVER_FOUND!"=="" if not "!VCToolsVersion!"=="!VCVER_FOUND!" echo [blendity] WARNING: asked for toolset !VCVER_FOUND! but the environment has !VCToolsVersion!
+) else (
+  if not "%BLENDITY_VCVARS_VER%"=="" echo [blendity] BLENDITY_VCVARS_VER=%BLENDITY_VCVARS_VER% is ignored: a compiler is already on the PATH - this prompt's toolset builds.
 )
+rem Every log states its compiler (round 579: one runner image's newer compiler was found only by comparing logs).
+for /f "delims=" %%b in ('cl 2^>^&1 ^| findstr /i /c:"version"') do echo [blendity] Compiler: %%b
+echo [blendity] Toolset: %VCToolsVersion%
 
 cd /d "%~dp0"
 if not exist build\obj_%CONFIG% mkdir build\obj_%CONFIG%
@@ -176,6 +206,11 @@ set LIBSRC=@%SRCRSP%
 set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%BLENDITY_NO_LTCG%"=="1" set FLAGS=!FLAGS:/GL=!
 if "%BLENDITY_NO_LTCG%"=="1" set LINKFLAGS=!LINKFLAGS:/LTCG=!
+rem Round 579: BLENDITY_PDB=1 keeps a release build's symbols (/Z7 in the objects, a .pdb beside each program). The code
+rem is the same (/OPT:REF and /OPT:ICF stay as a release link has them); the stress program's crash report then names
+rem its frames instead of printing ? for them.
+if "%BLENDITY_PDB%"=="1" if /i not "%CONFIG%"=="debug" set FLAGS=!FLAGS! /Z7
+if "%BLENDITY_PDB%"=="1" if /i not "%CONFIG%"=="debug" set LINKFLAGS=!LINKFLAGS! /DEBUG /OPT:REF /OPT:ICF
 if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 

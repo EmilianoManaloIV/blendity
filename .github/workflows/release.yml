@@ -68,11 +68,23 @@ jobs:
       - name: Fetch Blender's libraries
         shell: bash
         run: bash packaging/fetch_blender_libs.sh windows_x64
+      # Round 579 (task 0561): which image and which compilers this runner has - the first build on image 20261116.315
+      # (MSVC 14.52) made programs that crashed in two places; it was found only by comparing two logs' compiler paths.
+      - name: Runner image and MSVC toolsets
+        shell: bash
+        run: |
+          echo "image: ${ImageOS:-?} ${ImageVersion:-?}"
+          for d in "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/MSVC; do echo "$d:"; ls "$d" || true; done
       - name: Build Blendity-full (with the libraries), then Blendity (dependency-free)
         shell: cmd
         # Task 0169 (ADR 0054): both carry the OptiX device (its host headers fetched from NVIDIA at a pinned tag).
         env:
           BLENDITY_FETCH_OPTIX: "1"
+          # Round 579: the compiler every green build used. Runner image 20261116.315's default, 14.52, built programs
+          # that crashed, and that image has no 14.51; its other toolset, 14.44, cannot compile the lessons' long
+          # strings (C2026). So on such a runner the build stops (STRICT) rather than use 14.52: run the job again.
+          BLENDITY_VCVARS_VER: "14.51"
+          BLENDITY_VCVARS_STRICT: "1"
         run: |
           set BLENDITY_OUT=dist\windows\Blendity-full.exe
           call build.bat release app || exit /b 1

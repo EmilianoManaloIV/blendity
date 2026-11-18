@@ -13461,6 +13461,159 @@ static void tests_round556() {
   });
 }
 
+/* ---------------------------------------------------------------- round 572 (task 0554): the depth plane on small triangles */
+namespace {
+
+/* A lattice of n x n quads (two triangles each) `width` across, centred on the view's axis at distance d, its depth
+ * growing by `tilt` x d from its left edge to its right. */
+MeshPtr r572_lattice(float d, float width, int n, float tilt) {
+  MeshPtr m = std::make_shared<Mesh>();
+  for (int j = 0; j <= n; j++)
+    for (int i = 0; i <= n; i++) {
+      const float u = (float)i / (float)n - 0.5f, v = (float)j / (float)n - 0.5f;
+      m->add_vert({u * width, v * width, d + tilt * d * u});
+    }
+  for (int j = 0; j < n; j++)
+    for (int i = 0; i < n; i++) {
+      const uint32_t a = (uint32_t)(j * (n + 1) + i), b = a + 1, c = a + (uint32_t)n + 1, e = c + 1;
+      m->add_face({a, b, e});
+      m->add_face({a, e, c});
+    }
+  m->sync_attributes();
+  return m;
+}
+
+/* The Scene view's projection for a pivot at distance d (SceneCamera::projection's near and far), looking down +z from the origin. */
+struct R572View {
+  int W = 128, H = 128;
+  Mat4 v = Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0});
+  Mat4 p;
+  explicit R572View(float d) : p(Mat4::perspective(60.0f * kDeg2Rad, 1.0f, std::max(0.01f, d * 0.002f), std::max(1000.0f, d * 50.0f))) {}
+};
+
+/* How far along the pixel's ray the depth `z` lies (the renderer's own projection, by bisection, as sculpt_hit and the picks do). */
+float r572_distance(const Renderer3D &r3d, const Ray &ray, float z, float d) {
+  float lo = d * 0.25f, hi = d * 4.0f;
+  for (int i = 0; i < 60; i++) {
+    const float mid = 0.5f * (lo + hi);
+    Vec2 sp;
+    float zm = 0.0f;
+    r3d.project(ray.origin + ray.dir * mid, sp, zm);
+    (zm < z ? lo : hi) = mid;
+  }
+  return 0.5f * (lo + hi);
+}
+
+}  // namespace
+
+static void tests_round572() {
+  test("rasterizer (round 572): on triangles a third of a pixel across, a wall facing the view at 8 m and at 100 m has one depth - within a few of the depth's last bits, not thousands (centimetres to decimetres along the ray)", [] {
+    for (const float d : {8.0f, 100.0f}) {
+      const R572View view(d);
+      const float pixel = 2.0f * d * std::tan(30.0f * kDeg2Rad) / (float)view.H;  // (world units a pixel at d)
+      CfScene sc;
+      sc.add(r572_lattice(d, pixel * 40.0f, 120, 0.0f), Mat4::identity(), 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+      sc.items.back().double_sided = true;
+      sc.seal();
+      Image img;
+      RenderTarget rt;
+      Renderer3D r3d;
+      cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF204060u, &r3d);
+      Vec2 sp;
+      float z_ref = 0.0f, z_near = 0.0f;
+      CHECK(r3d.project({0.0f, 0.0f, d}, sp, z_ref));
+      CHECK(r3d.project({0.0f, 0.0f, d * 0.999f}, sp, z_near));
+      const float ulp = z_ref * 1.1920929e-7f, per_depth = d * 0.001f / std::max(1e-12f, z_ref - z_near);  // (distance per unit of depth there)
+      size_t covered = 0;
+      float worst = 0.0f;
+      for (int y = 0; y < view.H; y++)
+        for (int x = 0; x < view.W; x++) {
+          if (rt.ids[(size_t)y * view.W + x] != 1) continue;
+          covered++;
+          worst = std::max(worst, std::fabs(rt.depth_at(x, y) - z_ref));
+        }
+      std::printf("    at %g m: %zu pixels, the depth %.9g; the farthest pixel is %.1f last bits off (%.3g mm along the ray; one bit is %.3g mm)\n", d, covered, z_ref, worst / ulp,
+                  worst * per_depth * 1000.0f, ulp * per_depth * 1000.0f);
+      CHECK(covered > 1200);
+      CHECK(worst <= 4.0f * ulp);  // (measured 0. Before round 572: 145 - 70 mm at 8 m, 853 mm at 100 m)
+    }
+  });
+
+  test("rasterizer (round 572): the same wall turned, its depth changing across it - each pixel's depth is the wall's on that pixel's ray, within a few last bits", [] {
+    for (const float d : {8.0f, 100.0f}) {
+      const R572View view(d);
+      const float pixel = 2.0f * d * std::tan(30.0f * kDeg2Rad) / (float)view.H, tilt = 0.4f;
+      const float width = pixel * 40.0f;
+      CfScene sc;
+      sc.add(r572_lattice(d, width, 120, tilt), Mat4::identity(), 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+      sc.items.back().double_sided = true;
+      sc.seal();
+      Image img;
+      RenderTarget rt;
+      Renderer3D r3d;
+      cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF204060u, &r3d);
+      /* The wall's plane: through (0, 0, d), z = d + (tilt d / width) x. */
+      const Vec3 on(0.0f, 0.0f, d), normal = normalize(Vec3(-tilt * d / width, 0.0f, 1.0f));
+      Vec2 sp;
+      float z_ref = 0.0f;
+      CHECK(r3d.project(on, sp, z_ref));
+      const float ulp = z_ref * 1.1920929e-7f;
+      size_t checked = 0;
+      float worst = 0.0f;
+      for (int y = 2; y + 2 < view.H; y++)
+        for (int x = 2; x + 2 < view.W; x++) {
+          bool inner = true;  // (a pixel with the wall all round it: not the rim, where the last triangle's edge decides)
+          for (int k = 0; k < 4 && inner; k++) inner = rt.ids[(size_t)(y + (k == 0) - (k == 1)) * view.W + (x + (k == 2) - (k == 3))] == 1;
+          if (!inner || rt.ids[(size_t)y * view.W + x] != 1) continue;
+          const Ray ray = r3d.screen_ray(x + 0.5f, y + 0.5f);
+          const float t = dot(on - ray.origin, normal) / dot(ray.dir, normal);
+          float z_wall = 0.0f;
+          if (!r3d.project(ray.origin + ray.dir * t, sp, z_wall)) continue;
+          checked++;
+          worst = std::max(worst, std::fabs(rt.depth_at(x, y) - z_wall));
+        }
+      std::printf("    at %g m, turned: %zu pixels checked; the farthest is %.1f last bits off the wall's depth on its ray\n", d, checked, worst / ulp);
+      CHECK(checked > 1000);
+      CHECK(worst <= 8.0f * ulp);  // (measured 1; the expected depth is itself worked out in float. Before round 572: 260)
+    }
+  });
+
+  test("rasterizer (round 572): a 44-pixel sphere of 9,000 triangles at 8 m and at 100 m - the distance each pixel's depth gives puts the point on the sphere, within its facets' sag (what picking, Paint and Weight Paint read)", [] {
+    for (const float d : {8.0f, 100.0f}) {
+      const R572View view(d);
+      const float pixel = 2.0f * d * std::tan(30.0f * kDeg2Rad) / (float)view.H, radius = 22.0f * pixel;
+      const Vec3 centre(0.0f, 0.0f, d);
+      CfScene sc;
+      sc.add(primitives::uv_sphere(radius, 96, 48), Mat4::translate(centre), 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+      sc.seal();
+      Image img;
+      RenderTarget rt;
+      Renderer3D r3d;
+      cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF204060u, &r3d);
+      size_t checked = 0, off = 0;
+      float lowest = 1e30f, highest = 0.0f;
+      for (int y = 0; y < view.H; y++)
+        for (int x = 0; x < view.W; x++) {
+          if (rt.ids[(size_t)y * view.W + x] != 1) continue;
+          const Ray ray = r3d.screen_ray(x + 0.5f, y + 0.5f);
+          /* (Within 0.8 of the radius of the sphere's middle: at the rim the surface turns edge-on and a facet's sag is long along the ray.) */
+          const Vec3 to = centre - ray.origin;
+          const float miss = length(to - ray.dir * dot(to, ray.dir));
+          if (miss > 0.8f * radius) continue;
+          const Vec3 at = ray.origin + ray.dir * r572_distance(r3d, ray, rt.depth_at(x, y), d);
+          const float r = length(at - centre) / radius;
+          checked++, lowest = std::min(lowest, r), highest = std::max(highest, r);
+          /* (A facet's middle is a little inside the sphere; one last bit of the depth is 0.5 mm at 8 m, 6 mm at 100 m. Measured
+           * 0.9988 to 1.0001; before round 572, 0.985 to 1.015 here and far worse on smaller triangles.) */
+          off += r < 0.997f || r > 1.002f ? 1 : 0;
+        }
+      std::printf("    at %g m: %zu pixels checked, their points %.4f to %.4f radii from the centre; %zu off the sphere\n", d, checked, lowest, highest, off);
+      CHECK(checked > 700);
+      CHECK(off == 0);
+    }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13519,4 +13672,5 @@ void run_render_tests() {
   tests_round538();
   tests_round554();
   tests_round556();
+  tests_round572();
 }

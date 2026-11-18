@@ -309,6 +309,24 @@ void Context::focus_reveal(const Recti &r) {
   else reveal_id_ = 0;
 }
 
+/* Round 573 (task 0555): the focused control pushed out of its scroll area with no scroll - rows above it grew or went (a sentence that re-wraps, a list that fills in) after focus_reveal's
+ * four frames were over. When it was whole in the clip the frame before, is not now, and the area's offset is the same, it is revealed again. A wheel or a dragged scrollbar changes the
+ * offset: the user scrolled it away, and it stays away. */
+void Context::focus_watch(Id i, const Recti &r) {
+  const Recti clip = canvas.clip();
+  const bool seen = r.y >= clip.y && r.bottom() <= clip.bottom();
+  /* Every level it sits in - each enclosing scroll area and its popup - because the clip is all of theirs together: a wheel on the popup round a list is the user's scroll too
+   * (the review: only the innermost was read, and the list was then scrolled against the wheel). */
+  int offset = current_layer_ > 0 && current_layer_ <= (int)popups_.size() ? popups_[(size_t)current_layer_ - 1].scroll : 0;
+  for (const ScrollState &s : scroll_stack_) offset += s.offset;
+  const bool pushed_out = watch_id_ == i && watch_seen_ && !seen && offset == watch_offset_;
+  watch_id_ = i, watch_seen_ = seen, watch_offset_ = offset;
+  if (!pushed_out || reveal_id_ == i) return;
+  reveal_id_ = i;
+  reveal_left_ = 4;
+  focus_reveal(r);
+}
+
 void Context::focus_ring(const Recti &r) {
   const Recti clip = canvas.clip();
   const uint32_t color = theme.focus, outline = theme.text;
@@ -362,6 +380,7 @@ int Context::focus_stop(Id i, const Recti &r, StopKind kind) {
   focus_seen_ = true;
   focus_rect_ = r;
   focus_layer_ = current_layer_;
+  focus_watch(i, r);
   if (focus_start_id_ == i) {  // (it had the focus when the frame began: the keys are its)
     if (fk_.tab) return focus_walk(fk_.shift), 0;
     if (kind == StopMenuRow && (fk_.up || fk_.down)) return focus_walk(fk_.up), 0;

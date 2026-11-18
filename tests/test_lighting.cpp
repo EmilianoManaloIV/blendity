@@ -12099,11 +12099,24 @@ static void tests_round507_te() {
     CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
     const std::string dir = ed.lighting_dir_for_test();
     const auto pages = r507_pages(ed);
+    const bool moving = ed.lighting_moving_for_test();
     ed.command("save " + scene2);
     const std::string dir2 = ed.lighting_dir_for_test();
     CHECK(dir2 != dir);
-    r507te::settle(ed);
-    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    /* Round 569: until the Save As has landed and the bake's files have moved, not the move and then a fixed 20 frames.
+     * The save is written on a worker and the lightmaps go next to the new file from one of two places: the move's
+     * poll, when the files were still on their way at the Save As (the scene is elsewhere by then), or the save's own
+     * landing, when the move had already finished in the frame the bake landed. Which it is depends on how fast the
+     * move's thread ran; in the second case the worker had 20 quick frames to write the scene, and on a loaded machine
+     * it had not - no LightingData.bin yet (failed once in a group run, 5 of 5 alone). Both orders are still what the
+     * test pins; it now waits on the jobs' state, as round 511 made its neighbour below do. */
+    int frames = 0;
+    ed.step_frame_headless();
+    for (; frames < 5000 && (ed.save_job_running_for_test() || ed.lighting_moving_for_test()); frames++)
+      ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();  // (the frame that lands the save, and the move's poll after it)
+    std::printf("    files still moving at the Save As: %s; the save and the move done after %d frame(s)\n", moving ? "yes" : "no", frames);
+    CHECK(!ed.save_job_running_for_test() && !ed.lighting_moving_for_test());
     const auto after = r507_pages(ed);
     std::printf("    new folder %s: LightingData.bin %d\n", dir2.c_str(), (int)fs::exists(fs::join(dir2, "LightingData.bin")));
     CHECK(fs::exists(fs::join(dir2, "LightingData.bin")));
@@ -12120,14 +12133,24 @@ static void tests_round507_te() {
     const std::string dir = ed.lighting_dir_for_test();
     const auto pages = r507_pages(ed);
     std::printf("    files still moving at the open: %s\n", ed.lighting_moving_for_test() ? "yes" : "no");
+    /* Round 569: until the open has landed and the files have moved, not the move and then a fixed 20 frames (as round
+     * 511 did for the review's test below). The open reads on a worker; on a loaded machine 20 quick frames ended
+     * before it landed, and `after` was then the bake still in memory - not to the bit what the late open reads back
+     * from the file (failed once in ten group runs under load). */
+    auto opened = [&] {
+      ed.step_frame_headless();
+      for (int i = 0; i < 5000 && (ed.open_job_running_for_test() || ed.lighting_moving_for_test()); i++)
+        ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      CHECK(!ed.open_job_running_for_test() && !ed.lighting_moving_for_test());
+    };
     ed.command("open " + scene);
-    r507te::settle(ed);
-    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    opened();
     const auto after = r507_pages(ed);
     std::printf("    pages baked %zu, after the open %zu\n", pages.size(), after.size());
     CHECK(after.size() == pages.size());
     ed.command("open " + scene);  // (the control: the files have long arrived - what a file gives back is what a late open gives)
-    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    opened();
     const auto late = r507_pages(ed);
     CHECK(late.size() == after.size());
     for (size_t k = 0; k < std::min(late.size(), after.size()); k++) {

@@ -5,6 +5,7 @@
 #include "../core/jobs.h"
 #include "../image/image.h"
 #include "../scene/mesh.h"
+#include "../scene/skin_render.h"
 #include "canvas.h"
 #include "lightmapper.h"
 #include "raster.h"
@@ -12,6 +13,8 @@
 
 #include <algorithm>
 #include <climits>
+#include <memory>
+#include <mutex>
 #include <cmath>
 
 namespace bl {
@@ -115,14 +118,45 @@ TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::
       render_vertex_colors_into(mesh, rm, bake_colors);
       break;
     }
-  Mesh baked = mesh;
-  baked.uvs = r.uvs;
-  baked.touch();
-  const RenderMesh &bm = baked.render_mesh_tangents();
+  /* Round 520 (task 0503): a posed skin keeps its pose here. The re-UV'd copy's `touch()` ends the pose (its version moves), and
+   * the copy would then be built whole on the posed shape - its diagonals and MikkTSpace on the posed positions, not the views'
+   * rest triangulation and turned tangents. So the rest (a bare copy, read under its lock) gets the baked UVs and its own render
+   * mesh, and the pose's kernel moves that one: the same triangles as `rm`, the tangent frame the renderers will read. */
+  Mesh baked;
+  RenderMesh posed_baked;
+  const RenderMesh *bmp = nullptr;
+  if (mesh.skin_pose_holds()) {
+    const SkinPose &sp = *mesh.skin_pose;
+    std::unique_ptr<Mesh> brest;
+    {
+      /* (No JobSystem::isolate: only a Mesh copy runs under the lock, no parallel loop - skinned_render_mesh's work under it does.) */
+      std::lock_guard<std::mutex> lock(*sp.rest_lock);
+      MeshCopyBare bare;
+      brest = std::make_unique<Mesh>(*sp.rest);
+    }
+    if (brest->corner_verts.size() == r.uvs.size()) {
+      brest->uvs = r.uvs;
+      brest->touch();
+      const RenderMesh &rr = brest->render_mesh_tangents();
+      std::vector<uint32_t> table;
+      skin_render_vertex_table(*brest, rr, table);
+      posed_baked = rr;
+      skin_render_vertices(sp, rr, table, posed_baked);
+      bmp = &posed_baked;
+    }
+  }
+  if (!bmp) {
+    baked = mesh;
+    baked.uvs = r.uvs;
+    baked.touch();
+    bmp = &baked.render_mesh_tangents();
+  }
+  const RenderMesh &bm = *bmp;
   const size_t nt = rm.tri_count();
   if (rm.tri_corner.size() != nt * 3) return r;
   /* The two triangulations are the same (UVs only split vertices), so triangle t is the same in both; checked. */
   const bool same = bm.tri_count() == nt && bm.tri_corner == rm.tri_corner && bm.tangents.size() == bm.positions.size();
+  r.lined_up = same;
   const Mat4 nm = model.inverse().transposed();
   /* A mirrored placement exported: the other program's bitangent points the other way (see export_space). */
   const Vec3 c0 = model.dir(Vec3(1, 0, 0)), c1 = model.dir(Vec3(0, 1, 0)), c2 = model.dir(Vec3(0, 0, 1));
