@@ -1477,6 +1477,14 @@ class Editor {
   Vec3 sculpt_last_hit_for_test() const { return sculpt_last_hit_; }
   float sculpt_last_radius_for_test() const { return sculpt_last_radius_; }
   bool sculpt_hit_for_test(float x, float y, Vec3 &world, float &dist) { return sculpt_hit(scene_rect_, x, y, world, dist); }
+  /* Round 562 (task 0544): the pixel's ray against the sculpted mesh - through the face grid, or every face (`brute`) -
+   * as an object-space distance, -1 off the mesh; the grid used from `faces` faces up (a test's small mesh through it);
+   * the Scene view's depth plane scaled by up to `rel` either way, pixel by pixel (what a rasterizer's rounding does). */
+  float sculpt_ray_for_test(float x, float y, bool brute);
+  void sculpt_ray_grid_from_for_test(size_t faces) { sculpt_ray_grid_from_ = faces, sculpt_ray_.uid = 0; }
+  size_t sculpt_ray_builds_for_test() const { return sculpt_ray_.builds; }
+  size_t sculpt_ray_entries_for_test() const { return sculpt_ray_.entries; }
+  void noise_scene_depth_for_test(float rel, uint32_t seed);
   size_t sculpt_last_gathered_for_test() const { return sculpt_last_gathered_; }
   size_t sculpt_dabs_for_test() const { return sculpt_dab_px_.size(); }  // (task 0237)
   const std::vector<Vec3> *sculpt_colors_for_test(const Mesh &m) { return sculpt_colors(m, m.render_mesh(), Vec3(0.8f)); }  // (task 0238)
@@ -5345,6 +5353,32 @@ class Editor {
   bool set_sculpt(bool on);
   Mesh *sculpt_mesh();
   bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist, uint64_t obj = 0);  // (obj 0: the sculpted object; task 0519: Weight Paint's)
+  /* Round 562 (task 0544): the sculpted mesh's faces by the cells their boxes overlap, for the pixel's ray (sculpt.cpp:
+   * sculpt_ray_cast). Right for one mesh at one version and deform_version; a dab notes the faces it moved, and the
+   * next ray files them again. */
+  struct SculptRayGrid {
+    uint64_t uid = 0, version = 0, deform_version = 0;  // (the mesh it is right for; uid 0: none)
+    float cell = 1.0f;
+    std::unordered_map<uint64_t, std::vector<uint32_t>> cells;
+    std::vector<uint32_t> big;     // (faces over too many cells: every ray tests them)
+    std::vector<uint8_t> is_big;   // (per face)
+    std::vector<uint32_t> stamp;   // (per face: the cast that tested it last)
+    uint32_t pass = 0;
+    std::vector<int32_t> range;    // (per face, six: the cells it was filed in last - low x, y, z, high x, y, z)
+    std::vector<uint32_t> moved;   // (faces a dab moved since the last cast: filed again before the next)
+    std::vector<uint8_t> is_moved;
+    Vec3 lo, hi;                   // (the box the cells cover: where all but stray faces lie)
+    size_t entries = 0, built_entries = 0, built_big = 0, builds = 0;
+  } sculpt_ray_;
+  size_t sculpt_ray_grid_from_ = 4096;  // (fewer faces: every face tested, no grid)
+  void sculpt_ray_build(const Mesh &m);
+  void sculpt_ray_file(const Mesh &m, uint32_t f);
+  void sculpt_ray_moved(const Mesh &m, const std::vector<uint32_t> &ids);
+  void sculpt_ray_cell(const Mesh &m, const Ray &r, bool cull, uint64_t key, float &best);
+  float sculpt_ray_cast(const Mesh &m, const Ray &r, bool cull, bool brute = false);
+  bool sculpt_ray_fits(const GameObject &g, const Mesh &m) const;
+  bool sculpt_ray_culls(const GameObject &g) const;
+  bool sculpt_ray_hit(float x, float y, Vec3 &world, float &dist, bool any_stack);
   float sculpt_world_radius(float px, float dist) const;
   void sculpt_build_grid(const Mesh &m, float cell);
   void sculpt_gather(const Mesh &m, Vec3 centre, float radius, std::vector<uint32_t> &ids, std::vector<float> &d) const;
@@ -5423,8 +5457,6 @@ class Editor {
   /* Task 0239: Dynamic Subdivision - a Subdivision Surface on the sculpted object (ADR 0075). */
   int sculpt_subdiv_levels() const;
   void sculpt_set_subdiv(int levels);
-  bool sculpt_cage_hit(float x, float y, Vec3 &world, float &dist);
-  bool sculpt_cage_ = false;         // (this stroke: a Subdivision Surface is drawn over the mesh - the pick moves onto the cage)
   int sculpt_subdiv_pending_ = -1;   // (the panel's field while it is dragged: applied, one step, at the release)
   uint64_t sculpt_subdiv_pending_obj_ = 0;  // (the object the pending value is for)
   /* Task 0240: DynaMesh (ADR 0076) - the mesh retopologized evenly at a resolution, one ordinary step. */
