@@ -4,7 +4,7 @@
 - **Requirements:** the suite's reliability (ADR 0056: a unit test pins a behaviour, a measurement is a stress row)
 - **Decisions:** none needed
 - **Model:** main session (Pass 28's worker W6)
-- **PR:** (link when opened) - base `main`
+- **PR:** branch `task/0550-step-count-tests-a` - base `main`, the top of the stack over #465
 
 ## Goal
 Five unit tests fail when the machine is busy, though the editor does what they were written to check:
@@ -86,6 +86,10 @@ the Centre of Mass shown; F12 holding the editor's frames.
 - `BLENDITY_TEST_FILTER="F12 on a slow card"` x10 on the card (the hub's card slot), beside a CPU group.
 - `--group editor` on Windows and Linux.
 
+## Results
+See `changelog.d/568-step-count-tests-a.md` (**Checked**): every test 10 of 10 under load on Windows and Linux (the F12
+test on Windows' card only), the groups green on the merged tree, the review approved.
+
 ## Risks and edge cases
 - A frame that takes most of a second (24 frames over 15 s): its playhead leaves the rising half; those frames are printed
   and not counted, and the test still needs at least one counted frame.
@@ -93,7 +97,7 @@ the Centre of Mass shown; F12 holding the editor's frames.
   test would hang rather than fail quickly (the review's finding 4), as round 412's Stop check already would. A time
   check on that frame would be a measurement in a unit test (ADR 0056), so it is left to the CI job's time limit.
 - The Blockout click test no longer walks the slow path that showed the remembered-spot fault (the review's finding
-  3): round 571 owes a test of its own for it (clicks a second apart, the window selected again, one click on the spot).
+  3): round 571 (#465) fixed the fault and has tests of its own for it.
 
 ## Documentation to update
 - `changelog.d/568-step-count-tests-a.md`.

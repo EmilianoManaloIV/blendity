@@ -4,8 +4,8 @@
 with Centre of Mass shown" (11 hidden / 5 shown in #456's sanitizer shard; 20 / 12 and 10 / 17 locally) and "F12 on a slow
 card keeps twenty frames" (round 555 saw it fail at below-normal priority). Count over a fixed number of stepped frames
 instead, keep what each was written to catch, say in the test why. During the round the hub added a third: "blockout parts
-(547, te): clicking a window's glass selects the window ..." failed in #460's sanitizer shard 3; and a fourth, "the pen's targets (task 0270)", failed once
-under load for another worker.
+(547, te): clicking a window's glass selects the window ..." failed in #460's sanitizer shard 3; a fourth, "the pen's targets (task 0270)", failed once
+under load for another worker; and a fifth, round 543's Preferences hover test, failed on macOS in #462.
 
 **Fixed (tests only)**
 - **Centre of Mass, `tests/test_editor.cpp`.** No product fault. A clip plays by the real clock and the perf clip moves
@@ -36,10 +36,27 @@ under load for another worker.
 **Found, for other owners (not changed here)**
 - **The editor:** `Editor::pick_part_target` keeps the remembered spot after its pair of clicks is used. Click a window's
   frame (the window), click again (the Frame), select the window again in the Hierarchy, click that spot once: the Frame at
-  once, where a first click should give the window. The hub gave it to round 571, which owes the test for it too: the
+  once, where a first click should give the window. Round 571 fixed it (#465) and has the tests for it: the
   pinned test here takes the calm path (the code review's note).
 - **A testability gap:** `anim_tick` (and the three places that start playback) read `now_seconds()`, not the editor's
   clock, so `set_clock_for_test` cannot pin a playing clip; the Centre of Mass test works around it with a slow clip and
   a 5 ms floor per frame. A follow-up: play by `clock_now()`, then a test can step a clip by exact frames.
 
-**Checked:** CHECKED_LINE
+**Checked:** each test alone 10 times beside a CPU test group (`--group modeling` looping at normal priority).
+Windows, with Blender's libraries: Centre of Mass 10 of 10 (and 10 of 10 at below-normal priority: 24 of 24 frames moved
+and drew, hidden and shown, the 26 steps taking up to 10.6 s of the 15 s the clip gives them), the Blockout click 10 of 10,
+the pen's targets 10 of 10, the Preferences hover 10 of 10, F12 on the card 10 of 10 and 10 of 10 at below-normal priority
+(twenty frames with the render going each time, the slowest frame 769 ms). The card runs of the F12 test were made before
+#465 was merged in and before its name changed (nothing else in it did). Linux (WSL, dependency-free): Centre of Mass,
+the Blockout click, the pen's targets and the hover 10 of 10 each; the F12 test skips there (no card). Most of the
+Windows runs of ten were made before #465 was merged in; on the merged tree each changed test passed again (once on
+Windows, the Linux tens are the merged tree's). Groups on the merged
+tree (this round on #465): `editor` 3,861 checks on Windows and 3,846 on Linux, `blockout_opening_modifiers` 108 on both,
+0 failed. `tools/test_coverage_map.py --check`: 0 empty. Not run here: macOS (the hover test's failing platform), the
+sanitizer build (CI's).
+
+**Review:** approved. Its findings: the fifth test and the runs were missing from the spec and this entry (added); the
+pinned Blockout test takes the calm path, so the fault the slow path showed needs a test of its own (round 571 has them);
+a render that held the main thread would now hang the F12 test instead of failing it in seconds (kept: a time check there
+would be a measurement, and round 412's Stop check renders the same way); a comment's sentence, the F12 test's name and a
+variable called `clock` (fixed).

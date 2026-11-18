@@ -1638,9 +1638,9 @@ static void tests_round547_te_pick() {
      * (line "window selected, click on the left jamb then the right"). The clock is pinned now and moved by hand: a tenth
      * of a second before each click (the calm machine's run, double clicks included) and a second at each long rest (the
      * glide over, the next click a click of its own), so the run is the same on every machine. Nothing is loosened: the
-     * checks are the ones before. What the slow run showed is a finding about the editor, reported and not hidden here:
-     * with the view unmoved, the remembered spot outlives its pair of clicks, so the window selected again (not by a
-     * click on the part) and that spot clicked once gives the part at once. */
+     * checks are the ones before. What the slow run showed was a fault of the editor's, not hidden here: with the
+     * view unmoved, the remembered spot outlived its pair of clicks, so the window selected again (not by a click on the
+     * part) and that spot clicked once gave the part at once. Round 571 fixed it and has the tests for it below. */
     double at = 100.0;
     ed.set_clock_for_test(at);
     auto pe_click = [&](Editor &e, int x, int y) {
