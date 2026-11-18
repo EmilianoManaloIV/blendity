@@ -1,6 +1,7 @@
 # 0548: A million splats on the CPU within the frame budget (round 566)
 
-- **Status:** in progress
+- **Status:** done. Timed (the hub's windows, 2026-11-18): the 1M CPU orbit 38.6 / 37.9 ms median, the longest of 40
+  frames 44.0 / 40.5 ms (round 557: 84.4 / 94.6) - ADR 0105 met; the card path untouched.
 - **Requirements:** Q-06 responsiveness (ADR 0105: no editor frame over 50 ms while work runs)
 - **Decisions:** none needed (the same projection, order and blend; only how the work is laid out in memory and over the
   threads changes)
@@ -39,6 +40,10 @@ the stats what they were.
   4. **The tile loop**: the next splats of a tile prefetched; a row of a splat's box evaluated with the row's terms
      hoisted; the Gaussian through an `exp` written out in plain arithmetic (within 2e-7 of `std::exp` over the
      billboard's range), so the compiler can keep it in registers.
+  6. What the second window named (47.4 ms, the longest 51.4: projection and draw unchanged by item 5 - the frame is
+     limited by the memory it moves): each splat written straight to its place in the drawing order (no second copy
+     unless something is culled), the list's room reused from the last frame, the binning's fill from an 8-byte tile box
+     a splat.
   5. What the first timed A/B named (84.4 -> 49.2 ms, the longest frame 54 ms): the sRGB-to-linear curve of a splat's
      colour read from a 4,096-step table instead of three `powf` (within 3e-8 of the curve below 1; the curve itself at 1
      and above); the C library's `floor` out of the binning and the tiles (a call each without SSE 4.1); the pixel
