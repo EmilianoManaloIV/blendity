@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-18 (round 579): The Windows builds name their compiler, and CI and the release pin it
+
+**Asked:** the release blocker of the day (the hub): CI's dependency-free Windows test program crashed once on #472's tree.
+Find out why, and make sure 1.0.0 is not built by something nobody saw pass.
+
+**Found:** the crash follows the compiler, not the code. That run's Windows build was the first on a new runner image
+(`windows-2025-vs2026` 20261116.315.1) whose default toolset is MSVC 14.52.37025; every green Windows build before it
+was on image 20261103.298.1 with MSVC 14.51.36231, the development machine's too. The 14.52 build crashed in two
+programs: the tests as test 645 (a mesh-map bake) ran, and the stress program in `modifiers_ngon`. Neither place is
+reached by the changes between the passing and the crashing trees, and the same commit built here passes: that test
+alone 50 of 50 under load, the suite's tests 1-650 in one process 27 of 27.
+
+**Changed (task 0561; build scripts only)**
+- `build.bat` takes `BLENDITY_VCVARS_VER` (14.44, or a whole version): the installed toolset that starts with it builds;
+  when none does, a warning lists what is installed and the default builds. Unset, nothing changes.
+- `build.bat` prints the compiler's banner line and the toolset in every build.
+- `build.bat` takes `BLENDITY_PDB=1`: a release build with its symbols beside each program, so the stress program's
+  crash report names its frames (it printed `?` for them). Not switched on in CI.
+- CI's `windows-build` and the release's Windows job pin `BLENDITY_VCVARS_VER: "14.44"` - the one toolset both runner
+  images carry beside their default (14.51 is not on the new image) - and print the image and the installed toolsets.
+
+**Not done:** the fault under MSVC 14.52 itself - a miscompile, or undefined behaviour in the mesh code that 14.52
+exposes. `docs/handoff/OPEN-WORK.md` item 19 has the two crash sites and how to catch it.
+
+**Checked:** `build.bat`'s choice tried here with no pin, 14.51 (installed), 14 and 14.99 (not installed: the warning,
+the installed list, the default builds). The proof is this pull request's CI: `windows-build`'s log naming toolset
+14.44, `windows-unit` and `windows-stress` green.
+
 ## 2026-11-18 (round 578): Blendity 1.0.0
 
 **Asked:** an official 1.0.0 release, today, with everything on the open stack in it (the owner, 2026-11-18).
@@ -36,16 +64,18 @@ code. The 0.x versions were pre-releases; the entries below are the whole histor
   says what to click). Macs with an Intel processor are not supported.
 - The PDFs in `docs/` still carry 0.13.0 on their title pages; the release's own PDFs are built from the 1.0.0
   sources.
-- Seen once on CI (the dependency-free Windows build, run 44354841677, on #472's tree): the test program crashed
-  after 644 tests of the suite run as one process, where "smart materials (ADR 0082)" and its mesh-map bake come next,
-  after the whole modeling group in the same process. Not reproduced in about 40 local runs by three sessions. The
-  cause is unknown; the suspect is the built-in job pool's nested `parallel_for` (`src/core/jobs.cpp`). The facts,
-  what was ruled out and the next step are in `docs/handoff/OPEN-WORK.md`.
+- Programs built by Microsoft's compiler 14.52 crash in mesh code. One CI run (44354841677, on #472's tree) was the
+  first on a new runner image whose compiler is MSVC 14.52.37025, and its build crashed in two programs: the tests at
+  "smart materials (ADR 0082)" (test 645) and the stress program in `modifiers_ngon`. With MSVC 14.51 - every earlier
+  CI build, and the machine everything here was tested on - the same commit does not crash in well over a hundred
+  runs. CI and the release's Windows build are pinned to toolset 14.44 (round 579), so the installer is not built
+  with 14.52; whether 14.52 miscompiles or exposes a fault in the code is not known. `docs/handoff/OPEN-WORK.md`
+  item 19 has the facts and how to catch it.
 - The other open follow-ups are listed in round 574's entry, below.
 
 **Checked:** the full unit suite again on builds of this tree, which report 1.0.0 (no 0.13.0 string is left in the programs), every group in its own process with its own test and prefs folder: Windows with Blender's libraries 106,864 checks in 3,801 tests (the card groups on the card: gpu 1,655, splats_raster 276, splats_gpu 3,917, splats_trace 3,996), Linux dependency-free (WSL) 100,060 in 3,801; 25 groups each, 0 failed - the updater's and the manual's tests among them (assets, render, editor). The dependency-free Windows build ran on the tree before the version changed (round 574: 100,021, 0 failed); on this tree it is CI's. The 1.0.0 `Blendity.exe` starts headless in a scratch project and writes its picture. The suites ran before rounds 575 and 577 were merged in (new documents, pictures and the README: no code). `tools/sweep_commands.py --check`, `tools/test_coverage_map.py --check`, both HCI audits, the shard table, `make_books.py --check-cited` and `changelog.py check` pass. Code review: approve (rounds 574 and 578), its notes taken.
 
-**Not checked here:** CI's dependency-free Windows job crashed once on #472's tree (round 565's pull request), in the middle of the suite run as one process. The same program run the same way here did not crash, nor did the 25 groups one by one; it is being looked at as a rare fault older than this pass. The installers themselves are built and installed by `release.yml` when the tag is pushed, not before.
+**Not checked here:** the suites above ran on programs built with MSVC 14.51 (Windows) and GCC (Linux). The release's Windows installer is built with toolset 14.44 (round 579's pin): that toolset's suite is this pull request's CI, not a local run. The installers themselves are built and installed by `release.yml` when the tag is pushed, not before.
 
 ## 2026-11-18 (round 577): A README for a first visit, with current pictures
 
