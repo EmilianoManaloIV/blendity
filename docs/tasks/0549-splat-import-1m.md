@@ -4,7 +4,7 @@
 - **Requirements:** R-10 (import), Q-03 (responsiveness), Q-01 (robust data)
 - **Decisions:** none new (ADR 0147 the layout, ADR 0056 measurements, ADR 0105 / 0107 the frame budget and the import job)
 - **Model:** main session (worker W5 of Pass 28); code-reviewer agent
-- **PR:** (link when opened; on Pass 28's current single top)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/463 (on #462, the single top when it was published)
 - **Approval:** covered by the user's approval of Pass 28's plan (2026-11-18, relayed by the hub).
 
 ## Goal
