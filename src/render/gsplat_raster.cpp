@@ -7,6 +7,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "display.h"
 #include "gsplat_math.h"
 #include "raster.h"
 
@@ -14,8 +15,20 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <thread>
+
+/* A hint that memory will be read soon (round 566): the gather and the tiles read projected splats through an index, a
+ * place the processor can't guess. Nothing where the compiler has no such hint. */
+#if defined(__GNUC__) || defined(__clang__)
+#define BL_SPLAT_PREFETCH(p) __builtin_prefetch(p)
+#elif defined(_M_X64) || defined(_M_IX86)
+#include <xmmintrin.h>
+#define BL_SPLAT_PREFETCH(p) _mm_prefetch((const char *)(p), _MM_HINT_T0)
+#else
+#define BL_SPLAT_PREFETCH(p) ((void)0)
+#endif
 
 namespace bl {
 
@@ -35,12 +48,70 @@ inline uint32_t float_flip(float f) {
 
 bool is_orthographic(const Mat4 &proj) { return std::fabs(proj.m[15] - 1.0f) < 1e-6f && std::fabs(proj.m[11]) < 1e-6f; }
 
+/* gsplat_project_one in its two halves (round 566): where a splat is and its ellipse - false when culled, before its
+ * colour is touched - and its linear colour along the view. project_cloud runs the first for every splat and the second
+ * for the ones that stay, their colours through the display encoder by the span. */
+bool project_shape(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, SplatScreen &out, float dot_px_at_w1);
+
+gsplat::F3 sh_colour_srgb(const PointCloud &pc, size_t i, Vec3 dir_local);
+
+/* gsplat_math.h's srgb_to_linear for the projection (round 566): three powf a splat were a third of a million splats'
+ * projection. Between 0 and 1 the curve is read from 4,096 steps, joined by straight lines - within 1e-7 of the curve
+ * (the lines' own error and a float's rounding near 1), far under a display step; at 1 and above (SH overshoot, which a
+ * Filmic view still tells apart) the curve itself. */
+struct SrgbToLinearTable {
+  static constexpr int kSteps = 4096;
+  float at[kSteps + 2];
+  SrgbToLinearTable() {
+    for (int k = 0; k <= kSteps + 1; k++) at[k] = gsplat::srgb_to_linear((float)k / (float)kSteps);
+  }
+};
+const SrgbToLinearTable g_srgb_to_linear;  // (made when the program starts: no "is it made yet" test in a million lookups)
+inline float srgb_to_linear_fast(float c) {
+  /* Not a number, or infinite (huge SH terms of opposite signs): the curve's own answer, as before - read from the
+   * bits, since a compare may be folded away under /fp:fast and the value would then index the table. */
+  if (!gsplat::finite1(c)) return gsplat::srgb_to_linear(c);
+  if (!(c > 0.0f)) return 0.0f;
+  if (!(c < 1.0f)) return gsplat::srgb_to_linear(c);
+  const float t = c * (float)SrgbToLinearTable::kSteps;
+  const int k = std::min(std::max((int)t, 0), SrgbToLinearTable::kSteps);  // (0 .. 4095 already; held there whatever the compiler assumed)
+  return g_srgb_to_linear.at[k] + (g_srgb_to_linear.at[k + 1] - g_srgb_to_linear.at[k]) * (t - (float)k);
+}
+
+inline Vec3 project_linear(const PointCloud &pc, size_t i, Vec3 cam_local, Vec3 ortho_dir_local) {
+  /* The colour along the view: from the camera toward the splat, in the cloud's own space (Blender's eval_radiance). */
+  const Vec3 dir = (ortho_dir_local.x != 0.0f || ortho_dir_local.y != 0.0f || ortho_dir_local.z != 0.0f) ? ortho_dir_local : pc.position[i] - cam_local;
+  if (!pc.is_splats()) return i < pc.color.size() ? pc.color[i] : Vec3(1.0f);
+  const gsplat::F3 c = sh_colour_srgb(pc, i, dir);  // (as gsplat_radiance, the curve through the table)
+  return Vec3(srgb_to_linear_fast(c.x), srgb_to_linear_fast(c.y), srgb_to_linear_fast(c.z));
+}
+
+/* floor() of a pixel coordinate (round 566): a splat's box edges are finite and far inside an int, and the C library's
+ * floor is a call on a processor without SSE 4.1 - eight of them a splat in the binning, four more in every tile. */
+inline int floor_px(float v) {
+  const int i = (int)v;
+  return i - (v < (float)i ? 1 : 0);
+}
+
+inline void set_display_colour(SplatScreen &out, uint32_t px) {
+  out.r = ((px >> 16) & 255) / 255.0f, out.g = ((px >> 8) & 255) / 255.0f, out.b = (px & 255) / 255.0f;
+}
+
 }  // namespace
 
 /* ---------------------------------------------------------------- projection */
 
 bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, Vec3 cam_local,
                         Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out, float dot_px_at_w1) {
+  if (!project_shape(pc, i, mvp, width, height, out, dot_px_at_w1)) return false;
+  set_display_colour(out, to_display_pixel(project_linear(pc, i, cam_local, ortho_dir_local), vt, exposure));
+  out.visible = true;
+  return true;
+}
+
+namespace {
+
+bool project_shape(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, SplatScreen &out, float dot_px_at_w1) {
   out.visible = false;
   if (i >= pc.position.size() || width <= 0 || height <= 0) return false;
   const bool splat = pc.is_splats();
@@ -112,28 +183,30 @@ bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int wid
     out.ry = std::fabs(out.e0y) * ax0 + std::fabs(out.e0x) * ax1;
     out.dot = false;
   }
-  if (out.x + out.rx < 0.0f || out.y + out.ry < 0.0f || out.x - out.rx > W || out.y - out.ry > H) return false;
-
-  /* The colour along the view: from the camera toward the splat, in the cloud's own space (Blender's eval_radiance). */
-  const Vec3 dir = (ortho_dir_local.x != 0.0f || ortho_dir_local.y != 0.0f || ortho_dir_local.z != 0.0f) ? ortho_dir_local : p - cam_local;
-  const Vec3 lin = splat ? gsplat_radiance(pc, i, dir) : (i < pc.color.size() ? pc.color[i] : Vec3(1.0f));
-  const uint32_t px = to_display_pixel(lin, vt, exposure);
-  out.r = ((px >> 16) & 255) / 255.0f, out.g = ((px >> 8) & 255) / 255.0f, out.b = (px & 255) / 255.0f;
-  out.visible = true;
-  return true;
+  return !(out.x + out.rx < 0.0f || out.y + out.ry < 0.0f || out.x - out.rx > W || out.y - out.ry > H);
 }
+
+}  // namespace
 
 /* As both path tracers (round 533's gsplat_math.h, Cycles'): the SH colour is in the training photos' sRGB, turned into
  * linear light before the view transform. */
 Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local) {
+  const gsplat::F3 l = gsplat::radiance_linear(sh_colour_srgb(pc, i, dir_local));
+  return Vec3(l.x, l.y, l.z);
+}
+
+namespace {
+
+/* A splat's SH colour along a view, in the training photos' sRGB (gsplat_math.h's sh_color on the cloud's arrays). */
+gsplat::F3 sh_colour_srgb(const PointCloud &pc, size_t i, Vec3 dir_local) {
   const Vec3 base = i < pc.color.size() ? pc.color[i] : Vec3(1.0f);
   const int rest = pc.sh_rest_per_point();
   const bool has_rest = rest > 0 && (i + 1) * (size_t)rest <= pc.sh_rest.size();
   const float *sh = has_rest ? &pc.sh_rest[i * (size_t)rest].x : nullptr;
-  const gsplat::F3 c = gsplat::sh_color(gsplat::f3(base.x, base.y, base.z), sh, has_rest ? rest : 0, gsplat::f3(dir_local.x, dir_local.y, dir_local.z));
-  const gsplat::F3 l = gsplat::radiance_linear(c);
-  return Vec3(l.x, l.y, l.z);
+  return gsplat::sh_color(gsplat::f3(base.x, base.y, base.z), sh, has_rest ? rest : 0, gsplat::f3(dir_local.x, dir_local.y, dir_local.z));
 }
+
+}  // namespace
 
 /* -------------------------------------------------------------------- sorting */
 
@@ -351,6 +424,10 @@ std::vector<SplatOrder> SplatPass::orders(const std::vector<SplatDraw> &draws, c
 }
 
 void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort) {
+  /* The last frame's list becomes this frame's room (round 566): its splats are still constructed, so sizing kept_ for
+   * the same cloud writes nothing - an emptied vector would be filled with 60 bytes a splat before the projection
+   * overwrites every one of them. */
+  kept_.swap(screen_);
   screen_.clear();
   stats_ = SplatStats{};
   std::vector<std::vector<SplatScreen>> lists;  // (several clouds: each one's, merged below)
@@ -386,40 +463,90 @@ void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v,
   g_last_stats = stats_;
 }
 
-/* One cloud projected in its order into kept_, the culled left out (round 557: 40 ms at 1M was half memory - a fresh
- * 76 MB array zeroed every frame, then copied on one thread). The projections go into proj_, kept between frames, and
- * are compacted in parallel: each chunk counts its visible splats, the counts are summed in chunk order (the order
- * stays), then each chunk copies its own. */
+/* One cloud projected into kept_ in its drawing order, the culled left out. Round 557 kept the buffers between frames
+ * (a fresh 76 MB array zeroed every frame was half of 40 ms at 1M). Round 566: a frame of a million splats is limited by
+ * the memory it moves, so each splat is read where it lies in the cloud's arrays - in the drawing order its 236 bytes
+ * (six arrays, 15 SH triples) were a read at a random place of the cloud - and written straight to its place in the
+ * drawing order (`rank`: the order turned round), with no second copy unless something was culled. */
 void SplatPass::project_cloud(const PointCloud &pc, const std::vector<uint32_t> &ord, uint32_t id, const SplatDrawView &dv, const SplatView &v) {
   const size_t n = ord.size();
-  proj_.resize(n);
+  kept_.resize(n);
+  rank_.resize(n);
   JobSystem &js = JobSystem::global();
   const int64_t chunks = std::max<int64_t>(1, std::min<int64_t>(256, (int64_t)(n / 4096) + 1));
   const size_t per = (n + (size_t)chunks - 1) / (size_t)chunks;
-  std::vector<size_t> counts((size_t)chunks + 1, 0);
-  js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
-    for (int64_t c = cb; c < ce; c++) {
-      const size_t b = (size_t)c * per, e = std::min(n, b + per);
-      size_t visible = 0;
-      for (size_t k = b; k < e; k++) {
-        SplatScreen &s = proj_[k];
-        if (!gsplat_project_one(pc, ord[k], dv.mvp, v.width, v.height, dv.cam_local, dv.ortho_dir, v.view_transform, v.exposure, s, dv.dot_px)) continue;
-        s.id = id;
-        visible++;
+  auto each_chunk = [&](const std::function<void(int64_t c, size_t b, size_t e)> &fn) {
+    js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
+      for (int64_t c = cb; c < ce; c++) fn(c, (size_t)c * per, std::min(n, (size_t)c * per + per));
+    });
+  };
+  /* Where each splat goes: rank[ord[k]] = k. An order that is not the cloud's (an index past the end, or one missing
+   * because another came twice - the sorter makes neither) leaves a splat without a place: nothing of the cloud is
+   * drawn, rather than a slot holding an older frame's splat. */
+  constexpr uint32_t kNoPlace = 0xFFFFFFFFu;
+  each_chunk([&](int64_t, size_t b, size_t e) { std::fill(rank_.begin() + (ptrdiff_t)b, rank_.begin() + (ptrdiff_t)e, kNoPlace); });
+  each_chunk([&](int64_t, size_t b, size_t e) {
+    for (size_t k = b; k < e; k++)
+      if (ord[k] < n) rank_[ord[k]] = (uint32_t)k;
+  });
+  std::vector<size_t> counts((size_t)chunks + 1, 0);  // per chunk: splats without a place, then splats culled, then splats kept
+  each_chunk([&](int64_t c, size_t b, size_t e) {
+    size_t missing = 0;
+    for (size_t i = b; i < e; i++) missing += rank_[i] == kNoPlace;
+    counts[(size_t)c + 1] = missing;
+  });
+  for (int64_t c = 0; c < chunks; c++)
+    if (counts[(size_t)c + 1]) return kept_.clear();
+  each_chunk([&](int64_t c, size_t b, size_t e) {
+    /* The splats that stay wait here for their colour: a span through the display encoder instead of a call each (the
+     * same encoder, the same pixels - an OCIO view's span is to_display_pixel one by one inside it). */
+    constexpr int kSpan = 256;
+    constexpr size_t kAhead = 8;
+    Vec3 lin[kSpan];
+    uint32_t px[kSpan];
+    uint32_t at[kSpan];
+    int m = 0;
+    size_t culled = 0;
+    auto flush = [&] {
+      display::encode_span(&lin[0].x, px, (size_t)m, v.view_transform, v.exposure);
+      for (int j = 0; j < m; j++) set_display_colour(kept_[at[j]], px[j]);
+      m = 0;
+    };
+    for (size_t i = b; i < e; i++) {
+      if (i + kAhead < e) BL_SPLAT_PREFETCH(&kept_[rank_[i + kAhead]]);  // (its place is anywhere in the list)
+      SplatScreen &s = kept_[rank_[i]];
+      if (!project_shape(pc, i, dv.mvp, v.width, v.height, s, dv.dot_px)) {  // (leaves s.visible false)
+        culled++;
+        continue;
       }
-      counts[(size_t)c + 1] = visible;
+      s.id = id;
+      s.visible = true;
+      lin[m] = project_linear(pc, i, dv.cam_local, dv.ortho_dir);
+      at[m] = rank_[i];
+      if (++m == kSpan) flush();
     }
+    flush();
+    counts[(size_t)c + 1] = culled;
   });
+  size_t culled = 0;
+  for (int64_t c = 0; c < chunks; c++) culled += counts[(size_t)c + 1];
+  if (!culled) return;  // (the whole cloud is on screen: kept_ is the list)
+  /* Some were culled: the rest closed up into proj_, in order - each chunk counts its visible splats, the counts are
+   * summed in chunk order, then each chunk copies its own. */
+  each_chunk([&](int64_t c, size_t b, size_t e) {
+    size_t visible = 0;
+    for (size_t k = b; k < e; k++) visible += kept_[k].visible;
+    counts[(size_t)c + 1] = visible;
+  });
+  counts[0] = 0;
   for (int64_t c = 0; c < chunks; c++) counts[(size_t)c + 1] += counts[(size_t)c];
-  kept_.resize(counts[(size_t)chunks]);
-  js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
-    for (int64_t c = cb; c < ce; c++) {
-      const size_t b = (size_t)c * per, e = std::min(n, b + per);
-      size_t at = counts[(size_t)c];
-      for (size_t k = b; k < e; k++)
-        if (proj_[k].visible) kept_[at++] = proj_[k];
-    }
+  proj_.resize(counts[(size_t)chunks]);
+  each_chunk([&](int64_t c, size_t b, size_t e) {
+    size_t at = counts[(size_t)c];
+    for (size_t k = b; k < e; k++)
+      if (kept_[k].visible) proj_[at++] = kept_[k];
   });
+  kept_.swap(proj_);
 }
 
 /* Keeps the frame's work under kSplatPixelBudget: the boxes' on-screen areas in power-of-two classes, the largest classes
@@ -433,12 +560,26 @@ void SplatPass::limit_to_budget(int width, int height) {
     return w > 0.0 && h > 0.0 ? (w + 1.0) * (h + 1.0) : 1.0;
   };
   auto class_of = [](double a) { return std::min(kClasses - 1, (int)std::ilogb(std::max(1.0, a))); };
+  /* Round 566: counted in parallel (one thread over a million splats was 3 ms of every frame) - in chunks of a fixed
+   * size, summed in chunk order, so the sums don't depend on how many threads ran. */
+  const size_t n = screen_.size();
+  constexpr size_t kPer = 16384;
+  const int64_t chunks = (int64_t)((n + kPer - 1) / kPer);
+  std::vector<double> part((size_t)chunks * kClasses, 0.0);
+  JobSystem::global().parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
+    for (int64_t c = cb; c < ce; c++) {
+      double *in = &part[(size_t)c * kClasses];
+      const size_t b = (size_t)c * kPer, e = std::min(n, b + kPer);
+      for (size_t k = b; k < e; k++) {
+        const double a = area_of(screen_[k]);
+        in[class_of(a)] += a;
+      }
+    }
+  });
   double total = 0.0;
-  for (const SplatScreen &s : screen_) {
-    const double a = area_of(s);
-    area_in[class_of(a)] += a;
-    total += a;
-  }
+  for (int64_t c = 0; c < chunks; c++)
+    for (int k = 0; k < kClasses; k++) area_in[k] += part[(size_t)c * kClasses + k];
+  for (int k = 0; k < kClasses; k++) total += area_in[k];
   if (total <= kSplatPixelBudget) return;
   int edge = kClasses;  // classes above `edge` are left out; `edge` itself keeps what still fits
   while (edge > 0 && total > kSplatPixelBudget) total -= area_in[--edge];
@@ -470,33 +611,70 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
   const int tx = (W + kTile - 1) / kTile, ty = (H + kTile - 1) / kTile, tiles = tx * ty;
   /* Bin: each splat into the tiles its box touches, in draw order (a counting sort keeps the order in every tile). */
   auto tile_range = [&](const SplatScreen &s, int &x0, int &x1, int &y0, int &y1) {
-    x0 = std::max(0, (int)std::floor(s.x - s.rx)) / kTile;
-    x1 = std::min(W - 1, (int)std::floor(s.x + s.rx)) / kTile;
-    y0 = std::max(0, (int)std::floor(s.y - s.ry)) / kTile;
-    y1 = std::min(H - 1, (int)std::floor(s.y + s.ry)) / kTile;
+    x0 = std::max(0, floor_px(s.x - s.rx)) / kTile;
+    x1 = std::min(W - 1, floor_px(s.x + s.rx)) / kTile;
+    y0 = std::max(0, floor_px(s.y - s.ry)) / kTile;
+    y1 = std::min(H - 1, floor_px(s.y + s.ry)) / kTile;
   };
-  std::vector<size_t> offsets((size_t)tiles + 1, 0);  // (size_t: a frame's bins may pass 2^32 before the budget trims it)
-  for (const SplatScreen &s : screen_) {
-    int x0, x1, y0, y1;
-    tile_range(s, x0, x1, y0, y1);
-    for (int y = y0; y <= y1; y++)
-      for (int x = x0; x <= x1; x++) offsets[(size_t)y * tx + x + 1]++;
+  /* Round 566, in parallel (two passes over a million splats on one thread were a third of the draw): each chunk of the
+   * list counts its tiles, the counts are summed tile by tile in chunk order - so a tile's entries stay in draw order -
+   * and each chunk then fills its own places. */
+  JobSystem &js = JobSystem::global();
+  const size_t n = screen_.size();
+  const int64_t threads = std::max(1, std::min(js.thread_count(), js.max_threads()));
+  const int64_t chunks = std::max<int64_t>(1, std::min<int64_t>(threads * 2, (int64_t)(n / 8192) + 1));
+  const size_t per = (n + (size_t)chunks - 1) / (size_t)chunks;
+  std::vector<size_t> place((size_t)chunks * tiles, 0);  // a chunk's count in each tile, then its first place there (size_t: a frame's bins may pass 2^32)
+  /* Each splat's tile box, kept from the count for the fill: 8 bytes a splat read again instead of its 60. */
+  struct TileBox {
+    uint16_t x0, x1, y0, y1;
+  };
+  const std::unique_ptr<TileBox[]> boxes(new TileBox[n]);
+  js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
+    for (int64_t c = cb; c < ce; c++) {
+      size_t *count = &place[(size_t)c * tiles];
+      const size_t b = (size_t)c * per, e = std::min(n, b + per);
+      for (size_t k = b; k < e; k++) {
+        int x0, x1, y0, y1;
+        tile_range(screen_[k], x0, x1, y0, y1);
+        /* (A box that ends before it starts - a splat just off the edge - touches no tile: kept as an empty box.) */
+        if (x1 < x0 || y1 < y0) x0 = 1, x1 = 0, y0 = 1, y1 = 0;
+        boxes[k] = TileBox{(uint16_t)x0, (uint16_t)x1, (uint16_t)y0, (uint16_t)y1};
+        for (int y = y0; y <= y1; y++)
+          for (int x = x0; x <= x1; x++) count[(size_t)y * tx + x]++;
+      }
+    }
+  });
+  std::vector<size_t> offsets((size_t)tiles + 1, 0);
+  size_t sum = 0;
+  for (int t = 0; t < tiles; t++) {
+    offsets[(size_t)t] = sum;
+    for (int64_t c = 0; c < chunks; c++) {
+      size_t &p = place[(size_t)c * tiles + t];
+      const size_t count = p;
+      p = sum;
+      sum += count;
+    }
   }
-  for (int i = 0; i < tiles; i++) offsets[(size_t)i + 1] += offsets[(size_t)i];
-  std::vector<uint32_t> list(offsets[(size_t)tiles]);
-  std::vector<size_t> fill(offsets.begin(), offsets.end() - 1);
-  for (uint32_t k = 0; k < (uint32_t)screen_.size(); k++) {
-    int x0, x1, y0, y1;
-    tile_range(screen_[k], x0, x1, y0, y1);
-    for (int y = y0; y <= y1; y++)
-      for (int x = x0; x <= x1; x++) list[fill[(size_t)y * tx + x]++] = k;
-  }
+  offsets[(size_t)tiles] = sum;
+  std::vector<uint32_t> list(sum);
+  js.parallel_for(chunks, 1, [&](int64_t cb, int64_t ce) {
+    for (int64_t c = cb; c < ce; c++) {
+      size_t *at = &place[(size_t)c * tiles];
+      const size_t b = (size_t)c * per, e = std::min(n, b + per);
+      for (size_t k = b; k < e; k++) {
+        const TileBox t = boxes[k];
+        for (int y = t.y0; y <= t.y1; y++)
+          for (int x = t.x0; x <= t.x1; x++) list[at[(size_t)y * tx + x]++] = (uint32_t)k;
+      }
+    }
+  });
   /* Each tile front to back (round 557, as the 3DGS reference composites): a pixel keeps what shows through it (T) and
    * the colour gathered in front (C), and takes no more splats once T is under kSplatOpaqueT - the dense middle of a
    * cloud stops after its first few layers instead of evaluating every splat behind them; a tile whose pixels are all
    * covered stops. The same "over" as back to front; the pick id is the front-most splat at kSplatPickAlpha. */
   constexpr float kSplatOpaqueT = 1.0f / 1024.0f;
-  JobSystem::global().parallel_for(tiles, 1, [&](int64_t tb, int64_t te) {
+  js.parallel_for(tiles, 1, [&](int64_t tb, int64_t te) {
     float acc[kTile * kTile * 3], trans[kTile * kTile];
     float zbuf[kTile * kTile];
     uint32_t idbuf[kTile * kTile];
@@ -517,23 +695,34 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
           idbuf[y * kTile + x] = has_ids ? rt.ids[pi] : 0u;
         }
       int covered = 0;  // pixels whose T fell under kSplatOpaqueT
+      constexpr size_t kAhead = 4;  // (round 566: the tile's next splats asked for while this one blends)
       for (size_t li = last; li-- > first && covered < tw * th;) {
+        if (li >= first + kAhead) BL_SPLAT_PREFETCH(&screen_[list[li - kAhead]]);
         const SplatScreen &s = screen_[list[li]];
-        const int x0 = std::max(ox, (int)std::floor(s.x - s.rx)), x1 = std::min(ox + tw - 1, (int)std::floor(s.x + s.rx));
-        const int y0 = std::max(oy, (int)std::floor(s.y - s.ry)), y1 = std::min(oy + th - 1, (int)std::floor(s.y + s.ry));
-        for (int py = y0; py <= y1; py++)
-          for (int px = x0; px <= x1; px++) {
-            const int l = (py - oy) * kTile + (px - ox);
+        const int x0 = std::max(ox, floor_px(s.x - s.rx)), x1 = std::min(ox + tw - 1, floor_px(s.x + s.rx));
+        const int y0 = std::max(oy, floor_px(s.y - s.ry)), y1 = std::min(oy + th - 1, floor_px(s.y + s.ry));
+        /* gsplat_alpha_at with what a row shares taken out of its pixels (round 566): u_k = dx a_k + dy b_k. */
+        const float a0 = s.e0x * s.inv0, b0 = s.e0y * s.inv0, a1 = -s.e0y * s.inv1, b1 = s.e0x * s.inv1;
+        const float dot_r2 = s.rx * s.rx;
+        for (int py = y0; py <= y1; py++) {
+          const float dy = py + 0.5f - s.y;
+          const float row0 = dy * b0, row1 = dy * b1;
+          int l = (py - oy) * kTile + (x0 - ox);
+          for (int px = x0; px <= x1; px++, l++) {
             if (trans[l] < kSplatOpaqueT) continue;  // (covered by the splats in front)
             if (s.z > zbuf[l]) continue;  // a mesh is nearer than the splat's centre
+            const float dx = px + 0.5f - s.x;
             float a;
             if (s.dot) {
-              const float dx = px + 0.5f - s.x, dy = py + 0.5f - s.y;
-              a = dx * dx + dy * dy <= s.rx * s.rx ? 1.0f : 0.0f;
+              if (!(dx * dx + dy * dy <= dot_r2)) continue;
+              a = 1.0f;
             } else {
-              a = gsplat_alpha_at(s, px + 0.5f, py + 0.5f);
+              const float u0 = dx * a0 + row0, u1 = dx * a1 + row1;
+              if (u0 > 2.0f || u0 < -2.0f || u1 > 2.0f || u1 < -2.0f) continue;
+              a = s.opacity * gsplat_exp_neg(u0 * u0 + u1 * u1);
+              a = a < 1.0f ? a : 1.0f;
+              if (!(a > 0.0f)) continue;
             }
-            if (a <= 0.0f) continue;
             touched[l] = 1;
             float *o = &acc[l * 3];
             const float w = trans[l] * a;
@@ -542,6 +731,7 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
             if (trans[l] < kSplatOpaqueT) covered++;
             if (a >= kSplatPickAlpha && !picked[l]) idbuf[l] = s.id, picked[l] = 1;  // (the front-most)
           }
+        }
       }
       for (int y = 0; y < th; y++)
         for (int x = 0; x < tw; x++) {

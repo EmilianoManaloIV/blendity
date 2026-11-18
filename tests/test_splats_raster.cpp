@@ -941,10 +941,269 @@ static void splat_raster_round557_cache_tests() {
   });
 }
 
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Round 566 (task 0548): a million splats on the CPU within the frame budget - the projection in the cloud's own order,  */
+/* colours by the span, the binning in parallel, the tile loop's written-out exp. The picture must be what it was.        */
+/* ---------------------------------------------------------------------------------------------------------------- */
+
+namespace {
+
+/* The screen list a cloud must give: gsplat_project_one for each splat in the sorter's order, the culled left out. */
+std::vector<SplatScreen> r566_reference_list(SplatPass &pass, const SplatDraw &d, const SplatView &sv) {
+  const SplatDrawView dv = gsplat_draw_view(d, sv);
+  const auto ord = pass.sorter(d.key).order(d, dv.mvp, false);  // (the order prepare() just drew with: the same matrix)
+  std::vector<SplatScreen> out;
+  if (!ord) return out;
+  for (uint32_t i : *ord) {
+    SplatScreen s;
+    if (!gsplat_project_one(*d.cloud, i, dv.mvp, sv.width, sv.height, dv.cam_local, dv.ortho_dir, sv.view_transform, sv.exposure, s, dv.dot_px)) continue;
+    s.id = d.id;
+    out.push_back(s);
+  }
+  return out;
+}
+
+/* Bit for bit, but the display colour within `colour_steps` of 1/255: the span encoder's wide kernels give a curve
+ * (Filmic, ACES) one step of FMA rounding against its one-pixel path (test_render's "all kernels agree"); Standard is
+ * exact on every kernel, so 0 there. */
+bool r566_same_splat(const SplatScreen &a, const SplatScreen &b, int colour_steps) {
+  const float fa[] = {a.x, a.y, a.z, a.e0x, a.e0y, a.inv0, a.inv1, a.rx, a.ry, a.opacity};
+  const float fb[] = {b.x, b.y, b.z, b.e0x, b.e0y, b.inv0, b.inv1, b.rx, b.ry, b.opacity};
+  const float tol = (colour_steps + 0.01f) / 255.0f;
+  const bool colour = colour_steps == 0 ? (a.r == b.r && a.g == b.g && a.b == b.b)
+                                        : (std::fabs(a.r - b.r) <= tol && std::fabs(a.g - b.g) <= tol && std::fabs(a.b - b.b) <= tol);
+  return std::memcmp(fa, fb, sizeof(fa)) == 0 && colour && a.id == b.id && a.visible == b.visible && a.dot == b.dot;
+}
+
+size_t r566_differing(const std::vector<SplatScreen> &a, const std::vector<SplatScreen> &b, int colour_steps = 0) {
+  if (a.size() != b.size()) return std::max(a.size(), b.size());
+  size_t bad = 0;
+  for (size_t k = 0; k < a.size(); k++) bad += !r566_same_splat(a[k], b[k], colour_steps);
+  return bad;
+}
+
+/* A plain blend of a screen list over black, as draw_cpu's comment describes it: each pixel front to back with
+ * gsplat_alpha_at, no more splats once what shows through is under 1/1024. `ids` gets the front-most splat's id at
+ * kSplatPickAlpha; `unsure` marks a pixel where a splat's alpha is within 1e-5 of that edge (the id may go either way
+ * with the last bit of exp). */
+void r566_reference_blend(const std::vector<SplatScreen> &list, int W, int H, std::vector<float> &rgb, std::vector<uint32_t> &ids, std::vector<uint8_t> &unsure) {
+  rgb.assign((size_t)W * H * 3, 0.0f), ids.assign((size_t)W * H, 0u), unsure.assign((size_t)W * H, 0);
+  std::vector<float> trans((size_t)W * H, 1.0f);
+  std::vector<uint8_t> picked((size_t)W * H, 0);
+  for (size_t k = list.size(); k-- > 0;) {
+    const SplatScreen &s = list[k];
+    const int x0 = std::max(0, (int)std::floor(s.x - s.rx)), x1 = std::min(W - 1, (int)std::floor(s.x + s.rx));
+    const int y0 = std::max(0, (int)std::floor(s.y - s.ry)), y1 = std::min(H - 1, (int)std::floor(s.y + s.ry));
+    for (int y = y0; y <= y1; y++)
+      for (int x = x0; x <= x1; x++) {
+        const size_t l = (size_t)y * W + x;
+        if (trans[l] < 1.0f / 1024.0f) continue;
+        float a;
+        if (s.dot) a = (x + 0.5f - s.x) * (x + 0.5f - s.x) + (y + 0.5f - s.y) * (y + 0.5f - s.y) <= s.rx * s.rx ? 1.0f : 0.0f;
+        else a = gsplat_alpha_at(s, x + 0.5f, y + 0.5f);
+        if (a <= 0.0f) continue;
+        const float w = trans[l] * a;
+        rgb[l * 3] += s.r * w, rgb[l * 3 + 1] += s.g * w, rgb[l * 3 + 2] += s.b * w;
+        trans[l] -= w;
+        if (picked[l]) continue;
+        if (std::fabs(a - kSplatPickAlpha) < 1e-5f) unsure[l] = 1;
+        if (a >= kSplatPickAlpha) ids[l] = s.id, picked[l] = 1;
+      }
+  }
+}
+
+/* Two clouds over each other: 20,000 small splats (several a pixel in the middle: the front-to-back stop works) and 300
+ * large ones whose boxes cross the 32 px tiles. */
+std::vector<SplatDraw> r566_dense_draws() {
+  PointCloudPtr small = pointcloud_random(PointCloudType::GaussianSplats, 20000, 3, 566);
+  PointCloudPtr large = pointcloud_random(PointCloudType::GaussianSplats, 300, 1, 567);
+  return {SplatDraw{small, Mat4::identity(), 7, false, 0}, SplatDraw{large, Mat4::translate(Vec3(0.2f, 0.1f, 0.0f)), 8, false, 0}};
+}
+
+}  // namespace
+
+static void splat_raster_round566_tests() {
+  test("splats: a cloud's screen list is each splat as gsplat_project_one gives it, in back-to-front order, the culled left out", [] {
+    struct Case {
+      const char *name;
+      PointCloudType type;
+      int degree;
+      bool ortho;
+      ViewTransform vt;
+      float exposure;
+      Vec3 eye;
+    };
+    /* (The eye at 2.2 m sees the cloud's cube past the view's edges: a part of it is culled.) */
+    const Case cases[] = {{"degree 3, perspective, Standard", PointCloudType::GaussianSplats, 3, false, ViewTransform::Standard, 0.0f, {0, 0, -5}},
+                          {"degree 3, close, Filmic +0.5", PointCloudType::GaussianSplats, 3, false, ViewTransform::Filmic, 0.5f, {0.4f, 0.2f, -2.2f}},
+                          {"degree 1, orthographic", PointCloudType::GaussianSplats, 1, true, ViewTransform::Standard, 0.0f, {0, 0, -5}},
+                          {"Points, close", PointCloudType::Points, 0, false, ViewTransform::Standard, 0.0f, {0.4f, 0.2f, -2.2f}}};
+    for (const Case &c : cases) {
+      PointCloudPtr pc = pointcloud_random(c.type, 30000, c.degree, 566);
+      /* Some that must be left out whatever the view: transparent, and a NaN centre. */
+      pc->position[11] = {std::numeric_limits<float>::quiet_NaN(), 0, 0};
+      if (pc->is_splats()) pc->opacity[12] = 0.0f;
+      SplatView sv;
+      sv.view = Mat4::look_at(c.eye, {0, 0, 0}, {0, 1, 0});
+      sv.proj = c.ortho ? Mat4::ortho(1.5f, 320.0f / 240.0f, 0.1f, 100.0f) : Mat4::perspective(60 * kDeg2Rad, 320.0f / 240.0f, 0.1f, 100.0f);
+      sv.width = 320, sv.height = 240, sv.view_transform = c.vt, sv.exposure = c.exposure;
+      const SplatDraw d{pc, Mat4::translate(Vec3(0.1f, 0.0f, 0.0f)), 5, false, 0, 0.03f};
+      SplatPass pass;
+      pass.prepare({d}, sv, false);
+      const std::vector<SplatScreen> want = r566_reference_list(pass, d, sv);
+      const size_t bad = r566_differing(pass.screen(), want, c.vt == ViewTransform::Standard ? 0 : 1);
+      std::printf("    %s: %zu of %zu drawn, %zu differ\n", c.name, pass.screen().size(), pc->count(), bad);
+      CHECK(!want.empty() && want.size() < pc->count());
+      CHECK(pass.screen().size() == want.size());
+      CHECK(bad == 0);
+      CHECK(pass.stats().culled == pc->count() - want.size());
+      /* Back to front. */
+      bool ordered = true;
+      for (size_t k = 1; k < pass.screen().size(); k++) ordered = ordered && pass.screen()[k - 1].z >= pass.screen()[k].z;
+      CHECK(ordered);
+    }
+  });
+
+  test("splats: a cloud wholly behind the camera or off the screen leaves an empty list and the picture as it was", [] {
+    SplatShot s;
+    PointCloudPtr pc = pointcloud_random(PointCloudType::GaussianSplats, 9000, 3, 566);
+    s.draw({SplatDraw{pc, Mat4::translate(Vec3(0, 0, -20.0f)), 7, false, 0}});  // behind the eye at z = -5
+    CHECK(s.pass.screen().empty() && s.pass.stats().culled == 9000);
+    s.draw({SplatDraw{pc, Mat4::translate(Vec3(40.0f, 0, 0)), 7, false, 0}});  // far to the side
+    CHECK(s.pass.screen().empty() && s.pass.stats().culled == 9000);
+    bool black = true;
+    for (uint32_t p : s.img.pixels) black = black && (p & 0xFFFFFFu) == 0;
+    CHECK(black);
+    /* And then the same pass draws a visible cloud (its kept buffers hold the last frame's sizes). */
+    s.draw({SplatDraw{pc, Mat4::identity(), 7, false, 0}});
+    CHECK(s.pass.screen().size() == 9000 && s.id(100, 100) == 7);
+  });
+
+  test("splats: a dense cloud's picture is the plain front-to-back blend of its screen list within 1/255, the ids the same", [] {
+    SplatShot s;
+    s.W = 240, s.H = 200;
+    s.p = Mat4::perspective(60 * kDeg2Rad, 240.0f / 200.0f, 0.1f, 100.0f);
+    s.draw(r566_dense_draws());
+    std::vector<float> rgb;
+    std::vector<uint32_t> ids;
+    std::vector<uint8_t> unsure;
+    r566_reference_blend(s.pass.screen(), s.W, s.H, rgb, ids, unsure);
+    int worst = 0;
+    size_t lit = 0, id_bad = 0, id_7 = 0, id_8 = 0, skipped = 0;
+    for (int y = 0; y < s.H; y++)
+      for (int x = 0; x < s.W; x++) {
+        const size_t l = (size_t)y * s.W + x;
+        const uint32_t c = s.px(x, y);
+        const int got[3] = {red(c), green(c), (int)(c & 255)};
+        for (int k = 0; k < 3; k++) worst = std::max(worst, std::abs(got[k] - (int)std::lround(std::min(1.0f, rgb[l * 3 + k]) * 255.0f)));
+        lit += (c & 0xFFFFFFu) != 0;
+        id_7 += ids[l] == 7, id_8 += ids[l] == 8;
+        if (unsure[l]) skipped++;
+        else id_bad += s.id(x, y) != ids[l];
+      }
+    std::printf("    %zu splats, %zu lit pixels, worst channel difference %d/255, ids differing %zu (%zu on the pick edge not compared)\n",
+                s.pass.screen().size(), lit, worst, id_bad, skipped);
+    CHECK(lit > 5000 && id_7 > 100 && id_8 > 100);  // both clouds are seen and picked
+    CHECK(worst <= 1);
+    CHECK(id_bad == 0);
+    CHECK(skipped < 50);
+  });
+
+  test("splats: the picture and the ids of a dense cloud are the same on one thread as on all of them", [] {
+    JobSystem &js = JobSystem::global();
+    const int before = js.max_threads();
+    const std::vector<SplatDraw> draws = r566_dense_draws();
+    SplatShot all, one;
+    all.W = one.W = 240, all.H = one.H = 200;
+    all.draw(draws);
+    js.set_max_threads(1);
+    one.draw(draws);
+    js.set_max_threads(before);
+    CHECK(all.pass.screen().size() > 20000);
+    CHECK(r566_differing(all.pass.screen(), one.pass.screen()) == 0);
+    CHECK(all.img.pixels == one.img.pixels);
+    CHECK(all.rt.ids == one.rt.ids);
+  });
+
+  test("splats: a splat's projected colour is gsplat_radiance through the view transform within a display step - dark, near 1 and SH overshoot", [] {
+    /* (The projection reads the sRGB curve from a table; gsplat_radiance is the curve itself.) */
+    PointCloudPtr pc = pointcloud_random(PointCloudType::GaussianSplats, 20000, 3, 566);
+    /* Base colours across the whole curve: under the 0.04045 knee, round it, near 1, and over 1 (which Filmic keeps
+     * apart); the SH bands move each a little further. */
+    for (size_t i = 0; i < pc->count(); i++) {
+      const float t = (float)(i % 1000) / 999.0f;
+      pc->color[i] = i % 4 == 0 ? Vec3(0.09f * t) : i % 4 == 1 ? Vec3(0.9f + 0.2f * t) : i % 4 == 2 ? Vec3(1.0f + 3.0f * t) : Vec3(t, 1.0f - t, 0.5f * t);
+    }
+    const float inf = std::numeric_limits<float>::infinity();
+    pc->color[5] = {inf, 0.5f, -inf};  // (finite in the arrays is the loader's promise; a NaN sum must not crash either)
+    pc->sh_rest[6 * 15] = {3e38f, 0, 0}, pc->sh_rest[6 * 15 + 1] = {3e38f, 0, 0}, pc->sh_rest[6 * 15 + 2] = {-3e38f, 0, 0};
+    const Mat4 v = Mat4::look_at({0, 0, -5}, {0, 0, 0}, {0, 1, 0}), p = Mat4::perspective(60 * kDeg2Rad, 1.0f, 0.1f, 100.0f);
+    const Vec3 cam(0, 0, -5);
+    for (ViewTransform vt : {ViewTransform::Standard, ViewTransform::Filmic}) {
+      int worst = 0;
+      size_t seen = 0;
+      for (size_t i = 0; i < pc->count(); i++) {
+        SplatScreen s;
+        if (!gsplat_project_one(*pc, i, p * v, 200, 200, cam, Vec3(0.0f), vt, 0.0f, s)) continue;
+        seen++;
+        const uint32_t want = to_display_pixel(gsplat_radiance(*pc, i, pc->position[i] - cam), vt, 0.0f);
+        const int got[3] = {(int)std::lround(s.r * 255.0f), (int)std::lround(s.g * 255.0f), (int)std::lround(s.b * 255.0f)};
+        const int wanted[3] = {(int)((want >> 16) & 255), (int)((want >> 8) & 255), (int)(want & 255)};
+        for (int k = 0; k < 3; k++) worst = std::max(worst, std::abs(got[k] - wanted[k]));
+      }
+      std::printf("    %s: %zu splats, worst channel difference %d/255\n", vt == ViewTransform::Standard ? "Standard" : "Filmic", seen, worst);
+      CHECK(seen > 19000);
+      CHECK(worst <= 1);
+    }
+  });
+
+  test("splats: a cloud whose opacity or SH array is short draws what it can and crashes nothing", [] {
+    SplatShot s;
+    PointCloudPtr pc = pointcloud_random(PointCloudType::GaussianSplats, 9000, 3, 566);
+    pc->sh_rest.resize(pc->sh_rest.size() / 2);  // the second half has no bands: its base colour alone
+    pc->opacity.resize(6000);                    // the last 3,000 have no opacity: not drawn
+    const SplatDraw d{pc, Mat4::identity(), 7, false, 0};
+    s.draw({d});
+    CHECK(s.pass.screen().size() == 6000);
+    SplatView sv{s.v, s.p, s.W, s.H, ViewTransform::Standard, 0.0f};
+    CHECK(r566_differing(s.pass.screen(), r566_reference_list(s.pass, d, sv)) == 0);
+    CHECK(s.id(100, 100) == 7);
+  });
+
+  test("splats: the tile loop's exp is std::exp to a millionth over a billboard's range, and 0 far past it", [] {
+    double worst = 0.0;
+    for (int k = 0; k <= 8 * 256; k++) {
+      const float q = (float)k / 256.0f;
+      const double want = std::exp(-(double)q);
+      worst = std::max(worst, std::fabs((double)gsplat_exp_neg(q) - want) / want);
+    }
+    /* Past the billboard (the loop never asks): looser - a compiler that joins ln 2's two parts loses a little with n. */
+    double worst_far = 0.0;
+    for (float q = 8.0f; q < 79.0f; q += 0.37f) {
+      const double want = std::exp(-(double)q);
+      worst_far = std::max(worst_far, std::fabs((double)gsplat_exp_neg(q) - want) / want);
+    }
+    std::printf("    worst relative difference %.3g to q = 8, %.3g to q = 79\n", worst, worst_far);
+    CHECK(worst < 1e-6);
+    CHECK(worst_far < 1e-4);
+    CHECK(gsplat_exp_neg(0.0f) == 1.0f);
+    CHECK(gsplat_exp_neg(80.0f) == 0.0f && gsplat_exp_neg(1e30f) == 0.0f);
+    /* A splat's alpha through it is gsplat_alpha_at's. */
+    SplatScreen sp;
+    sp.x = 10.3f, sp.y = 7.6f, sp.e0x = 0.8f, sp.e0y = 0.6f, sp.inv0 = 1.0f / 3.0f, sp.inv1 = 1.0f / 1.5f, sp.opacity = 0.9f;
+    for (float dx = -5.0f; dx <= 5.0f; dx += 0.5f) {
+      const float u0 = (dx * sp.e0x) * sp.inv0, u1 = (-dx * sp.e0y) * sp.inv1;
+      if (std::fabs(u0) > 2.0f || std::fabs(u1) > 2.0f) continue;
+      CHECK(std::fabs(sp.opacity * gsplat_exp_neg(u0 * u0 + u1 * u1) - gsplat_alpha_at(sp, sp.x + dx, sp.y)) < 1e-5f);
+    }
+  });
+}
+
 void run_splats_raster_tests() {
   splat_raster_round532_tests();
   splat_raster_round532_test_pass();
   splat_raster_round532_review();
   splat_raster_round557_cache_tests();
   splat_raster_round557_tests();
+  splat_raster_round566_tests();
 }
