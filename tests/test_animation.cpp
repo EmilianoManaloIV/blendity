@@ -15556,6 +15556,141 @@ static void tests_round522() {
   });
 }
 
+/* ---------------------------------------------------------------- round 569 (task 0551): the two shell tests round 521's
+ * review left. A shape key that moves a posed skin's rest makes its outline's rest shell follow without a hull built
+ * (Outline::posed_shell's `moved_only`): written in place when nothing else holds it, else into a copy made under the old
+ * lock, so a render job that still draws the old shell keeps reading what it had. Both must give the shell a hull built
+ * fresh on the new rest gives. The Outline here is the test's own, not a component: no view asks it for a shell, so
+ * which of the two paths runs is decided by what the test holds, not by what a frame happened to keep. */
+static void r569_add_blink(GameObject *g) {
+  Mesh &m = *mesh_make_mutable(g->mesh_filter()->mesh);
+  std::vector<Vec3> d(m.vert_count(), Vec3(0.0f));
+  /* The first two rings, sideways and up (the faces above them turn), and - on the body, 12 vertices a ring - rings 9 to
+   * 11, where the Spine group's weight goes 0, 0.5, 1: there a thickness group scales a push whose normal the blink
+   * changed (review 569: on the first rings alone the group's weight is 0, and a stale normal would not show). */
+  for (size_t i = 0; i < d.size(); i++)
+    if (i < 24 || (i >= 108 && i < 144)) d[i] = Vec3(0.05f, 0.1f, 0.0f);
+  m.shape_keys.push_back(ShapeKey{"Blink", d});
+  m.touch();
+}
+
+static const Mesh *r569_blink(Editor &ed, GameObject *g, float weight) {
+  g->get<MeshRenderer>()->shape_weights = {{"Blink", weight}};
+  ed.mark_changed_for_test("R569 blink");
+  r34_steps(ed, 2);
+  const Mesh *em = g->evaluated_mesh();
+  return em && em->skin_pose && em->skin_pose_holds() ? em : nullptr;
+}
+
+static bool r569_bits(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  return a.size() == b.size() && !a.empty() && std::memcmp(a.data(), b.data(), a.size() * sizeof(Vec3)) == 0;
+}
+
+static Outline r569_outline(const char *group) {
+  Outline ol;
+  ol.thickness = 0.02f;
+  ol.world_space = false;
+  ol.thickness_group = group;
+  return ol;
+}
+
+/* `shell` (of `em`, from an Outline that followed a blink) against the shell an Outline that never saw the mesh builds:
+ * the rest shell and the posed positions to the bit, and the same picture from the render caches. To the bit is safe
+ * here: both sides are the product's own compiled functions (outline_hull_positions, the skin kernel), where round 521's
+ * cube check compared with a hull the test worked out itself and met GCC's fused multiply-add on one side only. */
+static bool r569_is_fresh_hull(const Mesh &shell, const Mesh &em, const char *group, const char *what) {
+  Outline fresh = r569_outline(group);
+  const PoseCounts p0 = pose_counts_this_thread();
+  const Mesh *f = fresh.shell(em, 1.0f, 0, 1.0f);
+  if (!f || !f->skin_pose || !shell.skin_pose || (pose_counts_this_thread() - p0).outline_shells != 1u) return std::printf("    %s: no fresh hull to compare with\n", what), false;
+  const bool rest = r569_bits(shell.skin_pose->rest->positions, f->skin_pose->rest->positions);
+  const bool posed = r569_bits(shell.positions, f->positions);
+  const RenderMesh &a = shell.render_mesh(), &b = f->render_mesh();
+  const bool picture = a.tri_corner == b.tri_corner && r569_bits(a.positions, b.positions);
+  if (!rest || !posed || !picture) std::printf("    %s: rest shell %d, posed positions %d, render mesh %d (1 = the fresh hull's)\n", what, (int)rest, (int)posed, (int)picture);
+  return rest && posed && picture;
+}
+
+static void tests_round569() {
+  test("a blink moves a posed skin's outline shell in place (round 569, round 521's review): the same rest shell mesh under the same lock, no hull built, and it is the hull a fresh Outline builds on the new rest - with a thickness group too", [] {
+    for (const char *group : {"", "Spine"}) {
+      Editor ed;
+      const R469Char c = r519m_scene(ed);
+      r569_add_blink(c.body);
+      const Mesh *em = r569_blink(ed, c.body, 0.25f);
+      CHECK(em != nullptr);
+      if (!em) return;
+      Outline mine = r569_outline(group);
+      const Mesh *s = mine.shell(*em, 1.0f, 0, 1.0f);
+      CHECK(s && s->skin_pose);
+      if (!s || !s->skin_pose) return;
+      const Mesh *rest_shell = s->skin_pose->rest.get();
+      const std::mutex *lock = s->skin_pose->rest_lock.get();
+      std::vector<Vec3> before = rest_shell->positions;
+      uint64_t deform = rest_shell->deform_version;
+      (void)s->render_mesh();  // (its caches filled: what follows the blink must not show these)
+      for (float w : {0.5f, 0.75f}) {
+        em = r569_blink(ed, c.body, w);
+        CHECK(em != nullptr);
+        if (!em) return;
+        const PoseCounts p0 = pose_counts_this_thread();
+        s = mine.shell(*em, 1.0f, 0, 1.0f);
+        CHECK((pose_counts_this_thread() - p0).outline_shells == 0u);
+        CHECK(s && s->skin_pose);
+        if (!s || !s->skin_pose) return;
+        CHECK(s->skin_pose->rest.get() == rest_shell && s->skin_pose->rest_lock.get() == lock);  // (in place)
+        if (s->skin_pose->rest.get() != rest_shell) return;  // (a hull built anew freed the old one: not read below)
+        CHECK(rest_shell->deform_version > deform && !r569_bits(rest_shell->positions, before));  // (and moved)
+        CHECK(r569_is_fresh_hull(*s, *em, group, "in place"));
+        before = rest_shell->positions, deform = rest_shell->deform_version;
+      }
+    }
+  });
+
+  test("a blink while a render job still holds the outline shell goes into a copy (round 569, round 521's review): the held shell, its rest shell and its picture stay what they were, the new shell has a rest shell and a lock of its own and is a fresh hull's, no hull is built - and once the job lets go the next blink is in place again", [] {
+    Editor ed;
+    const R469Char c = r519m_scene(ed);
+    r569_add_blink(c.body);
+    const Mesh *em = r569_blink(ed, c.body, 0.25f);
+    CHECK(em != nullptr);
+    if (!em) return;
+    Outline mine = r569_outline("Spine");
+    const Mesh *s = mine.shell(*em, 1.0f, 0, 1.0f);
+    std::shared_ptr<const Mesh> held = s ? mine.shell_held(s) : nullptr;  // (what a render job keeps while it draws, round 412)
+    CHECK(held && held->skin_pose);
+    if (!held || !held->skin_pose) return;
+    const Mesh &old_rest = *held->skin_pose->rest;
+    const std::mutex *old_lock = held->skin_pose->rest_lock.get();
+    const std::vector<Vec3> rest_was = old_rest.positions, posed_was = held->positions, picture_was = held->render_mesh().positions;
+    const uint64_t deform_was = old_rest.deform_version;
+    em = r569_blink(ed, c.body, 0.5f);
+    CHECK(em != nullptr);
+    if (!em) return;
+    PoseCounts p0 = pose_counts_this_thread();
+    s = mine.shell(*em, 1.0f, 0, 1.0f);
+    CHECK((pose_counts_this_thread() - p0).outline_shells == 0u);
+    CHECK(s && s->skin_pose && s != held.get());
+    if (!s || !s->skin_pose) return;
+    const Mesh *copy = s->skin_pose->rest.get();
+    CHECK(copy != &old_rest && s->skin_pose->rest_lock.get() != old_lock);
+    /* What the job holds is what it held: the old rest shell not written, its posed positions and its render mesh the same. */
+    CHECK(old_rest.deform_version == deform_was && r569_bits(old_rest.positions, rest_was));
+    CHECK(held->skin_pose_holds() && r569_bits(held->positions, posed_was) && r569_bits(held->render_mesh().positions, picture_was));
+    CHECK(!r569_bits(copy->positions, rest_was));  // (the copy moved)
+    CHECK(r569_is_fresh_hull(*s, *em, "Spine", "the copy"));
+    const std::mutex *copy_lock = s->skin_pose->rest_lock.get();
+    held.reset();  // (the job is done)
+    em = r569_blink(ed, c.body, 0.75f);
+    CHECK(em != nullptr);
+    if (!em) return;
+    p0 = pose_counts_this_thread();
+    s = mine.shell(*em, 1.0f, 0, 1.0f);
+    CHECK((pose_counts_this_thread() - p0).outline_shells == 0u);
+    CHECK(s && s->skin_pose && s->skin_pose->rest.get() == copy && s->skin_pose->rest_lock.get() == copy_lock);  // (in place, on the copy, under the copy's lock)
+    CHECK(s && s->skin_pose && r569_is_fresh_hull(*s, *em, "Spine", "in place after the copy"));
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -15606,4 +15741,5 @@ void run_animation_tests() {
   tests_round520();
   tests_round521();
   tests_round522();
+  tests_round569();
 }
