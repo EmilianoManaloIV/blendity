@@ -190,8 +190,17 @@ jobs:
       - name: Install compiler + X11 headers
         # GCC 14 (Ubuntu's toolchain PPA): Blender's libraries call its C++ runtime, which build.sh ships in lib/.
         run: |
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          sudo apt-get update && sudo apt-get install -y g++-14 libx11-dev libxi-dev fonts-dejavu-core git-lfs
+          # Round 581: the PPA's server answered 503 on and off all through 2026-11-18 (ten failed runs of this step).
+          # Try again for up to about 20 minutes; packages already downloaded stay in apt's cache between tries.
+          for i in $(seq 1 20); do
+            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+              && sudo apt-get update -o Acquire::Retries=5 \
+              && sudo apt-get install -y -o Acquire::Retries=5 g++-14 libx11-dev libxi-dev fonts-dejavu-core git-lfs \
+              && break
+            echo "::warning::the toolchain PPA did not answer (try $i of 20); waiting"
+            sleep 45
+          done
+          g++-14 --version
           echo "CXX=g++-14" >> "$GITHUB_ENV" && echo "CC=gcc-14" >> "$GITHUB_ENV"
       - name: Blender's libraries (cached by their pinned commits)
         uses: actions/cache@v4
