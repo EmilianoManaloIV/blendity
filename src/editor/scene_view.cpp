@@ -3479,7 +3479,8 @@ void Editor::run_last_op(bool first) {
   L.result_version = mf->mesh->version;
   std::string label = "Edit: " + op;
   if (first) {
-    if (ok) Log::info("%s done. Adjust it in the panel at the bottom left of the Scene view (F9).", op.c_str());
+    const std::string adjust = key("edit.adjust_last");  // (round 570: the preset's chord - Ctrl+F9 in Maya's - or no bracket with none bound)
+    if (ok) Log::info("%s done. Adjust it in the panel at the bottom left of the Scene view%s.", op.c_str(), adjust.empty() ? "" : (" (" + adjust + ")").c_str());
   }
   else if (!pending_change_ && !undo_.empty() && undo_.back().label == label) {
     /* Amend the operator's undo step instead of stacking a new one. */
@@ -3847,7 +3848,7 @@ void Editor::modal_finish(bool keep) {
     else if (modal_.op == "array") array_count_ = last_op_.count, array_spacing_ = last_op_.amount, array_axis_ = last_op_.axis;
     else if (modal_.op == "taper") taper_distance_ = last_op_.amount, taper_scale_ = last_op_.amount2;
     else if (modal_.op == "recess") recess_depth_ = last_op_.amount, recess_border_ = last_op_.amount2;
-    Log::info("%s: %.4g (F9 adjusts it)", modal_.op.c_str(), last_op_.amount);
+    Log::info("%s: %.4g (%s adjusts it)", modal_.op.c_str(), last_op_.amount, hint_key("edit.adjust_last", "Adjust Last Operation").c_str());  // (round 570: the keymap's key; the panel's name with none bound)
     return;
   }
   /* Cancelled: the mesh as it was, and no undo step left behind. */

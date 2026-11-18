@@ -3016,6 +3016,12 @@ struct Slot {
   std::vector<VkDescriptorSet> post_sets;
   size_t post_sets_used = 0;
   VkDescriptorSet set = VK_NULL_HANDLE;
+  /* Round 565: this view's see-through corners - on the card (`see`), and the host's copy of what was last sent
+   * (`see_stage`, which is also what a send copies from). see_bytes: how much of `see` holds see_stage's bytes (0: nothing
+   * sent yet, or a send that was not recorded); see_send: a send this frame's recording still owes. */
+  Buf see, see_stage;
+  size_t see_bytes = 0, see_send = 0;
+  bool see_cached = false;  // (see_stage is in cached memory: it can be compared with)
 };
 
 /* The frame's uniform block, as kCommon declares it. */
@@ -3110,11 +3116,9 @@ class VulkanRaster final : public Raster {
     ts_period_ns_ = props.limits.timestampPeriod;
     max_storage_ = props.limits.maxStorageBufferRange;
     f_.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
-    {  // (round 565: the lighting's tables in card memory the host can write, where the card has it; =host keeps them in the host's - make_buffer)
-      const char *where = std::getenv("BLENDITY_CARD_TABLES");
-      tables_local_ = !(where && std::string(where) == "host") &&
-                      memory_type(~0u, host_props() | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != UINT32_MAX;
-      detail_.card_tables = tables_local_;
+    {
+      const char *see = std::getenv("BLENDITY_CARD_SEE");  // (=resend: the see-through corners sent every frame, as before round 565 - write_see)
+      see_keep_ = !(see && std::string(see) == "resend");
     }
     uint32_t qn = 0;
     f_.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
@@ -3175,7 +3179,7 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
-    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532, 557)
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})  // (tasks 0192, 0195-0197; rounds 416, 532, 557)
       if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
@@ -3798,7 +3802,8 @@ class VulkanRaster final : public Raster {
     if (!settle_timed(err)) return false;  // (task 0204: a frame left running on the card finishes first)
     if (!record_frame(fr, err)) return rt_abandoned();
     stamp(kStampCopies);
-    if (!submit_wait(err)) return rt_abandoned();
+    if (frame_fails_for_test(err) || !submit_wait(err)) return rt_abandoned();
+    see_submitted();
     frame_waited();
     read_times();
     return true;
@@ -3810,6 +3815,7 @@ class VulkanRaster final : public Raster {
     if (!settle_timed(err)) return false;
     if (!record_frame(fr, err)) return rt_abandoned();
     stamp(kStampCopies);
+    if (frame_fails_for_test(err)) return false;
     submits_++;
     ScopedTimer wall;
     f_.vkEndCommandBuffer(cmd_);
@@ -3818,6 +3824,7 @@ class VulkanRaster final : public Raster {
     si.pCommandBuffers = &cmd_;
     f_.vkResetFences(dev_, 1, &fence_);
     if (f_.vkQueueSubmit(queue_, 1, &si, fence_) != VK_SUCCESS) return fail(err, info_.name + ": the GPU refused the frame");
+    see_submitted();
     in_flight_ = true;
     times_ = RasterTimes{};
     times_.submit_wall = wall.ms();  // (the submission alone; the card's own times come by take_async_times once it is done)
@@ -3866,7 +3873,8 @@ class VulkanRaster final : public Raster {
     const Slot &sl = slots_[fr.slot];
     record_planes(sl, px, color != nullptr, depth != nullptr, ids != nullptr);
     stamp(kStampCopies);
-    if (!submit_wait(err)) return false;
+    if (frame_fails_for_test(err) || !submit_wait(err)) return false;
+    see_submitted();
     frame_waited();
     read_times();
     ScopedTimer unpack;
@@ -3922,6 +3930,7 @@ class VulkanRaster final : public Raster {
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, kStamps);
     stamp(kStampStart);
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
+    record_see(sl);    // (round 565: this view's see-through corners, when they are not the ones it holds)
     record_skins();    // (round 519: the skinned meshes' posed vertices, one barrier after, before the first pass)
     bool traced = rt_wanted(fr);
     if (traced && !record_rt_shadows(sl, err)) traced = rt_give_up(err);  // (round 543: after the copies, before any set is bound)
@@ -3989,6 +3998,13 @@ class VulkanRaster final : public Raster {
   /* (A traced variant that didn't compile, or a build that failed, leaves the map: the option then reads as unavailable.) */
   bool can_trace_shadows() const override { return rt_ok_ && !rt_failed_ && (!rt_pipelines_tried_ || pl_light_rt_); }
   void fail_rt_shadows_for_test() override { rt_force_fail_ = true; }
+  void fail_next_frame_for_test() override { fail_frame_once_ = true; }
+  bool frame_fails_for_test(std::string *err) {
+    if (!fail_frame_once_) return false;
+    fail_frame_once_ = false;
+    fail(err, "a test made the frame fail");
+    return true;
+  }
   RtShadowStats rt_shadow_stats() const override {
     const rt::Counters &c = rt_.counters();
     RtShadowStats s;
@@ -4638,7 +4654,6 @@ class VulkanRaster final : public Raster {
   enum { kStampStart, kStampSkin, kStampShadow, kStampGbuffer, kStampToon, kStampBaked, kStampLight, kStampSplats, kStampSee, kStampOverlays, kStampHdr, kStampPost, kStampCopies, kStamps };
   static_assert(RasterDetail::kGpu == kStamps - 1, "a RasterDetail part is the gap after each stamp, in the stamps' order");
   RasterDetail detail_;
-  bool tables_local_ = false;  // (round 565: the card has memory of its own the host can write - make_buffer)
   uint64_t ts_mask_ = ~0ull;   // (the timestamp counter's valid bits)
   double submit_ms_ = 0;       // (the last submit_wait's submission alone)
   Buf ubo_, inst_buf_, staging_, readback_, lut_buf_;
@@ -4648,7 +4663,10 @@ class VulkanRaster final : public Raster {
   Buf ov_lines_, ov_points_, ov_outlines_;  // task 0192: the frame's overlays (host-visible, written each frame)
   Buf light_buf_;                            // task 0195: the frame's lights, as many as there are
   Buf vcol_buf_;                             // task 0195: Weight Paint's vertex colours (RasterFrame::vertex_colors)
-  Buf see_buf_;                              // task 0195: the see-through triangles' corners (RasterFrame::see_through)
+  bool see_keep_ = true;                     // (round 565: a slot's see-through corners stay on the card while they are the same - write_see)
+  int see_owed_slot_ = -1;                   // (the slot whose send the frame being recorded holds, until the frame is on the queue)
+  size_t see_owed_bytes_ = 0;
+  bool fail_frame_once_ = false;             // (fail_next_frame_for_test)
   /* Round 532, 557: the Gaussian splats - bindings 40 the static splats and 42 their SH (device-local, kept while
    * splat_key_ holds), 41 the clouds' pick ids, 43 the frame's order, 44 the clouds' values (host-visible, written each frame). */
   Buf splat_src_buf_, splat_ids_buf_, splat_sh_buf_, splat_ord_buf_, splat_cl_buf_;
@@ -4774,30 +4792,7 @@ class VulkanRaster final : public Raster {
     ai.memoryTypeIndex = memory_type(req.memoryTypeBits, props);
     return ai.memoryTypeIndex != UINT32_MAX && f_.vkAllocateMemory(dev_, &ai, nullptr, &mem) == VK_SUCCESS;
   }
-  /* Round 565 (task 0547): the small tables the host writes and the lighting reads at every pixel (the frame's constants,
-   * the instances, the lights, the baked / toon / lilToon tables, the probe volume, the highlight's bits, the outlines' ids)
-   * go into the card's own memory when the card has a kind the host can write too. In the host's memory every read of them
-   * by a shader - 62 lights at each of a world's pixels - crosses to the host: the lighting pass took twice to five times as
-   * long. No such kind (or no room left in it): the host's memory, as before. What is written whole every frame and read
-   * once in order (the see-through corners, the vertex colours, the splats' order), the baked corners (64 MB blocks, copied
-   * by the host when they grow) and staging / read-back buffers stay in the host's: writing the card's memory is slower,
-   * reading it back much slower. A table over 16 MB (100,000 lilToon instances, a large probe volume) stays in the host's
-   * too: on a card without a resizable window that memory is 256 MB in all, and over its budget the system pages it.
-   * BLENDITY_CARD_TABLES=host keeps the old placement (a measurement's before). */
-  static constexpr VkDeviceSize kCardTableMax = 16ull << 20;
-  bool table_on_card(const Buf &b) const {
-    for (const Buf *t : {&ubo_, &inst_buf_, &light_buf_, &baked_buf_, &toon_buf_, &lil_buf_, &lilmap_buf_, &probe_buf_, &hl_buf_, &ov_outlines_})
-      if (t == &b) return true;
-    return false;
-  }
   bool make_buffer(Buf &b, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props) {
-    if (props == host_props() && table_on_card(b)) {
-      if (tables_local_ && size <= kCardTableMax && make_buffer_in(b, size, usage, props | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) return detail_.tables_on_card++, true;
-      detail_.tables_in_host++;
-    }
-    return make_buffer_in(b, size, usage, props);
-  }
-  bool make_buffer_in(Buf &b, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props) {
     size = std::max<VkDeviceSize>(size, 16);
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bi.size = size;
@@ -5338,7 +5333,7 @@ class VulkanRaster final : public Raster {
     }
     d.tiling[3] = s.normal_strength;
     d.offset[3] = s.procedural_scale;
-    d.color2[3] = 0.0f, d.bmin[3] = 0.0f, d.bmax[3] = 0.0f;  // (round 565: each its own store - a chained one reads the card's memory back in a debug build)
+    d.color2[3] = d.bmin[3] = d.bmax[3] = 0.0f;
     for (int k = 0; k < 4; k++) d.tex0[k] = s.tex[k];
     d.tex1[0] = s.tex[4], d.tex1[1] = s.mapping, d.tex1[2] = s.procedural, d.tex1[3] = s.wrap;
     d.tex2[0] = s.filter, d.tex2[1] = s.has_uv ? 1 : 0, d.tex2[2] = s.has_tangent ? 1 : 0, d.tex2[3] = s.textured ? (s.vertex_color_mul ? 2 : 1) : 0;  // (task 0537: 2 - textured, multiplying the vertex colours)
@@ -5538,6 +5533,67 @@ class VulkanRaster final : public Raster {
            write_points(fr, err) &&
            write_array(ov_outlines_, ot.data(), ot.size() * 4, err);
   }
+  /* Round 565 (task 0547): the see-through triangles' corners. A world has many (SideRail's stand-in 113,000: 7 MB), sorted
+   * back to front for the view, and while the camera stands still - a pose dragged, a clip playing - they are the same
+   * every frame. They were written whole into a buffer in the host's memory each frame (0.5 ms) for the card to fetch
+   * across (0.6 ms of its frame at full clock, 3 ms in its lowest power state). Now each view's slot keeps its own on the
+   * card: the frame's corners are compared with the host's copy of what the slot last sent, and only a list that differs
+   * is copied there and sent (one buffer copy at the frame's start). Two views have different lists; each keeps its own.
+   * A frame without see-through surfaces sends and draws none: the slot's stay for the next that has them. */
+  bool make_see(Buf &b, size_t bytes) {
+    return make_buffer(b, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  }
+  bool write_see(const RasterFrame &fr, Slot &sl, std::string *err) {
+    const size_t bytes = fr.see_through.size() * sizeof(SeeCorner);
+    sl.see_send = 0;
+    see_owed_slot_ = -1;
+    if (!bytes) return true;
+    if (bytes > max_storage_) return fail(err, "see-through surfaces over the card's storage buffer limit");  // (the CPU draws the view)
+    const size_t roomy = (size_t)std::min<uint64_t>((uint64_t)bytes * 2, max_storage_);
+    if (bytes > sl.see.size) {
+      f_.vkDeviceWaitIdle(dev_);
+      free_buffer(sl.see);
+      sl.see_bytes = 0;
+      const bool made = make_see(sl.see, roomy) || make_see(sl.see, bytes);
+      if (!made) make_see(sl.see, 16);  // (a placeholder back: no set is left with a buffer that is gone)
+      bind_buffers(sl.set);
+      if (!made) return fail(err, "out of memory for the see-through surfaces");
+    }
+    if (bytes > sl.see_stage.size) {  // (the host's copy: cached memory - it is read back to compare)
+      free_buffer(sl.see_stage);
+      sl.see_bytes = 0;
+      const VkMemoryPropertyFlags cached = host_props() | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+      sl.see_cached = make_buffer(sl.see_stage, roomy, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, cached) || make_buffer(sl.see_stage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, cached);
+      /* (A card with no cached memory the host can write: its uncached kind is slow to read back, so nothing is compared
+       * and the corners go every frame, as before.) */
+      if (!sl.see_cached && !make_buffer(sl.see_stage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props()))
+        return fail(err, "out of memory for the see-through surfaces");
+    }
+    if (see_keep_ && sl.see_cached && sl.see_bytes == bytes && std::memcmp(sl.see_stage.mapped, fr.see_through.data(), bytes) == 0) {
+      detail_.see_kept++;
+      return true;
+    }
+    sl.see_bytes = 0;  // (until the send is recorded: a frame that fails before then sends again)
+    std::memcpy(sl.see_stage.mapped, fr.see_through.data(), bytes);
+    sl.see_send = bytes;
+    detail_.see_sent++;
+    return true;
+  }
+  /* (In the frame's command buffer, before anything draws. The slot holds the corners only once that frame is on the
+   * queue - see_submitted: a frame that fails after this, its filters' targets or its submission, never runs the copy,
+   * and the next frame must send again.) */
+  void record_see(Slot &sl) {
+    if (!sl.see_send) return;
+    const VkBufferCopy c{0, 0, sl.see_send};
+    f_.vkCmdCopyBuffer(cmd_, sl.see_stage.buf, sl.see.buf, 1, &c);
+    uploaded();
+    see_owed_slot_ = (int)(&sl - slots_), see_owed_bytes_ = sl.see_send;
+    sl.see_send = 0;
+  }
+  void see_submitted() {
+    if (see_owed_slot_ >= 0) slots_[see_owed_slot_].see_bytes = see_owed_bytes_;
+    see_owed_slot_ = -1;
+  }
   /* The frame's constants and the instances, written into their host-visible buffers. */
   bool write_frame(const RasterFrame &fr, std::string *err) {
     if (instances_.size() * sizeof(InstGpu) > inst_buf_.size) {
@@ -5587,7 +5643,7 @@ class VulkanRaster final : public Raster {
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     {
       ScopedTimer see_time;
-      if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
+      if (!write_see(fr, slots_[fr.slot], err)) return false;
       detail_.host[RasterDetail::WriteSee] += see_time.ms();
     }
     if (!write_splats(fr, err)) return false;  // (rounds 532, 557)
@@ -5728,6 +5784,7 @@ class VulkanRaster final : public Raster {
       dai.descriptorSetCount = 1;
       dai.pSetLayouts = &set_layout_;
       if (f_.vkAllocateDescriptorSets(dev_, &dai, &sl.set) != VK_SUCCESS) return fail(err, "could not make the descriptor sets");
+      if (!make_see(sl.see, 16)) return fail(err, "out of memory");  // (a placeholder until the view has see-through surfaces)
       bind_buffers(sl.set);
     }
     return true;
@@ -5740,7 +5797,10 @@ class VulkanRaster final : public Raster {
                                             {texinfo_buf_.buf, 0, VK_WHOLE_SIZE}, {texlevel_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo hb{hl_buf_.buf, 0, VK_WHOLE_SIZE};
     const VkDescriptorBufferInfo ov[3] = {{ov_lines_.buf, 0, VK_WHOLE_SIZE}, {ov_points_.buf, 0, VK_WHOLE_SIZE}, {ov_outlines_.buf, 0, VK_WHOLE_SIZE}};
-    const VkDescriptorBufferInfo lb2[7] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see_buf_.buf, 0, VK_WHOLE_SIZE},
+    VkBuffer see = VK_NULL_HANDLE;  // (round 565: the set's own slot's see-through corners)
+    for (const Slot &sl : slots_)
+      if (sl.set == set) see = sl.see.buf;
+    const VkDescriptorBufferInfo lb2[7] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see, 0, VK_WHOLE_SIZE},
                                            {toon_buf_.buf, 0, VK_WHOLE_SIZE}, {baked_buf_.buf, 0, VK_WHOLE_SIZE}, {corner_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {probe_buf_.buf, 0, VK_WHOLE_SIZE}};
     const VkDescriptorBufferInfo lil2[2] = {{lil_buf_.buf, 0, VK_WHOLE_SIZE}, {lilmap_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 416: bindings 32, 33)
@@ -6469,8 +6529,9 @@ class VulkanRaster final : public Raster {
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     destroy_skin_pass();  // (round 519: the skins' buffers and sets, the pass's pipeline and pool)
     for (Mesh &m : meshes_) free_mesh(m);
+    for (Slot &sl : slots_) free_buffer(sl.see), free_buffer(sl.see_stage);  // (round 565)
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_, &splat_src_buf_, &splat_ids_buf_, &splat_sh_buf_, &splat_ord_buf_, &splat_cl_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);

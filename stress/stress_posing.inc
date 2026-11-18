@@ -51,7 +51,7 @@ static gpu::RasterDetail card_detail(Editor &ed) {
 static std::string card_detail_text(const gpu::RasterDetail &a, const gpu::RasterDetail &b) {
   if (b.frames <= a.frames) return std::string();  // (none drawn, or the device was made again meanwhile: its totals began at 0)
   const double n = (double)(b.frames - a.frames);
-  std::string s = strprintf("; card frames %.0f (%.0f copied back), ms a card frame - the card:", n, (double)(b.frames_read - a.frames_read));
+  std::string s = strprintf("; card frames %.0f (%.0f waited for), ms a card frame - the card:", n, (double)(b.frames_read - a.frames_read));
   double card = 0, host = 0;
   for (int k = 0; k < gpu::RasterDetail::kGpu; k++) {
     const double v = (b.gpu[k] - a.gpu[k]) / n;
@@ -65,10 +65,10 @@ static std::string card_detail_text(const gpu::RasterDetail &a, const gpu::Raste
     if (v >= 0.005) s += strprintf(" %s %.2f,", gpu::RasterDetail::host_name(k), v);
   }
   s += strprintf(" in all %.2f; a card frame held: instances %.0f, draw calls %.0f, pipeline binds %.0f, mesh binds %.0f, set rewrites %.2f, lights %.0f, outline ids %.0f, "
-                 "see-through corners %.0f, overlay lines and dots %.0f, pixels %.0f; the lighting's tables made so far: %.0f in the card's memory, %.0f in the host's",
+                 "see-through corners %.0f, overlay lines and dots %.0f, pixels %.0f, see-through corners sent %.2f and kept %.2f",
                  host, (b.instances - a.instances) / n, (b.draws - a.draws) / n, (b.pipeline_binds - a.pipeline_binds) / n, (b.mesh_binds - a.mesh_binds) / n,
                  (b.set_writes - a.set_writes) / n, (b.lights - a.lights) / n, (b.outline_ids - a.outline_ids) / n, (b.see_corners - a.see_corners) / n,
-                 (b.overlay_prims - a.overlay_prims) / n, (b.pixels - a.pixels) / n, (double)b.tables_on_card, (double)b.tables_in_host);
+                 (b.overlay_prims - a.overlay_prims) / n, (b.pixels - a.pixels) / n, (b.see_sent - a.see_sent) / n, (b.see_kept - a.see_kept) / n);
   return s;
 }
 

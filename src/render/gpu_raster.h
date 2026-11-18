@@ -346,21 +346,20 @@ struct RasterTimes {
 
 /* Round 565 (task 0547): where a card frame goes, finer than RasterTimes - totals over every frame the device drew, for a
  * measurement to take before and after its frames. `gpu`: the card's own ms between timestamps (0 without them); RasterTimes'
- * "g-buffer" is Gbuffer + Toon + Baked here, its "lighting" Light to Post; Skin holds the queued mesh copies and the traced
- * shadows' builds too (what comes before the first pass). `host`: the render call's own steps on the CPU (Settle: waiting
+ * "g-buffer" is Gbuffer + Toon + Baked here, its "lighting" Light to Post; Skin is everything before the first pass: the
+ * skins' poses, the queued mesh copies, a view's see-through corners when they are sent, the traced shadows' builds. `host`: the render call's own steps on the CPU (Settle: waiting
  * for the frame left running before; Record: with the toon / baked / linear-light targets made when first needed; Submit and
  * Wait: the frame's own submission, not an upload's; Wait: the fence of a frame that copies planes back). */
 struct RasterDetail {
   enum Gpu { Skin, Shadow, Gbuffer, Toon, Baked, Light, Splats, SeeThrough, Overlays, Hdr, Post, Copies, kGpu };
   enum Host { Settle, Targets, Write, WriteSee, Tables, Record, Submit, Wait, Unpack, kHost };
   double gpu[kGpu] = {}, host[kHost] = {};
-  uint64_t frames = 0, frames_read = 0;  // frames drawn; those that copied planes back (the others were left running)
+  uint64_t frames = 0, frames_read = 0;  // frames drawn; those waited for - render() and render_read(), which copies planes back (the others were left running)
   uint64_t draws = 0, pipeline_binds = 0, mesh_binds = 0, set_writes = 0;  // the instanced passes' calls; descriptor set rewrites (images or buffers)
   uint64_t instances = 0, lights = 0, outline_ids = 0, see_corners = 0, overlay_prims = 0, pixels = 0;  // what the frames held
-  uint64_t tables_on_card = 0, tables_in_host = 0;  // the lighting's small tables made in the card's own memory / in the host's (since the device was made)
-  bool card_tables = false;  // the device puts those tables in the card's memory (it has the kind, and BLENDITY_CARD_TABLES isn't "host")
+  uint64_t see_sent = 0, see_kept = 0;  // frames that sent their see-through corners to the card / whose corners were the slot's last ones (nothing sent)
   static const char *gpu_name(int k) {
-    static const char *n[kGpu] = {"skin", "shadow maps", "g-buffer", "toon planes", "baked planes", "lighting", "splats", "see-through", "overlays", "linear light", "filters", "copies out"};
+    static const char *n[kGpu] = {"skin and copies in", "shadow maps", "g-buffer", "toon planes", "baked planes", "lighting", "splats", "see-through", "overlays", "linear light", "filters", "copies out"};
     return n[k];
   }
   static const char *host_name(int k) {
@@ -551,6 +550,7 @@ class Raster {
   virtual bool can_trace_shadows() const { return false; }
   virtual RtShadowStats rt_shadow_stats() const { return {}; }
   virtual void fail_rt_shadows_for_test() {}  // (the next traced frame's build fails: the map from then on)
+  virtual void fail_next_frame_for_test() {}  // (round 565: the next frame fails after it is recorded, before it reaches the card - what it recorded never runs)
 };
 
 /* Round 450: BLENDITY_VIEW_OFF=sh,lv,mask (any of them, comma-separated) compiles the views' shaders without round

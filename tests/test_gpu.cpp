@@ -8293,7 +8293,7 @@ static void tests_round521_gpu() {
 }
 
 /* ---------------------------------------------------------------- round 565 (task 0547): what a card frame costs, by part, and the
- * lighting's small tables in the card's own memory. Nothing here asserts a time (ADR 0056). */
+ * see-through corners kept on the card. Nothing here asserts a time (ADR 0056). */
 namespace r565 {
 
 /* A raster of its own with a cube and a floor on it; the frames and instances the tests share. */
@@ -8303,21 +8303,22 @@ struct Rig {
   static constexpr int W = 160, H = 120;
   Mat4 vp, sun_vp;
 
-  static void set_tables_env(bool host) {
-    if (host) set_env("BLENDITY_CARD_TABLES", "host");
-    else clear_env("BLENDITY_CARD_TABLES");
+  static void set_see_env(bool resend) {
+    if (resend) set_env("BLENDITY_CARD_SEE", "resend");
+    else clear_env("BLENDITY_CARD_SEE");
   }
-  /* False (with the reason printed) when there is no card. host_tables: the device is made with BLENDITY_CARD_TABLES=host
-   * (the variable is cleared again as soon as it is made, whatever came of it). */
-  bool open(bool host_tables) {
+  /* False (with the reason printed) when there is no card. resend_see: the device is made with BLENDITY_CARD_SEE=resend (the
+   * see-through corners go to the card every frame); the variable is cleared again as soon as the device is made, whatever
+   * came of it. */
+  bool open(bool resend_see = false) {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return false;
     }
     std::string err;
-    if (host_tables) set_tables_env(true);
+    set_see_env(resend_see);  // (cleared for the keeping device too: a run with the variable exported must not change it)
     g = gpu::Raster::create(0, &err);
-    if (host_tables) set_tables_env(false);
+    set_see_env(false);
     if (!g) {
       std::printf("    skipped: %s\n", err.c_str());
       return false;
@@ -8440,7 +8441,7 @@ inline bool draw(Rig &r, const std::vector<gpu::RasterInstance> &inst, const gpu
 static void tests_round565_gpu() {
   test("a card frame's parts are counted: frames, draws, binds, instances, lights and pixels rise by what each frame held, the card's and the host's times are finite and never fall, and the parts add up to the frame's own time (round 565; skipped without a GPU)", [] {
     r565::Rig rig;
-    if (!rig.open(false)) return;
+    if (!rig.open()) return;
     std::string err;
     const std::vector<gpu::RasterInstance> inst = rig.plain(3);
     const std::vector<gpu::RasterLight> lights = {r565::Rig::three_lights()[0], r565::Rig::three_lights()[1]};
@@ -8523,67 +8524,281 @@ static void tests_round565_gpu() {
     CHECK(after.same(last));  // (the same frame drawn the other way)
   });
 
-  test("the lighting's tables in the card's memory draw the same picture as in the host's: eight materials, a sun, a point and a spot light, shadows and an outline are equal byte for byte, and so are the same frame after the instance table has grown (round 565; skipped without a GPU)", [] {
-    r565::Rig host, card;
-    if (!host.open(true)) return;
-    if (!card.open(false)) return;  // (the variable is cleared again by now: this one is made without it)
-    const gpu::RasterDetail dh = host.g->detail(), dc = card.g->detail();
-    std::printf("    BLENDITY_CARD_TABLES=host: %llu tables in the host's memory, %llu on the card; default: %llu in the host's, %llu on the card\n", (unsigned long long)dh.tables_in_host,
-                (unsigned long long)dh.tables_on_card, (unsigned long long)dc.tables_in_host, (unsigned long long)dc.tables_on_card);
-    CHECK(dh.tables_in_host > 0 && dh.tables_on_card == 0);
-    CHECK(dc.tables_on_card + dc.tables_in_host > 0);
-    CHECK(!dh.card_tables);
-    /* (A card with the memory puts every one of the ten tables there - none is over the 16 MB a table may have on the card.) */
-    CHECK(!dc.card_tables || (dc.tables_on_card >= 10 && dc.tables_in_host == 0));
-    if (!dc.card_tables) std::printf("    this card has no host-writable memory of its own: both rasters keep the tables in the host's\n");
-    const std::vector<gpu::RasterLight> lights = r565::Rig::three_lights();
-    const std::vector<gpu::RasterInstance> inst = host.rich();
-    CHECK(inst.size() == 7);
-    const gpu::RasterFrame fr = host.frame(lights, 1024, true);
-    r565::Pic ph, pc;
-    CHECK(r565::draw(host, inst, fr, ph) && r565::draw(card, inst, fr, pc));
-    CHECK(ph.shows_objects() && pc.shows_objects());
-    CHECK(ph.same(pc));
-    /* The same again without the outline, and with a different light count: tables written over, not made new. */
-    const gpu::RasterFrame fr2 = host.frame({lights[1], lights[2]}, 0, false);
-    r565::Pic ph2, pc2;
-    CHECK(r565::draw(host, inst, fr2, ph2) && r565::draw(card, inst, fr2, pc2));
-    CHECK(ph2.same(pc2));
-    CHECK(!ph2.same(ph));  // (the frames differ, so the equality above is not two blank pictures)
-    /* Past the first size of the instance table (1024) and of the light table: both are made again, larger. */
-    std::vector<gpu::RasterInstance> many = inst;
-    for (int k = 0; k < 1100; k++) {
-      gpu::RasterInstance in = host.make(host.cube, {-5.0f + 0.25f * (float)(k % 40), 0.1f, -4.0f + 0.3f * (float)(k / 40)}, {0.1f, 0.1f, 0.1f}, (uint32_t)k + 8);
-      in.albedo_rough[0] = (float)(k % 7) / 6.0f, in.albedo_rough[1] = (float)(k % 5) / 4.0f, in.albedo_rough[3] = 0.2f + 0.7f * (float)(k % 3) / 2.0f;
-      in.metal_spec[0] = (k % 4 == 0) ? 1.0f : 0.0f;
-      many.push_back(in);
+  test("see-through corners are sent to the card once and kept while they stay the same: a second frame sends none, a changed corner sends them again, two views keep their own, and the picture is the one a card that resends every frame draws (round 565; skipped without a GPU)", [] {
+    r565::Rig keep, resend;
+    if (!keep.open()) return;
+    if (!resend.open(true)) return;  // (the variable is cleared again by now: `keep` was made without it)
+    if (!keep.g->can_draw_see_through()) {
+      std::printf("    skipped: the card has no dual-source blending\n");
+      return;
     }
-    std::vector<gpu::RasterLight> crowd = lights;
-    for (int k = 0; k < 40; k++) {
-      gpu::RasterLight l;
-      l.type = 1;
-      l.position[0] = -5.0f + 0.25f * (float)k, l.position[1] = 1.5f, l.position[2] = -3.0f + 0.15f * (float)k;
-      l.color[0] = (float)(k % 3) / 2.0f, l.color[1] = (float)(k % 5) / 4.0f, l.color[2] = 0.6f;
-      l.intensity = 4.0f, l.range = 6.0f;
-      crowd.push_back(l);
+    /* A floor, three cubes and one Transparent instance the see-through triangles point at. */
+    std::vector<gpu::RasterInstance> inst = keep.plain(3);
+    const uint32_t see_inst = (uint32_t)inst.size();
+    gpu::RasterInstance glassy = keep.make(keep.cube, {0, 0, 0}, {1, 1, 1}, 20);
+    glassy.surface = 2;
+    glassy.albedo_rough[0] = 0.9f, glassy.albedo_rough[1] = 0.1f, glassy.albedo_rough[2] = 0.2f;
+    glassy.metal_spec[3] = 0.6f;
+    inst.push_back(glassy);
+    /* `n` triangles in front of the cubes, shifted by dx along x, each a little higher than the one before. */
+    const auto tris = [&](int n, float dx) {
+      std::vector<gpu::SeeCorner> v((size_t)n * 3);
+      const uint32_t white = 0x3C00u | (0x3C00u << 16);
+      for (int k = 0; k < n; k++) {
+        const float x = -4.0f + dx + 1.6f * (float)k, y = 1.0f + 0.2f * (float)k;
+        const float pos[3][3] = {{x, y, 2.5f}, {x + 1.8f, y, 2.5f}, {x + 0.9f, y + 1.5f, 2.0f}};
+        for (int q = 0; q < 3; q++) {
+          gpu::SeeCorner &c = v[(size_t)k * 3 + (size_t)q];
+          std::memset(&c, 0, sizeof c);
+          std::memcpy(c.p, pos[q], 12);
+          c.n[1] = 0.3f, c.n[2] = 0.95f;
+          c.inst = see_inst;
+          std::memcpy(&c.pad[0], &white, 4);
+          std::memcpy(&c.pad[1], &white, 4);
+        }
+      }
+      return v;
+    };
+    /* Draws the corners in a slot of a raster. */
+    const auto draw = [&](r565::Rig &r, const std::vector<gpu::SeeCorner> &see, int slot, r565::Pic &pic) {
+      gpu::RasterFrame fr = r.frame({r565::Rig::three_lights()[0]}, 0, false);
+      fr.slot = slot;
+      fr.see_through = see;
+      return r565::draw(r, inst, fr, pic);
+    };
+    const auto counts = [](const r565::Rig &r) { return std::make_pair((uint64_t)r.g->detail().see_sent, (uint64_t)r.g->detail().see_kept); };
+
+    const std::vector<gpu::SeeCorner> A = tris(6, 0.0f), B = tris(6, 0.7f), none;
+    CHECK(A.size() == B.size() && A.size() == 18 && !!std::memcmp(A.data(), B.data(), A.size() * sizeof(gpu::SeeCorner)));
+
+    /* 1: the see-through pixels show. */
+    r565::Pic bare, a1, a2, ra1, ra2;
+    CHECK(draw(keep, none, 0, bare));
+    const auto c0 = counts(keep);
+    CHECK(draw(keep, A, 0, a1));
+    CHECK(bare.shows_objects() && a1.shows_objects());
+    CHECK(!a1.same(bare));
+
+    /* 2: the second identical frame sends nothing. */
+    const auto c1 = counts(keep);
+    CHECK(c1.first == c0.first + 1 && c1.second == c0.second);
+    CHECK(draw(keep, A, 0, a2));
+    const auto c2 = counts(keep);
+    CHECK(c2.first == c1.first && c2.second == c1.second + 1);
+    CHECK(a2.same(a1));
+    const auto r0 = counts(resend);
+    CHECK(draw(resend, A, 0, ra1) && draw(resend, A, 0, ra2));
+    const auto r1 = counts(resend);
+    CHECK(r1.first == r0.first + 2 && r1.second == r0.second);
+    CHECK(ra1.same(a1) && ra2.same(a1));
+
+    /* 3: one corner moved: sent again, a different picture, the resend raster's picture; then kept. */
+    std::vector<gpu::SeeCorner> A2 = A;
+    A2[2].p[0] += 1.5f, A2[2].p[1] += 1.0f;
+    r565::Pic a3, a3b, ra3;
+    CHECK(draw(keep, A2, 0, a3));
+    const auto c3 = counts(keep);
+    CHECK(c3.first == c2.first + 1 && c3.second == c2.second);
+    CHECK(!a3.same(a2));
+    CHECK(draw(resend, A2, 0, ra3));
+    CHECK(a3.same(ra3));
+    CHECK(draw(keep, A2, 0, a3b));
+    const auto c3b = counts(keep);
+    CHECK(c3b.first == c3.first && c3b.second == c3.second + 1);
+    CHECK(a3b.same(a3));
+
+    /* 4: a shorter list is sent (its size differs) and draws as the resend raster does. */
+    std::vector<gpu::SeeCorner> A3(A2.begin(), A2.end() - 3);
+    r565::Pic a4, ra4;
+    CHECK(draw(keep, A3, 0, a4));
+    const auto c4 = counts(keep);
+    CHECK(c4.first == c3b.first + 1 && c4.second == c3b.second);
+    CHECK(draw(resend, A3, 0, ra4));
+    CHECK(a4.same(ra4) && !a4.same(a3));
+
+    /* 5: two views, each keeps its own list. */
+    r565::Pic pa, pb, pa2, pb2, rpa, rpb;
+    CHECK(draw(keep, A, 0, pa) && draw(keep, B, 1, pb));
+    const auto c5 = counts(keep);
+    CHECK(c5.first == c4.first + 2 && c5.second == c4.second);
+    CHECK(draw(keep, A, 0, pa2) && draw(keep, B, 1, pb2));
+    const auto c5b = counts(keep);
+    CHECK(c5b.first == c5.first && c5b.second == c5.second + 2);
+    CHECK(pa2.same(pa) && pb2.same(pb));
+    CHECK(!pa.same(pb));
+    CHECK(draw(resend, A, 0, rpa) && draw(resend, B, 1, rpb));
+    CHECK(pa.same(rpa) && pb.same(rpb));
+
+    /* 6: a frame without see-through surfaces between two with them: no count, and the slot's copy survives it. */
+    r565::Pic empty0, a6;
+    CHECK(draw(keep, none, 0, empty0));
+    const auto c6 = counts(keep);
+    CHECK(c6.first == c5b.first && c6.second == c5b.second);
+    CHECK(empty0.same(bare));
+    CHECK(draw(keep, A, 0, a6));
+    const auto c6b = counts(keep);
+    CHECK(c6b.first == c6.first && c6b.second == c6.second + 1);
+    CHECK(a6.same(pa));
+
+    /* 7: a list that outgrows slot 0's buffer: sent; the other view's copy is still there. */
+    std::vector<gpu::SeeCorner> big((size_t)20000 * 3);
+    for (int k = 0; k < 20000; k++) {
+      const float x = -5.0f + 0.05f * (float)(k % 200), y = 0.3f + 0.05f * (float)(k / 200);
+      const float pos[3][3] = {{x, y, 2.5f}, {x + 0.04f, y, 2.5f}, {x + 0.02f, y + 0.04f, 2.5f}};
+      for (int q = 0; q < 3; q++) {
+        gpu::SeeCorner &c = big[(size_t)k * 3 + (size_t)q];
+        c = A[(size_t)q];
+        std::memcpy(c.p, pos[q], 12);
+      }
     }
-    const gpu::RasterDetail g0h = host.g->detail(), g0c = card.g->detail();
-    const gpu::RasterFrame fr3 = host.frame(crowd, 1024, true);
-    r565::Pic ph3, pc3;
-    CHECK(r565::draw(host, many, fr3, ph3) && r565::draw(card, many, fr3, pc3));
-    const gpu::RasterDetail g1h = host.g->detail(), g1c = card.g->detail();
-    std::printf("    %zu instances and %zu lights: tables made again - host-tables raster %llu, default raster %llu\n", many.size(), crowd.size(),
-                (unsigned long long)(g1h.tables_on_card + g1h.tables_in_host - g0h.tables_on_card - g0h.tables_in_host),
-                (unsigned long long)(g1c.tables_on_card + g1c.tables_in_host - g0c.tables_on_card - g0c.tables_in_host));
-    CHECK(g1h.tables_in_host > g0h.tables_in_host && g1h.tables_on_card == 0);
-    CHECK(g1c.tables_on_card + g1c.tables_in_host > g0c.tables_on_card + g0c.tables_in_host);
-    CHECK(!g1c.card_tables || (g1c.tables_on_card > g0c.tables_on_card && g1c.tables_in_host == 0));  // (the tables made again when they grew are on the card too)
-    CHECK(ph3.shows_objects() && pc3.shows_objects());
-    CHECK(ph3.same(pc3));
-    /* And the small frame again after the growth. */
-    r565::Pic ph4, pc4;
-    CHECK(r565::draw(host, inst, fr, ph4) && r565::draw(card, inst, fr, pc4));
-    CHECK(ph4.same(pc4) && ph4.same(ph));
+    r565::Pic pbig, rbig, pb3;
+    CHECK(draw(keep, big, 0, pbig));
+    const auto c7 = counts(keep);
+    CHECK(c7.first == c6b.first + 1 && c7.second == c6b.second);
+    CHECK(draw(keep, B, 1, pb3));
+    const auto c7b = counts(keep);
+    CHECK(c7b.first == c7.first && c7b.second == c7.second + 1);
+    CHECK(pb3.same(pb));
+    CHECK(draw(resend, big, 0, rbig));
+    CHECK(pbig.same(rbig) && !pbig.same(pa));
+    /* 8: a frame that fails after its send was recorded (its filters' targets, its submission) never ran the copy: the same
+     * list drawn next is sent again, not taken as held, and draws as the resend raster draws it. */
+    r565::Pic lost, pa8, ra8;
+    keep.g->fail_next_frame_for_test();
+    CHECK(!draw(keep, A, 0, lost));  // (slot 0 held the long list: A is staged and its send recorded, then the frame fails)
+    const auto c8 = counts(keep);
+    CHECK(draw(keep, A, 0, pa8));
+    const auto c8b = counts(keep);
+    CHECK(c8b.first == c8.first + 1 && c8b.second == c8.second);
+    CHECK(draw(resend, A, 0, ra8));
+    CHECK(pa8.same(ra8) && pa8.same(pa));
+    CHECK(draw(keep, A, 0, pa8));  // (and now it is held)
+    const auto c8c = counts(keep);
+    CHECK(c8c.first == c8b.first && c8c.second == c8b.second + 1);
+    /* The resend raster never keeps. */
+    const auto r2 = counts(resend);
+    CHECK(r2.second == r0.second);
+    std::printf("    keep raster: %llu sent, %llu kept; resend raster: %llu sent, %llu kept\n", (unsigned long long)c7b.first, (unsigned long long)c7b.second,
+                (unsigned long long)r2.first, (unsigned long long)r2.second);
+  });
+}
+
+/* ---------------------------------------------------------------- round 563 (task 0545): a kept draw list stamps the card
+ * stand-ins its items point at as seen, so a view that keeps its list holds them as one that gathers does (review 520's follow-up). */
+namespace r563 {
+
+/* Solid shading of the small avatar, its list kept and its stand-ins made (without a card when `card` is false). */
+static bool open(Editor &ed, bool card) {
+  r34_open(ed, false);
+  ed.command("benchscene avatarlikequick");
+  ed.command("camera 0 1.0 4.5 0 0.9 0");
+  if (card) ed.viewport_device_for_test(2);
+  else ed.skin_items_for_test(true);  // (Solid makes card-skin items without a card, then turns them back for the CPU raster)
+  ed.command("shading solid");
+  ed.mark_changed_for_test("R563 solid");
+  r34_steps(ed, 6);
+  if (!card) return true;
+  gpu::Raster *g = ed.gpu_raster_for_test();
+  if (g && g->can_skin() && ed.scene_on_gpu_for_test()) return true;
+  std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+  return false;
+}
+
+/* One frame that draws the Scene view again with the scene as it is (the camera turned a little: the scene's hash holds). */
+static void draw_again(Editor &ed, int i) {
+  ed.command(strprintf("camera %.4f 1.0 4.5 0 0.9 0", 0.5f * (float)(i % 50 + 1)));
+  r34_steps(ed, 1);
+}
+
+}  // namespace r563
+
+static void tests_round563_gpu() {
+  test("a kept Solid list keeps its stand-ins through 700 gathers of another view (round 563): the list is never made again and no stand-in is let go; before, they aged out after 600", [] {
+    Editor ed;
+    r563::open(ed, false);
+    const size_t stands = ed.skin_stands_for_test(), held = ed.solid_kept_stands_for_test();
+    CHECK(stands > 0 && held > 0);
+    r563::draw_again(ed, 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds, h0 = view_perf::counters.hit[view_perf::SolidItems];
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);  // (the other view's gathers: each counts, none finds these stand-ins)
+    }
+    const uint64_t b1 = view_perf::counters.solid_item_builds, h1 = view_perf::counters.hit[view_perf::SolidItems];
+    std::printf("    70 frames with 700 gathers elsewhere: Solid's list made %llu times, used kept %llu times; stand-ins %zu -> %zu (%zu in the kept list)\n", (unsigned long long)(b1 - b0),
+                (unsigned long long)(h1 - h0), stands, ed.skin_stands_for_test(), ed.solid_kept_stands_for_test());
+    CHECK(h1 - h0 >= 60);  // (the frames drew from the kept list)
+    CHECK(b1 == b0);
+    CHECK(ed.skin_stands_for_test() == stands && ed.solid_kept_stands_for_test() == held);
+    ed.skin_items_for_test(false);
+  });
+
+  test("a kept list that is not drawn still lets its stand-ins go, and is made again before it is read (round 563, a guard: the stamp must not hold them for a view that does not draw): 700 gathers elsewhere with the view still, then a frame", [] {
+    Editor ed;
+    r563::open(ed, false);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    ed.skin_gathers_elsewhere_for_test(700);  // (nothing drew the kept list meanwhile: a closed or still view holds no stand-in)
+    CHECK(ed.skin_stands_for_test() == 0);
+    CHECK(ed.solid_kept_stands_for_test() == 0);  // (the list went with them)
+    r563::draw_again(ed, 0);
+    r34_steps(ed, 2);
+    CHECK(view_perf::counters.solid_item_builds > b0);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    ed.skin_items_for_test(false);
+  });
+
+  test("on the card a kept Solid list's skins are not sent again while another view gathers (round 563), and a stand-in dropped between two frames is drawn from a new one: the same picture (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    if (!r563::open(ed, true)) return;
+    const GameObject *body = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!body && ed.skin_card_mesh_for_test(&g) >= 0) body = &g;
+    });
+    CHECK(body != nullptr);
+    if (!body) return;
+    r563::draw_again(ed, 0);
+    const size_t stands = ed.skin_stands_for_test();
+    const FrameProfile s0 = ed.frame_profile_totals();
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);
+    }
+    const FrameProfile s1 = ed.frame_profile_totals();
+    std::printf("    70 frames with 700 gathers elsewhere: %llu skins sent, Solid's list made %llu times, stand-ins %zu -> %zu\n", (unsigned long long)(s1.skin_uploads - s0.skin_uploads),
+                (unsigned long long)(view_perf::counters.solid_item_builds - b0), stands, ed.skin_stands_for_test());
+    CHECK(s1.skin_uploads == s0.skin_uploads);
+    CHECK(view_perf::counters.solid_item_builds == b0);
+    CHECK(ed.skin_stands_for_test() == stands);
+    CHECK(ed.scene_on_gpu_for_test());
+    /* A stand-in dropped between two frames (every one, as age does): the next frame gathers, sends the skins again and shows the same picture. */
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const Recti view = ed.window_rect_for_test(WindowKind::Scene);
+    const std::vector<uint32_t> before = r34_crop(ed, view);
+    ed.skin_age_stands_for_test();
+    CHECK(ed.skin_stands_for_test() == 0 && ed.solid_kept_stands_for_test() == 0);
+    CHECK(ed.skin_card_mesh_for_test(body) < 0);
+    ed.command("camera 3 1.0 4.5 0 0.9 0");
+    r34_steps(ed, 2);
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const FrameProfile s2 = ed.frame_profile_totals();
+    const std::vector<uint32_t> after = r34_crop(ed, view);
+    size_t differ = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); i++) differ += before[i] != after[i];
+    std::printf("    after the drop: %llu skins sent, stand-ins %zu, %zu of %zu pixels differ\n", (unsigned long long)(s2.skin_uploads - s1.skin_uploads), ed.skin_stands_for_test(), differ, before.size());
+    CHECK(s2.skin_uploads > s1.skin_uploads);
+    CHECK(ed.skin_stands_for_test() == stands && ed.skin_card_mesh_for_test(body) >= 0);
+    CHECK(before.size() == after.size() && differ == 0);
+    CHECK(ed.scene_on_gpu_for_test());
   });
 }
 
@@ -8636,4 +8851,5 @@ void run_gpu_tests() {
   tests_round520_gpu();
   tests_round521_gpu();
   tests_round565_gpu();
+  tests_round563_gpu();
 }
