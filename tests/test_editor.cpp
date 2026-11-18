@@ -6723,6 +6723,14 @@ static void tests_round290() {
     ed.init_headless(1700, 1000);
     ed.record_buttons_for_test(true);
     ed.command("window tablet on");
+    /* Round 568: this test failed once under load ("6 targets" - one was missing; which, the run did not keep). Two
+     * of its targets raced the machine, and both are tied down now; the sizes asked for are the ones before.
+     * - A toast lives 3 s of the editor's clock: on a starved machine the frames between "paint on" and reading the
+     *   Fix button could outlast it. The clock is pinned (a toast made here stays).
+     * - The job tray's Cancel was read after one frame of a bake "big enough to be running for a frame": the bake is
+     *   a worker's, the frame is the main thread's, and a main thread held up let the bake finish first. The bake is
+     *   now started again, larger, until a frame shows it running (five tries at most). */
+    ed.set_clock_for_test(100.0);
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     const float scale = ed.ui_for_test().scale, mm7 = 7.0f / 25.4f * 96.0f * scale;
     struct Target { std::string name; Recti r; };
@@ -6737,11 +6745,17 @@ static void tests_round290() {
     if (ed.button_rect_for_test("Fix: make a surface", r)) targets.push_back({"a toast's Fix", r});
     /* The job tray's Cancel: a mesh-maps bake. */
     ed.command("surface new PenSurf");
-    ed.command("meshmaps 1024 32");  // (big enough to be running for a frame)
-    ed.step_frame_headless();
-    if (ed.button_rect_for_test("job:Cancel", r)) targets.push_back({"the job tray's Cancel", r});
-    ed.command("meshmaps cancel");
-    for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    bool cancel_seen = false;
+    const int bake_sizes[5] = {1024, 2048, 4096, 4096, 4096};
+    for (int attempt = 0; attempt < 5 && !cancel_seen; attempt++) {
+      ed.command(strprintf("meshmaps %d %d", bake_sizes[attempt], attempt < 3 ? 32 : 64));  // (big enough to be running for a frame; bigger when it was not)
+      ed.step_frame_headless();
+      cancel_seen = ed.button_rect_for_test("job:Cancel", r);
+      if (!cancel_seen) std::printf("    the %d px bake was over before a frame showed it: again, larger\n", bake_sizes[attempt]);
+      ed.command("meshmaps cancel");
+      for (int i = 0; i < 400 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    }
+    if (cancel_seen) targets.push_back({"the job tray's Cancel", r});
     /* A modal's step buttons: Bevel. */
     ed.command("edit");
     ed.command("edit edge all");
@@ -11555,7 +11569,19 @@ static void tests_round468() {
     CHECK(length(ed.scene_eye() - eye0) < 1e-3f);
   });
 
-  test("a clip playing with Centre of Mass shown (round 468): the Scene view still draws the moving avatar - about as many frames as with it hidden (the stress row 'Centre of Mass shown: the clip playing' read NO VIEW)", [] {
+  /* Round 568: this test counted the view's renders over 24 frames paced 17 ms apart and asked for at least half as many
+   * with the Centre of Mass shown as hidden. A clip plays by the real clock, and the perf clip moves for its first 30
+   * frames of 60 (half a second in every second): how many of the 24 frames fell in the moving half was the machine's
+   * speed, in both runs separately - 11 hidden / 5 shown in a sanitizer shard, 20 / 12 and 10 / 17 here under load,
+   * with the view drawing every frame the avatar moved in all of them. Now the clip is slowed to a frame a second, so its
+   * rising half (frames 0 to 15: every bone turning one way) lasts 15 s, and exactly 24 frames are stepped: each one
+   * whose playhead moved on inside that half - all 24 unless the 26 steps together take over 15 s - must draw the view, hidden
+   * and shown. That is stricter than the old ratio (every moving frame, not half of them) and no longer a measurement.
+   * The editor's own clock is pinned (the toasts, the measured rate); the clip's is the real one and cannot be, so each
+   * frame is given 5 ms for the playhead to move: a floor a slow machine only raises. */
+  test("a clip playing with Centre of Mass shown (round 468): the Scene view still draws the moving avatar - every stepped frame the clip moved it in, as with it hidden (the stress row 'Centre of Mass shown: the clip playing' read NO VIEW)", [] {
+    const int kFrames = 24;
+    int moved[2] = {0, 0}, drawn[2] = {0, 0};
     uint64_t renders[2] = {0, 0}, deforms[2] = {0, 0}, applies[2] = {0, 0};
     for (int shown = 0; shown < 2; shown++) {
       Editor ed;
@@ -11567,22 +11593,40 @@ static void tests_round468() {
       ed.command("assist on physics");
       ed.command(shown ? "body show on" : "body show off");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      CHECK(clip != nullptr);
+      if (!clip) return;
+      clip->frame_rate = 1.0f;  // (the perf clip's keys: 0, 15, 30 - the rising half is 15 s long now)
+      const float rising_end = 15.0f;
+      ed.set_clock_for_test(100.0);
       ed.command("anim play");
-      for (int i = 0; i < 2; i++) ed.step_frame_headless();
-      const FrameProfile p0 = ed.frame_profile_totals();
-      const PoseCounts c0 = ed.pose_counts_total_for_test();
-      for (int i = 0; i < 24; i++) {
+      /* Two frames first, as before: the pose a frame draws may be the one the frame before applied, so a frame counts
+       * as "moved" when the playhead rose over both of the last two steps. */
+      float before = ed.anim_frame_for_test(), last = before;
+      for (int i = 0; i < 2; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         ed.step_frame_headless();
-        std::this_thread::sleep_for(std::chrono::milliseconds(17));
+        before = last, last = ed.anim_frame_for_test();
       }
-      const FrameProfile p1 = ed.frame_profile_totals();
-      renders[shown] = p1.view_renders - p0.view_renders, deforms[shown] = (ed.pose_counts_total_for_test() - c0).skin_deforms, applies[shown] = (ed.pose_counts_total_for_test() - c0).clip_applies;
+      const PoseCounts c0 = ed.pose_counts_total_for_test();
+      for (int i = 0; i < kFrames; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const uint64_t r0 = ed.frame_profile_totals().view_renders;
+        ed.step_frame_headless();
+        const uint64_t r = ed.frame_profile_totals().view_renders - r0;
+        const float now = ed.anim_frame_for_test();
+        const bool moving = before < last && last < now && now <= rising_end;
+        moved[shown] += moving ? 1 : 0, drawn[shown] += moving && r > 0 ? 1 : 0, renders[shown] += r;
+        if (!moving || r == 0) std::printf("    Centre of Mass %s, frame %d: playhead %.4f -> %.4f -> %.4f, %llu view render(s)%s\n", shown ? "shown" : "hidden", i, before, last, now, (unsigned long long)r, moving ? "  <- moved and not drawn" : "  (not counted: the playhead did not rise inside the first half)");
+        before = last, last = now;
+      }
+      deforms[shown] = (ed.pose_counts_total_for_test() - c0).skin_deforms, applies[shown] = (ed.pose_counts_total_for_test() - c0).clip_applies;
+      std::printf("    Centre of Mass %s: %d stepped frames, the playhead at %.3f of %g; %d moved the avatar, %d of those drew the view (%llu view renders, %llu deforms, %llu clip applies)\n", shown ? "shown" : "hidden", kFrames, last,
+                  rising_end, moved[shown], drawn[shown], (unsigned long long)renders[shown], (unsigned long long)deforms[shown], (unsigned long long)applies[shown]);
       ed.command("anim stop");
       std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
     }
-    std::printf("    24 paced frames, Centre of Mass hidden: %llu view renders, %llu deforms, %llu clip applies; shown: %llu view renders, %llu deforms, %llu clip applies\n", (unsigned long long)renders[0],
-                (unsigned long long)deforms[0], (unsigned long long)applies[0], (unsigned long long)renders[1], (unsigned long long)deforms[1], (unsigned long long)applies[1]);
-    CHECK(renders[0] > 0 && renders[1] > 0 && renders[1] * 2 >= renders[0]);
+    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] > 0 && drawn[shown] == moved[shown]);
   });
 
   test("perf drag key with nothing under it (round 468): an origin off the Scene view (behind the camera, far to the side) is refused and the key never left pressed; with no active object likewise", [r468t_clean, r468t_click_selects, r468t_settle] {

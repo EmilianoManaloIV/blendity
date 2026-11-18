@@ -1630,6 +1630,27 @@ static void tests_round547_te_pick() {
   test("blockout parts (547, te): clicking a window's glass selects the window, the next click on the same spot the Glass; a click on a different spot of the frame with the window selected keeps the window, and the same spot again gives the Frame", [] {
     Editor ed;
     const PickScene s = pe_pick_scene(ed);
+    /* Round 568: the clicks here ran on the real clock, and whether two of them on one pixel were a double click (under
+     * 0.35 s apart: it frames the selection, and the camera's glide takes 0.28 s) was the machine's speed. On a calm
+     * machine the second click on the left jamb is a double click, the view is framed on the window and the jamb's pixel
+     * moves; in #460's sanitizer shard the clicks were too far apart, the view stayed, and the last part - the window
+     * selected again, one click on the left jamb - clicked the very pixel the earlier pair had remembered and got the Frame
+     * (line "window selected, click on the left jamb then the right"). The clock is pinned now and moved by hand: a tenth
+     * of a second before each click (the calm machine's run, double clicks included) and a second at each long rest (the
+     * glide over, the next click a click of its own), so the run is the same on every machine. Nothing is loosened: the
+     * checks are the ones before. What the slow run showed was a fault of the editor's, not hidden here: with the
+     * view unmoved, the remembered spot outlived its pair of clicks, so the window selected again (not by a click on the
+     * part) and that spot clicked once gave the part at once. Round 571 fixed it and has the tests for it below. */
+    double at = 100.0;
+    ed.set_clock_for_test(at);
+    auto pe_click = [&](Editor &e, int x, int y) {
+      e.set_clock_for_test(at += 0.1);
+      ::pe_click(e, x, y);
+    };
+    auto pe_settle = [&](Editor &e, int frames) {  // (80 frames were "long enough for the glide" by the real clock: a second on the pinned one, then a few frames)
+      if (frames >= 80) e.set_clock_for_test(at += 1.0);
+      ::pe_settle(e, frames >= 80 ? 5 : frames);
+    };
     const GameObject *frame = pe_part(*s.window, kPartKindFrame), *pane = pe_part(*s.window, kPartKindGlass);
     CHECK(frame && pane);
     if (!frame || !pane) return;
