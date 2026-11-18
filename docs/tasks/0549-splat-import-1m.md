@@ -1,6 +1,6 @@
 # 0549: A measured 1M-splat import (round 567)
 
-- **Status:** done (round 567); the timed rows come from Pass 28's timed batch
+- **Status:** done (round 567; timed in the hub's window, 2026-11-18)
 - **Requirements:** R-10 (import), Q-03 (responsiveness), Q-01 (robust data)
 - **Decisions:** none new (ADR 0147 the layout, ADR 0056 measurements, ADR 0105 / 0107 the frame budget and the import job)
 - **Model:** main session (worker W5 of Pass 28); code-reviewer agent

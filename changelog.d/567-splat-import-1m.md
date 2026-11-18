@@ -22,27 +22,29 @@ runs, fix what is plainly wasteful in the readers.
   of one file, a file's first points alone against the same points inside a larger file, and every scale and opacity
   byte of an SPZ against the format's formula.
 
-**Measured** (NOT yet in a timed window: the rows below are from an untimed run on a busy machine, 2026-11-18, best
-of three reads, 1,000,000 splats of SH degree 3; the hub's timed batch replaces them)
+**Measured** (the hub's timed window, 2026-11-18 04:21-04:23, the machine quiet; two runs of each exe, the better
+one shown, each row the best of three reads; 1,000,000 splats of SH degree 3. "Before" is round 531's readers with
+this round's clocks, its setup inside its decode)
 
 | file | file MB | read ms | unpack ms | setup ms | decode ms | axes ms | validate ms | total ms | cloud MB | peak growth MB |
 |---|---|---|---|---|---|---|---|---|---|---|
-| PLY binary, before | 236.5 | 811 | 0 | (in decode) | 880 | 261 | 75 | 2,027 | 225.1 | 435 |
-| PLY binary, after | 236.5 | 346 | 0 | 61 | 23 | 17 | 70 | 516 | 225.1 | 435 |
-| SPZ v3 gzip, before | 45.1 | 96 | 570 | (in decode) | 153 | 288 | 82 | 1,189 | 225.1 | 356 |
-| SPZ v3 gzip, after | 45.1 | 68 | 452 | 54 | 15 | 19 | 63 | 671 | 225.1 | 355 |
+| PLY binary, before | 236.5 | 186.3 | 0 | (in decode) | 253.9 | 118.9 | 29.7 | 588.8 | 225.1 | 435.0 |
+| PLY binary, after | 236.5 | 184.1 | 0 | 27.1 | 19.1 | 11.4 | 31.8 | 273.4 | 225.1 | 435.0 |
+| SPZ v3 gzip, before | 45.1 | 32.0 | 253.7 | (in decode) | 76.4 | 123.0 | 29.2 | 514.3 | 225.1 | 356.2 |
+| SPZ v3 gzip, after | 45.1 | 32.3 | 252.7 | 24.7 | 13.4 | 11.5 | 30.2 | 364.9 | 225.1 | 356.2 |
 
-- The file read's difference between the two runs is the machine's load, not this round: the readers do not read
-  the file.
-- The editor (headless, jobs on workers): the PLY lands 0.71 s after `import`, the SPZ 0.67 s; the longest frame
-  while the worker reads is 4.1 ms (PLY) and 14.5 ms (SPZ), the landing frame 1.5 ms - within ADR 0105's budget
-  (50 ms a frame while a job runs, 100 ms for one frame). The read was already off the main thread (round 413);
-  nothing had to move.
-- Not changed, named for a later round (outside this round's files): the whole-file read (`fs::read_file`, most of
-  a PLY's time now), SPZ's inflate and the copy `gunzip` makes of its output (most of an SPZ's time), and
-  `pointcloud_validate`, which is serial.
+- The second run of each exe agrees within 3 % (PLY 593.7 -> 281.2 ms, SPZ 513.9 -> 367.3 ms). The readers' own
+  part (setup, decode, axes, validate) went from 403 ms to 89 ms for the PLY and from 229 ms to 80 ms for the SPZ;
+  memory is unchanged.
+- The editor (headless, jobs on workers): the PLY lands 0.40 s after `import` (before: 1.19 s), the SPZ 0.48 s
+  (before: 0.70 s); the longest frame while the worker reads is 9.9 ms, the landing frame 1.3 ms - within ADR
+  0105's budget (50 ms a frame while a job runs, 100 ms for one frame), as it was before the round. The read was
+  already off the main thread (round 413); nothing had to move.
+- Not changed, named for a later round (outside this round's files): the whole-file read (`fs::read_file`, 184 ms
+  of a PLY's 273), SPZ's inflate and the copy `gunzip` makes of its output (253 ms of an SPZ's 365), and
+  `pointcloud_validate`, which is serial (about 30 ms).
 
-**Checked:** both suites' groups `splats` and `editor` - Windows with Blender's libraries 427 and 3,866 checks,
+**Checked:** both suites' groups `splats` and `editor` - Windows with Blender's libraries 427 and 3,869 checks,
 Linux dependency-free 425 and 3,843, 0 failed; the dependency-free Windows build is left to CI.
 `blendity_stress --only splats`: 16,500 damaged files, 0 problems.
 
@@ -52,18 +54,21 @@ after: | `read_ply_point_cloud()`, `read_spz()`, `gltf_point_cloud()`, `pointclo
 
 <!-- docs/PERFORMANCE.md -->
 replace: | 1M under 2 s (not measured; ~0.4 s estimated) |
-with: | 1M under 2 s: measured in Pass 28's timed batch; untimed 0.52 s PLY, 0.67 s SPZ (round 567) |
+with: | 1M under 2 s: 0.27 s PLY, 0.36 s SPZ from a file on disk; 0.40 s / 0.48 s through the editor's import (round 567, timed) |
 
 append:
 ## Round 567: a million splats imported
 
-To be measured in Pass 28's timed batch (`blendity_stress --only splats`, the rows "Round 567"). Untimed, on a busy
-machine, best of three reads of 1,000,000 splats of SH degree 3:
+`blendity_stress --only splats`, the rows "Round 567", in the hub's timed window (2026-11-18, the machine quiet);
+the best of three reads of 1,000,000 splats of SH degree 3, the better of two runs:
 
 | file | read ms | unpack ms | setup ms | decode ms | axes ms | validate ms | total ms | peak growth MB |
 |---|---|---|---|---|---|---|---|---|
-| PLY binary, 236.5 MB | 346 | 0 | 61 | 23 | 17 | 70 | 516 | 435 |
-| SPZ v3 gzip, 45.1 MB | 68 | 452 | 54 | 15 | 19 | 63 | 671 | 355 |
+| PLY binary, 236.5 MB, before | 186.3 | 0 | (in decode) | 253.9 | 118.9 | 29.7 | 588.8 | 435.0 |
+| PLY binary, 236.5 MB | 184.1 | 0 | 27.1 | 19.1 | 11.4 | 31.8 | 273.4 | 435.0 |
+| SPZ v3 gzip, 45.1 MB, before | 32.0 | 253.7 | (in decode) | 76.4 | 123.0 | 29.2 | 514.3 | 356.2 |
+| SPZ v3 gzip, 45.1 MB | 32.3 | 252.7 | 24.7 | 13.4 | 11.5 | 30.2 | 364.9 | 356.2 |
 
-Before the round, the same way: PLY 2,027 ms (decode 880, axes 261), SPZ 1,189 ms (decode 153, axes 288). Through the
-editor's import the longest frame while the worker reads was 14.5 ms and the landing frame 1.5 ms.
+The cloud itself is 225.1 MB. Through the editor's import (the file copied into the project, read on a worker) the
+PLY lands in 0.40 s and the SPZ in 0.48 s; the longest frame while the worker reads was 9.9 ms and the landing frame
+1.3 ms. What is left is outside the readers: the file read for a PLY, the inflate for an SPZ.
