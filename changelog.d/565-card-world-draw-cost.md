@@ -20,7 +20,7 @@ that time goes in the card's frame, fix what is cheap and safe, name what remain
 **Fixed**
 - Each view keeps its see-through corners on the card (`VulkanRaster::write_see`, a buffer a view slot): a frame's corners
   are compared with what the view last sent, and only a list that differs is sent. While the camera stands still - a pose
-  dragged, a clip playing - none is. The card's frame of the world in P8: SEE_CARD_BEFORE -> SEE_CARD_AFTER ms. The pictures are
+  dragged, a clip playing - none is. The card's frame of the world in P8: 13.1 -> 10.7 ms. The pictures are
   the same byte for byte as a card that sends them every frame (`BLENDITY_CARD_SEE=resend`; a test).
 
 **Tried and dropped**
@@ -47,9 +47,16 @@ that time goes in the card's frame, fix what is cheap and safe, name what remain
 - A camera with filters lights its picture twice (the linear-light pass: 2 to 3.6 ms in P8 in the Play row); one pass with
   two targets would halve it (the see-through and overlay draws share that pass).
 
-TIMED_ROWS
+**Timed (the hub's windows, round 522's build against this round's; task 0547's table)**
+- None of round 522's five rows is met: a Puppet handle 21.1 -> 19.0, Play 23.7 -> 24.6, a scrub with two views 24.3 ->
+  22.6, with one 19.1 -> 18.3, the clip 17.6 -> 17.3 ms. The fix's 0.3-2 ms is inside what one build differs by between two
+  runs (up to 3 ms a row, by where the card's clock is during it); what holds the rows is the power state. The alone rows
+  and the CPU rows are unchanged; over-budget rows in the section 27 / 26 before, 27 after.
 
-**Checked:** CHECKS_TEXT
+**Checked:** the round's groups - on the card (`gpu`, with Blender's libraries) 1,612 checks; Windows with Blender's
+libraries `render` RENDER_W and `editor` EDITOR_W; Linux dependency-free `gpu` 138 (the card tests skip), `render` 40,378,
+`editor` 3,843 - 0 failed; two reviews (the second's blocker, a send marked as held by a frame that then failed, fixed
+with a test that forces it). The whole suite is CI's.
 
 <!-- docs/PERFORMANCE.md -->
 append:
@@ -61,7 +68,7 @@ The world's frame is 1 to 2.3 ms of card work at the card's full clock, and 10 t
 fall to its lowest power state (P8, 210 MHz on an RTX 4070 SUPER, at about 30 % load - `nvidia-smi` beside the run): every
 part of the frame is 4 to 6 times slower there, the copy out of the same bytes included. One part was the editor's doing:
 the world's see-through corners (7 MB) went to the card every frame; each view now keeps them there and sends only a list
-that changed (SEE_CARD_BEFORE -> SEE_CARD_AFTER ms of card time a frame in P8). What remains over 16.7 ms is the power
+that changed (13.1 -> 10.7 ms of card time a frame in P8). What remains over 16.7 ms is the power
 state's; see `docs/tasks/0547-card-world-draw-cost.md`.
 
 <!-- docs/ARCHITECTURE.md -->
