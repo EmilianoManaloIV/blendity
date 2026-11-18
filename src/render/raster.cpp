@@ -1098,8 +1098,9 @@ void Renderer3D::raster_tile(int tile_index) {
        * edge - and even a whole pixel of margin made two sculpt tests' strokes find no surface under the mouse on #448's CI,
        * though their pixels kept the sphere's id; the old margin passes them. Round 556's checks (no pixel outside the
        * triangles, a dense orthographic sphere's depths on its surface) pass with the wide margin too, so they don't show
-       * what the strokes tripped on; a wide span sends many more pixels through tri_covers, and the frame's cost is one
-       * guess - not proven.) */
+       * what the strokes tripped on. Round 562 found it: not the frame's cost - a wider span starts the row's stepping at
+       * another pixel, which changed the depth's rounding, then centimetres at the strokes' distance, and the brush took
+       * its point from the depth. Sculpt reads the mesh now, and round 572 took that rounding out of the depth: dz1 below.) */
       double Ad[3], Bd[3], Cd[3], iAd[3];  // (A and B too: the float ones are differences rounded to float - 50.3 - 10.1 isn't exact)
       for (int q = 0; q < 3; q++) {
         const int a = (q + 1) % 3, b = (q + 2) % 3;
@@ -1108,6 +1109,13 @@ void Renderer3D::raster_tile(int tile_index) {
         iAd[q] = Ad[q] != 0.0 ? 1.0 / Ad[q] : 0.0;  // (once a triangle, not a division a row; its rounding, 1e-16 of the
                                                     // crossing, is far inside the 1e-4 pixel margin)
       }
+      /* Round 572 (task 0554): a pixel's depth is the first corner's plus the other two's differences by their
+       * barycentrics, not the three corners' depths by the three. The stepped float edge values don't add up to the area
+       * exactly - on a triangle under a pixel across they miss it by 1e-5 to 1e-4 of it - and the old sum carried that
+       * straight into the depth: 1e-4 of a depth near 1, which at 8 m is decimetres along the pixel's ray (round 562: a
+       * sculpt brush landing off a small sphere; picking, Paint and Weight Paint read the same plane). Now the same
+       * miss scales only the triangle's own depth range. */
+      const float z0 = st.z[0], dz1 = st.z[1] - z0, dz2 = st.z[2] - z0;  // (z0 a local: the loop's depth writes can't make it be read again)
       const bool spans = opt_.span_rows;
       for (int y = miny; y <= maxy; y++) {
         const float py = y + 0.5f;
@@ -1137,8 +1145,8 @@ void Renderer3D::raster_tile(int tile_index) {
         uint32_t *crow = rt_->color ? rt_->color + (size_t)y * rt_->stride : nullptr;
         for (int x = sx; x <= ex; x++, w0 += A0, w1 += A1, w2 += A2) {
           if (!tri_covers(vx, vy, x + 0.5f, py, w0, w1, w2, tol[0], tol[1], tol[2])) continue;
-          const float b0 = w0 * inv_area, b1 = w1 * inv_area, b2 = w2 * inv_area;
-          const float z = b0 * st.z[0] + b1 * st.z[1] + b2 * st.z[2];
+          const float b1 = w1 * inv_area, b2 = w2 * inv_area;
+          const float z = z0 + b1 * dz1 + b2 * dz2;  // (round 572: from the first corner's depth - see dz1)
           float &dz = depth[row + x];
           if (z >= dz || z < 0.0f) continue;
           dz = z;
@@ -1147,6 +1155,7 @@ void Renderer3D::raster_tile(int tile_index) {
             if (ids) ids[row + x] = st.id;  // depth-only passes into a view keep picking working
             continue;
           }
+          const float b0 = w0 * inv_area;
           const float iw = 1.0f / (b0 * st.iw[0] + b1 * st.iw[1] + b2 * st.iw[2]);
           const Vec3 &c0 = st.c[0], &c1 = st.c[1], &c2 = st.c[2];
           crow[x] = pack_rgb((b0 * c0.x + b1 * c1.x + b2 * c2.x) * iw, (b0 * c0.y + b1 * c1.y + b2 * c2.y) * iw,
@@ -2554,7 +2563,9 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           if (!tri_covers(t.x, t.y, px, py, w0, w1, w2, see_tol, see_tol, see_tol)) continue;
           w0 = std::max(w0, 0.0f), w1 = std::max(w1, 0.0f), w2 = std::max(w2, 0.0f);
           const size_t pi = (size_t)y * W + x;
-          float z = w0 * t.z[0] + w1 * t.z[1] + w2 * t.z[2];
+          /* (Round 572, as raster_tile: from the first corner's depth - clamped at an edge the three no longer add up to
+           * one, and the sum of three products carried that into the depth at its full size.) */
+          float z = t.z[0] + w1 * (t.z[1] - t.z[0]) + w2 * (t.z[2] - t.z[0]);
           if (z < 0.0f || (z >= depth[pi] && !mat.volume())) continue;  // (a fog behind what is drawn still covers what is in it: draw_volume_pixel cuts it there)
           /* Perspective-correct barycentrics in the source triangle. */
           float q0 = w0 * t.iw[0], q1 = w1 * t.iw[1], q2 = w2 * t.iw[2], s = q0 + q1 + q2;

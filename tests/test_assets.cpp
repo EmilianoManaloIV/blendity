@@ -6036,6 +6036,19 @@ static void tests_round355() {
     ed.command("component SkinModifier");
     ed.command("set SkinModifier.Armature Armature");
     ed.command("skin bind");
+    /* Round 569: until the bind has landed, not three frames. The sphere has more than the 5,000 vertices under which
+     * Automatic Weights solve at once, so the solve runs on a worker and lands - with an undo step of its own - in
+     * the frame after it is done. Three frames were enough on a quiet machine; inside a group run on a busy one they
+     * were not (failed once on round 544's tree, 3 of 3 alone): an export of an object whose solve still runs waits
+     * for it (the editor writes the file when the job ends), so the glTF read below was not there yet, and the
+     * landing's step made the last Undo take back the weights, not the second fix - the two checks that fail when the
+     * landing is held back until the Undo. What the test pins is unchanged; it no longer depends on how fast a worker
+     * thread is. */
+    const bool on_worker = ed.skin_job_running_for_test();
+    int frames = 0;
+    for (; frames < 20000 && ed.skin_job_running_for_test(); frames++) ed.step_frame_headless(), std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::printf("    the bind solved %s; landed after %d frame(s)\n", on_worker ? "on a worker" : "at once", frames);
+    CHECK(!ed.skin_job_running_for_test());
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     ed.select_for_test(g->id, false);
     ed.command("budget quest");

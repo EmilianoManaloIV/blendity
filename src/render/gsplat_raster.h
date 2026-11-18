@@ -22,7 +22,9 @@
 #include "shading.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -86,8 +88,9 @@ constexpr float kPointDotMinRadiusPx = 1.0f;
  * point is a round dot of `dot_px_at_w1` / w pixels' radius (its world radius times the projection's pixel scale). */
 bool gsplat_project_one(const PointCloud &pc, size_t i, const Mat4 &mvp, int width, int height, Vec3 cam_local,
                         Vec3 ortho_dir_local, ViewTransform vt, float exposure, SplatScreen &out, float dot_px_at_w1 = 0.0f);
-/* A splat's linear colour seen along `dir_local` (from the camera, the cloud's own space): the one place the rasterizer
- * takes it - gsplat_math.h's sh_color then radiance_linear, as both path tracers - so all three agree. */
+/* A splat's linear colour seen along `dir_local` (from the camera, the cloud's own space): gsplat_math.h's sh_color then
+ * radiance_linear, as both path tracers. The projection takes the same colour with the sRGB curve read from a table
+ * (round 566: within 1e-7 of this one, far under a display step), so all three agree. */
 Vec3 gsplat_radiance(const PointCloud &pc, size_t i, Vec3 dir_local);
 
 /* The alpha of a projected splat at pixel centre (px, py) (pixel coordinates, centres at +0.5): 0 outside its
@@ -98,6 +101,22 @@ inline float gsplat_alpha_at(const SplatScreen &s, float px, float py) {
   if (u0 > 2.0f || u0 < -2.0f || u1 > 2.0f || u1 < -2.0f) return 0.0f;
   const float a = s.opacity * std::exp(-(u0 * u0 + u1 * u1));
   return a < 1.0f ? a : 1.0f;
+}
+
+/* exp(-q) for the q a billboard holds, 0 .. 8 (and to 80: below that it is 0), within 2e-7 of std::exp relative to the
+ * result (round 566). Written out - -q = n ln 2 + r with |r| <= ln 2 / 2, exp(r) by its series to r^7, times 2^n by the
+ * float's exponent bits - so the tile loop's Gaussian is a dozen multiplications in registers on every compiler instead
+ * of a call into the C library for each pixel of each splat. Not for NaN or negative q (the loop has neither). */
+inline float gsplat_exp_neg(float q) {
+  if (!(q < 80.0f)) return 0.0f;
+  const int n = (int)(q * -1.4426950408889634f - 0.5f);  // round(-q / ln 2): the argument is never positive
+  const float fn = (float)n;
+  const float r = (-q - fn * 0.693359375f) + fn * 2.12194440e-4f;  // ln 2 in two parts: the first is exact times a small n
+  const float p = 1.0f + r * (1.0f + r * (0.5f + r * (1.0f / 6.0f + r * (1.0f / 24.0f + r * (1.0f / 120.0f + r * (1.0f / 720.0f + r * (1.0f / 5040.0f)))))));
+  uint32_t bits = (uint32_t)(n + 127) << 23;  // 2^n: n is -115 .. 0 here
+  float scale;
+  std::memcpy(&scale, &bits, 4);
+  return p * scale;
 }
 
 /* Back-to-front order of a cloud's splats for a camera: a parallel radix sort of their view depths. A sort that would
@@ -175,6 +194,7 @@ class SplatPass {
   void project_cloud(const PointCloud &pc, const std::vector<uint32_t> &ord, uint32_t id, const SplatDrawView &dv, const SplatView &v);
   std::vector<SplatScreen> screen_;
   std::vector<SplatScreen> proj_, kept_;  // (round 557: kept between frames - their room, not their contents)
+  std::vector<uint32_t> rank_;  // (round 566: each splat's place in the drawing order - the order turned round)
   mutable SplatStats stats_;  // (draw_cpu adds its time)
   std::vector<std::pair<uint64_t, std::unique_ptr<SplatSorter>>> sorters_;
   SplatSorter scratch_sorter_;  // draws with key 0

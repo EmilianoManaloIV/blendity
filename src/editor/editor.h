@@ -990,6 +990,7 @@ class Editor {
    * bookkeeping - what the responsiveness rows and tools/bench_world.py read. */
   float last_frame_ms() const { return frame_ms_; }
   const std::vector<float> &frame_history() const { return frame_history_; }
+  void set_frame_history_for_test(float ms) { frame_history_.assign(60, ms); }  // (round 573: the last 60 frames' cost as Preferences reads it; each frame after adds its own)
   std::string perf_status_text() const;
   /* Round 468 (task 0444): the posing frame's parts (ms) and counts as the one text every printer shares - `perf status`,
    * `perf drag`, the windowed check - over a span of `frames` frames, a mean a frame. Items are "<name> <number>" after
