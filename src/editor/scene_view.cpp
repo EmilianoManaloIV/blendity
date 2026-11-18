@@ -598,6 +598,7 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
  * highlight, Weight Paint's mesh in its weight colours. */
 std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
   prebuild_render_meshes(s, game);  // (round 418)
+  skin_settling_ = false;
   std::vector<DrawItem> items;
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
@@ -611,7 +612,13 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
-    it.mesh = &m->render_mesh(editing);
+    /* Round 520: a posed skin the card poses is its rest render mesh here, as in the other card views (a Weight Paint or Sculpt
+     * object is drawn from its base mesh below); the CPU's raster gets the posed one from render_solid. */
+    skin_kind_ = game ? 1 : 0;
+    const bool replaced = (!game && weight_paint_ && g.id == wp_obj_) || (!game && vertex_paint_ && g.id == vp_obj_);  // (their mesh is the base's, set below: the evaluated render mesh - a posed skin's kernel - is not asked)
+    const bool sculpt_held = !game && sculpt_ && g.id == sculpt_obj_;  // (no pose: skin_pose_off)
+    if (replaced) it.mesh = nullptr;
+    else if (!(items_card_skin_ && !editing && !sculpt_held && skin_card_item(g, *m, *mr, false, it))) it.mesh = &m->render_mesh(editing);
     it.model = g.world_matrix();
     const Material &mat0 = *mr->material(0);
     it.albedo = mat0.base_color;
@@ -643,6 +650,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     }
     items.push_back(it);
   });
+  if (items_card_skin_) skin_prune_stands();
   return items;
 }
 
@@ -738,7 +746,9 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
   /* Round 506: the items first - kept on the scene hash (solid_items_ref), and with them the lights the environment is made from. */
   uint64_t items_gen = 0;
   const std::vector<DrawItem> none;
+  items_card_skin_ = shading_ != Shading::Wireframe && skin_on_card_wanted();  // (round 520: a skinned mesh the card poses stays its rest render mesh)
   const std::vector<DrawItem> &items = shading_ != Shading::Wireframe ? solid_items_ref(*scene_, false, &items_gen) : none;
+  items_card_skin_ = false;
   view_keeps::CurrentList current(keeps_, items_gen != 0 ? &items : nullptr, items_gen, 6);
   const bool kept_lights = items_gen != 0 && keeps_.solid_lights_gen == items_gen && keeps_.solid_lights_gamma == scene_->unity.gamma_lights();
   LightingEnv env = build_env(*scene_, kept_lights ? &keeps_.solid_lights : nullptr);
@@ -764,7 +774,9 @@ void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
     return;
   }
   scene_r3d_.clear_sky((p * v).inverse(), {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
-  for (const DrawItem &it : items) scene_r3d_.add(it);
+  std::vector<DrawItem> cpu_items;  // (the card did not draw: the raster reads the posed render meshes)
+  if (skin_items_any(items)) cpu_items = skin_items_to_cpu(items);
+  for (const DrawItem &it : (cpu_items.empty() ? items : cpu_items)) scene_r3d_.add(it);
   const bool splats = shading_ != Shading::Wireframe &&
                       scene_splats_prepare(*scene_, scene_r3d_, rt, v, p, env.view_transform, env.exposure);  // (round 532)
   if (!items.empty() || splats) scene_r3d_.flush();

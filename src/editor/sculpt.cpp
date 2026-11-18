@@ -112,6 +112,7 @@ bool Editor::set_sculpt(bool on) {
     sculpt_obj_ = 0;
     sculpt_scene_ = nullptr;
     sculpt_cache_mesh_ = nullptr;
+    sync_skin_pose_off();
     if (!on) Log::info("Sculpt off");
     if (!on) fold_edit_shape();  // (round 406: the shape being edited takes the strokes)
   }
@@ -138,6 +139,7 @@ bool Editor::set_sculpt(bool on) {
   show_edit_shape_full(*g);  // (round 406: a shape opened in the Inspector shows in full while sculpted)
   sculpt_scene_ = scene_.get();
   sculpt_cache_mesh_ = nullptr;
+  sync_skin_pose_off();  // (round 520: its skinned mesh is posed whole from here, not by a pose the card shares)
   Log::info("Sculpt on '%s': drag over it (Shift smooths, Alt carves; Esc leaves)", g->name.c_str());
   ui_.redraw = true;
   return true;

@@ -81,10 +81,12 @@ bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
     Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};  // unnormalised: t stays a world parameter
-    const RenderMesh &rm = m->render_mesh();
-    if (ray_aabb({lr.origin, normalize(lr.dir)}, rm.bounds) < 0) return;
-    for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    const MeshTris mt = mesh_tris(*m);  // (round 520: a posed skin by its own positions - no CPU skin kernel for a click)
+    if (ray_aabb({lr.origin, normalize(lr.dir)}, mt.bounds) < 0) return;
+    for (size_t t = 0; t < mt.count(); t++) {
+      Vec3 a, b, c;
+      mt.tri(t, a, b, c);
+      const float d = ray_triangle(lr, a, b, c);
       if (d > 0 && d < best) best = d;
     }
   });
@@ -214,14 +216,16 @@ bool Editor::origin_snap_target(const Recti &view, int mx, int my, Vec3 &world, 
   const Ray ray = scene_r3d_.screen_ray(mouse.x, mouse.y);
   const Mat4 inv = w.inverse();
   const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
-  const RenderMesh &rm = m->render_mesh();
+  const MeshTris mt = mesh_tris(*m);  // (round 520: a posed skin by its own positions)
   float t_best = 1e30f;
   uint32_t face = UINT32_MAX;
-  for (size_t t = 0; t < rm.tri_count(); t++) {
-    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+  for (size_t t = 0; t < mt.count(); t++) {
+    Vec3 a, b, c;
+    mt.tri(t, a, b, c);
+    const float d = ray_triangle(lr, a, b, c);
     if (d > 0 && d < t_best) {
       t_best = d;
-      face = t < rm.tri_face.size() ? rm.tri_face[t] : UINT32_MAX;
+      face = mt.face(t);
     }
   }
   if (face == UINT32_MAX || face >= m->face_count()) return false;
@@ -384,7 +388,7 @@ uint64_t Editor::pick_wire_object(const Recti &view, int mx, int my, int radius)
       }
     };
     if (mr->display_as == 2) {
-      const AABB b = m->render_mesh().bounds;
+      const AABB b = render_bounds(*m);
       Vec3 c[8];
       for (int k = 0; k < 8; k++) c[k] = {k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z};
       static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};

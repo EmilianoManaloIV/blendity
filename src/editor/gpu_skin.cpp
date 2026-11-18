@@ -29,6 +29,7 @@ const char *skin_left_on_cpu(const GameObject &g) {
     if (const auto *s = dynamic_cast<const SkinModifier *>(g.components[i].get()))
       if (s->enabled) skin = s, at = i;
   if (!skin) return nullptr;
+  if (g.skin_pose_off) return "a skinned mesh in Sculpt or Weight Paint, posed on the CPU";
   if (!skin->vertex_group.empty()) return "a skinned mesh whose Skin has a vertex-group limit, posed on the CPU";
   for (size_t i = at + 1; i < g.components.size(); i++)
     if (g.components[i]->is_modifier() && g.components[i]->enabled) return "a skinned mesh with a modifier after its Skin, posed on the CPU";
@@ -69,9 +70,16 @@ Editor::SkinStand &Editor::skin_stand_for(const GameObject &g, const std::shared
   skin_drop_card(*spare);
   *spare = SkinStand();  // (a new stand-in: the old one's address may be in a kept list, which goes below)
   spare->rest = rest, spare->kind = kind;
+  skin_forget_kept_lists();
+  return *spare;
+}
+
+/* Every kept list that may hold a stand-in's RenderMesh (the views' items and Solid shading's): gathered again before they are
+ * read, since a stand-in let go or replaced leaves their items pointing at freed memory (review 520). */
+void Editor::skin_forget_kept_lists() {
   for (auto &variants : items_cache_)
     for (ItemsCache &c : variants) c.valid = false;
-  return *spare;
+  for (ItemsCache &c : solid_cache_) c.valid = false;
 }
 
 /* The stand-in a card-skin item points at (its mesh is the stand-in's). */
@@ -199,8 +207,27 @@ void Editor::skin_prune_stands() {
     else ++it;
   }
   if (!dropped) return;
-  for (auto &variants : items_cache_)
-    for (ItemsCache &c : variants) c.valid = false;
+  skin_forget_kept_lists();
+}
+
+/* Round 520 (ADR 0146 1(c)): the object Sculpt or Weight Paint holds is evaluated without a pose (built whole, as before round 518);
+ * everything else keeps it. The flags follow the modes: set on the held objects, cleared once no mode holds them. */
+void Editor::sync_skin_pose_off() {
+  if (!scene_) return;
+  /* (ids restart in every scene: a mode started in another scene - a prefab stage - holds nothing here) */
+  const uint64_t ids[2] = {sculpt_ && sculpt_scene_ == scene_.get() ? sculpt_obj_ : 0, weight_paint_ && wp_scene_ == scene_.get() ? wp_obj_ : 0};
+  const bool same_scene = skin_off_scene_ == scene_.get();
+  if (same_scene && ids[0] == skin_off_ids_[0] && ids[1] == skin_off_ids_[1]) {
+    for (uint64_t id : ids)
+      if (GameObject *g = id ? scene_->find(id) : nullptr) g->skin_pose_off = true;  // (a copy undo made of it: held again)
+    return;
+  }
+  if (!same_scene || skin_off_ids_[0] || skin_off_ids_[1])
+    scene_->for_each([&](GameObject &g) { g.skin_pose_off = false; });
+  for (uint64_t id : ids)
+    if (GameObject *g = id ? scene_->find(id) : nullptr) g->skin_pose_off = true;
+  skin_off_scene_ = scene_.get();
+  skin_off_ids_[0] = ids[0], skin_off_ids_[1] = ids[1];
 }
 
 /* What the posed mesh's render mesh gives a reader that draws or traces it. */

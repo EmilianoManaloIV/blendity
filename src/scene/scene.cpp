@@ -3362,6 +3362,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
   if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime, head_topo_key = (head_topo_key ^ shape_hash) * kFnvPrime;
   if (shaped) mix(shape_hash), smix(shape_hash);
+  if (skin_pose_off) mix(0x5C17B05EULL), smix(0x5C17B05EULL);  // (round 520: the same mesh without its pose is another result)
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
   if (!any && !shaped) {  // (nothing drawn over the mesh: the caches go with it - a chain's tables are not kept for nothing)
     eval_mesh_[kind] = nullptr, eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
@@ -3407,7 +3408,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m.skin_pose = nullptr;
     size_t last = components.size();
     while (last > split && !on(*components[last - 1])) last--;
-    const auto *skin = last > split && mods != 2 ? dynamic_cast<const SkinModifier *>(components[last - 1].get()) : nullptr;
+    const auto *skin = last > split && mods != 2 && !skin_pose_off ? dynamic_cast<const SkinModifier *>(components[last - 1].get()) : nullptr;
     if (!skin || !skin->vertex_group.empty()) {
       run(m, split, components.size());
       return nullptr;
@@ -3848,6 +3849,7 @@ std::unique_ptr<Scene> Scene::clone() const {
     auto c = std::make_unique<GameObject>();
     c->name = o->name;
     c->active = o->active;
+    c->skin_pose_off = o->skin_pose_off;  // (round 520: a snapshot evaluates the held object as the scene does)
     c->local_ = o->local_;
     c->world_ = o->world_;
     c->world_dirty_ = o->world_dirty_;

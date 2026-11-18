@@ -1378,6 +1378,7 @@ class Editor {
     paint_end_stroke();
   }
   bool raycast_scene_for_test(const Ray &ray, Vec3 &hit) { return raycast_scene(ray, hit); }
+  bool raycast_surface_for_test(const Ray &ray, Vec3 &hit, Vec3 &normal) { return raycast_surface(ray, hit, normal, {}); }  // (round 520)
   void collect_bake_scene_for_test(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) { collect_bake_scene(objects, lights); }
   void attach_lightmap_for_test(const GameObject &g, const Mesh &m, DrawItem &it) { attach_lightmap(g, m, it); }
   bool vr_tube_for_test() const { return vr_tube_; }
@@ -2022,7 +2023,16 @@ class Editor {
     outline_view_.on = false;
     return items;
   }
+  /* Round 520: Solid shading's items as a card view gathers them (a posed skin its rest render mesh), without a card. */
+  std::vector<DrawItem> solid_items_card_for_test(bool game = false) {
+    items_card_skin_ = true;
+    std::vector<DrawItem> items = solid_items(*scene_, game);
+    items_card_skin_ = false;
+    return items;
+  }
   static std::vector<DrawItem> skin_items_to_cpu_for_test(const std::vector<DrawItem> &items) { return skin_items_to_cpu(items); }
+  /* Round 520: every stand-in not gathered since is let go, as 600 gathers without them would (the kept lists go with them). */
+  void skin_age_stands_for_test() { skin_builds_ += 700; skin_prune_stands(); }
   size_t skin_stands_for_test() const { return skin_stands_.size(); }
   const std::string &skin_reason_for_test() const { return skin_reason_; }
   void skin_items_for_test(bool on) { skin_items_for_test_ = on; }
@@ -2544,6 +2554,7 @@ class Editor {
     bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
     std::vector<DrawItem> items;
   } items_cache_[3][2];  // (round 506: [0 Scene view, 1 Game view (its LOD levels), 2 any other game gather - the Camera Preview, VR, renders][tangents]: the Game view and the preview each keep theirs)
+  void skin_forget_kept_lists();
   ItemsCache solid_cache_[2];  // (round 506: Solid shading's [game])
   mutable view_keeps::PerEditor keeps_;  // (round 506: what the Scene view's keeps hold between frames)
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
@@ -4223,6 +4234,11 @@ class Editor {
   std::string card_view_key_;
   /* Round 362: the world kit (world_kit.cpp). */
   void update_collider_fits();
+  /* Round 520 (ADR 0146 1(c)): Sculpt and Weight Paint work on a skinned mesh's posed vertices on the CPU, so the object they
+   * hold gets no skin_pose (GameObject::skin_pose_off); every other object keeps its pose. Called every frame and by both modes. */
+  void sync_skin_pose_off();
+  const Scene *skin_off_scene_ = nullptr;
+  uint64_t skin_off_ids_[2] = {0, 0};
   void draw_colliders();
   void draw_light_volumes();  // (round 397)
   void budget_light_volume_rows(ui::Context &u, ui::Layout &lay, const BudgetCounts &c);

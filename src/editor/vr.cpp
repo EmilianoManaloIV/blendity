@@ -232,14 +232,28 @@ bool Editor::vr_segment_hit(Vec3 a, Vec3 b, Vec3 &hit, Vec3 &normal) {
 /* A mesh's segment BVH: the one made for its version and deform, else its last while a worker makes the new one (a copy
  * of the triangles goes to it), else none yet. */
 const xr::SegmentBvh *Editor::vr_bvh_of(const Mesh &m, int &building) {
-  const RenderMesh &rm = m.render_mesh();
+  /* Round 520: a posed skin's triangles are its own positions' (a ray needs where the surface is, not a render mesh that would
+   * run the CPU skin kernel every frame the pose moves). */
+  const bool posed = m.skin_pose_holds();
+  const RenderMesh *rm = posed ? nullptr : &m.render_mesh();
   VrBvh &c = vr_bvh_[m.uid.v];
   c.seen = vr_arc_stamp_;
-  const bool stale = c.version != m.version || c.deform != m.deform_version || c.tris != rm.tri_count() || !c.bvh;
+  const bool stale = c.version != m.version || c.deform != m.deform_version || (!posed && c.tris != rm->tri_count()) || !c.bvh;  // (a posed skin: its version and deform say it - no triangulating for a count)
   if (!stale || c.job.valid() || building >= kMaxBvhBuilds) return c.bvh.get();
-  c.version = m.version, c.deform = m.deform_version, c.tris = rm.tri_count();
+  const size_t tris = posed ? m.tessellation().size() / 4 : rm->tri_count();
+  c.version = m.version, c.deform = m.deform_version, c.tris = tris;
   building++;
-  c.job = std::async(std::launch::async, [pos = rm.positions, idx = rm.indices] { return make_bvh(pos, idx); });
+  std::vector<Vec3> pos;
+  std::vector<uint32_t> idx;
+  if (posed) {
+    const std::vector<uint32_t> &tess = m.tessellation();
+    pos = m.positions;
+    idx.reserve(tris * 3);
+    for (size_t t = 0; t < tris; t++)
+      for (size_t j = 0; j < 3; j++) idx.push_back(m.corner_verts[tess[t * 4 + j]]);
+  }
+  else pos = rm->positions, idx = rm->indices;
+  c.job = std::async(std::launch::async, [pos = std::move(pos), idx = std::move(idx)] { return make_bvh(pos, idx); });
   return c.bvh.get();
 }
 

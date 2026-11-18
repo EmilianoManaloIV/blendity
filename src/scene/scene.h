@@ -1842,6 +1842,9 @@ class GameObject {
   /* Round 469 (ADR 0124): bumped when this object's local transform or one anywhere below it is written
    * (mark_dirty walks up): "did anything under this character move?" is one comparison. */
   uint64_t below_version = 1;
+  /* Round 520 (ADR 0146 1(c)): set by the editor on the object Sculpt or Weight Paint works on: its evaluated mesh gets no skin_pose
+   * (built whole, as before round 518), for those modes read and write the posed vertices on the CPU. */
+  bool skin_pose_off = false;
   /* The render hash this object last produced and the inputs it came from (ADR 0015): when they all
    * compare equal the hash is reused instead of re-hashing the world matrix and the materials. */
   struct RenderHashMemo {

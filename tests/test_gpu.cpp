@@ -8000,6 +8000,112 @@ static void tests_round519_more_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 520 (task 0503): the traced shadows (round 543)
+ * meet the skin pass (round 519) - a posed skin's bottom level is built from the posed buffer the frame the pose changes. */
+static void tests_round520_gpu() {
+  test("a posed skin's traced shadow follows the pose (round 520): the bone raised, the floor point its shadow now reaches goes dark, the bottom level rebuilt; a still frame rebuilds nothing (skipped without a card with ray queries or skinning)", [] {
+    r543::Scene s;
+    if (!s.open()) return;
+    if (!s.g->can_skin()) {
+      std::printf("    skipped: this card can't skin\n");
+      return;
+    }
+    /* The cube as a skin of one bone, every vertex on it. */
+    const MeshPtr cube = primitives::cube(1.0f);  // (held: render_mesh() is the mesh's own cache)
+    const RenderMesh &rm = cube->render_mesh();
+    std::vector<gpu::RasterVertex> rest(rm.positions.size());
+    for (size_t i = 0; i < rest.size(); i++)
+      rest[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+    gpu::SkinWeights w;
+    w.slots = 1, w.bones = 1;
+    w.count.assign(rest.size(), 1);
+    w.bone.assign(rest.size(), 0);
+    w.weight.assign(rest.size(), 1.0f);
+    std::string err;
+    const int skin = s.g->add_skin(rest, rm.indices, w, &err);
+    CHECK(skin >= 0);
+    if (skin < 0) {
+      std::printf("    add_skin: %s\n", err.c_str());
+      return;
+    }
+    auto pose = [&](float up) {
+      SkinPose sp;
+      sp.owner = sp.owner_inv = Mat4::identity();
+      sp.mats = {Mat4::translate({0, up, 0})};
+      sp.duals = {skin_to_dual(sp.mats[0])};
+      sp.rigid = {1};
+      std::vector<float> pal;
+      skin_card_palette(sp, pal);
+      return s.g->set_skin_palette(skin, pal, &err);
+    };
+    r543::cube_over_floor(s);
+    s.inst[1].mesh = (uint32_t)skin;  // (the skin in the cube's place)
+    CHECK(pose(0.0f));
+    CHECK(s.draw(true, false));
+    const float lit_before = s.lum({1.5f, 0, 0}), lit_ref = s.lum({-3.1f, 0, 0});  // (as round 543's update_mesh test)
+    const gpu::RtShadowStats a = s.g->rt_shadow_stats();
+    CHECK(pose(1.0f));
+    CHECK(s.draw(true, false));
+    const float dark_after = s.lum({1.5f, 0, 0});
+    const gpu::RtShadowStats b = s.g->rt_shadow_stats();
+    CHECK(s.draw(true, false));  // (no new palette: the posed buffer and its bottom level stay)
+    const gpu::RtShadowStats c = s.g->rt_shadow_stats();
+    std::printf("    the point at x 1.5: %.0f at rest, %.0f raised (lit reference %.0f); BLAS builds %llu -> %llu -> %llu (still frame)\n", lit_before, dark_after, lit_ref,
+                (unsigned long long)a.blas_builds, (unsigned long long)b.blas_builds, (unsigned long long)c.blas_builds);
+    CHECK(lit_before > 0.8f * lit_ref);
+    CHECK(dark_after < 0.7f * lit_ref);
+    CHECK(b.blas_builds > a.blas_builds);
+    CHECK(c.blas_builds == b.blas_builds);
+    s.g->remove_skin(skin);
+  });
+
+  test("a real card Solid frame of a posed skin builds no render mesh on the CPU and is drawn on the card (round 520); Shaded then Solid share the stand-ins (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed, false);
+    ed.command("benchscene avatarlikequick");
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 6);
+    gpu::Raster *g = ed.gpu_raster_for_test();
+    if (!g || !g->can_skin() || !ed.scene_on_gpu_for_test()) {
+      std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+      return;
+    }
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    if (!chest) chest = ed.scene().find_by_name("Spine");
+    CHECK(chest != nullptr);
+    if (!chest) return;
+    auto pose = [&](float a, const char *why) {
+      chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, a));
+      ed.mark_changed_for_test(why);
+      r34_steps(ed, 3);
+    };
+    pose(0.2f, "R520 shaded");
+    const size_t stands = ed.skin_stands_for_test();
+    CHECK(stands > 0);
+    ed.command("shading solid");
+    pose(0.3f, "R520 solid warm");  // (the first Solid frame gathers its items)
+    const FrameProfile f0 = ed.frame_profile_totals();
+    const MeshCounts m0 = mesh_counts();
+    for (int i = 0; i < 4; i++) pose(0.35f + 0.1f * (float)i, "R520 solid");
+    const MeshCounts d = mesh_counts() - m0;
+    const FrameProfile f1 = ed.frame_profile_totals();
+    std::printf("    four posed Solid frames on the card: %llu render meshes skinned on the CPU, %llu skinned items drawn by the card, stand-ins %zu -> %zu\n", (unsigned long long)d.skinned,
+                (unsigned long long)(f1.skin_items - f0.skin_items), stands, ed.skin_stands_for_test());
+    CHECK(d.skinned == 0);
+    CHECK(f1.skin_items > f0.skin_items);
+    CHECK(ed.scene_on_gpu_for_test());
+    CHECK(ed.skin_stands_for_test() == stands);  // (Shaded's stand-ins are the ones Solid draws)
+    ed.command("shading shaded");
+    pose(0.9f, "R520 shaded again");
+    CHECK(ed.skin_stands_for_test() == stands);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -8046,4 +8152,5 @@ void run_gpu_tests() {
   tests_round545b2_gpu();
   tests_round519_gpu();
   tests_round519_more_gpu();
+  tests_round520_gpu();
 }

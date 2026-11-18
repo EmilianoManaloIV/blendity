@@ -269,4 +269,37 @@ AABB skin_posed_bounds(const SkinPose &pose, const SkinBoneBoxes &boxes, const M
   return box;
 }
 
+
+/* ---- Round 520 (task 0503) ---- */
+
+MeshTris mesh_tris(const Mesh &m) {
+  MeshTris t;
+  t.mesh = &m;
+  if (m.skin_pose_holds()) {
+    t.tess = &m.tessellation();
+    t.bounds = m.bounds();
+    return t;
+  }
+  t.rm = &m.render_mesh();
+  t.bounds = t.rm->bounds;
+  return t;
+}
+
+size_t MeshTris::count() const { return rm ? rm->tri_count() : tess->size() / 4; }
+
+void MeshTris::tri(size_t t, Vec3 &a, Vec3 &b, Vec3 &c) const {
+  if (rm) {
+    a = rm->positions[rm->indices[t * 3]], b = rm->positions[rm->indices[t * 3 + 1]], c = rm->positions[rm->indices[t * 3 + 2]];
+    return;
+  }
+  const uint32_t *q = &(*tess)[t * 4];
+  a = mesh->positions[mesh->corner_verts[q[0]]], b = mesh->positions[mesh->corner_verts[q[1]]], c = mesh->positions[mesh->corner_verts[q[2]]];
+}
+
+uint32_t MeshTris::face(size_t t) const {
+  if (rm) return t < rm->tri_face.size() ? rm->tri_face[t] : UINT32_MAX;
+  return (*tess)[t * 4 + 3];
+}
+
+AABB render_bounds(const Mesh &m) { return m.skin_pose_holds() ? m.bounds() : m.render_mesh().bounds; }
 }  // namespace bl

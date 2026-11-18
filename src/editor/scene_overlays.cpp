@@ -391,7 +391,7 @@ void Editor::render_static_overlays() {
     if (mr->display_as != 0 && !is_selected(g.id)) col = Color::hex(0xC8C8C8, 220);  // Blender draws wire objects light
     bool depth = shading_ != Shading::Wireframe;
     if (mr->display_as == 2) {  // Bounds: the box's 12 edges
-      const AABB b = m->render_mesh().bounds;
+      const AABB b = render_bounds(*m);
       Vec3 c[8];
       for (int k = 0; k < 8; k++) c[k] = w.point({k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z});
       static const int kE[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};

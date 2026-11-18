@@ -26,9 +26,11 @@ std::vector<float> crossings(const GameObject &g, const Ray &ray) {
   if (!m) return ts;
   const Mat4 inv = g.world_matrix().inverse();
   const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
-  const RenderMesh &rm = m->render_mesh();
-  for (size_t t = 0; t < rm.tri_count(); t++) {
-    const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+  const MeshTris mt = mesh_tris(*m);  // (round 520)
+  for (size_t t = 0; t < mt.count(); t++) {
+    Vec3 a, b, c;
+    mt.tri(t, a, b, c);
+    const float d = ray_triangle(lr, a, b, c);
     if (d > 0.0f) ts.push_back(d);
   }
   std::sort(ts.begin(), ts.end());

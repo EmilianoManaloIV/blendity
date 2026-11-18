@@ -37,10 +37,11 @@ bool Editor::raycast_surface(const Ray &ray, Vec3 &hit, Vec3 &normal, const std:
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
     const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
-    const RenderMesh &rm = m->render_mesh();
-    if (ray_aabb({lr.origin, normalize(lr.dir)}, rm.bounds) < 0) return;
-    for (size_t t = 0; t < rm.tri_count(); t++) {
-      const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    const MeshTris mt = mesh_tris(*m);  // (round 520: a posed skin by its own positions - no CPU skin kernel)
+    if (ray_aabb({lr.origin, normalize(lr.dir)}, mt.bounds) < 0) return;
+    for (size_t t = 0; t < mt.count(); t++) {
+      Vec3 a, b, c;
+      mt.tri(t, a, b, c);
       const float d = ray_triangle(lr, a, b, c);
       if (d > 0 && d < best) {
         best = d;

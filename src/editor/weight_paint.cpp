@@ -48,6 +48,7 @@ bool Editor::set_weight_paint(bool on) {
     if (shading_ == Shading::Solid) shading_ = wp_saved_shading_;  // unless the user chose another meanwhile
     wp_obj_ = 0;
     wp_scene_ = nullptr;
+    sync_skin_pose_off();
     if (!on) Log::info("Weight Paint off");
   }
   if (!on) return true;
@@ -71,6 +72,7 @@ bool Editor::set_weight_paint(bool on) {
   wp_obj_ = g->id;
   wp_last_active_ = active_;  // (the mesh: no bone to follow yet)
   wp_scene_ = scene_.get();
+  sync_skin_pose_off();  // (round 520: its skinned mesh is posed whole from here)
   wp_group_ = std::max(0, std::min(active_vgroup_, (int)mf->mesh->vertex_groups.size() - 1));
   wp_saved_shading_ = shading_;
   shading_ = Shading::Solid;  // weights show as vertex colours, Gouraud-shaded (Blender's weight view is lit the same way)

@@ -14720,6 +14720,393 @@ static void tests_round519_more() {
   });
 }
 
+/* ---------------------------------------------------------------- round 520 (task 0503): what a posed frame asks the posed
+ * render mesh for - picking, snapping, colliders, exports, renders and bakes see the posed shape from the evaluated mesh,
+ * a posed frame on the card builds none, and Sculpt / Weight Paint keep a skinned mesh on the CPU path. */
+/* A character whose Arm bone is lifted by 2 m: its glove (a tube 0.4 m tall, x 0.4..0.8) is at y 2.8..3.2 and was at 0.8..1.2. */
+static R469Char r520_scene(Editor &ed, bool draw = true) {
+  r34_open(ed, false);
+  ed.command("select Cube");  // (the sample scene's cube must not stand in a ray's way)
+  ed.command("delete");
+  const R469Char c = r469_build(ed.scene(), true);
+  if (draw)
+    for (GameObject *o : {c.body, c.hair, c.glove}) o->add<MeshRenderer>();
+  c.arm->set_local_position({0.5f, 2.0f, 0.0f});
+  ed.command("camera 0 2 9 0 2 0");
+  ed.mark_changed_for_test("R520 setup");
+  r34_steps(ed, 4);
+  for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);  // (the camera's glide: a click projects with the camera that is drawn)
+  r34_steps(ed, 2);
+  return c;
+}
+
+static void tests_round520() {
+  test("a click on a posed character's raised arm picks it, a click where the arm was at rest does not (round 520)", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    const Mesh *em = c.glove->evaluated_mesh();
+    CHECK(em && em->skin_pose && em->bounds().max.y > 3.1f);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window({0.75f, 2.9f, 0.13f}, x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() == c.glove);
+    CHECK(ed.project_to_window({0.75f, 0.9f, 0.13f}, x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 1);
+    CHECK(ed.active_object_for_test() != c.glove);
+  });
+
+  test("a ray and a surface snap land on a posed character's raised arm and miss where it was, with no render mesh posed for them (round 520)", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    (void)c;
+    Vec3 hit, n;
+    const Ray up{{0.6f, 3.0f, 6.0f}, {0, 0, -1}}, rest{{0.6f, 1.0f, 6.0f}, {0, 0, -1}};
+    const MeshCounts m0 = mesh_counts();
+    CHECK(ed.raycast_scene_for_test(up, hit));
+    CHECK_NEAR(hit.z, 0.2f, 0.03f);
+    CHECK_NEAR(hit.y, 3.0f, 0.01f);
+    CHECK(ed.raycast_surface_for_test(up, hit, n));
+    CHECK(hit.z > 0.15f && hit.z < 0.25f && dot(n, Vec3(0, 0, 1)) > 0.5f);  // (the side facing the ray)
+    CHECK(!ed.raycast_scene_for_test(rest, hit));
+    CHECK(!ed.raycast_surface_for_test(rest, hit, n));
+    const MeshCounts d = mesh_counts() - m0;
+    std::printf("    four rays on a posed character: %llu render meshes skinned\n", (unsigned long long)d.skinned);
+    CHECK(d.skinned == 0);
+    /* The mesh helper itself: a posed skin's triangles are its own positions', a plain mesh's its render mesh's. */
+    const Mesh *em = c.glove->evaluated_mesh();
+    if (!em) return;
+    const MeshTris posed = mesh_tris(*em);
+    CHECK(posed.rm == nullptr && posed.count() == em->tessellation().size() / 4 && posed.count() > 0);
+    const MeshPtr cube = primitives::cube();
+    const MeshTris plain = mesh_tris(*cube);
+    CHECK(plain.rm == &cube->render_mesh() && plain.count() == cube->render_mesh().tri_count());
+    CHECK(render_bounds(*em).max.y == em->bounds().max.y && render_bounds(*cube).max.y == cube->render_mesh().bounds.max.y);
+  });
+
+  test("a mesh collider of a posed character is the posed shape at the physics step (round 520): a box dropped onto a raised platform rests on it, not where the platform was", [] {
+    if (!physics_jolt_available()) return;
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    /* A closed 1 m cube on the Arm bone, over where the glove is: the only mesh with a renderer, so the only collider (the open
+     * tubes of the character are no surface a box rests on). It spans y 0.5 .. 1.5 at rest and 2.5 .. 3.5 with the arm lifted. */
+    MeshPtr slab = primitives::cube();
+    for (Vec3 &p : slab->positions) p = p + Vec3(0.6f, 1.0f, 0.0f);
+    slab->vertex_groups.push_back(VertexGroup{"Arm", std::vector<float>(slab->vert_count(), 1.0f)});
+    slab->touch();
+    GameObject *plat = r469_skinned(s, "Platform", nullptr, slab, "Rig");
+    plat->add<MeshRenderer>();
+    c.arm->set_local_position({0.5f, 2.0f, 0.0f});
+    GameObject *box = s.create("Box");
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->add<MeshRenderer>();
+    box->add<Rigidbody>()->bounciness = 0.0f;
+    box->set_local_position({0.6f, 6.0f, 0.0f});
+    const MeshCounts m0 = mesh_counts();
+    PlayContext ctx;
+    s.start(ctx);
+    CHECK(s.physics != nullptr);
+    ctx.dt = 1.0f / 60.0f;
+    for (int i = 0; i < 300; i++) s.update(ctx);
+    const MeshCounts d = mesh_counts() - m0;
+    std::printf("    the box rests at y = %.3f (the raised platform's top 3.5 + 0.5; at rest it would be 2.0); %llu render meshes skinned\n", box->world_position().y, (unsigned long long)d.skinned);
+    CHECK_NEAR(box->world_position().y, 4.0f, 0.08f);
+    CHECK(d.skinned == 0);
+  });
+
+  test("a posed export writes the posed positions (round 520): OBJ and PLY of a posed character's evaluated mesh, read back", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    c.arm->set_local_position({0.5f, 2.0f, 0.0f});
+    const std::shared_ptr<const Mesh> em = c.glove->evaluated_mesh_shared(0);
+    CHECK(em && em->skin_pose);
+    if (!em) return;
+    const MeshCounts m0 = mesh_counts();
+    for (int f : {(int)ExportFormat::OBJ, (int)ExportFormat::PLY}) {
+      ExportItem it;
+      it.name = "Glove", it.mesh = em.get(), it.world = Mat4::identity();
+      const std::string path = fs::join(test_dir(), f == (int)ExportFormat::OBJ ? "r520posed.obj" : "r520posed.ply");
+      std::string err;
+      CHECK(export_file(path, {it}, export_defaults(f), &err));
+      ImportResult r;
+      CHECK(import_model(path, r) && !r.nodes.empty() && r.nodes[0].mesh);
+      if (!r.nodes.empty() && r.nodes[0].mesh) {
+        float lo = 1e30f, hi = -1e30f;
+        for (const Vec3 &p : r.nodes[0].mesh->positions) lo = std::min(lo, p.y), hi = std::max(hi, p.y);
+        std::printf("    %s: y from %.3f to %.3f (posed 2.8 .. 3.2)\n", f == (int)ExportFormat::OBJ ? "OBJ" : "PLY", lo, hi);
+        CHECK_NEAR(lo, 2.8f, 0.01f);
+        CHECK_NEAR(hi, 3.2f, 0.01f);
+      }
+      fs::remove_file(path);
+    }
+    CHECK((mesh_counts() - m0).skinned == 0);  // (an export reads the positions, not a posed render mesh)
+  });
+
+  test("a render gather and the CPU path tracer see the posed shape, and each asked twice in one pose builds the posed render mesh once (round 520)", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    const Mesh *em = c.glove->evaluated_mesh();
+    CHECK(em && em->skin_pose);
+    if (!em) return;
+    const MeshCounts m0 = mesh_counts();
+    const RenderMesh &a = em->render_mesh();
+    const RenderMesh &b = em->render_mesh();
+    const MeshCounts d = mesh_counts() - m0;
+    CHECK(&a == &b && d.skinned <= 1);  // (one kernel run: a frame's drawing may have asked already - never twice)
+    CHECK(a.bounds.max.y > 3.1f && a.bounds.min.y > 2.7f);
+    /* F12's gather (the Game view's items): the posed render mesh, the one already made - no second run. */
+    const MeshCounts m1 = mesh_counts();
+    const std::vector<DrawItem> items = ed.collect_items_for_test(true, Mat4::identity(), Mat4::identity(), Vec3(0.0f));
+    const DrawItem *glove = nullptr;
+    for (const DrawItem &it : items)
+      if (it.id == (uint32_t)c.glove->id && !it.always_cull) glove = &it;
+    CHECK(glove && glove->mesh && glove->mesh->bounds.max.y > 3.1f && !glove->skin);
+    std::printf("    the render gather after two asks: %llu more render meshes skinned\n", (unsigned long long)(mesh_counts() - m1).skinned);
+    CHECK((mesh_counts() - m1).skinned == 0);
+    /* The CPU path tracer: a dark glove in a white furnace shows where the camera looks at it, and not where it was. */
+    auto look = [&](Vec3 target) {
+      auto mats = std::vector<MaterialPtr>{make_material("Dark", {0.0f, 0.0f, 0.0f})};
+      mats[0]->specular = 0.0f;
+      Environment env;
+      env.mode = Environment::Color;
+      env.color = {0.5f, 0.5f, 0.5f};
+      PathTracer pt;
+      pt.build({{&em->render_mesh_tangents(), Mat4::identity(), &mats}}, {}, env);
+      PTSettings st;
+      st.denoise = false;
+      pt.set_settings(st);
+      pt.set_camera(Mat4::look_at(target + Vec3(0, 0, 4), target, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1, 0.1f, 20), 16, 16);
+      pt.render(1e9, 8);
+      const std::vector<float> rgb = pt.linear_rgb(false);
+      return std::make_pair(rgb[(8 * 16 + 8) * 3 + 1], rgb[1]);
+    };
+    const auto raised = look({0.6f, 3.0f, 0.0f}), was = look({0.6f, 1.0f, 0.0f});
+    std::printf("    path tracer: centre %.3f / background %.3f at the raised arm; centre %.3f where it was\n", raised.first, raised.second, was.first);
+    CHECK(raised.first < 0.2f && raised.second > 0.4f);
+    CHECK(was.first > 0.4f);
+  });
+
+  test("a posed frame builds no render mesh for Solid shading and Display As Bounds on the card's gather (round 520), and Solid on the CPU draws the same picture", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    ed.command("shading solid");
+    ed.mark_changed_for_test("R520 solid");
+    r34_steps(ed, 2);
+    const Mesh *em = c.body->evaluated_mesh();
+    CHECK(em && em->skin_pose);
+    if (!em) return;
+    const MeshCounts m0 = mesh_counts();
+    const std::vector<DrawItem> items = ed.solid_items_card_for_test();
+    const MeshCounts d = mesh_counts() - m0;
+    size_t on_card = 0;
+    for (GameObject *o : {c.body, c.hair, c.glove})
+      for (const DrawItem &it : items)
+        if (it.id == (uint32_t)o->id) on_card += it.skin == o->evaluated_mesh() && it.mesh && it.mesh != &o->evaluated_mesh()->render_mesh();
+    std::printf("    Solid's items as a card view gathers them: %zu of 3 on the card, %llu render meshes skinned\n", on_card, (unsigned long long)d.skinned);
+    CHECK(on_card == 3 && d.skinned == 0);
+    /* The CPU draws the posed render meshes: with card-skin items made (the hook) and turned back, the same picture as without. */
+    ed.command("camera 0 2 9 0 2 0");
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.4f));
+    ed.mark_changed_for_test("R520 solid A");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> a = r34_crop(ed, ed.scene_view_rect());
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.5f));
+    ed.mark_changed_for_test("R520 solid B");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> b = r34_crop(ed, ed.scene_view_rect());
+    ed.skin_items_for_test(true);
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.4f));
+    ed.mark_changed_for_test("R520 solid A again");
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> again = r34_crop(ed, ed.scene_view_rect());
+    ed.skin_items_for_test(false);
+    size_t differ = a.size() == again.size() ? 0 : a.size(), moved = 0;
+    for (size_t i = 0; i < a.size() && i < again.size(); i++) differ += a[i] != again[i];
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) moved += a[i] != b[i];
+    std::printf("    Solid on the CPU with card-skin items made: %zu of %zu pixels differ (the pose itself moves %zu)\n", differ, a.size(), moved);
+    CHECK(!a.empty() && moved > 200 && differ == 0);
+    /* Display As Bounds: drawn as a box from the positions' box - frames of it pose nothing. */
+    for (GameObject *o : {c.body, c.hair, c.glove}) o->get<MeshRenderer>()->display_as = 2;
+    ed.mark_changed_for_test("R520 bounds");
+    r34_steps(ed, 2);
+    const MeshCounts m1 = mesh_counts();
+    for (int i = 0; i < 4; i++) {
+      c.arm->set_local_position({0.5f, 2.0f + 0.1f * (float)i, 0.0f});
+      ed.mark_changed_for_test("R520 bounds frame");
+      r34_steps(ed, 2);
+    }
+    const MeshCounts d2 = mesh_counts() - m1;
+    std::printf("    four posed frames as bounds: %llu render meshes skinned\n", (unsigned long long)d2.skinned);
+    CHECK(d2.skinned == 0);
+  });
+
+  test("Sculpt and Weight Paint on a skinned mesh get no pose (round 520): it is built whole as before round 518, the others keep theirs, the card's gather lists it as left on the CPU", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    CHECK(c.body->evaluated_mesh() && c.body->evaluated_mesh()->skin_pose);
+    for (int mode = 0; mode < 2; mode++) {
+      ed.command("select Body");
+      ed.command(mode == 0 ? "sculpt on" : "weightpaint on");
+      CHECK(mode == 0 ? ed.sculpt_for_test() : ed.weight_paint_for_test());
+      r34_steps(ed, 2);
+      const Mesh *em = c.body->evaluated_mesh();
+      CHECK(em && !em->skin_pose);
+      CHECK(c.hair->evaluated_mesh() && c.hair->evaluated_mesh()->skin_pose && c.glove->evaluated_mesh()->skin_pose);  // (only the held object)
+      /* Its positions are still the pose (the deform is every frame's): the glove-less body tube is where the bones put it. */
+      const std::vector<DrawItem> items = ed.collect_items_card_for_test(false, true);
+      const DrawItem *body = nullptr, *hair = nullptr;
+      for (const DrawItem &it : items) {
+        if (it.id == (uint32_t)c.body->id && !it.always_cull) body = &it;
+        if (it.id == (uint32_t)c.hair->id && !it.always_cull) hair = &it;
+      }
+      CHECK(body && !body->skin && body->skin_note && std::string(body->skin_note).find("Sculpt or Weight Paint") != std::string::npos);
+      CHECK(hair && hair->skin);
+      std::printf("    %s: body without a pose, listed '%s'\n", mode == 0 ? "Sculpt" : "Weight Paint", body && body->skin_note ? body->skin_note : "");
+      ed.command(mode == 0 ? "sculpt off" : "weightpaint off");
+      r34_steps(ed, 2);
+      CHECK(c.body->evaluated_mesh() && c.body->evaluated_mesh()->skin_pose);  // (the pose is back with the mode gone)
+    }
+  });
+
+  test("Texture Bake of a posed skin keeps the views' triangulation and tangent frame (round 520): a bent tube and a cube on a bone, lined up, flat faces bake a flat normal map", [] {
+    for (int variant = 0; variant < 2; variant++) {
+      Scene s;
+      GameObject *tube = nullptr;
+      if (variant == 0) {
+        const R469Char c = r469_build(s, true);
+        c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+        tube = c.body;
+      }
+      else {
+        GameObject *rig = s.create("Rig");
+        rig->add<Armature>();
+        GameObject *bone = r469_bone(s, "B", rig, {0, 0, 0});
+        MeshPtr cube = primitives::cube();
+        VertexGroup g{"B", std::vector<float>(cube->vert_count(), 1.0f)};
+        cube->vertex_groups.push_back(g);
+        cube->touch();
+        tube = r469_skinned(s, "Cube", nullptr, cube, "Rig");
+        bone->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.9f));
+      }
+      const Mesh *em = tube->evaluated_mesh();
+      CHECK(em && em->skin_pose);
+      if (!em) continue;
+      std::vector<MaterialPtr> mats{make_material("M", {0.8f, 0.8f, 0.8f})};
+      TextureBakeSettings st;
+      st.size = 64, st.samples = 1;
+      const TextureBakeResult r = bake_textures(*em, tube->world_matrix(), mats, st);
+      size_t covered = 0, flat = 0;
+      for (size_t i = 0; i < r.normal.size(); i++) {
+        if (!r.covered[i]) continue;
+        covered++;
+        const uint32_t p = r.normal[i];
+        const int dr = std::abs((int)((p >> 16) & 255) - 128), dg = std::abs((int)((p >> 8) & 255) - 128), db = std::abs((int)(p & 255) - 255);
+        if (variant == 1) flat += dr <= 4 && dg <= 4 && db <= 4;
+      }
+      std::printf("    %s: lined up %d, %zu texels covered, %zu flat\n", variant == 0 ? "a bent tube" : "a cube on a bone", (int)r.lined_up, covered, flat);
+      CHECK(r.lined_up && covered > 100);
+      if (variant == 1) CHECK(flat * 100 >= covered * 98);  // (a flat face's normal in its own tangent frame is straight out)
+    }
+  });
+
+  test("a kept Solid list is made again when its stand-ins are let go (round 520, review): never a list pointing at freed stand-ins", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    (void)c;
+    ed.command("shading solid");
+    ed.skin_items_for_test(true);  // (Solid makes card-skin items without a card, then turns them back for the CPU raster)
+    ed.mark_changed_for_test("R520 kept solid");
+    r34_steps(ed, 4);
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    r34_steps(ed, 3);
+    const uint64_t b1 = view_perf::counters.solid_item_builds;
+    std::printf("    Solid's item builds: %llu, then %llu after three still frames; stand-ins %zu\n", (unsigned long long)b0, (unsigned long long)b1, ed.skin_stands_for_test());
+    CHECK(b1 == b0);  // (the list is kept)
+    CHECK(ed.skin_stands_for_test() > 0);
+    ed.skin_age_stands_for_test();  // (every stand-in let go, as 600 gathers without them would)
+    CHECK(ed.skin_stands_for_test() == 0);
+    ed.command("camera 0.5 2 9 0 2 0");  // (another view of the same scene: Solid draws again, its scene hash unchanged)
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    CHECK(view_perf::counters.solid_item_builds > b1);  // (gathered again: the kept list was dropped with the stand-ins)
+    CHECK(ed.skin_stands_for_test() > 0);
+    ed.skin_items_for_test(false);
+  });
+
+  test("Texture Bake keeps the views' triangulation where the posed whole build would differ (round 520): a twisted grid, a pose whose own triangulation is not the rest's", [] {
+    bool found = false;
+    for (int k = 1; k < 18 && !found; k++) {
+      Scene s;
+      GameObject *rig = s.create("Rig");
+      rig->add<Armature>();
+      r469_bone(s, "A", rig, {0, 0, 0});
+      GameObject *b = r469_bone(s, "B", rig, {0, 0, 0});
+      auto m = std::make_shared<Mesh>();
+      const int n = 8;
+      for (int j = 0; j <= n; j++)
+        for (int i = 0; i <= n; i++) m->add_vert({-1.0f + 2.0f * (float)i / (float)n, 0.0f, -1.0f + 2.0f * (float)j / (float)n});
+      for (int j = 0; j < n; j++)
+        for (int i = 0; i < n; i++) {
+          const uint32_t a = (uint32_t)(j * (n + 1) + i);
+          m->add_face({a, a + 1, a + (uint32_t)n + 2, a + (uint32_t)n + 1});
+        }
+      VertexGroup ga{"A", {}}, gb{"B", {}};
+      for (const Vec3 &p : m->positions) {
+        const float wb = std::max(0.0f, std::min(1.0f, (p.x + 0.6f) / 1.2f));
+        ga.weights.push_back(1.0f - wb), gb.weights.push_back(wb);
+      }
+      m->vertex_groups = {ga, gb};
+      m->touch();
+      GameObject *grid = r469_skinned(s, "Grid", nullptr, m, "Rig");
+      b->set_local_rotation(Quat::axis_angle({1, 0, 0}, (float)k * 0.35f));
+      const Mesh *em = grid->evaluated_mesh();
+      CHECK(em && em->skin_pose);
+      if (!em || !em->skin_pose) return;
+      MeshCopyBare bare;
+      const Mesh whole = *em;  // (what the old path built: no pose, the posed positions triangulated afresh)
+      const bool differs = whole.render_mesh().tri_corner != em->skin_pose->rest->render_mesh().tri_corner;
+      if (!differs) continue;
+      found = true;
+      std::vector<MaterialPtr> mats{make_material("M", {0.8f, 0.8f, 0.8f})};
+      TextureBakeSettings st;
+      st.size = 64, st.samples = 1;
+      const TextureBakeResult r = bake_textures(*em, grid->world_matrix(), mats, st);
+      size_t covered = 0;
+      for (uint8_t cv : r.covered) covered += cv != 0;
+      std::printf("    twist %.2f rad: the posed whole build's triangles differ from the rest's; the bake lined up: %d, %zu texels\n", (double)k * 0.35, (int)r.lined_up, covered);
+      CHECK(r.lined_up && covered > 100);
+    }
+    CHECK(found);
+  });
+
+  test("Weight Paint on a skinned object that has no pose still paints (round 520): one wpstroke over the body raises its weights", [] {
+    Editor ed;
+    const R469Char c = r520_scene(ed);
+    ed.command("select Body");
+    ed.command("weightpaint on");
+    r34_steps(ed, 3);
+    CHECK(ed.weight_paint_for_test());
+    const Mesh *em = c.body->evaluated_mesh();
+    CHECK(em && !em->skin_pose);
+    auto sum = [&] {
+      double t = 0.0;
+      for (const VertexGroup &vg : c.body->mesh_filter()->mesh->vertex_groups)
+        for (float w : vg.weights) t += w;
+      return t;
+    };
+    const double before = sum();
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window({0.0f, 1.0f, 0.2f}, x, y));
+    ed.command(strprintf("wpstroke %d %d %d %d", x - 6, y, x + 6, y));
+    r34_steps(ed, 2);
+    const double after = sum();
+    std::printf("    the body's weights: %.2f -> %.2f\n", before, after);
+    CHECK(after != before);
+    CHECK(c.body->evaluated_mesh() && !c.body->evaluated_mesh()->skin_pose);
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -14767,4 +15154,5 @@ void run_animation_tests() {
   tests_round518_more();
   tests_round519();
   tests_round519_more();
+  tests_round520();
 }

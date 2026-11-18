@@ -131,4 +131,24 @@ void skin_bone_boxes(const SkinPose &pose, const std::vector<Vec3> &rest_positio
  * `posed`'s positions (the deform's own, on the CPU) when it is given. Never smaller than the kernel's bounds. */
 AABB skin_posed_bounds(const SkinPose &pose, const SkinBoneBoxes &boxes, const Mesh *posed = nullptr);
 
+
+/* ---- Round 520 (task 0503): readers that need where a posed skin is, not its render mesh ---- */
+
+/* The triangles of `m` for a ray or a snap. A posed skin (skin_pose_holds) gives its own positions' triangulation - its quads are
+ * split by their posed diagonals, which differ from the drawn rest triangulation by the quad's non-planarity - because the render
+ * mesh of it would run the CPU skin kernel; any other mesh gives its render mesh's. `face(t)` is the mesh's face of triangle t
+ * (UINT32_MAX when the render mesh has none). Valid while `m` is not changed. */
+struct MeshTris {
+  const Mesh *mesh = nullptr;
+  const RenderMesh *rm = nullptr;
+  const std::vector<uint32_t> *tess = nullptr;
+  AABB bounds;
+  size_t count() const;
+  void tri(size_t t, Vec3 &a, Vec3 &b, Vec3 &c) const;
+  uint32_t face(size_t t) const;
+};
+MeshTris mesh_tris(const Mesh &m);
+/* The render mesh's bounds (loose vertices included, as Mesh::bounds() has them), without making the render mesh of a posed skin (its positions' box, which is the same box). */
+AABB render_bounds(const Mesh &m);
+
 }  // namespace bl

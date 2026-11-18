@@ -17,7 +17,7 @@ namespace bl {
 const Mesh *Editor::lod_for_view(const GameObject &g, const Mesh &m) {
   const LODGroupComponent *lg = g.get<LODGroupComponent>();
   if (!lg || !lg->enabled || !lod_view_.on || lod_deforms(g)) return &m;
-  const AABB b = m.render_mesh().bounds.transformed(g.world_matrix());  // (the mesh this view draws - review 363: not another evaluation)
+  const AABB b = render_bounds(m).transformed(g.world_matrix());  // (the mesh this view draws - review 363: not another evaluation)
   const float height = b.valid() ? std::max(b.max.y - b.min.y, std::max(b.max.x - b.min.x, b.max.z - b.min.z)) : 0.0f;
   const float dist = std::max(1e-3f, length(b.center() - lod_view_.eye));
   const float screen = height * lod_view_.half_focal / (lod_view_.ortho ? 1.0f : dist);

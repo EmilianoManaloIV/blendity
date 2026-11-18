@@ -598,6 +598,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
   process_events(events);
+  sync_skin_pose_off();  // (round 520: before anything evaluates this frame)
   upload_bytes_frame_ = 0;
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
   texture_stream_poll();  // (round 447: what the views found missing, loading on a worker)
@@ -2888,6 +2889,7 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
   job->mesh_uid = mf->mesh->uid.v;
   job->version = mf->mesh->version, job->deform_version = mf->mesh->deform_version;
   job->input = mesh_copy_bare(source);
+  if (source.skin_pose_holds()) job->input->skin_pose = source.skin_pose;  // (round 520: a posed skin's bake keeps the pose - the views' rest triangulation and turned tangents; the worker poses it from the shared rest, under its lock)
   job->model = g->world_matrix();
   if (mr)
     for (const MaterialPtr &mp : mr->materials) job->materials.push_back(snapshot_material(mp));
@@ -3068,6 +3070,7 @@ bool Editor::eval_job_request(const GameObject &g, int kind, uint64_t key) {
   job->copy = std::make_unique<GameObject>();
   job->copy->id = g.id;
   job->copy->name = g.name;
+  job->copy->skin_pose_off = g.skin_pose_off;  // (round 520: the worker's result is the same mesh the main thread's would be)
   for (const auto &c : g.components) {
     if (dynamic_cast<const Blockout *>(c.get())) continue;  // (round 502: the stack reads the mesh, not the pieces' build state - its face origins are not copied at every landing)
     job->copy->add_component(c->clone());
@@ -3650,6 +3653,7 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
     for (ExportItem &it : job->items) {
       if (it.mesh) {
         std::shared_ptr<Mesh> bare = mesh_copy_bare(*it.mesh);
+        if (it.mesh->skin_pose_holds()) bare->skin_pose = it.mesh->skin_pose;  // (round 520: a posed skin keeps its pose for the texture bake)
         it.mesh = bare.get();
         job->keep.push_back(std::move(bare));
       }
@@ -4422,7 +4426,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     GameObject *g = scene_->create(name, parent);
     g->add<Lattice>();
     if (tm && !parent) {
-      const AABB b = tm->render_mesh().bounds;  // in the mesh's own space, so the box turns with it
+      const AABB b = render_bounds(*tm);  // in the mesh's own space, so the box turns with it
       const Vec3 size = b.max - b.min;
       g->set_world_matrix(target->world_matrix() *
                           Mat4::trs(b.center(), Quat(), Vec3(std::max(size.x, 0.01f), std::max(size.y, 0.01f), std::max(size.z, 0.01f)) * 1.05f));

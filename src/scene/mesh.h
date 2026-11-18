@@ -401,6 +401,10 @@ struct Mesh : MeshCaches {
   bool render_cache_warm(bool force_flat = false) const;  // (round 418: the next render_mesh returns at once)
   /* Same, plus MikkTSpace tangents for normal mapping (blender/intern/mikktspace). */
   const RenderMesh &render_mesh_tangents(bool force_flat = false) const;
+  /* Round 520: the triangles of the mesh as it is (three corners and the face each, in face order), triangulated from its own
+   * positions: for a reader that needs only where the surface is (a ray, a snap) - on a posed skin, not the render mesh, which
+   * would run the CPU skin kernel. */
+  const std::vector<uint32_t> &tessellation() const;
   /* Unique edges, cached per version (wireframe & edit-mode overlays). */
   const std::vector<std::pair<uint32_t, uint32_t>> &edge_cache() const;
   /* The faces at each vertex, in face order (faces[offsets[v]] to faces[offsets[v + 1]], a face listed once per
@@ -495,7 +499,6 @@ struct Mesh : MeshCaches {
   /* A full build's render vertices and triangles (corner_rv: each corner's render vertex): on every thread (task 0109),
    * or the serial build before it (the tests compare). */
   void build_render_vertices(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;
-  const std::vector<uint32_t> &tessellation() const;  // share_.tess, made when this version hasn't one
   void corners_by_vertex() const;                     // share_'s corner table, made when this topology hasn't it
   void edges_by_corners(std::vector<std::pair<uint32_t, uint32_t>> &out) const;  // edges()'s table, from them
   void render_vertices_serial(RenderMesh &rm, const std::vector<Vec3> &cnormal, bool uv, std::vector<uint32_t> &corner_rv) const;

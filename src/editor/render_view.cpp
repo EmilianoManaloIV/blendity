@@ -498,7 +498,7 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
   uint64_t base = 0;
   bool hit = false;
   if (kept_kind) {
-    base = scene_render_hash() ^ ((uint64_t)game + 1) * 0x9E3779B97F4A7C15ull;
+    base = scene_render_hash() ^ ((uint64_t)game + 1) * 0x9E3779B97F4A7C15ull ^ (items_card_skin_ ? 0xC2B2AE3D27D4EB4Full : 0);  // (round 520: a card view's items hold the rest render meshes of skinned objects)
     hit = c.valid && (c.base == base || view_perf::stale(view_perf::SolidItems));
     if (hit && !cache_verify_) {
       *gen = keeps_.solid_gen[game];
@@ -511,7 +511,7 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
   std::vector<DrawItem> items = solid_items(s, game);
   const bool same = hit && same_draw_items(items, c.items);
   if (hit && !same) note_render_cache_mismatch();
-  c.valid = kept_kind, c.base = base;
+  c.valid = kept_kind && !skin_settling_, c.base = base;  // (a rest settling after shape keys: gathered again until it is back on the card)
   if (!same) c.items = std::move(items);
   if (kept_kind && !same) keeps_.solid_gen[game] = view_keeps::next_items_gen();
   *gen = kept_kind ? keeps_.solid_gen[game] : 0;

@@ -64,6 +64,18 @@ options as they were put:
    so the CPU stays the card's reference. The alternative keeps today's recomputed normals on the CPU views and
    accepts a listed approximation on the card (ADR 0108) - not recommended: the reference would no longer be exact.
 
+## Amended (round 520, task 0503): point 5 as built
+The mesh's vertices are still posed on the CPU every posed frame by `SkinModifier::modify` (round 518's baseline: 1.0 ms
+skinning + 0.6 ms setup of the chest drag's 37.3 ms on the card; round 519 removed the render side, 26 ms). So the
+evaluated mesh's positions are the CPU positions, always current; there is no `GameObject::posed_mesh_cpu()`. What is
+lazy is the posed *render* mesh: `Mesh::render_mesh()` of a posed mesh runs the reference kernel only when asked, once
+per pose. Round 520 moved the per-frame and per-click askers (picking, snapping, Display As Bounds, Solid, VR, the
+lighting key) to the posed positions (`mesh_tris`, `render_bounds`). Not yet as point 5 says: F12, the path tracers and
+MoonRay pose the render mesh at their snapshot on the main thread (once per pose and object), not on their worker. Round
+522's timed check decides whether either gap holds a row (the lazy vertex deform under ADR 0112's bar; the snapshot's
+posing if it shows in F12's first frame); otherwise they stay as written here. The user sees this amendment in round
+520's PR.
+
 ## Consequences
 - A posed frame on the card sends palettes, not meshes; the frame's CPU part is the pose. The rows Pass 22 left over
   16.7 ms are expected to come under it alone; in the world, two-view rows may stay held by the views' shared

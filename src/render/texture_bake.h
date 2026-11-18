@@ -38,6 +38,7 @@ struct TextureBakeResult {
   std::vector<uint8_t> covered;     // texels a triangle covers (before the padding)
   size_t texels = 0;                // how many
   bool own_uvs = false;             // the mesh's UVs were kept
+  bool lined_up = false;            // (round 520) the normal map is written in the views' triangulation and tangent frame (a posed skin's too)
   bool any_alpha = false;           // a texel's alpha is below 1 (only see-through surfaces have alpha: Opaque and Glass don't)
   int alpha_slot = -1;              // the first material slot whose surface left that alpha (the baked material takes its surface)
   double ms = 0.0;                  // (round 412: the bake's time, set by the editor's worker)
