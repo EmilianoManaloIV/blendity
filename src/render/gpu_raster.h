@@ -344,6 +344,31 @@ struct RasterTimes {
   double shadow = 0, gbuffer = 0, lighting = 0, total = 0, submit_wall = 0;
 };
 
+/* Round 565 (task 0547): where a card frame goes, finer than RasterTimes - totals over every frame the device drew, for a
+ * measurement to take before and after its frames. `gpu`: the card's own ms between timestamps (0 without them); RasterTimes'
+ * "g-buffer" is Gbuffer + Toon + Baked here, its "lighting" Light to Post; Skin holds the queued mesh copies and the traced
+ * shadows' builds too (what comes before the first pass). `host`: the render call's own steps on the CPU (Settle: waiting
+ * for the frame left running before; Record: with the toon / baked / linear-light targets made when first needed; Submit and
+ * Wait: the frame's own submission, not an upload's; Wait: the fence of a frame that copies planes back). */
+struct RasterDetail {
+  enum Gpu { Skin, Shadow, Gbuffer, Toon, Baked, Light, Splats, SeeThrough, Overlays, Hdr, Post, Copies, kGpu };
+  enum Host { Settle, Targets, Write, WriteSee, Tables, Record, Submit, Wait, Unpack, kHost };
+  double gpu[kGpu] = {}, host[kHost] = {};
+  uint64_t frames = 0, frames_read = 0;  // frames drawn; those that copied planes back (the others were left running)
+  uint64_t draws = 0, pipeline_binds = 0, mesh_binds = 0, set_writes = 0;  // the instanced passes' calls; descriptor set rewrites (images or buffers)
+  uint64_t instances = 0, lights = 0, outline_ids = 0, see_corners = 0, overlay_prims = 0, pixels = 0;  // what the frames held
+  uint64_t tables_on_card = 0, tables_in_host = 0;  // the lighting's small tables made in the card's own memory / in the host's (since the device was made)
+  bool card_tables = false;  // the device puts those tables in the card's memory (it has the kind, and BLENDITY_CARD_TABLES isn't "host")
+  static const char *gpu_name(int k) {
+    static const char *n[kGpu] = {"skin", "shadow maps", "g-buffer", "toon planes", "baked planes", "lighting", "splats", "see-through", "overlays", "linear light", "filters", "copies out"};
+    return n[k];
+  }
+  static const char *host_name(int k) {
+    static const char *n[kHost] = {"wait for the frame before", "targets", "frame tables", "of them the see-through corners", "texture tables and uploads", "recording", "submit", "wait", "unpack"};
+    return n[k];
+  }
+};
+
 /* A GPU picture against the CPU's, scored where it says something: covered pixels (id not 0: the background is the
  * same clear colour on both) whose 3 x 3 neighbourhood on the CPU is one object (a silhouette's pixel may fall either
  * way on two rasterisers). Worst channel difference per pixel, 8-bit. */
@@ -488,6 +513,7 @@ class Raster {
    * have no passes: they come here once the card is done), for the Profiler. */
   virtual RasterTimes take_async_times() { return {}; }
   virtual RasterTimes times() const = 0;
+  virtual RasterDetail detail() const { return {}; }  // (round 565)
   /* (A): a slot's last frame into CPU memory; any pointer may be null (not read back then). */
   virtual bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
   /* Task 0160 (ADR 0051): render() and read_back() as one submission - the copies out are recorded behind the frame's

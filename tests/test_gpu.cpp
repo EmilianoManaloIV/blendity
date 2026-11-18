@@ -8292,6 +8292,301 @@ static void tests_round521_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 565 (task 0547): what a card frame costs, by part, and the
+ * lighting's small tables in the card's own memory. Nothing here asserts a time (ADR 0056). */
+namespace r565 {
+
+/* A raster of its own with a cube and a floor on it; the frames and instances the tests share. */
+struct Rig {
+  std::unique_ptr<gpu::Raster> g;
+  int cube = -1, plane = -1;
+  static constexpr int W = 160, H = 120;
+  Mat4 vp, sun_vp;
+
+  static void set_tables_env(bool host) {
+    if (host) set_env("BLENDITY_CARD_TABLES", "host");
+    else clear_env("BLENDITY_CARD_TABLES");
+  }
+  /* False (with the reason printed) when there is no card. host_tables: the device is made with BLENDITY_CARD_TABLES=host
+   * (the variable is cleared again as soon as it is made, whatever came of it). */
+  bool open(bool host_tables) {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return false;
+    }
+    std::string err;
+    if (host_tables) set_tables_env(true);
+    g = gpu::Raster::create(0, &err);
+    if (host_tables) set_tables_env(false);
+    if (!g) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return false;
+    }
+    auto upload = [&](const MeshPtr &mp) {
+      const RenderMesh &rm = mp->render_mesh();
+      std::vector<gpu::RasterVertex> vs(rm.positions.size());
+      for (size_t i = 0; i < vs.size(); i++)
+        vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      return g->add_mesh(vs, rm.indices, &err);
+    };
+    cube = upload(primitives::cube(1.0f));
+    plane = upload(primitives::plane(20.0f, 1));
+    vp = Mat4::perspective(50 * kDeg2Rad, (float)W / (float)H, 0.1f, 100.0f) * Mat4::look_at({0, 7, 9}, {0, 0, 0}, {0, 1, 0});
+    sun_vp = Mat4::ortho(12.0f, 1.0f, 0.1f, 60.0f) * Mat4::look_at(normalize(Vec3(1, -2, -0.5f)) * -20.0f, {0, 0, 0}, {0, 0, 1});
+    return cube >= 0 && plane >= 0;
+  }
+  gpu::RasterInstance make(int mesh, Vec3 at, Vec3 scale, uint32_t id) const {
+    gpu::RasterInstance in;
+    const Mat4 m = Mat4::translate(at) * Mat4::scale(scale);
+    std::memcpy(in.model, m.m, 64);
+    in.mesh = (uint32_t)mesh;
+    in.id = id;
+    return in;
+  }
+  /* A floor and `cubes` cubes in a row, all the same material (ids 1, 2, ...). */
+  std::vector<gpu::RasterInstance> plain(int cubes) const {
+    std::vector<gpu::RasterInstance> v = {make(plane, {0, 0, 0}, {1, 1, 1}, 1)};
+    for (int k = 0; k < cubes; k++) v.push_back(make(cube, {-2.0f + 2.0f * (float)k, 0.5f, 0}, {1, 1, 1}, (uint32_t)k + 2));
+    return v;
+  }
+  /* A floor and six cubes that differ in albedo, roughness, metallic and emission (ids 1 to 7). */
+  std::vector<gpu::RasterInstance> rich() const {
+    std::vector<gpu::RasterInstance> v = plain(6);
+    for (int k = 0; k < 6; k++) {
+      gpu::RasterInstance &in = v[(size_t)k + 1];
+      const float f = (float)k / 5.0f;
+      const Mat4 m = Mat4::translate({-5.0f + 2.0f * (float)k, 0.5f, 0.5f * (float)(k % 3) - 0.5f});
+      std::memcpy(in.model, m.m, 64);
+      in.albedo_rough[0] = 0.9f - 0.7f * f, in.albedo_rough[1] = 0.2f + 0.6f * f, in.albedo_rough[2] = 0.3f + 0.5f * (float)(k % 2), in.albedo_rough[3] = 0.15f + 0.8f * f;
+      in.metal_spec[0] = (k % 3 == 1) ? 1.0f : 0.0f;
+      if (k == 4) in.emission[0] = 2.0f, in.emission[1] = 0.8f;
+    }
+    return v;
+  }
+  /* A sun, a point light and a spot light. */
+  static std::vector<gpu::RasterLight> three_lights() {
+    gpu::RasterLight sun;
+    sun.type = 0;
+    const Vec3 d = normalize(Vec3(1, -2, -0.5f));
+    sun.direction[0] = d.x, sun.direction[1] = d.y, sun.direction[2] = d.z;
+    sun.intensity = 1.5f;
+    gpu::RasterLight point;
+    point.type = 1;
+    point.position[0] = 0, point.position[1] = 3, point.position[2] = 2;
+    point.color[0] = 1.0f, point.color[1] = 0.5f, point.color[2] = 0.4f;
+    point.intensity = 40.0f, point.range = 30.0f;
+    gpu::RasterLight spot;
+    spot.type = 2;
+    spot.position[0] = 3, spot.position[1] = 5, spot.position[2] = 3;
+    const Vec3 sd = normalize(Vec3(-3, -5, -3));
+    spot.direction[0] = sd.x, spot.direction[1] = sd.y, spot.direction[2] = sd.z;
+    spot.color[0] = 0.4f, spot.color[1] = 0.6f, spot.color[2] = 1.0f;
+    spot.intensity = 80.0f, spot.range = 30.0f;
+    spot.spot_cos_outer = std::cos(35.0f * kDeg2Rad), spot.spot_cos_inner = std::cos(20.0f * kDeg2Rad);
+    return {sun, point, spot};
+  }
+  gpu::RasterFrame frame(const std::vector<gpu::RasterLight> &lights, int shadow_size, bool outline) const {
+    gpu::RasterFrame fr;
+    fr.width = W, fr.height = H;
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, sun_vp.m, 64);
+    fr.eye[0] = 0, fr.eye[1] = 7, fr.eye[2] = 9;
+    fr.shadow_size = shadow_size;
+    fr.shadow_light = 0;
+    fr.lights = lights;
+    fr.env_mode = 1;
+    fr.env_color[0] = fr.env_color[1] = fr.env_color[2] = 0.05f;
+    if (outline) {  // (cubes 3 and 5, ids sorted; one outline run)
+      gpu::OverlayOutline o;
+      o.ids = {3, 5};
+      o.color = 0xFFFFE000u;
+      o.width = 2;
+      fr.outlines.push_back(o);
+      fr.overlay_runs.push_back({2u, 0u, 1u});
+    }
+    return fr;
+  }
+};
+
+struct Pic {
+  std::vector<uint32_t> color, ids;
+  std::vector<float> depth;
+  void size() { color.assign((size_t)Rig::W * Rig::H, 0u), ids.assign(color.size(), 0u), depth.assign(color.size(), 0.0f); }
+  bool same(const Pic &o) const {
+    return color.size() == o.color.size() && std::memcmp(color.data(), o.color.data(), color.size() * 4) == 0 &&
+           std::memcmp(ids.data(), o.ids.data(), ids.size() * 4) == 0 && std::memcmp(depth.data(), o.depth.data(), depth.size() * 4) == 0;
+  }
+  /* The picture holds something: more than one colour and an object's id. */
+  bool shows_objects() const {
+    bool two_colours = false, object = false;
+    for (size_t i = 1; i < color.size(); i++) two_colours = two_colours || color[i] != color[0];
+    for (uint32_t id : ids) object = object || id != 0;
+    return two_colours && object;
+  }
+};
+
+/* Draws the frame with the instances and reads colour, depth and ids back. */
+inline bool draw(Rig &r, const std::vector<gpu::RasterInstance> &inst, const gpu::RasterFrame &fr, Pic &pic) {
+  std::string err;
+  pic.size();
+  r.g->set_instances(inst);
+  const bool ok = r.g->render_read(fr, pic.color.data(), pic.depth.data(), pic.ids.data(), &err);
+  if (!ok) std::printf("    render_read failed: %s\n", err.c_str());
+  return ok;
+}
+
+}  // namespace r565
+
+static void tests_round565_gpu() {
+  test("a card frame's parts are counted: frames, draws, binds, instances, lights and pixels rise by what each frame held, the card's and the host's times are finite and never fall, and the parts add up to the frame's own time (round 565; skipped without a GPU)", [] {
+    r565::Rig rig;
+    if (!rig.open(false)) return;
+    std::string err;
+    const std::vector<gpu::RasterInstance> inst = rig.plain(3);
+    const std::vector<gpu::RasterLight> lights = {r565::Rig::three_lights()[0], r565::Rig::three_lights()[1]};
+    const gpu::RasterFrame fr = rig.frame(lights, 512, false);
+    rig.g->set_instances(inst);
+    r565::Pic pic;
+    pic.size();
+    /* A first frame makes the targets, tables and descriptor sets; the counts below are of the frames after it. */
+    CHECK(rig.g->render_read(fr, pic.color.data(), pic.depth.data(), pic.ids.data(), &err));
+    const gpu::RasterDetail d0 = rig.g->detail();
+    CHECK(d0.frames == 1 && d0.frames_read == 1);
+    const int N = 3;
+    gpu::RasterDetail prev = d0;
+    uint64_t draws = 0, mesh_binds = 0, pipeline_binds = 0;
+    bool timed = false, finite = true, monotone = true, parts_add_up = true;
+    for (int k = 0; k < N; k++) {
+      CHECK(rig.g->render_read(fr, pic.color.data(), pic.depth.data(), pic.ids.data(), &err));
+      const gpu::RasterDetail cur = rig.g->detail();
+      const uint64_t dd = cur.draws - prev.draws, dm = cur.mesh_binds - prev.mesh_binds, dp = cur.pipeline_binds - prev.pipeline_binds;
+      if (k == 0) draws = dd, mesh_binds = dm, pipeline_binds = dp;
+      CHECK(dd > 0 && dm > 0 && dp > 0);
+      CHECK(dd == draws && dm == mesh_binds && dp == pipeline_binds);  // (the same frame again: the same calls)
+      for (int p = 0; p < gpu::RasterDetail::kGpu; p++) {
+        finite = finite && std::isfinite(cur.gpu[p]);
+        monotone = monotone && cur.gpu[p] >= prev.gpu[p];
+      }
+      for (int p = 0; p < gpu::RasterDetail::kHost; p++) {
+        finite = finite && std::isfinite(cur.host[p]);
+        monotone = monotone && cur.host[p] >= prev.host[p];
+      }
+      const gpu::RasterTimes t = rig.g->times();
+      if (t.total > 0) {
+        timed = true;
+        double sum = 0;
+        for (int p = gpu::RasterDetail::Shadow; p <= gpu::RasterDetail::Post; p++) sum += cur.gpu[p] - prev.gpu[p];
+        if (!(std::fabs(sum - t.total) <= 1e-3)) {
+          parts_add_up = false;
+          std::printf("    frame %d: parts add up to %.6f ms, times().total %.6f ms\n", k, sum, t.total);
+        }
+        /* (The Profiler's three numbers keep their meaning: the shadow maps; the g-buffer with the toon and baked planes; the
+         * lighting to the filters.) */
+        const auto part = [&](int p) { return cur.gpu[p] - prev.gpu[p]; };
+        const double gb = part(gpu::RasterDetail::Gbuffer) + part(gpu::RasterDetail::Toon) + part(gpu::RasterDetail::Baked);
+        double lit = 0;
+        for (int p = gpu::RasterDetail::Light; p <= gpu::RasterDetail::Post; p++) lit += part(p);
+        if (!(std::fabs(t.shadow - part(gpu::RasterDetail::Shadow)) <= 1e-3 && std::fabs(t.gbuffer - gb) <= 1e-3 && std::fabs(t.lighting - lit) <= 1e-3)) {
+          parts_add_up = false;
+          std::printf("    frame %d: shadow %.6f / g-buffer %.6f / lighting %.6f ms against the parts' %.6f / %.6f / %.6f\n", k, t.shadow, t.gbuffer, t.lighting,
+                      part(gpu::RasterDetail::Shadow), gb, lit);
+        }
+      }
+      prev = cur;
+    }
+    const gpu::RasterDetail d1 = rig.g->detail();
+    CHECK(finite);
+    CHECK(monotone);
+    CHECK(parts_add_up);
+    CHECK(d1.frames == d0.frames + (uint64_t)N && d1.frames_read == d0.frames_read + (uint64_t)N);
+    CHECK(d1.instances == d0.instances + (uint64_t)N * inst.size());
+    CHECK(d1.lights == d0.lights + (uint64_t)N * lights.size());
+    CHECK(d1.pixels == d0.pixels + (uint64_t)N * r565::Rig::W * r565::Rig::H);
+    CHECK(d1.set_writes == d0.set_writes);  // (identical frames: the targets are kept)
+    if (timed) CHECK(d1.gpu[gpu::RasterDetail::Light] > d0.gpu[gpu::RasterDetail::Light]);
+    std::printf("    %d frames: %llu draws, %llu mesh binds, %llu pipeline binds a frame; %s", N, (unsigned long long)draws, (unsigned long long)mesh_binds, (unsigned long long)pipeline_binds,
+                timed ? "card timestamps:" : "this card reports no timestamps\n");
+    if (timed) {
+      for (int p = 0; p < gpu::RasterDetail::kGpu; p++) std::printf(" %s %.3f", gpu::RasterDetail::gpu_name(p), (d1.gpu[p] - d0.gpu[p]) / N);
+      std::printf(" (ms a frame)\n");
+    }
+    /* A frame left running counts as a frame but not as one that was read; read_back settles it. */
+    const r565::Pic last = pic;
+    const gpu::RasterDetail a0 = rig.g->detail();
+    CHECK(rig.g->render_async(fr, &err));
+    r565::Pic after;
+    after.size();
+    CHECK(rig.g->read_back(0, after.color.data(), after.depth.data(), after.ids.data(), &err));
+    const gpu::RasterDetail a1 = rig.g->detail();
+    CHECK(a1.frames == a0.frames + 1);
+    CHECK(a1.frames_read == a0.frames_read);
+    CHECK(after.same(last));  // (the same frame drawn the other way)
+  });
+
+  test("the lighting's tables in the card's memory draw the same picture as in the host's: eight materials, a sun, a point and a spot light, shadows and an outline are equal byte for byte, and so are the same frame after the instance table has grown (round 565; skipped without a GPU)", [] {
+    r565::Rig host, card;
+    if (!host.open(true)) return;
+    if (!card.open(false)) return;  // (the variable is cleared again by now: this one is made without it)
+    const gpu::RasterDetail dh = host.g->detail(), dc = card.g->detail();
+    std::printf("    BLENDITY_CARD_TABLES=host: %llu tables in the host's memory, %llu on the card; default: %llu in the host's, %llu on the card\n", (unsigned long long)dh.tables_in_host,
+                (unsigned long long)dh.tables_on_card, (unsigned long long)dc.tables_in_host, (unsigned long long)dc.tables_on_card);
+    CHECK(dh.tables_in_host > 0 && dh.tables_on_card == 0);
+    CHECK(dc.tables_on_card + dc.tables_in_host > 0);
+    CHECK(!dh.card_tables);
+    /* (A card with the memory puts every one of the ten tables there - none is over the 16 MB a table may have on the card.) */
+    CHECK(!dc.card_tables || (dc.tables_on_card >= 10 && dc.tables_in_host == 0));
+    if (!dc.card_tables) std::printf("    this card has no host-writable memory of its own: both rasters keep the tables in the host's\n");
+    const std::vector<gpu::RasterLight> lights = r565::Rig::three_lights();
+    const std::vector<gpu::RasterInstance> inst = host.rich();
+    CHECK(inst.size() == 7);
+    const gpu::RasterFrame fr = host.frame(lights, 1024, true);
+    r565::Pic ph, pc;
+    CHECK(r565::draw(host, inst, fr, ph) && r565::draw(card, inst, fr, pc));
+    CHECK(ph.shows_objects() && pc.shows_objects());
+    CHECK(ph.same(pc));
+    /* The same again without the outline, and with a different light count: tables written over, not made new. */
+    const gpu::RasterFrame fr2 = host.frame({lights[1], lights[2]}, 0, false);
+    r565::Pic ph2, pc2;
+    CHECK(r565::draw(host, inst, fr2, ph2) && r565::draw(card, inst, fr2, pc2));
+    CHECK(ph2.same(pc2));
+    CHECK(!ph2.same(ph));  // (the frames differ, so the equality above is not two blank pictures)
+    /* Past the first size of the instance table (1024) and of the light table: both are made again, larger. */
+    std::vector<gpu::RasterInstance> many = inst;
+    for (int k = 0; k < 1100; k++) {
+      gpu::RasterInstance in = host.make(host.cube, {-5.0f + 0.25f * (float)(k % 40), 0.1f, -4.0f + 0.3f * (float)(k / 40)}, {0.1f, 0.1f, 0.1f}, (uint32_t)k + 8);
+      in.albedo_rough[0] = (float)(k % 7) / 6.0f, in.albedo_rough[1] = (float)(k % 5) / 4.0f, in.albedo_rough[3] = 0.2f + 0.7f * (float)(k % 3) / 2.0f;
+      in.metal_spec[0] = (k % 4 == 0) ? 1.0f : 0.0f;
+      many.push_back(in);
+    }
+    std::vector<gpu::RasterLight> crowd = lights;
+    for (int k = 0; k < 40; k++) {
+      gpu::RasterLight l;
+      l.type = 1;
+      l.position[0] = -5.0f + 0.25f * (float)k, l.position[1] = 1.5f, l.position[2] = -3.0f + 0.15f * (float)k;
+      l.color[0] = (float)(k % 3) / 2.0f, l.color[1] = (float)(k % 5) / 4.0f, l.color[2] = 0.6f;
+      l.intensity = 4.0f, l.range = 6.0f;
+      crowd.push_back(l);
+    }
+    const gpu::RasterDetail g0h = host.g->detail(), g0c = card.g->detail();
+    const gpu::RasterFrame fr3 = host.frame(crowd, 1024, true);
+    r565::Pic ph3, pc3;
+    CHECK(r565::draw(host, many, fr3, ph3) && r565::draw(card, many, fr3, pc3));
+    const gpu::RasterDetail g1h = host.g->detail(), g1c = card.g->detail();
+    std::printf("    %zu instances and %zu lights: tables made again - host-tables raster %llu, default raster %llu\n", many.size(), crowd.size(),
+                (unsigned long long)(g1h.tables_on_card + g1h.tables_in_host - g0h.tables_on_card - g0h.tables_in_host),
+                (unsigned long long)(g1c.tables_on_card + g1c.tables_in_host - g0c.tables_on_card - g0c.tables_in_host));
+    CHECK(g1h.tables_in_host > g0h.tables_in_host && g1h.tables_on_card == 0);
+    CHECK(g1c.tables_on_card + g1c.tables_in_host > g0c.tables_on_card + g0c.tables_in_host);
+    CHECK(!g1c.card_tables || (g1c.tables_on_card > g0c.tables_on_card && g1c.tables_in_host == 0));  // (the tables made again when they grew are on the card too)
+    CHECK(ph3.shows_objects() && pc3.shows_objects());
+    CHECK(ph3.same(pc3));
+    /* And the small frame again after the growth. */
+    r565::Pic ph4, pc4;
+    CHECK(r565::draw(host, inst, fr, ph4) && r565::draw(card, inst, fr, pc4));
+    CHECK(ph4.same(pc4) && ph4.same(ph));
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -8340,4 +8635,5 @@ void run_gpu_tests() {
   tests_round519_more_gpu();
   tests_round520_gpu();
   tests_round521_gpu();
+  tests_round565_gpu();
 }

@@ -42,6 +42,36 @@ static std::string log_find(size_t at, const char *prefix) {
   return std::string();
 }
 
+/* Round 565 (task 0547): the card's frames between two readings of its totals - each part's ms a card frame (the card's own
+ * time by its timestamps, then the render call's steps on the CPU), and what a frame held. Empty when no card frame was drawn. */
+static gpu::RasterDetail card_detail(Editor &ed) {
+  gpu::Raster *g = ed.gpu_raster_for_test();
+  return g ? g->detail() : gpu::RasterDetail{};
+}
+static std::string card_detail_text(const gpu::RasterDetail &a, const gpu::RasterDetail &b) {
+  if (b.frames <= a.frames) return std::string();  // (none drawn, or the device was made again meanwhile: its totals began at 0)
+  const double n = (double)(b.frames - a.frames);
+  std::string s = strprintf("; card frames %.0f (%.0f copied back), ms a card frame - the card:", n, (double)(b.frames_read - a.frames_read));
+  double card = 0, host = 0;
+  for (int k = 0; k < gpu::RasterDetail::kGpu; k++) {
+    const double v = (b.gpu[k] - a.gpu[k]) / n;
+    card += v;
+    if (v >= 0.005) s += strprintf(" %s %.2f,", gpu::RasterDetail::gpu_name(k), v);
+  }
+  s += strprintf(" in all %.2f; the render call:", card);
+  for (int k = 0; k < gpu::RasterDetail::kHost; k++) {
+    const double v = (b.host[k] - a.host[k]) / n;
+    if (k != gpu::RasterDetail::WriteSee) host += v;  // (nested in the frame tables)
+    if (v >= 0.005) s += strprintf(" %s %.2f,", gpu::RasterDetail::host_name(k), v);
+  }
+  s += strprintf(" in all %.2f; a card frame held: instances %.0f, draw calls %.0f, pipeline binds %.0f, mesh binds %.0f, set rewrites %.2f, lights %.0f, outline ids %.0f, "
+                 "see-through corners %.0f, overlay lines and dots %.0f, pixels %.0f; the lighting's tables made so far: %.0f in the card's memory, %.0f in the host's",
+                 host, (b.instances - a.instances) / n, (b.draws - a.draws) / n, (b.pipeline_binds - a.pipeline_binds) / n, (b.mesh_binds - a.mesh_binds) / n,
+                 (b.set_writes - a.set_writes) / n, (b.lights - a.lights) / n, (b.outline_ids - a.outline_ids) / n, (b.see_corners - a.see_corners) / n,
+                 (b.overlay_prims - a.overlay_prims) / n, (b.pixels - a.pixels) / n, (double)b.tables_on_card, (double)b.tables_in_host);
+  return s;
+}
+
 static PartsMs parts_between(const FrameProfile &a, const FrameProfile &b, const PoseCounts &pa, const PoseCounts &pb, const MeshCounts &ma, const MeshCounts &mb, double n) {
   const PoseCounts p = pb - pa;
   const MeshCounts m = mb - ma;
@@ -119,6 +149,7 @@ struct Bench {
     const FrameProfile p0 = ed.frame_profile_totals();
     const PoseCounts c0 = pose_counts();
     const MeshCounts m0 = mesh_counts();
+    const gpu::RasterDetail d0 = card_detail(ed);
     FrameProfile acc;
     double sum = 0;
     Sample s;
@@ -139,6 +170,7 @@ struct Bench {
     s.parts = parts_between(p0, p1, c0, c1, m0, m1, n);
     s.notes = strprintf("view renders %.0f over %d frames; parts ms (a frame's mean; nested, not to add up): %s; counts (a frame's mean): %s", s.views, n,
                         Editor::posing_parts_text(acc, c1 - c0, m1 - m0, n).c_str(), Editor::posing_counts_text(acc, c1 - c0, m1 - m0, n).c_str());
+    s.notes += card_detail_text(d0, card_detail(ed));
     return s;
   }
 
@@ -147,7 +179,9 @@ struct Bench {
     Sample s;
     const size_t at = log_mark();
     const uint64_t undo0 = ed.frame_profile_totals().undo_steps;
+    const gpu::RasterDetail d0 = card_detail(ed);  // (round 565: over the whole script - its press and release frames too)
     ed.command(cmd + strprintf(" frames %d", n));
+    const gpu::RasterDetail d1 = card_detail(ed);
     const PerfDragResult &r = ed.perf_drag_result_for_test();
     if (!r.ok) {
       s.ok = false, s.error = r.error.empty() ? "the script did not finish" : r.error;
@@ -161,6 +195,7 @@ struct Bench {
     const size_t prior = head.find("; the pose prior");
     s.notes = strprintf("view renders %.0f over %d frames; %s; %s%s", s.views, n, log_find(at, "perf drag parts ms").c_str(), log_find(at, "perf drag counts").c_str(),
                         prior == std::string::npos ? "" : (" (" + head.substr(prior + 2) + ")").c_str());
+    s.notes += card_detail_text(d0, d1);
     const uint64_t made = ed.frame_profile_totals().undo_steps - undo0;
     for (uint64_t i = 0; i < made; i++) ed.command("undo");
     steps(ed, 2);
