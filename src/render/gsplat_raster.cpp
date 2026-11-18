@@ -425,8 +425,8 @@ std::vector<SplatOrder> SplatPass::orders(const std::vector<SplatDraw> &draws, c
 
 void SplatPass::prepare(const std::vector<SplatDraw> &draws, const SplatView &v, bool async_sort) {
   /* The last frame's list becomes this frame's room (round 566): its splats are still constructed, so sizing kept_ for
-   * the same cloud writes nothing - an emptied vector would be filled with 60 bytes a splat before the projection
-   * overwrites every one of them. */
+   * the first cloud writes nothing when the last frame drew all of it (only what a culled or trimmed frame left out is
+   * made again) - an emptied vector would be filled with 60 bytes a splat before the projection overwrites every one. */
   kept_.swap(screen_);
   screen_.clear();
   stats_ = SplatStats{};
@@ -482,7 +482,8 @@ void SplatPass::project_cloud(const PointCloud &pc, const std::vector<uint32_t> 
   };
   /* Where each splat goes: rank[ord[k]] = k. An order that is not the cloud's (an index past the end, or one missing
    * because another came twice - the sorter makes neither) leaves a splat without a place: nothing of the cloud is
-   * drawn, rather than a slot holding an older frame's splat. */
+   * drawn (and all of it counts as culled), rather than a slot holding an older frame's splat. (Two chunks of such an
+   * order may store to one place at once: whichever lands, the missing place is still found below.) */
   constexpr uint32_t kNoPlace = 0xFFFFFFFFu;
   each_chunk([&](int64_t, size_t b, size_t e) { std::fill(rank_.begin() + (ptrdiff_t)b, rank_.begin() + (ptrdiff_t)e, kNoPlace); });
   each_chunk([&](int64_t, size_t b, size_t e) {
@@ -625,7 +626,8 @@ void SplatPass::draw_cpu(RenderTarget &rt) const {
   const int64_t chunks = std::max<int64_t>(1, std::min<int64_t>(threads * 2, (int64_t)(n / 8192) + 1));
   const size_t per = (n + (size_t)chunks - 1) / (size_t)chunks;
   std::vector<size_t> place((size_t)chunks * tiles, 0);  // a chunk's count in each tile, then its first place there (size_t: a frame's bins may pass 2^32)
-  /* Each splat's tile box, kept from the count for the fill: 8 bytes a splat read again instead of its 60. */
+  /* Each splat's tile box, kept from the count for the fill: 8 bytes a splat read again instead of its 60. (16 bits a
+   * tile index: a picture would have to be over two million pixels wide to pass it.) */
   struct TileBox {
     uint16_t x0, x1, y0, y1;
   };

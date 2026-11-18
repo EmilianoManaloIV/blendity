@@ -1057,9 +1057,11 @@ static void splat_raster_round566_tests() {
       CHECK(pass.screen().size() == want.size());
       CHECK(bad == 0);
       CHECK(pass.stats().culled == pc->count() - want.size());
-      /* Back to front. */
+      /* Back to front - by the sorter's depth, which is the projection's to the last bits only (the same z / w from
+       * another expression: GCC put neighbours a rounding apart the other way round; the list is the sorter's order
+       * exactly, checked above). */
       bool ordered = true;
-      for (size_t k = 1; k < pass.screen().size(); k++) ordered = ordered && pass.screen()[k - 1].z >= pass.screen()[k].z;
+      for (size_t k = 1; k < pass.screen().size(); k++) ordered = ordered && pass.screen()[k - 1].z >= pass.screen()[k].z - 1e-5f;
       CHECK(ordered);
     }
   });
@@ -1077,6 +1079,76 @@ static void splat_raster_round566_tests() {
     /* And then the same pass draws a visible cloud (its kept buffers hold the last frame's sizes). */
     s.draw({SplatDraw{pc, Mat4::identity(), 7, false, 0}});
     CHECK(s.pass.screen().size() == 9000 && s.id(100, 100) == 7);
+  });
+
+  test("splats: one pass drawing frame after frame - other clouds, ids, views, a culled part, a trimmed frame - gives each frame its own list, nothing left from the last", [] {
+    /* (Review 566: the pass keeps last frame's list as this frame's room; every splat of every frame must be this
+     * frame's own, whatever the list held before.) */
+    SplatPass pass;
+    PointCloudPtr points = pointcloud_random(PointCloudType::Points, 12000, 0, 566);
+    PointCloudPtr splats = pointcloud_random(PointCloudType::GaussianSplats, 12000, 3, 567);
+    PointCloudPtr larger = pointcloud_random(PointCloudType::GaussianSplats, 15000, 1, 568);
+    PointCloudPtr smaller = pointcloud_random(PointCloudType::GaussianSplats, 5000, 2, 569);
+    PointCloudPtr huge = pointcloud_random(PointCloudType::GaussianSplats, 12000, 0, 570);
+    for (Vec3 &sc : huge->scale) sc = Vec3(4.0f);  // (as the budget test: every box at the 1024 px cap)
+    SplatView far_view;
+    far_view.view = Mat4::look_at({0, 0, -5}, {0, 0, 0}, {0, 1, 0});
+    far_view.proj = Mat4::perspective(60 * kDeg2Rad, 320.0f / 240.0f, 0.1f, 100.0f);
+    far_view.width = 320, far_view.height = 240;
+    SplatView close_view = far_view;
+    close_view.view = Mat4::look_at({0.4f, 0.2f, -2.2f}, {0, 0, 0}, {0, 1, 0});
+    close_view.view_transform = ViewTransform::Filmic, close_view.exposure = 0.5f;
+    SplatView small_view = far_view;
+    small_view.width = 200, small_view.height = 120;
+    small_view.proj = Mat4::perspective(60 * kDeg2Rad, 200.0f / 120.0f, 0.1f, 100.0f);
+    struct Frame {
+      const char *name;
+      std::vector<SplatDraw> draws;
+      SplatView view;
+      bool some_culled, trimmed;
+    };
+    const SplatDraw d_points{points, Mat4::identity(), 5, false, 0, 0.03f}, d_splats{splats, Mat4::identity(), 6, false, 0};
+    const SplatDraw d_larger{larger, Mat4::translate(Vec3(0.3f, 0, 0)), 7, false, 0}, d_smaller{smaller, Mat4::identity(), 8, false, 0};
+    const SplatDraw d_huge{huge, Mat4::identity(), 9, false, 0};
+    const Frame frames[] = {{"Points, all on screen, id 5", {d_points}, far_view, false, false},
+                            {"splats of the same count, id 6, close (a part culled), Filmic", {d_splats}, close_view, true, false},
+                            {"the same splats, all on screen again", {d_splats}, far_view, false, false},
+                            {"huge splats: trimmed to the budget", {d_huge}, far_view, false, true},
+                            {"after the trimmed frame, the Points again", {d_points}, far_view, false, false},
+                            {"a smaller cloud", {d_smaller}, far_view, false, false},
+                            {"a larger cloud, another picture size", {d_larger}, small_view, false, false},
+                            {"the larger cloud, close (a part culled)", {d_larger}, close_view, true, false},
+                            {"the Points after a culled frame", {d_points}, far_view, false, false}};
+    for (const Frame &f : frames) {
+      pass.prepare(f.draws, f.view, false);
+      const SplatDraw &d = f.draws[0];
+      const std::vector<SplatScreen> want = r566_reference_list(pass, d, f.view);
+      const int steps = f.view.view_transform == ViewTransform::Standard ? 0 : 1;
+      std::printf("    %s: %zu drawn of %zu, %zu culled, %zu left out over the budget\n", f.name, pass.screen().size(), d.cloud->count(),
+                  pass.stats().culled, pass.stats().dropped);
+      CHECK(pass.stats().culled == d.cloud->count() - want.size());
+      CHECK((pass.stats().culled > 0) == f.some_culled);
+      CHECK((pass.stats().dropped > 0) == f.trimmed);
+      if (f.trimmed) {
+        /* What the budget kept is a part of the frame's own list, in its order. */
+        size_t at = 0, found = 0;
+        for (const SplatScreen &s : pass.screen()) {
+          while (at < want.size() && !r566_same_splat(s, want[at], steps)) at++;
+          found += at < want.size();
+        }
+        CHECK(!pass.screen().empty() && found == pass.screen().size());
+        continue;
+      }
+      CHECK(r566_differing(pass.screen(), want, steps) == 0);
+    }
+    /* Two clouds merged, then one of them alone: the single list is again its own. */
+    pass.prepare({d_splats, d_larger}, far_view, false);
+    CHECK(pass.screen().size() == splats->count() + larger->count());
+    size_t of6 = 0, of7 = 0;
+    for (const SplatScreen &s : pass.screen()) of6 += s.id == 6, of7 += s.id == 7;
+    CHECK(of6 == splats->count() && of7 == larger->count());
+    pass.prepare({d_smaller}, far_view, false);
+    CHECK(r566_differing(pass.screen(), r566_reference_list(pass, d_smaller, far_view)) == 0);
   });
 
   test("splats: a dense cloud's picture is the plain front-to-back blend of its screen list within 1/255, the ids the same", [] {
