@@ -1634,7 +1634,7 @@ static void tests_round181() {
     gpu::drop_ready_renderers_for_test();  // (a spare opened under the hook would sleep for the next test)
   });
 
-  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames short while the render goes on - under 10 ms but for the ones that merge and resolve the picture - and finishes (skipped without a GPU)", [] {
+  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames coming while the render goes on - Stop lands what it had, and a short render finishes (skipped without a GPU)", [] {
     if (!gpu::available()) {
       std::printf("    (no GPU here: skipped)\n");
       return;
@@ -1647,11 +1647,19 @@ static void tests_round181() {
       r34_open(ed);
       ed.command("engine path");
       ed.command("device gpu");
-      ed.command("samples 400");
+      /* Round 568: this counted the frames that fit before a 400-sample render ended and asked for twenty. How many fit
+       * is the machine's load, not the editor: at below-normal priority beside other sessions' builds the frames are
+       * slow, the card's worker is not, and the render was over after fewer (round 555 saw it fail so). Now the render
+       * cannot end by itself (100,000 samples, as round 412's Stop check renders), exactly twenty frames are stepped
+       * and each must come back with the render still going on the card - a render that held the main thread would
+       * not return from the first - then Stop lands what it had and a short render shows one finishes. What the check
+       * was written for is kept; only the race against the card's speed is gone. The frames' times are a stress row
+       * (round 411). */
+      ed.command("samples 100000");
       ed.command("render");
       ScopedTimer total;
       bool on_card = false;
-      while (!on_card && total.ms() < 20000.0) {  // (the device opens on a worker; the CPU traces meanwhile)
+      while (!on_card && total.ms() < 120000.0) {  // (the device opens on a worker; the CPU traces meanwhile. Round 568: 20 s was a budget a starved or cold card missed; the cap only ends a hang)
         ed.step_frame_headless();
         on_card = ed.render_status_for_test().find("GPU") != std::string::npos && ed.render_status_for_test().find("starting") == std::string::npos;
         if (!ed.rendering_for_test()) ed.command("render");
@@ -1659,28 +1667,39 @@ static void tests_round181() {
       CHECK(on_card);
       for (int i = 0; i < 5 && ed.rendering_for_test(); i++) ed.step_frame_headless();  // (the card settles: its upload and the first merge)
       double worst = 0.0;
-      int frames = 0;
+      int frames = 0, quick = 0;
       std::string times;
-      while (ed.rendering_for_test() && frames < 20 && total.ms() < 30000.0) {
+      for (int i = 0; i < 20; i++) {  // (a fixed count of frames, each with the render still going: no clock decides how many)
         ScopedTimer f;
         ed.step_frame_headless();
-        if (!ed.rendering_for_test()) break;  // (the finishing frame denoises and resolves: not a poll)
+        if (!ed.rendering_for_test()) break;
         worst = std::max(worst, f.ms());
+        quick += f.ms() < 10.0 ? 1 : 0;
         times += strprintf("%.1f ", f.ms());
         frames++;
       }
-      int quick = 0;
-      for (size_t at = 0; at < times.size();) {  // (the frames under 10 ms)
-        const size_t sp = times.find(' ', at);
-        quick += std::atof(times.substr(at, sp - at).c_str()) < 10.0 ? 1 : 0;
-        at = sp == std::string::npos ? times.size() : sp + 1;
-      }
       std::printf("    frames: %s(%d of them under 10 ms; a frame that merges new samples resolves the 1280x720 picture, about 12 ms more)\n", times.c_str(), quick);
-      while (ed.rendering_for_test() && total.ms() < 40000.0) ed.step_frame_headless();
-      std::printf("    %d frames measured, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
+      std::printf("    %d frames stepped with the render going, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
       CHECK(frames == 20);
+      CHECK(ed.rendering_for_test() && ed.render_status_for_test().find("GPU") != std::string::npos);  // (still the card's, twenty frames on)
       std::printf("    quick frames %d of 20, the worst %.1f ms (a stress row since round 411, not a check)\n", quick, worst);
+      /* Stop lands what the card had; then a render short enough to end is waited for, however long the machine takes
+       * (the cap is against a hang, not a budget). */
+      ed.stop_render_for_test();
       CHECK(!ed.rendering_for_test());
+      ScopedTimer stopping;  // (its own timer: the card's opening above may have taken a minute of `total`)
+      while (ed.render_job_running_for_test() && stopping.ms() < 120000.0) ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::printf("    stopped: %s\n", ed.render_status_for_test().c_str());
+      CHECK(!ed.render_job_running_for_test() && ed.render_status_for_test().find("(stopped)") != std::string::npos);
+      ed.command("samples 8");
+      ed.command("render");
+      CHECK(ed.rendering_for_test());
+      ScopedTimer last;
+      int last_frames = 0;
+      for (; ed.rendering_for_test() && last.ms() < 120000.0; last_frames++) ed.step_frame_headless();
+      std::printf("    8 samples: finished in %d frame(s); %s\n", last_frames, ed.render_status_for_test().c_str());
+      CHECK(!ed.rendering_for_test() && last_frames >= 1);
     }
     set_env("BLENDITY_GPU_FAKE_SLOW", "");
     for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -6679,12 +6698,28 @@ static void tests_round543_gpu() {
     /* The row found again before hovering it (the window-status lines above it may change between frames). */
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(find(r));
-    const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
-    ed.set_clock_for_test(300.0);
-    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
-    ed.set_clock_for_test(300.8);
-    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
-    const std::string tip = ed.ui_for_test().tooltip_text_for_test();
+    /* Round 568: with the clock pinned (the two notes above) the tooltip still came back empty once in macOS's whole
+     * suite (#462) and not in the run before it. The clock is no longer in it: a hover's timer starts again when the
+     * row's rectangle changes, and the lines above this row are the window's status, which something still landing
+     * from an earlier test (a device opening, a job ending) can change between the two frames of one hover - that is
+     * the reading, not a proof: the failed run printed only the empty text. So the hover is made again from the row's
+     * rectangle of the moment until the row has held still for one (twenty tries at most), and a try that fails says
+     * where the row was before and after. The check is unchanged: hovering the row says why. */
+    std::string tip;
+    double at = 300.0;
+    for (int attempt = 0; attempt < 20 && tip.empty() && find(r); attempt++, at += 2.0) {
+      const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
+      ed.set_clock_for_test(at);
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+      ed.set_clock_for_test(at + 0.8);
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+      tip = ed.ui_for_test().tooltip_text_for_test();
+      Recti after{};
+      const bool still_there = find(after);
+      if (tip.empty())
+        std::printf("    hover %d at %d %d: no tooltip; the row was at %d %d %dx%d, after the hover %s %d %d %dx%d\n", attempt, hx, hy, r.x, r.y, r.w, r.h, still_there ? "at" : "gone, last", after.x, after.y, after.w,
+                    after.h);
+    }
     std::printf("    the greyed row's tooltip: '%s'\n", tip.c_str());
     /* The spec's wording for a card without ray queries is "This graphics card has no ray tracing (Vulkan ray queries): the
      * views use the shadow map."; with the views on the CPU the code says the views draw on the CPU instead (same keywords). */
@@ -8292,6 +8327,125 @@ static void tests_round521_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 563 (task 0545): a kept draw list stamps the card
+ * stand-ins its items point at as seen, so a view that keeps its list holds them as one that gathers does (review 520's follow-up). */
+namespace r563 {
+
+/* Solid shading of the small avatar, its list kept and its stand-ins made (without a card when `card` is false). */
+static bool open(Editor &ed, bool card) {
+  r34_open(ed, false);
+  ed.command("benchscene avatarlikequick");
+  ed.command("camera 0 1.0 4.5 0 0.9 0");
+  if (card) ed.viewport_device_for_test(2);
+  else ed.skin_items_for_test(true);  // (Solid makes card-skin items without a card, then turns them back for the CPU raster)
+  ed.command("shading solid");
+  ed.mark_changed_for_test("R563 solid");
+  r34_steps(ed, 6);
+  if (!card) return true;
+  gpu::Raster *g = ed.gpu_raster_for_test();
+  if (g && g->can_skin() && ed.scene_on_gpu_for_test()) return true;
+  std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+  return false;
+}
+
+/* One frame that draws the Scene view again with the scene as it is (the camera turned a little: the scene's hash holds). */
+static void draw_again(Editor &ed, int i) {
+  ed.command(strprintf("camera %.4f 1.0 4.5 0 0.9 0", 0.5f * (float)(i % 50 + 1)));
+  r34_steps(ed, 1);
+}
+
+}  // namespace r563
+
+static void tests_round563_gpu() {
+  test("a kept Solid list keeps its stand-ins through 700 gathers of another view (round 563): the list is never made again and no stand-in is let go; before, they aged out after 600", [] {
+    Editor ed;
+    r563::open(ed, false);
+    const size_t stands = ed.skin_stands_for_test(), held = ed.solid_kept_stands_for_test();
+    CHECK(stands > 0 && held > 0);
+    r563::draw_again(ed, 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds, h0 = view_perf::counters.hit[view_perf::SolidItems];
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);  // (the other view's gathers: each counts, none finds these stand-ins)
+    }
+    const uint64_t b1 = view_perf::counters.solid_item_builds, h1 = view_perf::counters.hit[view_perf::SolidItems];
+    std::printf("    70 frames with 700 gathers elsewhere: Solid's list made %llu times, used kept %llu times; stand-ins %zu -> %zu (%zu in the kept list)\n", (unsigned long long)(b1 - b0),
+                (unsigned long long)(h1 - h0), stands, ed.skin_stands_for_test(), ed.solid_kept_stands_for_test());
+    CHECK(h1 - h0 >= 60);  // (the frames drew from the kept list)
+    CHECK(b1 == b0);
+    CHECK(ed.skin_stands_for_test() == stands && ed.solid_kept_stands_for_test() == held);
+    ed.skin_items_for_test(false);
+  });
+
+  test("a kept list that is not drawn still lets its stand-ins go, and is made again before it is read (round 563, a guard: the stamp must not hold them for a view that does not draw): 700 gathers elsewhere with the view still, then a frame", [] {
+    Editor ed;
+    r563::open(ed, false);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    ed.skin_gathers_elsewhere_for_test(700);  // (nothing drew the kept list meanwhile: a closed or still view holds no stand-in)
+    CHECK(ed.skin_stands_for_test() == 0);
+    CHECK(ed.solid_kept_stands_for_test() == 0);  // (the list went with them)
+    r563::draw_again(ed, 0);
+    r34_steps(ed, 2);
+    CHECK(view_perf::counters.solid_item_builds > b0);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    ed.skin_items_for_test(false);
+  });
+
+  test("on the card a kept Solid list's skins are not sent again while another view gathers (round 563), and a stand-in dropped between two frames is drawn from a new one: the same picture (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    if (!r563::open(ed, true)) return;
+    const GameObject *body = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!body && ed.skin_card_mesh_for_test(&g) >= 0) body = &g;
+    });
+    CHECK(body != nullptr);
+    if (!body) return;
+    r563::draw_again(ed, 0);
+    const size_t stands = ed.skin_stands_for_test();
+    const FrameProfile s0 = ed.frame_profile_totals();
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);
+    }
+    const FrameProfile s1 = ed.frame_profile_totals();
+    std::printf("    70 frames with 700 gathers elsewhere: %llu skins sent, Solid's list made %llu times, stand-ins %zu -> %zu\n", (unsigned long long)(s1.skin_uploads - s0.skin_uploads),
+                (unsigned long long)(view_perf::counters.solid_item_builds - b0), stands, ed.skin_stands_for_test());
+    CHECK(s1.skin_uploads == s0.skin_uploads);
+    CHECK(view_perf::counters.solid_item_builds == b0);
+    CHECK(ed.skin_stands_for_test() == stands);
+    CHECK(ed.scene_on_gpu_for_test());
+    /* A stand-in dropped between two frames (every one, as age does): the next frame gathers, sends the skins again and shows the same picture. */
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const Recti view = ed.window_rect_for_test(WindowKind::Scene);
+    const std::vector<uint32_t> before = r34_crop(ed, view);
+    ed.skin_age_stands_for_test();
+    CHECK(ed.skin_stands_for_test() == 0 && ed.solid_kept_stands_for_test() == 0);
+    CHECK(ed.skin_card_mesh_for_test(body) < 0);
+    ed.command("camera 3 1.0 4.5 0 0.9 0");
+    r34_steps(ed, 2);
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const FrameProfile s2 = ed.frame_profile_totals();
+    const std::vector<uint32_t> after = r34_crop(ed, view);
+    size_t differ = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); i++) differ += before[i] != after[i];
+    std::printf("    after the drop: %llu skins sent, stand-ins %zu, %zu of %zu pixels differ\n", (unsigned long long)(s2.skin_uploads - s1.skin_uploads), ed.skin_stands_for_test(), differ, before.size());
+    CHECK(s2.skin_uploads > s1.skin_uploads);
+    CHECK(ed.skin_stands_for_test() == stands && ed.skin_card_mesh_for_test(body) >= 0);
+    CHECK(before.size() == after.size() && differ == 0);
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -8340,4 +8494,5 @@ void run_gpu_tests() {
   tests_round519_more_gpu();
   tests_round520_gpu();
   tests_round521_gpu();
+  tests_round563_gpu();
 }

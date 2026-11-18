@@ -597,6 +597,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   brush_banks_sync();  // (round 540: the backstop - a brush index changed by a path that did not sync; never mid-dab)
+  pick_part_spot_watch();  // (round 571: a selection changed some other way ends a pair of clicks on a window's frame - here, not in the Scene view, so a hidden Scene tab does not keep the pair)
   process_events(events);
   sync_skin_pose_off();  // (round 520: before anything evaluates this frame)
   upload_bytes_frame_ = 0;
