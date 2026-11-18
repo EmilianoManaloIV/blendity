@@ -682,7 +682,8 @@ void tests_round573() {
   });
 
   test("hci: a control reached with Tab in Preferences stays in the dialog, in its place, while a frame's cost crosses the budget - the product no longer jitters there (round 573, task 0555)", [] {
-    /* (Round 569 made the Tab walk's own test run `fps unlimited`, which takes the budget sentence away; this one keeps the cap and crosses the budget on purpose.) */
+    /* (Round 569 had made the Tab walks' own tests run `fps unlimited`, which takes the budget sentence away; with this round's fix they run at the default cap again. This one crosses
+     * the budget on purpose.) */
     Editor ed;
     R573::open(ed);
     int outside = 0, moved = 0;
@@ -1219,10 +1220,9 @@ void run_hci_tests() {
       if (size) ed.set_ui_scale_for_test(1.5f);
       ed.set_guides_for_test(false);
       ed.record_buttons_for_test(true);
-      /* Round 569: no frame cap, so no Over / Within budget sentence re-wraps under the walk (the reason is at round
-       * 509's Preferences walk below; this one failed 3 of 10 hci group runs on Linux under load, a stop "focused out
-       * of sight"). */
-      ed.command("fps unlimited");
+      /* (Round 569 ran this walk with no frame cap, because the Over / Within budget sentence re-wrapped under it - 3 of
+       * 10 hci group runs on Linux under load ended with a stop "focused out of sight". Round 573 fixed the product:
+       * the sentence keeps its rows, so the walk runs at the default cap again.) */
       ed.command("preferences");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
       for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
@@ -1531,15 +1531,14 @@ void run_hci_tests() {
     ed.init_headless(1366, 1000);
     ed.set_guides_for_test(false);
     ed.record_buttons_for_test(true);
-    /* Round 569: no frame cap for this walk. With a cap the dialog's frame rate section says "Over budget ..." or
-     * "Within budget ..." by the last 60 frames' measured cost - sentences of different lengths that wrap to a
-     * different number of lines - so on a machine whose frames straddle the cap's budget (Linux's CPU frames of this
-     * 1366 x 1000 window under load: about 8 ms at the default 120) every control below moves a text line up or down
-     * between frames with no input, and a control Tab had just scrolled to the dialog's bottom edge ended a line below
-     * it: "N steps outside the dialog", in some runs and not others (8 of 8 clean with the cap off under the same load
-     * that failed 2 of 8 with it). Unlimited shows neither sentence. What the walk pins is unchanged; that the rows
-     * move under a focused control at all is the product's, reported to the hub, not this test's to judge by chance. */
-    ed.command("fps unlimited");
+    /* (Round 569 ran this walk with no frame cap. With a cap the dialog's frame rate section says "Over budget ..." or
+     * "Within budget ..." by the last 60 frames' measured cost - sentences that wrapped to a different number of
+     * lines - so on a machine whose frames straddle the cap's budget (Linux's CPU frames of this 1366 x 1000 window
+     * under load: about 8 ms at the default 120) every control below moved a text line up or down between frames with
+     * no input, and a control Tab had just scrolled to the dialog's bottom edge ended a line below it: "N steps outside
+     * the dialog", in 2 of 8 runs. Round 573 fixed the product - the sentence keeps its rows, and a focused control
+     * pushed out of view is brought back - so the walk runs at the default cap again; round 573's own tests cross the
+     * budget on purpose.) */
     ed.command("preferences");
     Kb::settle(ed);
     for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
