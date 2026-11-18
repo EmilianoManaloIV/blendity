@@ -549,10 +549,12 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
     if (game && m) m = lod_for_view(g, *m);  // (round 363: an LOD Group's level for its height on screen; nullptr culled)
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
-    /* (Round 519: a camera's reshaping reads the posed vertices - such a mesh never becomes a card-skin item, nor touches the
-     * stand-ins of the views' own rests.) */
+    /* (Round 519: a camera's reshaping of the vertices - view-angle shape keys, a camera-aligned lattice - reads the posed
+     * vertices: such a mesh never becomes a card-skin item, nor touches the stand-ins of the views' own rests. Round 522: a
+     * Camera Flatten only moves the item's matrix, and the Game view turns the flatten view on for every gather - so it no
+     * longer keeps every skin in the Game view on the CPU, as the timed rows found: 8 MB of posed meshes sent a frame.) */
     const bool card_skin = items_card_skin_;
-    if (view_shaped || flatten_view_.on) items_card_skin_ = false;
+    if (view_shaped) items_card_skin_ = false;
     skin_kind_ = game ? 1 : 0;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
     items_card_skin_ = card_skin;

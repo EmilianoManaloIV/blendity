@@ -2057,6 +2057,17 @@ class Editor {
     outline_view_.on = false;
     return items;
   }
+  /* Round 522: the Game view's gather as a card view makes it - the flatten view on (render_deferred turns it on for every Game
+   * view frame), from `eye` looking at `target` - without a card. The LOD and outline-distance views stay off. */
+  std::vector<DrawItem> collect_game_items_card_for_test(Vec3 eye, Vec3 target) {
+    uint64_t gen = 0;
+    items_card_skin_ = true;
+    set_flatten_view(Mat4::look_at(eye, target, {0, 1, 0}), Mat4::perspective(50.0f * kDeg2Rad, 1.6f, 0.1f, 100.0f), eye, 0, nullptr);
+    std::vector<DrawItem> items = collect_items_ref(true, true, &gen);
+    flatten_view_.on = false;
+    items_card_skin_ = false;
+    return items;
+  }
   /* Round 520: Solid shading's items as a card view gathers them (a posed skin its rest render mesh), without a card. */
   std::vector<DrawItem> solid_items_card_for_test(bool game = false) {
     items_card_skin_ = true;

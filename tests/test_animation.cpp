@@ -15499,6 +15499,56 @@ static void tests_round521() {
   });
 }
 
+/* ---------------------------------------------------------------- round 522 (task 0505): the timed check found every skin in
+ * the Game view posed on the CPU and sent whole (8 MB a frame of the stand-in): the Game view turns the flatten view on for
+ * every gather, and round 519 kept a skin off the card whenever it was on. A Camera Flatten only moves the item's matrix. */
+static void tests_round522() {
+  test("the Game view poses a skinned mesh on the card (round 522): its gather makes card-skin items with the flatten view on, runs no CPU kernel; with a Camera Flatten its item stays a card skin under the flattened matrix, and the CPU fallback a flattened view takes reads the posed mesh under that matrix", [] {
+    Editor ed;
+    r34_open(ed, false);
+    const R469Char c = r469_build(ed.scene(), true, true);
+    for (GameObject *o : {c.body, c.hair, c.glove}) o->add<MeshRenderer>();
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.8f));
+    ed.mark_changed_for_test("R522 setup");
+    r34_steps(ed, 3);
+    auto find = [](const std::vector<DrawItem> &items, const GameObject *g) -> const DrawItem * {
+      for (const DrawItem &it : items)
+        if (it.id == (uint32_t)g->id && !it.always_cull) return &it;
+      return nullptr;
+    };
+    const Mesh *em = c.body->evaluated_mesh(1);
+    CHECK(em && em->skin_pose);
+    if (!em || !em->skin_pose) return;
+    const Vec3 eye(0.0f, 1.0f, 6.0f), target(0.0f, 1.0f, 0.0f);
+    const MeshCounts m0 = mesh_counts();
+    std::vector<DrawItem> items = ed.collect_game_items_card_for_test(eye, target);
+    const MeshCounts d = mesh_counts() - m0;
+    const DrawItem *body = find(items, c.body);
+    std::printf("    the Game view's gather: body a card skin %d, %llu render meshes skinned on the CPU\n", body && body->skin ? 1 : 0, (unsigned long long)d.skinned);
+    CHECK(body && body->skin == em && body->skin_box.valid());
+    CHECK(d.skinned == 0);
+    /* A Camera Flatten on the body: the item's matrix flattened, the item still a card skin in the gather (a view with a flattened
+     * item draws on the CPU - item_unsupported - which turns it back below). */
+    CameraFlatten *cf = c.body->add<CameraFlatten>();
+    cf->amount = 0.6f;
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+    ed.mark_changed_for_test("R522 flatten");
+    r34_steps(ed, 2);
+    const MeshCounts m1 = mesh_counts();
+    items = ed.collect_game_items_card_for_test(eye, target);
+    const MeshCounts d1 = mesh_counts() - m1;
+    body = find(items, c.body);
+    std::printf("    with a Camera Flatten: flattened %d, a card skin %d, %llu skinned on the CPU\n", body && body->flattened ? 1 : 0, body && body->skin ? 1 : 0, (unsigned long long)d1.skinned);
+    CHECK(body && body->flattened && body->skin != nullptr);
+    CHECK(d1.skinned == 0);
+    /* The CPU's reading of that item (a view on the CPU): the posed render mesh under the same flattened matrix. */
+    if (body) {
+      const std::vector<DrawItem> cpu = Editor::skin_items_to_cpu_for_test({*body});
+      CHECK(cpu.size() == 1 && cpu[0].skin == nullptr && cpu[0].flattened && std::memcmp(cpu[0].model.m, body->model.m, 64) == 0);
+    }
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -15548,4 +15598,5 @@ void run_animation_tests() {
   tests_round519_more();
   tests_round520();
   tests_round521();
+  tests_round522();
 }
