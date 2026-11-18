@@ -397,6 +397,21 @@ class Raster {
     if (error) *error = "this device doesn't skin";
     return false;
   }
+  /* Round 521: a skin's rest vertices moved (a shape key's blink), same count and triangles: only `ranges` (each (first, count), from
+   * `v` holding just those vertices one range after another) are written into its rest buffer, and the pass runs again the
+   * next frame with the palette it has. False (nothing changed) when the skin isn't there, a range doesn't fit, or the device can't. */
+  virtual bool update_skin_rest(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &ranges, std::string *error) {
+    (void)mesh, (void)v, (void)ranges;
+    if (error) *error = "this device doesn't skin";
+    return false;
+  }
+  /* Round 521: the same skin's triangles changed with their count held (a quad's diagonal flipped under a shape key): `indices`
+   * is the whole new array, only `ranges` (first, count, in indices) are written. False (nothing changed) when it doesn't fit. */
+  virtual bool update_skin_triangles(int mesh, const std::vector<uint32_t> &indices, const std::vector<std::pair<uint32_t, uint32_t>> &ranges, std::string *error) {
+    (void)mesh, (void)indices, (void)ranges;
+    if (error) *error = "this device doesn't skin";
+    return false;
+  }
   virtual void remove_skin(int mesh) { remove_mesh(mesh); }
   /* Pass 27's hook (ray-traced shadows): extra VkBufferUsageFlags for the posed vertex buffers add_skin makes from now
    * on (the acceleration-structure build input), what a skin's posed buffer was made with, and the skinned meshes whose

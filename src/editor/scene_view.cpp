@@ -618,7 +618,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     const bool replaced = (!game && weight_paint_ && g.id == wp_obj_) || (!game && vertex_paint_ && g.id == vp_obj_);  // (their mesh is the base's, set below: the evaluated render mesh - a posed skin's kernel - is not asked)
     const bool sculpt_held = !game && sculpt_ && g.id == sculpt_obj_;  // (no pose: skin_pose_off)
     if (replaced) it.mesh = nullptr;
-    else if (!(items_card_skin_ && !editing && !sculpt_held && skin_card_item(g, *m, *mr, false, it))) it.mesh = &m->render_mesh(editing);
+    else if (!(items_card_skin_ && !editing && !sculpt_held && skin_card_item(g, *m, false, it))) it.mesh = &m->render_mesh(editing);
     it.model = g.world_matrix();
     const Material &mat0 = *mr->material(0);
     it.albedo = mat0.base_color;

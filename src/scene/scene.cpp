@@ -1897,55 +1897,127 @@ float Outline::outline_distance_scale(float distance, float px_per_m, float worl
   return std::exp(idx * step);
 }
 
+/* The inverted hull of `faces`' surface with `positions`: each vertex pushed out along its area-weighted smoothed normal by
+ * offset x its thickness-group weight (`gw`, null: 1), the faces flipped. */
+static void outline_hull_positions(const Mesh &faces, const std::vector<Vec3> &positions, float offset, const std::vector<float> *gw, std::vector<Vec3> &out) {
+  /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
+  std::vector<Vec3> vn(positions.size(), Vec3(0.0f));
+  for (size_t f = 0; f < faces.face_count(); f++) {
+    const uint32_t *v = faces.face_verts(f);
+    const uint32_t n = faces.face_size(f);
+    Vec3 fn(0.0f);
+    for (uint32_t k = 0; k < n; k++) fn += cross(positions[v[k]], positions[v[(k + 1) % n]]);  // Newell
+    if (!finite_bits(fn.x) || !finite_bits(fn.y) || !finite_bits(fn.z)) continue;
+    for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
+  }
+  out.clear();
+  out.reserve(positions.size());
+  for (size_t i = 0; i < positions.size(); i++) {
+    const float len = length(vn[i]);
+    const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
+    const float w = gw ? clampf(finite_bits((*gw)[i]) ? (*gw)[i] : 0.0f, 0.0f, 1.0f) : 1.0f;
+    out.push_back(positions[i] + d * (offset * w));
+  }
+}
+
+static std::shared_ptr<Mesh> outline_hull(const Mesh &faces, const std::vector<Vec3> &positions, float offset, const std::vector<float> *gw) {
+  auto m = std::make_shared<Mesh>();
+  m->name = "Outline";
+  m->smooth = true;
+  outline_hull_positions(faces, positions, offset, gw, m->positions);
+  std::vector<uint32_t> rev;
+  for (size_t f = 0; f < faces.face_count(); f++) {
+    const uint32_t *v = faces.face_verts(f);
+    const uint32_t n = faces.face_size(f);
+    rev.assign(v, v + n);
+    std::reverse(rev.begin(), rev.end());  // flipped: its outside faces in
+    m->add_face(rev.data(), rev.size());
+  }
+  return m;
+}
+
+/* Round 521 (ADR 0146): the shell of a posed skin is the shell of its *rest*, skinned: built once for a rest, an offset and a
+ * group (a pose never rebuilds it), then one cheap copy a pose that carries the pose's bones and weights - so on the card it is a
+ * skin of its own, and on the CPU its render mesh is the kernel's on the rest shell. Its vertices are the source's one for one
+ * (the binding applies unchanged) and its positions are the posed ones, for whoever reads them. */
+const Mesh *Outline::posed_shell(const Mesh &src, ShellCache &c, float offset) const {
+  const std::shared_ptr<const SkinPose> &pose = src.skin_pose.p;
+  const Mesh &rest = *pose->rest;
+  const bool same_key = c.rest_shell && c.offset == offset && c.group == thickness_group;
+  const bool same_rest = same_key && !c.rest_owner.owner_before(pose->rest) && !pose->rest.owner_before(c.rest_owner) && c.rest_version == rest.version &&
+                         c.rest_deform == rest.deform_version;
+  /* Only the rest's positions moved (a shape key's blink: the topology and the version held): the shell's positions are worked out
+   * again from the new rest and the group's weights read fresh from `src`. The rest's identity and version guard the whole reuse
+   * above - a weight edit touch()es the base mesh, which makes a new rest version. The shell follows in place
+   * - its render mesh follows in place after it, and the card's stand-in takes ranges - instead of the hull being built again. */
+  const bool moved_only = same_key && !same_rest && c.rest_version == rest.version && c.rest_topo == rest.topology_serial() && c.rest_shell->positions.size() == rest.positions.size();
+  const bool same_pose = same_rest && c.mesh && !c.pose.owner_before(pose) && !pose.owner_before(c.pose) && c.pose_version == src.version && c.pose_deform == src.deform_version;
+  if (same_pose) return c.mesh.get();
+  const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
+  const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == rest.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
+  if (moved_only) {
+    c.mesh.reset();  // (its pose held the rest shell: written in place when nothing else does, else a copy that keeps the render caches)
+    const bool alone = c.rest_shell.use_count() == 1;
+    MeshPtr r = c.rest_shell;
+    if (!alone) {  // (a render job's shell still reads its caches under the old lock: copied under it - a Mesh copy runs no parallel loop)
+      std::lock_guard<std::mutex> old(*c.rest_lock);
+      r = std::make_shared<Mesh>(*c.rest_shell);
+    }
+    std::shared_ptr<std::mutex> lock = alone ? c.rest_lock : std::make_shared<std::mutex>();
+    {
+      std::lock_guard<std::mutex> guard(*lock);
+      outline_hull_positions(rest, rest.positions, offset, gw, r->positions);
+      r->deform_version++;
+    }
+    c.rest_shell = r, c.rest_lock = lock;
+    c.rest_owner = pose->rest, c.rest_deform = rest.deform_version;
+  }
+  else if (!same_rest) {
+    BL_ZONE("outline shell");
+    PoseTimer timer(PoseStat::OutlineShell);  // (round 468: shells built, not the cache hits)
+    c.rest_shell = outline_hull(rest, rest.positions, offset, gw);
+    c.rest_lock = std::make_shared<std::mutex>();
+    c.rest_owner = pose->rest, c.rest_version = rest.version, c.rest_deform = rest.deform_version;
+    c.rest_topo = rest.topology_serial();
+    c.offset = offset;
+    c.group = thickness_group;
+  }
+  /* The rest shell's faces and positions, bare (no caches, no pose: a copy that is posed below), then its posed positions. */
+  std::shared_ptr<Mesh> m;
+  {
+    MeshCopyBare bare;
+    m = std::make_shared<Mesh>(*c.rest_shell);
+  }
+  auto sp = std::make_shared<SkinPose>(*pose);
+  sp->rest = c.rest_shell;
+  sp->rest_lock = c.rest_lock;
+  sp->for_version = m->version, sp->for_deform = m->deform_version;
+  skin_pose_positions(*sp, m->positions);
+  m->skin_pose = std::move(sp);
+  c.mesh = m;
+  c.serial = 0;
+  c.pose = pose;
+  c.pose_version = src.version, c.pose_deform = src.deform_version;
+  return c.mesh.get();
+}
+
 const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float thickness_scale) const {
   const float s = world_space ? (finite_bits(world_scale) && world_scale > 1e-6f ? world_scale : 1.0f) : 1.0f;
   const float offset = thickness / s * (finite_bits(thickness_scale) && thickness_scale > 0.0f ? thickness_scale : 1.0f);
   if (!(offset > 0.0f) || !finite_bits(offset) || src.face_count() == 0) return nullptr;
   ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
-  /* The shell reads only the source's positions and faces, so a posed skin (round 519) is keyed by its pose: the same pose
-   * object (an expired one never matches a new one at its address) and the versions it holds for. */
-  const std::shared_ptr<const SkinPose> &pose = src.skin_pose.p;
-  const bool posed = pose && src.skin_pose_holds();
-  const uint64_t serial = posed ? 0 : src.render_mesh().serial;  // unique per build of the source (not a reused address)
-  const bool same_pose = posed && !c.pose.owner_before(pose) && !pose.owner_before(c.pose) && c.pose_version == src.version && c.pose_deform == src.deform_version;
-  if (c.mesh && (same_pose || (serial != 0 && serial == c.serial)) && offset == c.offset && c.group == thickness_group) return c.mesh.get();
+  /* A posed skin (round 521) has the shell of its rest, skinned; anything else the hull of its own positions. */
+  if (src.skin_pose && src.skin_pose_holds()) return posed_shell(src, c, offset);
+  const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
+  if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset && c.group == thickness_group) return c.mesh.get();
   BL_ZONE("outline shell");
   PoseTimer timer(PoseStat::OutlineShell);  // (round 468: shells built, not the cache hits above)
   /* The per-vertex width (task 0149): the thickness group's weight, 1 without one (or one the mesh hasn't). */
   const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
   const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == src.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
-  /* Smoothed normals: each vertex's faces' area-weighted normals, so the shell stays closed at hard edges. */
-  std::vector<Vec3> vn(src.positions.size(), Vec3(0.0f));
-  for (size_t f = 0; f < src.face_count(); f++) {
-    const uint32_t *v = src.face_verts(f);
-    const uint32_t n = src.face_size(f);
-    Vec3 fn(0.0f);
-    for (uint32_t k = 0; k < n; k++) fn += cross(src.positions[v[k]], src.positions[v[(k + 1) % n]]);  // Newell
-    if (!finite_bits(fn.x) || !finite_bits(fn.y) || !finite_bits(fn.z)) continue;
-    for (uint32_t k = 0; k < n; k++) vn[v[k]] += fn;
-  }
-  auto m = std::make_shared<Mesh>();
-  m->name = "Outline";
-  m->smooth = true;
-  m->positions.reserve(src.positions.size());
-  for (size_t i = 0; i < src.positions.size(); i++) {
-    const float len = length(vn[i]);
-    const Vec3 d = len > 1e-20f && finite_bits(len) ? vn[i] / len : Vec3(0.0f);
-    const float w = gw ? clampf(finite_bits((*gw)[i]) ? (*gw)[i] : 0.0f, 0.0f, 1.0f) : 1.0f;
-    m->positions.push_back(src.positions[i] + d * (offset * w));
-  }
-  std::vector<uint32_t> rev;
-  for (size_t f = 0; f < src.face_count(); f++) {
-    const uint32_t *v = src.face_verts(f);
-    const uint32_t n = src.face_size(f);
-    rev.assign(v, v + n);
-    std::reverse(rev.begin(), rev.end());  // flipped: its outside faces in
-    m->add_face(rev.data(), rev.size());
-  }
-  c.mesh = m;
+  c.mesh = outline_hull(src, src.positions, offset, gw);
   c.serial = serial;
-  c.pose = posed ? pose : std::shared_ptr<const SkinPose>();
-  c.pose_version = src.version, c.pose_deform = src.deform_version;
+  c.pose.reset(), c.rest_shell.reset(), c.rest_lock.reset(), c.rest_owner.reset();
   c.offset = offset;
   c.group = thickness_group;
   return c.mesh.get();

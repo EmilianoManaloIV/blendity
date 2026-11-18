@@ -879,6 +879,8 @@ std::string Editor::perf_status_text() const {
   /* Round 519 (ADR 0146): the card's skins this frame, and why a skinned mesh was left to the CPU. */
   s += strprintf("; skins on the card: %llu (palettes sent %llu, sent to the card %llu), posed on the CPU %llu", (unsigned long long)p.skin_items,
                  (unsigned long long)p.skin_palettes, (unsigned long long)p.skin_uploads, (unsigned long long)p.skin_cpu);
+  if (p.skin_rest_updates)
+    s += strprintf(" (rest updates %llu: %llu ranges, %llu vertices)", (unsigned long long)p.skin_rest_updates, (unsigned long long)p.skin_rest_ranges, (unsigned long long)p.skin_rest_vertices);
   if (!skin_reason_.empty()) s += " (last: " + skin_reason_ + ")";
   return s;
 }
@@ -939,7 +941,8 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies},
       {"render meshes skinned", (double)mc.skinned},
       {"skins on the card", (double)p.skin_items}, {"palettes sent", (double)p.skin_palettes},  // (round 519, ADR 0146)
-      {"skins sent to the card", (double)p.skin_uploads}, {"skins posed on the CPU", (double)p.skin_cpu}};
+      {"skins sent to the card", (double)p.skin_uploads}, {"skins posed on the CPU", (double)p.skin_cpu},
+      {"skin rest updates", (double)p.skin_rest_updates}, {"skin rest ranges sent", (double)p.skin_rest_ranges}, {"skin rest vertices sent", (double)p.skin_rest_vertices}, {"skin triangle ranges sent", (double)p.skin_rest_tris}};
 }
 
 std::string Editor::posing_counts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames) {

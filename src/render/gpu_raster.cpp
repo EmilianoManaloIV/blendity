@@ -3516,6 +3516,38 @@ class VulkanRaster final : public Raster {
     return true;
   }
 
+  bool update_skin_rest(int mesh, const std::vector<RasterVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> &ranges, std::string *err) override {
+    const auto it = skins_.find(mesh);
+    if (it == skins_.end()) return fail(err, "no such skin");
+    Skin &s = it->second;
+    size_t nv = 0;
+    for (const auto &r : ranges) {
+      if ((uint64_t)r.first + r.second > s.verts) return fail(err, "a vertex range past the skin");
+      nv += r.second;
+    }
+    if (nv != v.size()) return fail(err, "vertices for other ranges");
+    if (!nv) return true;
+    size_t from = 0;  // (the vertices come one range after another; copied before the frame's passes, with the barrier of uploaded())
+    for (const auto &r : ranges) {
+      queue_copy(s.rest.buf, v.data() + from, (size_t)r.first * sizeof(RasterVertex), (size_t)r.second * sizeof(RasterVertex));
+      from += r.second;
+    }
+    s.dirty = true;  // (the posed buffer is written again from the new rest)
+    return true;
+  }
+
+  bool update_skin_triangles(int mesh, const std::vector<uint32_t> &idx, const std::vector<std::pair<uint32_t, uint32_t>> &ranges, std::string *err) override {
+    if (!skins_.count(mesh) || mesh < 0 || mesh >= (int)meshes_.size() || !meshes_[(size_t)mesh].live) return fail(err, "no such skin");
+    Mesh &m = meshes_[(size_t)mesh];
+    if (idx.size() != m.indices) return fail(err, "a skin of another size");
+    for (const auto &r : ranges)
+      if ((uint64_t)r.first + r.second > idx.size()) return fail(err, "an index range past the skin");
+    if (ranges.empty()) return true;
+    for (const auto &r : ranges) queue_copy(m.ib.buf, idx.data() + r.first, (size_t)r.first * 4, (size_t)r.second * 4);
+    m.rt_content = ++rt_content_serial_;  // (the traced shadows' bottom level reads the triangles too)
+    return true;
+  }
+
   /* Before the frame's first pass: the pass for each skin whose palette changed, then one barrier (shader write -> the
    * vertex fetches and everything after it). A second view of the frame finds nothing dirty. */
   void record_skins() {

@@ -259,6 +259,8 @@ struct FrameProfile {
   /* Round 519 (ADR 0146): skinned meshes the card poses - drawn from the card's, palettes sent (a changed one), skins sent
    * to the card (their rest vertices and weights, once), and skinned meshes that were posed on the CPU instead. */
   uint64_t skin_items = 0, skin_palettes = 0, skin_uploads = 0, skin_cpu = 0;
+  /* Round 521: a skin's rest moved by shape keys - the updates sent (ranges of vertices, not the skin again), their ranges and vertices. */
+  uint64_t skin_rest_updates = 0, skin_rest_ranges = 0, skin_rest_vertices = 0, skin_rest_tris = 0;  // (tris: index ranges, a quad's diagonal that flipped)
   uint64_t gpu_mesh_partial = 0, gpu_partial_bytes = 0;  // task 0099: updates that sent only what moved, and their bytes
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
@@ -312,6 +314,7 @@ struct FrameProfile {
     ms_gpu_instances += o.ms_gpu_instances, ms_gpu_corners += o.ms_gpu_corners, ms_gpu_see += o.ms_gpu_see, ms_gpu_render += o.ms_gpu_render;
     gpu_upload_bytes += o.gpu_upload_bytes;
     skin_items += o.skin_items, skin_palettes += o.skin_palettes, skin_uploads += o.skin_uploads, skin_cpu += o.skin_cpu;
+    skin_rest_updates += o.skin_rest_updates, skin_rest_ranges += o.skin_rest_ranges, skin_rest_vertices += o.skin_rest_vertices, skin_rest_tris += o.skin_rest_tris;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
     gpu_texture_uploads += o.gpu_texture_uploads;
@@ -1928,10 +1931,41 @@ class Editor {
     if (s == skin_stands_.end()) return "no stand-ins";
     for (const auto &st : s->second.slots) {
       const auto e = st->mesh ? gpu_meshes_.find(st->mesh.get()) : gpu_meshes_.end();
-      out += strprintf("[kind %d seen %llu moving %d rest %llu card %d] ", st->kind, (unsigned long long)st->seen, st->moving, (unsigned long long)st->rest_serial,
+      out += strprintf("[kind %d seen %llu moving %d moved %zu loose %d rest %llu card %d] ", st->kind, (unsigned long long)st->seen, st->moving, st->moved.size(), st->boxes_loose, (unsigned long long)st->rest_serial,
                        e != gpu_meshes_.end() ? e->second.id : -1);
     }
     return out + strprintf("(gather %llu)", (unsigned long long)skin_builds_);
+  }
+  /* Round 521: what the stand-in of `kind` (0 the Scene view's body, 2 its outline shell) holds for the card since it was last sent a rest:
+   * the moved ranges, their vertices and the stand-in's render vertices. False without that stand-in. */
+  bool skin_moved_for_test(const GameObject *g, int kind, size_t &ranges, size_t &vertices, size_t &total) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return false;
+    for (const auto &st : s->second.slots) {
+      if (st->kind != kind || !st->mesh) continue;
+      ranges = st->moved.size(), vertices = 0, total = st->mesh->positions.size();
+      for (const auto &rg : st->moved) vertices += rg.second;
+      return true;
+    }
+    return false;
+  }
+  /* Round 521 (review): the stand-in of `kind`'s weights (what the card's skin was made with), and the card mesh id it is drawn from (-1: none). */
+  const gpu::SkinWeights *skin_weights_for_test(const GameObject *g, int kind) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return nullptr;
+    for (const auto &st : s->second.slots)
+      if (st->kind == kind && st->mesh) return &st->weights;
+    return nullptr;
+  }
+  int skin_card_id_for_test(const GameObject *g, int kind) const {
+    const auto s = skin_stands_.find((uint32_t)g->id);
+    if (s == skin_stands_.end()) return -1;
+    for (const auto &st : s->second.slots) {
+      if (st->kind != kind || !st->mesh) continue;
+      const auto e = gpu_meshes_.find(st->mesh.get());
+      return e != gpu_meshes_.end() ? e->second.id : -1;
+    }
+    return -1;
   }
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
@@ -2037,6 +2071,7 @@ class Editor {
   const std::string &skin_reason_for_test() const { return skin_reason_; }
   void skin_items_for_test(bool on) { skin_items_for_test_ = on; }
   void skin_cards_off_for_test(bool off) { skin_cards_off_for_test_ = off; }
+  void skin_ranges_off_for_test(bool off) { skin_ranges_off_for_test_ = off; }
   /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
    * asset path and the layer, or -1. */
   std::pair<std::string, int> texture_upto_for_test() const { return texture_upto_; }
@@ -2475,13 +2510,21 @@ class Editor {
     int moving = 0;                                  // gathers left before a rest that moved (shape keys) goes back to the card
     int kind = 0;                                    // the view kind that made it (0 the Scene view, 1 the Game view and renders)
     uint64_t rest_hash = 0;                          // what the last rest seen held (a copy of the same rest is not a move)
+    /* Round 521: a rest whose vertices moved with the topology held (a blink): the render vertices that changed since the card last
+     * got the skin (ranges, first and count, sorted and joined), sent by gpu_skin_mesh as update_skin_rest; the bone boxes grown to
+     * hold them until the rest has held still (boxes_loose gathers) and they are made whole again. */
+    std::vector<std::pair<uint32_t, uint32_t>> moved;
+    bool tris_changed = false;                       // ... and its triangles (a diagonal flipped, same count): the card's indices are written in ranges too
+    std::vector<uint32_t> card_idx;                  // the indices the card holds for it (as card_indices made them), to find those ranges
+    int boxes_loose = 0;
+    const void *ranges_refused = nullptr;            // the card that said no to update_skin_rest: the CPU poses a rest that moves there
   };
   /* By object id, a stand-in a rest it is drawn from (review 519: the Scene and Game views each pose their own rest when a
    * modifier runs before the Skin; views that share a rest share its stand-in and its skin on the card). */
   struct SkinStands {
     std::vector<std::unique_ptr<SkinStand>> slots;
   };
-  static constexpr size_t kSkinStandsAnObject = 3;
+  static constexpr size_t kSkinStandsAnObject = 6;  // (round 521: the outline shells have their own: the Scene and Game views' body and shell, each rest)
   static constexpr int kSkinRestStill = 3;            // gathers a moved rest must hold still for before it goes back to the card
   std::unordered_map<uint32_t, SkinStands> skin_stands_;
   SkinStand &skin_stand_for(const GameObject &g, const std::shared_ptr<const Mesh> &rest, int kind);
@@ -2489,13 +2532,15 @@ class Editor {
   bool skin_settling_ = false;                        // this gather left a moved rest on the CPU: the list isn't kept (it counts gathers)
   SkinStand *skin_stand_of(const DrawItem &it);
   void skin_drop_card(SkinStand &st);
+  void skin_rest_moved(SkinStand &st, const RenderMesh &r, const SkinPose &sp);
   bool items_card_skin_ = false;                      // collect_items_build makes card-skin items (set by render_deferred's gather alone)
+  bool skin_ranges_off_for_test_ = false;             // a test: a rest that moves is posed on the CPU, as for a card that refuses update_skin_rest (round 519's behaviour)
   bool skin_cards_off_for_test_ = false;              // a test: skinning stays on the CPU
   bool skin_items_for_test_ = false;                  // a test: card-skin items are made without a card (to read them)
   uint64_t skin_builds_ = 0;
   std::string skin_reason_;                           // why the last skinned mesh left the card (the Profiler lists it)
   bool skin_on_card_wanted() const;
-  bool skin_card_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, DrawItem &it);
+  bool skin_card_item(const GameObject &g, const Mesh &m, bool want_tangents, DrawItem &it);
   void skin_prune_stands();
   int gpu_skin_mesh(const DrawItem &it, std::string &err);
   bool skin_item_card_ok(const DrawItem &it) const;

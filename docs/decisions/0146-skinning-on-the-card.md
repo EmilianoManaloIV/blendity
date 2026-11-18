@@ -76,6 +76,18 @@ MoonRay pose the render mesh at their snapshot on the main thread (once per pose
 posing if it shows in F12's first frame); otherwise they stay as written here. The user sees this amendment in round
 520's PR.
 
+## Amended (round 521, task 0504): a posed skin's outline
+Point 4's "same rule" extends to toon outlines (ADR 0020's inverted hull). The outline of a posed skin is the hull of the
+pose's *rest* - pushed along the rest's smoothed normals by the thickness (and the thickness group's widths) - posed by the
+same bones and weights as the body, on the CPU (round 518's kernel) and on the card (a skin of its own, the body's palette).
+It is built once per rest, thickness and distance step, not once per pose. It differs from the hull of the posed mesh only
+where bones blend: the push is turned by the blend instead of being worked out again from the posed faces (a linear blend
+shortens it, a dual quaternion keeps its length and tilts it). Measured on the posing stand-in: up to 44 % of the thickness
+apart from the old hull (the test tube's blended body 21 %), parts on one bone exact. The card and the CPU agree with each
+other (the card against the kernel within 1e-5 of the diagonal), so it is not on ADR 0108's per-view list; the Learn lesson
+says it. Shape keys under the skin go up as vertex (and index) ranges of the rest (`update_skin_rest`,
+`update_skin_triangles`); the CPU fallback stays for a card that refuses them and a rest whose UVs change at a vertex.
+
 ## Consequences
 - A posed frame on the card sends palettes, not meshes; the frame's CPU part is the pose. The rows Pass 22 left over
   16.7 ms are expected to come under it alone; in the world, two-view rows may stay held by the views' shared

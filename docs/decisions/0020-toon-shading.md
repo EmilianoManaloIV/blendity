@@ -31,6 +31,9 @@ path-traced renders, as camera filters did before task 0032.
   shows in F12 too; exports add the shell as another object. Screen-space line art is a separate filter
   (task 0039).
 
+**Later (ADR 0146, round 521):** a posed skinned mesh's hull is the rest's hull posed by the skin's bones (built once per
+rest and thickness, not per pose), on the CPU and on the card - see ADR 0146's "Amended (round 521)".
+
 ## Consequences
 - Every renderer shows the same toon look; F12 traces of a toon character match the viewport's bands.
 - A material's `reflect()` grows by a foldout; the GPU material pack grows by 48 bytes a material.

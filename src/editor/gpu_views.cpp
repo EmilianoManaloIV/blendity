@@ -1187,7 +1187,54 @@ int Editor::gpu_skin_mesh(const DrawItem &it, std::string &err) {
   mesh_deferred_now_ = false;
   const bool tangents = !rm.tangents.empty();
   bool fresh = false;
+  /* Round 521: the stand-in's rest moved (shape keys) with its triangles held: the card's skin takes the vertices that changed
+   * in ranges, and the pass runs again from them; a card that says no gets the skin whole once, and the CPU poses a rest that moves. */
+  if (e.id >= 0 && rm.serial != 0 && e.serial != rm.serial && e.tangents == tangents && e.vertices == rm.positions.size() && (!st.moved.empty() || st.tris_changed)) {
+    std::vector<gpu::RasterVertex> sent_v;
+    uint32_t count = 0;
+    for (const auto &rg : st.moved) count += rg.second;
+    sent_v.reserve(count);
+    for (const auto &rg : st.moved)
+      for (uint32_t i = rg.first; i < rg.first + rg.second && i < rm.positions.size(); i++) sent_v.push_back(raster_vertex(rm, i));
+    std::string rerr;
+    /* A quad whose diagonal flipped: the card's indices change where they differ from what it holds (same count, same material groups). */
+    std::vector<uint32_t> idx;
+    std::vector<std::pair<uint32_t, uint32_t>> idx_ranges;
+    bool tris_ok = true;
+    if (st.tris_changed) {
+      std::vector<std::array<uint32_t, 3>> parts;
+      idx = card_indices(rm, parts);
+      tris_ok = idx.size() == st.card_idx.size() && idx.size() == (size_t)e.indices;
+      for (size_t i = 0; tris_ok && i < idx.size(); i++) {
+        if (idx[i] == st.card_idx[i]) continue;
+        const uint32_t tri = (uint32_t)(i / 3) * 3;  // (whole triangles)
+        if (!idx_ranges.empty() && tri < idx_ranges.back().first + idx_ranges.back().second) continue;
+        if (!idx_ranges.empty() && tri == idx_ranges.back().first + idx_ranges.back().second) idx_ranges.back().second += 3;
+        else idx_ranges.push_back({tri, 3u});
+        i = (size_t)tri + 2;
+      }
+    }
+    bool sent_ok = false;
+    if (tris_ok && sent_v.size() == count) {
+      sent_ok = gpu_view_->update_skin_rest(e.id, sent_v, st.moved, &rerr) && (!st.tris_changed || gpu_view_->update_skin_triangles(e.id, idx, idx_ranges, &rerr));
+      if (!sent_ok) st.ranges_refused = gpu_view_.get();  // (the card said no: a rest that moves is posed on the CPU there)
+    }
+    if (sent_ok) {
+      if (st.tris_changed) st.card_idx = idx, prof_.skin_rest_tris += idx_ranges.size();
+      st.tris_changed = false;
+      const uint64_t bytes = (uint64_t)sent_v.size() * sizeof(gpu::RasterVertex);
+      prof_.gpu_upload_bytes += bytes;
+      mesh_bytes_frame_ += (size_t)bytes;
+      mesh_bytes_frame_max_ = std::max(mesh_bytes_frame_max_, mesh_bytes_frame_);
+      prof_.skin_rest_updates++;
+      prof_.skin_rest_ranges += st.moved.size();
+      prof_.skin_rest_vertices += sent_v.size();
+      e.serial = rm.serial;
+      st.moved.clear();
+    }
+  }
   if (!(e.id >= 0 && rm.serial != 0 && e.serial == rm.serial && e.tangents == tangents)) {
+    st.moved.clear();  // (the whole skin goes up: nothing is left to send in ranges)
     if (st.refused_card == gpu_view_.get() && st.refused_serial == rm.serial) {
       err = "the card couldn't hold this skin";
       return -1;
@@ -1201,6 +1248,8 @@ int Editor::gpu_skin_mesh(const DrawItem &it, std::string &err) {
       gpu_mesh_bytes_ -= std::min(gpu_mesh_bytes_, e.bytes);
       e.id = -1;
     }
+    st.card_idx = indices;  // (what the card holds, to write the triangles that change under a shape key in ranges)
+    st.tris_changed = false;
     e.id = gpu_view_->add_skin(v, indices, st.weights, &err);
     if (e.id < 0) {
       st.refused_card = gpu_view_.get(), st.refused_serial = rm.serial;

@@ -589,7 +589,7 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
 /* A mesh's draw item as every view builds it (the import preview too, task 0152). */
 DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing) {
   DrawItem it;
-  if (!(items_card_skin_ && !editing && skin_card_item(g, m, mr, want_tangents && needs_tangents(mr.materials), it)))  // (round 519: a skinned mesh the card poses is not given its posed render mesh)
+  if (!(items_card_skin_ && !editing && skin_card_item(g, m, want_tangents && needs_tangents(mr.materials), it)))  // (round 519: a skinned mesh the card poses is not given its posed render mesh)
     it.mesh = want_tangents && needs_tangents(mr.materials) ? &m.render_mesh_tangents(editing) : &m.render_mesh(editing);
   it.model = g.world_matrix();
   const Material &mat0 = *mr.material(0);
@@ -621,7 +621,14 @@ bool Editor::outline_draw_item(const GameObject &g, const Mesh &m, const DrawIte
   if (!shell) return false;
   if (collect_hold_) collect_hold_->push_back(ol.shell_held(shell));  // (round 412: a render job keeps the shell while it draws)
   o = DrawItem();
-  o.mesh = &shell->render_mesh();
+  /* Round 521: the shell of a posed skin is a skin of its own (the rest's shell, the body's bones): a card view gets its stand-in and
+   * palette, the CPU its render mesh posed once, lazily - the shell is never built again for a pose. Its stand-ins are the views' kinds
+   * 2 and 3, apart from the body's. */
+  const int kind = skin_kind_;
+  skin_kind_ = kind + 2;
+  const bool on_card = items_card_skin_ && it.skin && shell->skin_pose && skin_card_item(g, *shell, false, o);
+  skin_kind_ = kind;
+  if (!on_card) o.mesh = &shell->render_mesh();
   o.model = it.model;
   o.albedo = ol.materials()[0]->base_color;  // (NaN-free)
   o.unlit = true;

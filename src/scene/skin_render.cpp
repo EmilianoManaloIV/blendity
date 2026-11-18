@@ -197,34 +197,55 @@ void skin_card_palette(const SkinPose &pose, std::vector<float> &out) {
   }
 }
 
+namespace {
+/* One rest render vertex into the boxes (skin_bone_boxes, skin_bone_boxes_grow). */
+void box_add_vertex(const SkinPose &pose, const gpu::SkinWeights &w, size_t r, Vec3 p, SkinBoneBoxes &out) {
+  if (!finite3(p) || r >= w.count.size()) return;
+  const size_t slots = w.slots;
+  out.rest.add(p);
+  const size_t n = w.count[r];
+  if (!n) {
+    out.still.add(p);
+    return;
+  }
+  const Vec3 pc = pose.owner.point(p);
+  out.bound_rest.add(p);
+  out.many = out.many || n >= 3;
+  for (size_t k = 0; k < n; k++) {
+    const size_t bone = w.bone[r * slots + k];
+    if (bone >= out.bone.size()) continue;
+    out.bone[bone].add(pc);
+    if (n > 1) out.shared.resize(out.bone.size());
+    for (size_t j = 0; j < n && n > 1; j++) {
+      const uint32_t other = w.bone[r * slots + j];
+      std::vector<uint32_t> &s = out.shared[bone];
+      if (j != k && other < out.bone.size() && std::find(s.begin(), s.end(), other) == s.end()) s.push_back(other);  // (a bone's neighbours are few)
+    }
+  }
+}
+}  // namespace
+
 void skin_bone_boxes(const SkinPose &pose, const std::vector<Vec3> &rest_positions, const gpu::SkinWeights &w, SkinBoneBoxes &out) {
   out = SkinBoneBoxes{};
   out.bone.assign(pose.mats.size(), AABB());
-  const size_t slots = w.slots;
-  for (size_t r = 0; r < rest_positions.size() && r < w.count.size(); r++) {
-    const Vec3 p = rest_positions[r];
-    if (!finite3(p)) continue;
-    out.rest.add(p);
-    const size_t n = w.count[r];
-    if (!n) {
-      out.still.add(p);
-      continue;
+  for (size_t r = 0; r < rest_positions.size() && r < w.count.size(); r++) box_add_vertex(pose, w, r, rest_positions[r], out);
+}
+
+void skin_bone_boxes_grow(const SkinPose &pose, const std::vector<Vec3> &rest_positions, const gpu::SkinWeights &w,
+                          const std::vector<std::pair<uint32_t, uint32_t>> &ranges, SkinBoneBoxes &out) {
+  if (out.bone.size() != pose.mats.size()) out.bone.resize(pose.mats.size());
+  for (const auto &rg : ranges)
+    for (size_t r = rg.first; r < (size_t)rg.first + rg.second && r < rest_positions.size(); r++) box_add_vertex(pose, w, r, rest_positions[r], out);
+}
+
+void skin_pose_positions(const SkinPose &pose, std::vector<Vec3> &positions) {
+  JobSystem::global().parallel_for((int64_t)positions.size(), 1024, [&](int64_t b, int64_t e) {
+    for (int64_t v = b; v < e; v++) {
+      SkinBlend blend;
+      Vec3 out;
+      if (skin_blend_point(pose, (size_t)v, positions[(size_t)v], out, blend) && finite3(out)) positions[(size_t)v] = out;  // (no bone, a degenerate turn: stays at rest)
     }
-    const Vec3 pc = pose.owner.point(p);
-    out.bound_rest.add(p);
-    out.many = out.many || n >= 3;
-    for (size_t k = 0; k < n; k++) {
-      const size_t bone = w.bone[r * slots + k];
-      if (bone >= out.bone.size()) continue;
-      out.bone[bone].add(pc);
-      if (n > 1) out.shared.resize(out.bone.size());
-      for (size_t j = 0; j < n && n > 1; j++) {
-        const uint32_t other = w.bone[r * slots + j];
-        std::vector<uint32_t> &s = out.shared[bone];
-        if (j != k && other < out.bone.size() && std::find(s.begin(), s.end(), other) == s.end()) s.push_back(other);  // (a bone's neighbours are few)
-      }
-    }
-  }
+  });
 }
 
 namespace {

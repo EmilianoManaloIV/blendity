@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bl {
@@ -121,6 +122,13 @@ struct SkinBoneBoxes {
   bool many = false; // a vertex on three bones or more (see skin_posed_bounds)
 };
 void skin_bone_boxes(const SkinPose &pose, const std::vector<Vec3> &rest_positions, const gpu::SkinWeights &w, SkinBoneBoxes &out);
+/* Round 521: the boxes grown to hold rest render vertices that moved (`ranges`: (first, count) in `rest_positions`, a shape key's
+ * blink): a box never shrinks here, so it holds the old and the new places until it is made whole again. */
+void skin_bone_boxes_grow(const SkinPose &pose, const std::vector<Vec3> &rest_positions, const gpu::SkinWeights &w,
+                          const std::vector<std::pair<uint32_t, uint32_t>> &ranges, SkinBoneBoxes &out);
+/* Round 521: `positions` (a skin's rest vertices, in the mesh's space) posed in place by the same blend as the deform's - the positions of
+ * an outline shell, which is the rest's shell skinned. */
+void skin_pose_positions(const SkinPose &pose, std::vector<Vec3> &positions);
 /* A box (the mesh's space) holding every posed vertex: each bone's box moved by its matrix - a linear blend is a weighted
  * mean of the moved positions, so it lies in the hull of the moved boxes - plus the still ones. A dual quaternion blend is
  * a rigid motion, not a mean: about a box's centre c it is R (v - c) + T(c), so a vertex lies within 2 r (the box's half

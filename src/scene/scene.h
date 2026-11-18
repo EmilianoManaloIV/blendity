@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -688,11 +689,16 @@ struct Outline : ComponentBase<Outline> {
     uint64_t serial = 0;
     float offset = -1.0f;
     std::string group;  // the thickness group it was built with (task 0149)
-    /* A posed skin's source (round 519): keyed by its pose and the versions it was stamped for, not by its render mesh's
-     * serial - asking a posed mesh for its render mesh runs the CPU skin kernel, which the card spares. */
+    /* A posed skin's source (round 521): the shell of its rest (rest_shell, built for this rest at these versions, offset and
+     * group) and the copy of it posed by this pose, which `mesh` is - keyed by the pose and the versions it was stamped for. */
     std::weak_ptr<const SkinPose> pose;
     uint64_t pose_version = 0, pose_deform = 0;
+    MeshPtr rest_shell;
+    std::shared_ptr<std::mutex> rest_lock;  // (SkinPose::rest_lock of the poses made from rest_shell)
+    std::weak_ptr<const Mesh> rest_owner;
+    uint64_t rest_version = 0, rest_deform = 0, rest_topo = 0;
   };
+  const Mesh *posed_shell(const Mesh &src, ShellCache &c, float offset) const;
   mutable ShellCache shells_[kShellSlots];
   mutable std::vector<MaterialPtr> mats_;
   mutable Vec3 mats_color_{-1.0f, -1.0f, -1.0f};

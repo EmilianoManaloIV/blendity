@@ -7,6 +7,9 @@
 #include "../core/hash.h"
 #include "../core/jobs.h"
 
+#include <algorithm>
+#include <cstring>
+
 namespace bl {
 
 namespace {
@@ -94,6 +97,7 @@ Editor::SkinStand *Editor::skin_stand_of(const DrawItem &it) {
 /* The card's copy of a stand-in let go: it goes up again, from the stand-in as it is now, the next time it is drawn. */
 void Editor::skin_drop_card(SkinStand &st) {
   st.sent.clear(), st.sent_mesh = -1;
+  st.moved.clear(), st.card_idx.clear(), st.tris_changed = false;
   if (!st.mesh) return;
   const auto e = gpu_meshes_.find(st.mesh.get());
   if (e == gpu_meshes_.end()) return;
@@ -103,12 +107,45 @@ void Editor::skin_drop_card(SkinStand &st) {
   card_ids_gen_++;
 }
 
+/* Round 521: a stand-in's rest moved with its triangles held: the render vertices that differ from the stand-in's are joined into
+ * ranges (a gap of a few vertices is sent whole rather than as two ranges) and kept for the card, the stand-in takes the new
+ * rest, and the bone boxes grow to hold the vertices that moved. */
+void Editor::skin_rest_moved(SkinStand &st, const RenderMesh &r, const SkinPose &sp) {
+  const RenderMesh &old = *st.mesh;
+  const bool tan = !r.tangents.empty() && r.tangents.size() == old.tangents.size();
+  std::vector<std::pair<uint32_t, uint32_t>> now;
+  constexpr uint32_t kGap = 8;
+  for (uint32_t i = 0; i < (uint32_t)r.positions.size(); i++) {
+    const bool same = std::memcmp(&old.positions[i], &r.positions[i], sizeof(Vec3)) == 0 &&
+                      (i >= r.normals.size() || std::memcmp(&old.normals[i], &r.normals[i], sizeof(Vec3)) == 0) &&
+                      (!tan || std::memcmp(&old.tangents[i], &r.tangents[i], sizeof(Vec4)) == 0);
+    if (same) continue;
+    if (!now.empty() && i <= now.back().first + now.back().second + kGap) now.back().second = i + 1 - now.back().first;
+    else now.push_back({i, 1u});
+  }
+  st.tris_changed = st.tris_changed || st.mesh->indices != r.indices;
+  skin_bone_boxes_grow(sp, r.positions, st.weights, now, st.boxes);
+  st.boxes_loose = kSkinRestStill + 1;  // (this gather counts one itself: the boxes are made whole after kSkinRestStill gathers that find the rest held still)
+  /* (added to what the card has not been sent yet - a gather may run twice before it draws - then sorted and joined) */
+  st.moved.insert(st.moved.end(), now.begin(), now.end());
+  std::sort(st.moved.begin(), st.moved.end());
+  std::vector<std::pair<uint32_t, uint32_t>> joined;
+  for (const auto &rg : st.moved) {
+    if (!joined.empty() && rg.first <= joined.back().first + joined.back().second + kGap) {
+      joined.back().second = std::max(joined.back().first + joined.back().second, rg.first + rg.second) - joined.back().first;
+      continue;
+    }
+    joined.push_back(rg);
+  }
+  st.moved.swap(joined);
+  *st.mesh = r;  // (in place: the items and the card's entry hold its address)
+}
+
 /* A skinned mesh as a card view's item: its stand-in (the rest render mesh, kept per object and rest), the posed mesh it
  * follows, the box that holds every posed vertex and the pose's stamp. False (and the plain item: the caller gives it the
  * posed render mesh) when the card can't take it - with the reason in `it.skin_note` where there is one to give. Nothing
  * here asks the posed mesh for its render mesh: that runs the CPU kernel. */
-bool Editor::skin_card_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool tangents, DrawItem &it) {
-  (void)mr;
+bool Editor::skin_card_item(const GameObject &g, const Mesh &m, bool tangents, DrawItem &it) {
   if (!m.skin_pose) {
     it.skin_note = skin_left_on_cpu(g);
     if (it.skin_note) skin_reason_ = it.skin_note;
@@ -127,21 +164,31 @@ bool Editor::skin_card_item(const GameObject &g, const Mesh &m, const MeshRender
     const bool has_tan = r.tangents.size() == r.positions.size() && !r.positions.empty();
     const bool same_skin = st.mesh && st.binding == sp.binding && st.tangents == has_tan;
     bool same_rest = same_skin && st.rest_serial == r.serial;
-    if (same_skin && !same_rest && st.mesh->positions.size() == r.positions.size() && st.mesh->indices.size() == r.indices.size()) {
+    /* (The weights were made from the render-vertex table of the build the stand-in holds: another build - a whole rebuild after the rest
+     * followed in place, which may order its split vertices another way - is a new rest even when its counts are the same.) */
+    if (same_skin && !same_rest && st.mesh->positions.size() == r.positions.size() && st.mesh->indices.size() == r.indices.size() && st.mesh->build_serial == r.build_serial) {
       /* Another rest of the same shape: a copy with what the last one held (the Skin turned back on, the rest position
-       * left, a copy while undo holds the pose before) is the same rest; one whose vertices moved - shape keys under the
-       * Skin, a blink or a viseme - would send the whole skin again each frame, which costs more than posing it on the
-       * CPU, so the CPU poses it until the rest holds still (round 521 moves shape keys to the card). */
+       * left, a copy while undo holds the pose before) is the same rest. One whose vertices moved - shape keys under the
+       * Skin, a blink or a viseme - with the triangles held (round 521) stays on the card: only the render vertices that
+       * moved go up (the card's skin rest written in ranges, gpu_skin_mesh) and the bone boxes grow to hold them. A rest the
+       * card won't take in ranges, or whose triangles changed, is posed on the CPU until it holds still (round 519). */
       const uint64_t h = skin_rest_hash(r);
       st.rest_serial = r.serial;
-      if (h != st.rest_hash) {
+      if (h == st.rest_hash) same_rest = true;
+      else if (!skin_ranges_off_for_test_ && !(st.ranges_refused && st.ranges_refused == (const void *)gpu_view_.get()) && st.mesh->uvs.size() == r.uvs.size() &&
+               (r.uvs.empty() || std::memcmp(st.mesh->uvs.data(), r.uvs.data(), r.uvs.size() * sizeof(Vec2)) == 0)) {
+        skin_rest_moved(st, r, sp);
+        st.rest_hash = h;
+        same_rest = true;
+      }
+      else {
         st.rest_hash = h, st.moving = kSkinRestStill;
         moving = true;
         return;
       }
-      same_rest = true;
     }
     if (same_rest) {
+      if (st.boxes_loose > 0 && --st.boxes_loose == 0) skin_bone_boxes(sp, r.positions, st.weights, st.boxes);  // (held still: the boxes made whole, tight again)
       if (st.moving == 0) return;  // (the card holds this rest)
       if (--st.moving > 0) {
         moving = true;
@@ -166,6 +213,8 @@ bool Editor::skin_card_item(const GameObject &g, const Mesh &m, const MeshRender
     st.rest_serial = r.serial, st.binding = sp.binding, st.tangents = has_tan;
     st.rest_hash = skin_rest_hash(r);
     st.moving = 0;
+    st.boxes_loose = 0;
+    st.ranges_refused = nullptr;  // (a new rest: the card is asked for ranges again)
     st.refused_serial = 0;
     remade = true;
   });
