@@ -2,6 +2,537 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-18 (round 574): Pass 28's write-up - the follow-ups of Passes 26 and 27
+
+**Asked:** Pass 28's documentation as Pass 26's write-up did it (task 0556): rounds 562-573 folded into this file,
+README and the shared docs, a Pass 28 section in `docs/PERFORMANCE.md`, the unit-check count from a full suite on the
+joined tree, the lessons and the books checked for text the pass made wrong, and the follow-ups the pass's rounds named
+in one list.
+
+**Added (task 0556)**
+- `docs/PERFORMANCE.md`, "Pass 28: the follow-ups of Passes 26 and 27": the pass's timed rows in one table with their
+  budgets, each from its round's own entry. A million splats on the CPU now meet the 50 ms frame (38 ms, from 84); a
+  million splats import in 0.27 to 0.36 s; the card's draw of the SideRail world is still over 16.7 ms in every posing
+  row, unchanged within the run-to-run spread, and round 565 found why: the card idles in its lowest power state.
+- Pass 27's table and round 557's section, which say the CPU misses the frame at a million splats, point at round 566.
+
+**Changed (task 0556)**
+- Round 562's entry: its stress sentence is replaced, at its author's request, by the rerun's numbers (the first timed
+  window was spoiled by a build): dabs on the 500k-face sphere 1.5 -> 2.2 ms a frame with the sixteen-face cells that
+  shipped. The same numbers are in #464's comments.
+
+**Checked for text the pass made wrong:** every Learn lesson and both books' chapters, for the splat timings, the
+sculpt and depth claims, the Adjust Last Operation hints, the Preferences frame-rate sentences, the window lesson's
+two clicks and the bake's job messages (round 564 names the job "Generate Lighting"). Nothing there quotes what the
+pass changed; the lessons and the books are untouched and not rebuilt.
+
+**Follow-ups the pass leaves**
+- The card's draw of a world (round 565): every posing row in the SideRail world is over 16.7 ms (17.3 to 24.6 ms)
+  because the card sits in its P8 power state at 210 MHz while the editor gives it little to do - about 10.7 ms of card
+  time a frame there, about 1 ms at full clock. For the owner to decide: the driver's per-program "Prefer maximum
+  performance" for Blendity.exe, or the editor giving the card steady work during a drag or playback. Also named there:
+  a key on the frame to spare the compare of the see-through corners, and one lighting pass with two targets for a
+  camera with filters.
+- A judgement call for the owner (round 565): the one fix that round kept - the see-through corners staying on the
+  card - is 1.2x on the card's frame of the world (13.1 -> 10.7 ms in P8), under ADR 0112's 1.3x bar for keeping a
+  speed-up. It was kept because it was the only part of that frame the editor sent for nothing and the pictures are
+  the same byte for byte; it can be taken out again.
+- A playing clip cannot be pinned in a test: `anim_tick` and the three places that start playback read
+  `now_seconds()`, not the editor's clock (round 568). Play by `clock_now()`.
+- `stress/sweep_commands.inc` went stale twice in this pass (rounds 570 and 568, red on #462 and #466) and once in
+  Pass 27 (#443): the table takes the first example of a verb the tests run, so a new test changes it without its
+  author knowing. Proposed: keep the committed example while any test still runs it, and run
+  `tools/sweep_commands.py --check` with `tools/dev/chain.sh`'s audits.
+- A text or number field Tab is editing is not re-revealed when rows above it grow, and rows that go away on the frame
+  an area's offset is clamped are not seen as a push-out (round 573). Preferences' other measured texts (the status
+  under Viewport Device, the search rows) still move the rows below them.
+- A million splats on the CPU (round 566): SH kept between frames or of a lower order at distance (not needed for the
+  budget); the binning's count table grows with the picture's size and the thread count (a few ms at 8K on 64
+  threads); under Filmic or ACES a splat's display colour may differ by one step from `gsplat_project_one`'s.
+- A million splats imported (round 567): what is left is outside the readers - the whole-file read, SPZ's inflate and
+  its copy, and the serial validation.
+- Round 543's Preferences hover test on macOS: the cause is a reading, not proven (round 568).
+- CI's macOS jobs can end red without running: #465's build was cancelled twice after 15 minutes with no runner given
+  (GitHub's capacity notice) and passed on the third try (round 571). Nothing to fix in the repository.
+
+**Checked:** the full unit suite on the joined tree (#472's head, every Pass 28 round in it), every group in its own process with its own test and prefs folder - Windows with Blender's libraries 106,871 checks in 3,801 tests (the card groups with the card: gpu 1,655, splats_raster 276, splats_gpu 3,917, splats_trace 3,996); Windows dependency-free 100,021; Linux dependency-free (WSL) 100,060; 25 groups each, 0 failed. `changelog.py check` on the 13 fragments before the fold; `tools/sweep_commands.py --check`, `tools/test_coverage_map.py --check`, both HCI audits and the shard table pass. The suites ran before the fold, which changes documents only; the groups that read the README ran again on the release commit's build (round 575).
+
+## 2026-11-18 (round 573): Preferences' rows stay put when a frame's cost crosses the budget
+
+**Asked:** Pass 28, found by round 569 while pinning the Tab walk's test: Preferences' frame-rate section said "Over
+budget" or "Within budget" in sentences that wrap to different numbers of rows, so the rows below jumped up and down
+with no input while a frame's cost hovered at the cap's budget, and could push the control Tab had reached out of the
+dialog.
+
+**Fixed (task 0555)**
+- The two measured sentences of Preferences > Editor frame rate keep the rows of their longest form, whatever their
+  numbers say; the budget sentence is there whenever a cap is set.
+- A keyboard-focused control pushed out of its scroll area without a scroll (rows above it grew) is brought back into
+  view. One the user scrolled away with the wheel or the scrollbar stays away.
+
+- Round 569 had made the two Tab-walk tests of Preferences run with no frame cap so the jumping rows could not fail
+  them; with the product fixed they run at the default cap again.
+
+**Checked:** on the tree with rounds 568 and 569 merged in: `hci` 2,025 checks and `editor` 3,871 on Windows with Blender's libraries, 0 failed; on Linux (dependency-free) `hci` 2,020 and `editor` 3,844, 0 failed. The two Tab-walk tests, without round 569's pins, 10 of 10 each on Linux alone under ten busy loops on the same cores (they had failed 2-3 runs in 8-10 there). Label and consistency audits at 0; the coverage map, `sweep_commands.py --check` and the shard table pass.
+
+**Review:** approved. Taken from it: the re-reveal read only the innermost scroll area's offset, so a wheel on a panel round a list would have scrolled the list against it - every enclosing level counts now, with a test; the printed numbers stop at 9999 so a sentence cannot outgrow its rows. Left as follow-ups: a text field Tab is editing is not watched; rows that go away on the frame the offset is clamped.
+
+## 2026-11-18 (round 572): The CPU views' depth on small triangles is right to its last bits
+
+**Asked:** the follow-up round 562 named (the hub, Pass 28): the CPU rasterizer's depth on triangles under a pixel across was
+1e-5 to 1e-4 of itself off, and object picking, Paint, Weight Paint's stroke start and sculpting under a Mirror or an
+Array still read it.
+
+**Fixed (task 0554)**
+- `Renderer3D::raster_tile` writes a pixel's depth as the first corner's plus the other two's differences by their
+  barycentrics (`z0 + b1 (z1 - z0) + b2 (z2 - z0)`), not the three corners' depths by the three: the stepped float edge
+  values don't add up to the triangle's area exactly, and the old sum carried that miss into the depth at its full size.
+  Now it scales only the triangle's own depth range. The see-through pass (`draw_see_through`) the same.
+- Round 554 / 556's coverage rule and guard tests are untouched; the colours keep their three barycentrics.
+
+**Measured:** a wall of triangles a third of a pixel across, facing the view: before 145 of the depth's last bits off -
+70 mm along the ray at 8 m, 853 mm at 100 m; now 0. The same wall turned: 260 bits, now 1. A 44-pixel sphere of 9,000
+triangles: the points its depth gives lay 0.985 to 1.015 radii from the centre, now 0.9988 to 1.0001 (the facets' sag).
+
+**Checked:** the three new tests fail on the old expression (a local switch, not committed) and pass on the new. With Blender's libraries on Windows: `render` 40,490 checks, `sculpt` 551, `modeling` 6,751, `lighting` 9,926, `editor` 3,862, 0 failed; dependency-free on Linux: `render` 40,396, `sculpt` 531, `modeling` 6,693, `lighting` 9,872, `editor` 3,843, 0 failed. Code review: approve. Timed (the hub's window, before = round 562, two runs each): orbiting the Scene view on the CPU 7.24 / 7.08 -> 7.05 / 7.01 ms a frame, moving an object 15.85 / 14.52 -> 14.44 / 14.82 ms - no slower (the loop does one multiply less a pixel).
+
+## 2026-11-18 (round 571): A used pair of clicks on a window's frame is forgotten
+
+**Asked:** Pass 28, found by round 568 while pinning a test: after two clicks on a window's frame selected the Frame,
+selecting the window again in the Hierarchy and clicking that spot once selected the Frame at once.
+
+**Fixed (task 0553)**
+- The first click on a window's or door's Frame or Glass selects its opening and the second click on the same spot
+  the part; the spot of the first click was remembered for good. It is now forgotten when the second click is taken,
+  and whenever the selection becomes anything but that opening alone (the Hierarchy, a box selection, the console,
+  Undo), so a single click on a frame selects the opening every time.
+- With no key bound to Adjust Last Operation, Turn 90's tooltip said "F9" and Edit Mode's Inspector note showed an
+  empty bracket; both now name no key and leave no bracket.
+
+- Round 570's new test changed the examples the inventory sweep takes for `sketchline` and `sketchcircle`;
+  `stress/sweep_commands.inc` is regenerated (CI's check on #462 was red for it).
+
+**Checked:** `blockout` 20,835 checks, `hci` 2,009 and `editor` 3,869 on Windows with Blender's libraries, 0 failed; on Linux (dependency-free) `blockout` 16,044, `hci` 2,004 and `editor` 3,842, 0 failed. Label and consistency audits at 0; the coverage map and `sweep_commands.py --check` pass.
+
+**Review:** approved. Its one finding of substance: the once-a-frame check sat in the Scene view and was skipped while the Scene tab was behind the Game tab; it now runs from the editor's frame, with a test.
+
+## 2026-11-18 (round 570): Five "F9" messages name the keymap's key
+
+**Asked:** Pass 28, a follow-up of round 544's HCI sweep: five log lines still named Adjust Last Operation's key as a
+written "F9".
+
+**Fixed (task 0552)**
+- An Edit Mode operator's "done" line, the drag helper's line, and the lines for a box, a cylinder or cone and a
+  Push/Pull made from construction lines now take the key from the keymap: F9, Ctrl+F9 in Maya's preset, or the chord
+  you rebound it to.
+- With no key bound the lines name the panel ("Adjust Last Operation for the numbers"); the "done" line, which already
+  says where the panel is, drops its bracket.
+
+**Checked:** `hci` 2,003 checks and `editor` 3,862 on Windows with Blender's libraries, 0 failed; on Linux (dependency-free) `editor` 3,842, 0 failed, and `hci` 1,998 with the two new tests passing and one older test failing one run in three alone (round 509's Tab walk in Preferences, which this round does not touch). Label and consistency audits at 0; the coverage map passes.
+
+**Review:** approved; two notes left as specified.
+
+## 2026-11-18 (round 569): Two tests wait on a job's state, and two outline-shell tests
+
+**Asked:** Pass 28's follow-up of Passes 26 and 27 (task 0551, tests only): round 355's "Budget: Decimate to Good" failed
+once inside a group run and passed 3 of 3 alone; round 507's "Save As to another file the moment a bake lands" failed once
+and passed 5 of 5 alone - find what makes each depend on the machine's load and make it deterministic, keeping what it pins;
+and add the two outline-shell tests Pass 26's reviewer left for round 521 (PR #458).
+
+**Fixed (tests)**
+- **Decimate to Good**: `skin bind` on the test's sphere (over 5,000 vertices) solves Automatic Weights on a worker and lands
+  the frame after it is done; the test stepped three frames and went on. Under load the weights landed later: the export waited
+  for the solve (the file is written when the job ends), so the glTF the test read was not there, and the landing's own
+  undo step made the last Undo take back the weights instead of the second fix - the two checks that fail, every run, when
+  the landing is held back until the Undo. The test now steps until the solve has landed (`skin_job_running_for_test`).
+- **Save As the moment a bake lands**: the save is written on a worker, and the lightmaps reach the new folder either from
+  the file move's poll or - when the move had finished in the frame the bake landed - from the save's own landing, for
+  which the test left a fixed 20 frames. It now waits on the save job and the move, and prints which order ran.
+- **Its neighbour, "opening the baked scene again the moment the bake lands"** (1 failure in 10 lighting group runs under
+  load during this round's own checks): the open reads on a worker, and after a fixed 20 frames the pages compared could
+  still be the bake in memory. It waits on the open job and the move, as round 511's test does.
+- **"A bare Tab in the Preferences dialog ... the walk stays inside the dialog"** (round 509; the hub's addition - it
+  failed on Linux in a group run and 1 of 3 alone): the dialog's frame rate section prints "Over budget ..." or "Within
+  budget ..." from the measured frame cost, word-wrapped sentences of different lengths, so where frames straddle the
+  cap's budget the controls below move a text line between frames and one Tab had just scrolled to the bottom edge
+  ended below it. The test runs `fps unlimited` first (neither sentence shown); so does round 505's "Tab walks ... the
+  Preferences dialog's likewise", which failed 3 of 10 Linux hci group runs under load for the same reason.
+- The first three were not product bugs (every order is valid and handled). The fourth is one, reported and not fixed
+  here: Preferences' rows move by a line while the frame cost hovers at the cap's budget, and a keyboard-focused
+  control can be pushed out of the dialog (`Editor::draw_performance_settings`).
+
+**Added (tests)**
+- `tests_round569` (animation): a blink moves a posed skin's outline rest shell in place - the same mesh, the same lock, no
+  hull built - and it is to the bit the hull a fresh Outline builds on the new rest, with and without a thickness group;
+  and while a render job still holds the shell the blink goes into a copy with a lock of its own, what is held keeps its
+  rest shell, positions and picture, and once released the next blink is in place again.
+
+**Checked:** with every core kept busy by other processes, each changed or new test 10 of 10 alone and its group 10 of 10
+(animation 3 of 3), on Windows with Blender's libraries (Decimate to Good, Save As, opening again, the shell tests; the
+groups assets 3,028, lighting 9,929, animation 5,077 checks) and on Linux in WSL, dependency-free (the same, where
+Decimate to Good has no meshoptimizer and returns at once; both Preferences walks and the hci group 10 of 10; assets 2,985,
+lighting 9,875, animation 5,077, hci 2,004). Before the changes, under the same load: the Preferences walk failed 3 of 6
+and 2 of 8 alone on Linux, the other walk 3 of 10 hci group runs, "opening again" 1 of 10 lighting group runs on Windows;
+Decimate to Good and Save As did not fail in 10 loaded runs each, so their causes are shown by construction - the solve's
+landing held back until the Undo fails exactly the two checks every run, and both of the Save As's landing orders were
+seen (4 of 10 runs took the one that had only the 20 frames). On the top of the stack (#466's head merged): Windows hci
+2,009, assets 3,028, lighting 9,929, animation 5,077; Linux hci 2,004, assets 2,985, lighting 9,875, animation 5,077,
+sculpt 531 - 0 failed. The code reviewer (approve): a freed shell no longer read when the in-place check fails, the blink
+also moves vertices where the thickness group has weight, the copy's lock checked. No sanitizer build here (CI's).
+
+## 2026-11-18 (round 568): five tests that depended on the machine's speed step frames on a pinned clock (task 0550)
+
+**Asked** (Pass 28, the hub): two tests fail under load because they measure wall time - round 468's "a clip playing
+with Centre of Mass shown" (11 hidden / 5 shown in #456's sanitizer shard; 20 / 12 and 10 / 17 locally) and "F12 on a slow
+card keeps twenty frames" (round 555 saw it fail at below-normal priority). Count over a fixed number of stepped frames
+instead, keep what each was written to catch, say in the test why. During the round the hub added a third: "blockout parts
+(547, te): clicking a window's glass selects the window ..." failed in #460's sanitizer shard 3; a fourth, "the pen's targets (task 0270)", failed once
+under load for another worker; and a fifth, round 543's Preferences hover test, failed on macOS in #462.
+
+**Fixed (tests only)**
+- **Centre of Mass, `tests/test_editor.cpp`.** No product fault. A clip plays by the real clock and the perf clip moves
+  for the first half of every second; the test counted the view's renders over 24 paced frames, which was "how many
+  frames fell in the moving half" - the frames' speed, measured separately with the Centre of Mass hidden and shown.
+  Frame by frame the view drew in every frame the avatar moved in, both ways. Now the clip is slowed to a frame a second
+  (its rising half lasts 15 s), the editor's clock is pinned, 24 frames are stepped and every one whose playhead rose
+  inside that half must draw the view, hidden and shown: stricter than "at least half as many", and not a measurement.
+- **F12 on a slow card, `tests/test_gpu.cpp`.** No product fault. The test raced twenty main-thread frames against a
+  400-sample render. Now the render cannot end by itself (100,000 samples), exactly twenty frames are stepped and each
+  must return with the render still going on the card; Stop lands what it had; an 8-sample render is waited for to its
+  end. The time caps left (the card opening, the finish) only end a hang. The frames' times stay a stress row (round 411).
+- **Blockout glass click, `tests/test_blockout_parts.cpp`.** The clicks ran on the real clock: two on one pixel under
+  0.35 s apart are a double click, which frames the selection. Calm, the second click on the left jamb was one and the
+  view moved; in the slow shard it was not, and the last part clicked the pixel an earlier pair of clicks had remembered.
+  With the clock pinned, a tenth of a second between clicks passes and a second between clicks fails at the shard's line.
+  The clock is pinned and moved by hand (the calm run, double clicks included); the checks are unchanged.
+- **The pen's targets, `tests/test_editor.cpp`.** No product fault. Two of its six targets raced the machine: a toast
+  lives 3 s of the editor's clock (its Fix button was read some frames later), and the job tray's Cancel was read after
+  one frame of a worker's bake, which a held-up main thread lets finish first. The clock is pinned, and the bake is
+  started again, larger, until a frame shows it running (five tries at most). The sizes asked for are unchanged.
+- **Preferences' greyed Ray-Traced Shadows hover, `tests/test_gpu.cpp`** (round 543; empty tooltip once in macOS's whole
+  suite, #462, with the clock already pinned). A hover's timer starts again when the row's rectangle changes, and the
+  status lines above the row can change between a hover's two frames - the reading, not proven (it cannot be run here).
+  The hover is made again from the row's rectangle of the moment until the row holds still (twenty tries at most), and a
+  failed try prints where the row was; the check is unchanged.
+
+- `stress/sweep_commands.inc` regenerated: the F12 test's new `samples 8` became the inventory sweep's example for
+  `samples` (it was `samples 16`), and CI's "command table is current" check on #466 was red for it.
+
+**Found, for other owners (not changed here)**
+- **The editor:** `Editor::pick_part_target` keeps the remembered spot after its pair of clicks is used. Click a window's
+  frame (the window), click again (the Frame), select the window again in the Hierarchy, click that spot once: the Frame at
+  once, where a first click should give the window. Round 571 fixed it (#465) and has the tests for it: the
+  pinned test here takes the calm path (the code review's note).
+- **A testability gap:** `anim_tick` (and the three places that start playback) read `now_seconds()`, not the editor's
+  clock, so `set_clock_for_test` cannot pin a playing clip; the Centre of Mass test works around it with a slow clip and
+  a 5 ms floor per frame. A follow-up: play by `clock_now()`, then a test can step a clip by exact frames.
+
+**Checked:** each test alone 10 times beside a CPU test group (`--group modeling` looping at normal priority).
+Windows, with Blender's libraries: Centre of Mass 10 of 10 (and 10 of 10 at below-normal priority: 24 of 24 frames moved
+and drew, hidden and shown, the 26 steps taking up to 10.6 s of the 15 s the clip gives them), the Blockout click 10 of 10,
+the pen's targets 10 of 10, the Preferences hover 10 of 10, F12 on the card 10 of 10 and 10 of 10 at below-normal priority
+(twenty frames with the render going each time, the slowest frame 769 ms). The card runs of the F12 test were made before
+#465 was merged in and before its name changed (nothing else in it did). Linux (WSL, dependency-free): Centre of Mass,
+the Blockout click, the pen's targets and the hover 10 of 10 each; the F12 test skips there (no card). Most of the
+Windows runs of ten were made before #465 was merged in; on the merged tree each changed test passed again (once on
+Windows, the Linux tens are the merged tree's). Groups on the merged
+tree (this round on #465): `editor` 3,861 checks on Windows and 3,846 on Linux, `blockout_opening_modifiers` 108 on both,
+0 failed. `tools/test_coverage_map.py --check`: 0 empty. Not run here: macOS (the hover test's failing platform), the
+sanitizer build (CI's).
+
+**Review:** approved. Its findings: the fifth test and the runs were missing from the spec and this entry (added); the
+pinned Blockout test takes the calm path, so the fault the slow path showed needs a test of its own (round 571 has them);
+a render that held the main thread would now hang the F12 test instead of failing it in seconds (kept: a time check there
+would be a measurement, and round 412's Stop check renders the same way); a comment's sentence, the F12 test's name and a
+variable called `clock` (fixed).
+
+## 2026-11-18 (round 567): A million splats imported, measured
+
+**Asked:** Pass 28's follow-up of round 544's write-up, which gave the import of a million splats as "not measured
+(about 0.4 s estimated)": measure it (PLY and SPZ, time and memory per stage), keep the editor responsive while it
+runs, fix what is plainly wasteful in the readers.
+
+**Added (task 0549)**
+- `blendity_stress --only splats` now reads a 1,000,000-splat PLY and SPZ of SH degree 3 (built in code, written to
+  the run's scratch project, removed afterwards with the copies the editor's import makes): the file read, the
+  unpack, the setup, the decode, the change of axes and the validation each timed, the cloud's size and the process's
+  memory growth at its peak; and the same files through the editor's `import` with jobs on workers - the longest
+  frame while the file is read, the landing frame, the total.
+- A reader's `SplatReadReport` carries where its time went (`times`: unpack, setup, decode, axes, validate).
+
+**Changed**
+- The splat readers decode on every core: a point's bytes go to its own entries of the cloud, 4,096 points a piece
+  (`JobSystem::parallel_for`; from the editor on the import worker's background pool, never the main thread's). The
+  change of axes - positions, turns, the SH bands - runs the same way.
+- A PLY whose properties are all little-endian floats (what a 3DGS trainer writes) is read straight from its records;
+  before, every value went through a `double` and a switch on its type. Text PLY lines are parsed in parallel too.
+- The clouds are the same, value for value: the unit tests compare the little-endian, big-endian and text encodings
+  of one file, a file's first points alone against the same points inside a larger file, and every scale and opacity
+  byte of an SPZ against the format's formula.
+
+**Measured** (the hub's timed window, 2026-11-18 04:21-04:23, the machine quiet; two runs of each exe, the better
+one shown, each row the best of three reads; 1,000,000 splats of SH degree 3. "Before" is round 531's readers with
+this round's clocks, its setup inside its decode)
+
+| file | file MB | read ms | unpack ms | setup ms | decode ms | axes ms | validate ms | total ms | cloud MB | peak growth MB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| PLY binary, before | 236.5 | 186.3 | 0 | (in decode) | 253.9 | 118.9 | 29.7 | 588.8 | 225.1 | 435.0 |
+| PLY binary, after | 236.5 | 184.1 | 0 | 27.1 | 19.1 | 11.4 | 31.8 | 273.4 | 225.1 | 435.0 |
+| SPZ v3 gzip, before | 45.1 | 32.0 | 253.7 | (in decode) | 76.4 | 123.0 | 29.2 | 514.3 | 225.1 | 356.2 |
+| SPZ v3 gzip, after | 45.1 | 32.3 | 252.7 | 24.7 | 13.4 | 11.5 | 30.2 | 364.9 | 225.1 | 356.2 |
+
+- The second run of each exe agrees within 3 % (PLY 593.7 -> 281.2 ms, SPZ 513.9 -> 367.3 ms). The readers' own
+  part (setup, decode, axes, validate) went from 403 ms to 89 ms for the PLY and from 229 ms to 80 ms for the SPZ;
+  memory is unchanged.
+- The editor (headless, jobs on workers): the PLY lands 0.40 s after `import` (before: 1.19 s), the SPZ 0.48 s
+  (before: 0.70 s); the longest frame while the worker reads is 9.9 ms, the landing frame 1.3 ms - within ADR
+  0105's budget (50 ms a frame while a job runs, 100 ms for one frame), as it was before the round. The read was
+  already off the main thread (round 413); nothing had to move.
+- Not changed, named for a later round (outside this round's files): the whole-file read (`fs::read_file`, 184 ms
+  of a PLY's 273), SPZ's inflate and the copy `gunzip` makes of its output (253 ms of an SPZ's 365), and
+  `pointcloud_validate`, which is serial (about 30 ms).
+
+**Checked:** both suites' groups `splats` and `editor` - Windows with Blender's libraries 427 and 3,869 checks,
+Linux dependency-free 425 and 3,843, 0 failed; the dependency-free Windows build is left to CI.
+`blendity_stress --only splats`: 16,500 damaged files, 0 problems.
+
+## 2026-11-18 (round 566): A million splats on the CPU within the frame budget
+
+**Asked:** round 557 left the CPU rasterizer over ADR 0105's 50 ms at a million splats (86.8 ms a frame orbiting the
+Scene view: projection 41 ms, draw 37 ms; the card 6.2 ms). Bring the CPU path within 50 ms without changing the picture
+beyond the splat tests' tolerances and without touching the card path.
+
+**Found**
+- The projection waited on memory, not arithmetic: it walked the splats in their drawing order, so each splat's 236 bytes
+  (six arrays, 15 SH triples) were a read at a random place of a 236 MB cloud - 41 ms whatever the thread count. Then
+  three `powf` (sRGB to linear) and a one-pixel call of the display encoder for every splat.
+- The draw binned a million splats into tiles on one thread (two passes, eight calls of the C library's `floor` a splat),
+  each tile read its splats through an index, and every pixel of every splat's box called `exp`.
+- The pixel budget's count walked the million projected splats on one thread, every frame.
+
+**Changed (task 0548)**
+- Each splat is projected where it lies in the cloud's arrays, culled before its colour is touched, and written straight
+  to its place in the drawing order (the order turned round: `rank[order[k]] = k`); only a frame with culled splats
+  closes the list up with a second copy. The list's room is last frame's list, still constructed, so sizing it writes
+  nothing. The same values in the same order: the screen list is bit for bit what it was. (An order that is not a
+  permutation of the cloud - the sorter makes none - now draws nothing of that cloud.)
+- The visible splats' colours go through the display encoder by the span (256 at a time), and the sRGB curve is read
+  from a 4,096-step table (within 1e-7 of the curve below 1; the curve itself at 1 and above).
+- The binning runs in parallel (each chunk counts its tiles, the counts are summed in chunk order, each chunk fills its
+  own places from an 8-byte tile box kept from the count), the tile loop asks for its next splats ahead, takes a row's shared terms out of its pixels and evaluates
+  the Gaussian with an `exp` written out in plain arithmetic (within 1e-7 of `std::exp` over a billboard's range).
+- The pixel budget is counted in parallel, in chunks of a fixed size summed in order (its sums no longer add up in list
+  order: a frame exactly at the budget's edge may keep or drop one splat differently than before, the same on any
+  number of threads).
+- `gsplat_project_one` is the same two halves the pass runs (shape, then colour), so one splat projected alone is still
+  what the pass gives it.
+
+**Timed** (the hub's windows of 2026-11-18, a quiet machine, normal priority; `blendity_stress --only splat_raster`,
+RTX 4070 SUPER, 32 threads; each exe twice):
+
+| Row (1M degree-3 splats, CPU) | Round 557 | Round 566 |
+|---|---|---|
+| Orbit, median frame | 84.4 / 84.2 ms | **38.6 / 37.9 ms** |
+| Orbit, longest of 40 frames | 94.6 / 91.2 ms | **44.0 / 40.5 ms** |
+| Project (in the orbit's last frame) | 38.2 ms | 15.1 / 16.0 ms |
+| Draw (in the orbit's last frame) | 36.3 ms | 15.0 / 14.6 ms |
+| Project / draw alone (the section's first table) | 36.7 / 29.2 ms | 13.0 - 14.1 / 11.6 - 11.7 ms |
+| Orbit, 100k splats, median frame | 14.8 / 15.2 ms | 10.6 / 10.7 ms |
+| Orbit on the card, 1M / 100k (not touched) | 5.3 / 3.2 ms | 6.0 / 3.3 ms |
+
+Every frame of both runs is under ADR 0105's 50 ms: the CPU meets the budget at a million splats. The round's steps,
+each timed against the one before in its own window (the windows differ by a millisecond or two between themselves):
+
+| Step | Orbit, median / longest ms |
+|---|---|
+| Round 557 | 84.4 / 94.6 |
+| The cloud's own order, colours by the span, parallel binning, the tile loop | 49.2 / 54.5 |
+| + the sRGB table, no `floor` calls, the budget counted in parallel | 47.4 / 51.4 (project and draw unchanged: 3 ms was the budget's count) |
+| + straight into the drawing slot, the list's room reused, 8-byte tile boxes | 38.6 / 44.0 |
+
+What the steps showed: after the first, the frame was limited by the memory it moves, not by arithmetic - the table
+instead of three `powf` a splat changed nothing measurable; taking a 64 MB copy, a 64 MB initialisation and a 64 MB
+second read out of the frame took 8 ms.
+
+**Review** (the first two passes): approve with fixes, all applied - the table's index is held inside the table whatever the compiler assumed
+about NaN (`/fp:fast`), and a non-finite colour takes the curve's own answer as before; the binning's chunk count follows
+the thread limit, so the one-thread test really bins differently; tests for the table against the true curve (dark, near
+1, SH overshoot, Standard and Filmic) and for clouds with short arrays; the table is made when the program starts.
+
+**Not done (named):** SH kept between frames or of a lower order at distance (both change the picture; not needed for the
+budget). The binning's count table (tiles x chunks, made every frame, summed on one thread) grows with the picture's
+size and the thread count - fine at 1080p, a few ms at 8K on 64 threads. Under a curve view transform (Filmic, ACES) a
+splat's display colour may differ by one step from `gsplat_project_one`'s (the encoder's wide kernels round a curve one
+step apart from its one-pixel path, as test_render's "all kernels agree" allows); Standard is exact.
+
+**Second review** (the last pass): approve - every field of a slot that ends up visible is rewritten each frame and
+every slot is visited; its one gap, a test that reuses one pass over frames of different clouds, ids, views, a culled
+part and a trimmed frame, added.
+
+**Checked:** on the tree merged with the stack's top - Windows with Blender's libraries: `splats_raster` 276 checks (the
+card tests run), `splats` 427, `editor` 3,872, 0 failed; Linux (dependency-free): `splats_raster` 203, `splats` 425,
+`editor` 3,846, 0 failed; the full suite on CI. The inventory sweep's command table, the fragments and the coverage map
+check clean. Stress `--only splat_raster` in the hub's three timed windows (above); the timed exe is the code before the
+merge with the top and before the second review's comments and tests - the same `gsplat_raster.cpp` statements. One of
+the round's own checks was loosened with its reason in the test: "back to front" compares the projection's depths, which
+are the sorter's to the last bits only (GCC put neighbours a rounding apart the other way; the list is the sorter's
+order exactly, which the same test checks splat for splat).
+
+## 2026-11-18 (round 565): What the card's draw of a world costs
+
+**Asked:** Pass 28's follow-up of round 522 - with skinning on the card, the posing frames still over 16.7 ms with the
+avatar standing in its world (a Puppet handle 20.8, Play 24.7, a scrub with two views 23.9, with one 20.5, the clip 17.8 ms)
+are held by the card's own draw of the world (the render call about 10 ms, the card's lighting about 5 ms): measure where
+that time goes in the card's frame, fix what is cheap and safe, name what remains.
+
+**Found (task 0547)**
+- The world's frame is little work for the card: 1 to 2.3 ms at the card's full clock. The same frame - the same instances,
+  lights and pixels - takes 10 to 16 ms a minute later, every part 4 to 6 times slower alike, down to the copy out of the
+  same bytes (0.59 -> 2.06 ms). `nvidia-smi`, sampled beside the run, shows why: while the rows run the card (an RTX 4070
+  SUPER) sits in its lowest power state, P8 at 210 MHz, at about 30 % load. The editor gives it too little to do for the
+  driver to raise its clock, and a headless frame waits for the card.
+- The world's see-through surfaces (113,000 corners, 7 MB, sorted for the view) were written whole into a buffer in the
+  host's memory every frame, changed or not: 0.5-1 ms of the render call on the CPU, and the card fetching them across,
+  0.3 ms of its frame at full clock and 2.3 ms in P8 (the old four timestamps counted that under "lighting").
+- The rest of the render call on the CPU: 0.3-0.7 ms recording, 0.1-0.3 ms submitting; a headless frame also unpacks the
+  planes copied back (0.6-1.3 ms), which a window does not.
+
+**Fixed**
+- Each view keeps its see-through corners on the card (`VulkanRaster::write_see`, a buffer a view slot): a frame's corners
+  are compared with what the view last sent, and only a list that differs is sent. While the camera stands still - a pose
+  dragged, a clip playing - none is. The card's frame of the world in P8: 13.1 -> 10.7 ms. The pictures are
+  the same byte for byte as a card that sends them every frame (`BLENDITY_CARD_SEE=resend`; a test).
+
+**Tried and dropped**
+- The lighting's small tables (the frame's constants, the instances, the 62 lights read at every pixel, the baked / toon
+  tables) moved from the host's memory into the card's own host-writable memory. A first experiment that moved every
+  host-written buffer halved the "lighting" time; the timed rows of the tables alone were unchanged. What that experiment
+  had moved was the see-through corners (above); the tables' placement measures nothing, so it is not in the build.
+
+**Added**
+- `gpu::RasterDetail` (`Raster::detail()`): a card frame's parts - the card's own time after each of twelve parts by
+  timestamps (skin and uploads, shadow maps, g-buffer, toon planes, baked planes, lighting, splats, see-through, overlays,
+  linear light, filters, copies out), the render call's steps on the CPU (the wait for the frame before, targets, tables,
+  uploads, recording, submit, wait, unpack), and what the frames held (draw calls, pipeline and mesh binds, instances,
+  lights, pixels, see-through corners sent and kept). The `posing` stress rows print it per card frame.
+
+**Named, not fixed**
+- The card's power state. In P8 the world's frame is still about 10.7 ms of card time (lighting 3.1, g-buffer 2.4, copies out
+  2.1 - headless only -, see-through 2.0, shadow maps 0.5); at full clock about 1 ms. The driver chooses the clock; the
+  editor changes no driver or power setting. What could be done, for the owner to decide: the driver's own per-program
+  setting (NVIDIA's "Power management mode: Prefer maximum performance" for Blendity.exe); or the editor giving the card
+  steady work while a drag or playback runs, which costs power for nothing drawn.
+- The compare of the corners on the CPU (7 MB read twice: as long as the old copy, 0.5-1 ms a card frame): the editor already
+  knows when its sorted list is last frame's (round 471); a key on the frame would spare the compare (`gpu_views.cpp`).
+- A camera with filters lights its picture twice (the linear-light pass: 2 to 3.6 ms in P8 in the Play row); one pass with
+  two targets would halve it (the see-through and overlay draws share that pass).
+
+**Timed (the hub's windows, round 522's build against this round's; task 0547's table)**
+- None of round 522's five rows is met: a Puppet handle 21.1 -> 19.0, Play 23.7 -> 24.6, a scrub with two views 24.3 ->
+  22.6, with one 19.1 -> 18.3, the clip 17.6 -> 17.3 ms. The fix's 0.3-2 ms is inside what one build differs by between two
+  runs (up to 3 ms a row, by where the card's clock is during it); what holds the rows is the power state. The alone rows
+  and the CPU rows are unchanged; over-budget rows in the section 27 / 26 before, 27 after.
+
+**Checked:** the round's groups - on the card (`gpu`, with Blender's libraries) 1,612 checks; Windows with Blender's
+libraries `render` 40,490 and `editor` 3,872; Linux dependency-free `gpu` 138 (the card tests skip), `render` 40,378,
+`editor` 3,843 - 0 failed; two reviews (the second's blocker, a send marked as held by a frame that then failed, fixed
+with a test that forces it). The whole suite is CI's.
+
+## 2026-11-18 (round 564): The "mixed frames" of a bake's page upload were a toast
+
+**Asked:** Pass 28: "Generate Lighting with the views on the card (round 508)" shows mixed frames (ADR 0140) when the CPU
+is starved (4,586 pixels, 17-36 frames "not still"); reproduce under load, fix the page upload so a frame is never half
+old and half new, and make the test pass 5 of 5 under load.
+
+**Found (task 0546)**
+- Reproduced on the card beside other builds. The frames were not mixed lighting: all 4,586 pixels are the box of the job
+  tray's toast "Baking lighting done in 1.3 s" over the Scene view. The tray ends the "Baking lighting" job when its
+  label turns to "Sending the bake to the card", and toasts a job that ran a second or more - which the test's bake does
+  only on a starved machine. The toast was also still up in the landed picture, not in the reference. ADR 0140 holds; the
+  page upload is unchanged.
+
+**Fixed**
+- The toast said "Baking lighting done" before the bake had landed: while its probes were still baking, or while its
+  pages went up to the card and the views still showed the old lighting. The job tray now follows Generate Lighting as
+  one job through its phases (the label still names the phase, with the phase's own time and estimate) and says
+  "Generate Lighting done in N s" once, at the landing (`job_tray.cpp`).
+- A bake cancelled from the Lighting window, by `bake cancel`, by Clear Baked Data or by a new scene said "done in N s":
+  the tray never saw the cancel. It says "Generate Lighting cancelled in N s" now, and `jobs cancel Generate Lighting`
+  works by the job's name. The cancelled job ends in the call that cancels it, so a bake started again in the same frame
+  is a new job with its own time.
+- The HCI log names the bake's job "Generate Lighting" (`job start`, one `job done` or `job cancelled`; it was one job a
+  phase, "Baking lighting" first) with a `job phase <label>` line for each phase.
+
+**Changed (tests)**
+- Round 508's test compares its pictures outside the toasts' boxes (`Editor::toast_frames_for_test`), and says why.
+- A new test forces what starvation does: a second bake over an older one with the pages going up exactly one a frame
+  and a toast kept over the view. Every frame while they go up is the old bake's picture outside the toast, the landing
+  frame sends none, the landed picture is the new light's, and the "done" toast comes with the landing. Another, without
+  a card, checks the one "done" toast of a bake with a reflection probe; a third cancels a bake four ways.
+- Both card tests wait for the card to have caught up (no mesh waiting, no texture streaming, no bake, two frames the
+  same) instead of `r555_card_settle`'s 20 s: under six CPU groups 58 of the scene's 121 meshes were still going up
+  after it, and round 508's test failed 1 run in 5 by that alone.
+
+**Checked:** on the card (Windows, Blender libraries): round 508's test 5 of 5 with three CPU test groups alongside at normal priority and 5 of 5 with six; the new card test 5 of 5 with three and alone (4 pages over 4 frames, 0 in the landing frame, 0 frames differing from the old bake outside the toast, the landed picture differing in 11,237 pixels). gpu group 1577 checks, 0 failed, on the build merged with #470's head. On the merge with #466's head (before #470 was merged in): Windows editor 3872, lighting 9926, hci 2009; Linux gpu 160, editor 3846, lighting 9872 - none failed. `sweep_commands.py --check` and `test_coverage_map.py --check` pass. Two reviews: the first asked for changes (the cancel, tests on a toast's three seconds), the second approved with nits, which are in.
+
+## 2026-11-18 (round 563): A kept draw list holds its card stand-ins
+
+**Asked:** Pass 28, the follow-up of round 520's review (PR #457): a `seen` stamp, so a kept draw list can never be left
+with a card stand-in that was let go.
+
+**Fixed (task 0545)**
+- A skinned mesh the card poses is drawn from a stand-in that is let go after 600 gathers without it. A view that kept
+  its draw list (nothing in the scene changed) used the list in place of a gather, so its stand-ins were never stamped:
+  with another view gathering every frame (a Game view with an LOD Group or a Camera Flatten) they aged out, the kept
+  list was dropped and the skins went to the card again - a hitch about every ten seconds. A kept list now notes the
+  stand-ins its items point at and stamps them each time it is used (`skin_list_stands`, `skin_stamp_kept` in
+  `render_view.cpp`), so a list in use is never dropped for age. A list that is not drawn still lets them go, and is
+  gathered again before it is read.
+
+**Checked:** the groups the change touches - with Blender's libraries on Windows: gpu on the card 1,530 checks (its only failure round 508's
+bake test, by a toast: round 564), editor 3,862 and lighting 9,926 with 0 failed, round 520's stand-in tests in animation;
+dependency-free on Linux: gpu 138, editor 3,843, lighting 9,872, 0 failed. Review: approve.
+
+## 2026-11-18 (round 562): A sculpt stroke lands on the mesh, not on the depth plane's rounding
+
+**Asked:** Pass 28's first follow-up (rounds 554 / 556, PRs #448 and #455): widening the CPU rasterizer's row-span margin broke
+"sculpt mask gestures ..." and the Dyntopo test although every pixel's coverage and triangle stayed the same; the guess
+was that a stroke depends on the frame's cost. Find the path and fix it in Sculpt.
+
+**Found:** not time. A 15 ms sleep around every frame changes nothing; the wide margin fails on every run. `sculpt_hit`
+turned the Scene view's depth under the pixel into a distance along the pixel's ray, and that depth is rounded hard: the
+rasterizer divides the sum of three stepped float edge values by the triangle's area, so on triangles under a pixel
+across the depth is 1e-5 to 1e-4 of itself off - at 8 m, centimetres to decimetres along the ray. On the tests' sphere
+(5,952 faces, 44 px across) the brush's point was 0.36 to 0.68 from the centre of a 0.5 sphere with today's margin too:
+two of the nine dabs of the passing Drag Dot stroke gathered nothing. A wider span starts a row's stepping at another
+pixel and reshuffles the noise; the tests had passed by luck.
+
+**Fixed (task 0544; ADR 0074 and ADR 0075 amended)**
+- The brush's point is the sculpted mesh's own: the first shown face on the pixel's ray, from the positions as they are
+  at that dab (`Editor::sculpt_ray_hit`), when the object is drawn as its mesh is or as a Subdivision Surface of it.
+  The id plane still says whether the object is under the pointer. Faces looking away are let through when the view
+  culls them.
+- The depth plane still places the brush where the ray misses the mesh, with another modifier or a weighted shape key
+  (an Array's copy can stand in front of the mesh), and for Paint and Weight Paint.
+- The ray goes through a grid of the mesh's faces (`SculptRayGrid`), built once per mesh version from a sample's spread
+  (one stray face a thousand sizes away doesn't set its box); a dab, Grab's follow, Drag Dot's take-back and an undo or
+  redo of a sculpt step note the faces they moved and the next ray files them again, so a stroke rebuilds nothing.
+  Under 4,096 faces, and with Dyntopo on, every face is tested. Both ways agree to the bit.
+- `sculpt_cage_hit` is gone: the same ray is the Subdivision Surface's cage's.
+
+**Changed, for the user to know:** dabs put down between two frames (a fast drag, a console `sculpt stroke`) now each
+land on the surface the dabs before them left, not on the surface as last drawn. A stroke therefore no longer depends
+on the frame rate; a console stroke of many full-strength dabs on one spot builds up as the same drag with the mouse
+does. One round-508 test's mirrored dab is now made on the sphere at rest (the reason is in the test).
+
+**Not done here (for the hub):** the depth plane's rounding itself, in `src/render/raster.cpp` (outside this round's
+files): interpolating `z0 + b1 (z1 - z0) + b2 (z2 - z0)` instead of `(w0 z0 + w1 z1 + w2 z2) / area` would take the
+error from the depth's own size to the triangle's depth range - for object picking, Paint, Weight Paint's stroke start
+and sculpting under a Mirror or an Array, which still read the depth.
+
+**Checked:** the `sculpt` group with the span margin at 1e-4 and, through a local switch that is not committed, at 1 and
+30 pixels: the same output line for line (before: 5 and 2 checks failed). With Blender's libraries on Windows: `sculpt` 551 checks (the round's 85 among them), `editor` 3,868, `animation` 5,035, `hci` 1,985, `input` 283, 0 failed; dependency-free on Linux: `sculpt` 531 (narrow and wide margin), `editor` 3,843, 0 failed. Code review: two passes, findings fixed (a far stray face, long Grab drags, modifiers in front of the mesh, face sampling on regular grids). Stress `sculpt_paint`, timed in the hub's windows (before = #460's exe, two runs each): structural problems 0 -> 0. With the grid's cells two faces wide the dabs' time a frame on the 500k-face sphere rose 1.3 -> 2.6 ms, which is why the cells are sixteen faces wide; as shipped: dabs 1.5 -> 2.2 ms, Draw's median frame 17.0 / 17.2 -> 17.9 / 18.2 ms on the CPU views and 6.9 / 7.0 -> 7.5 / 7.5 ms on the card, Snake Hook unchanged within its noise (7.7 to 10.5 before, 8.3 to 9.9 after).
+
 ## 2026-11-17 (round 523): Pass 26's write-up - skinning on the card
 
 **Asked:** Pass 26's documentation as Pass 25's write-up did it (task 0506): rounds 518-522 folded into this file, README

@@ -4365,8 +4365,8 @@ notes folder's `pass27-timed/`, the detail in `docs/perf/verify-544.md`.
 
 | Row | Result | Budget |
 |---|---|---|
-| splat import, 100k splats (round 531) | PLY binary 38.8 ms, SPZ v3 36.2 ms, PLY ASCII 729 ms | 1M under 2 s (not measured; ~0.4 s estimated) |
-| splat draw, orbiting, 1280 x 720 (532, 557) | 100k 15.4 ms CPU / 7.8 ms card; 1M 86.8 ms / 6.2 ms (94 ms on the card before round 557) | the card within the frame; the CPU over at 1M |
+| splat import, 100k splats (round 531) | PLY binary 38.8 ms, SPZ v3 36.2 ms, PLY ASCII 729 ms | 1M under 2 s: 0.27 s PLY, 0.36 s SPZ from a file on disk; 0.40 s / 0.48 s through the editor's import (round 567, timed) |
+| splat draw, orbiting, 1280 x 720 (532, 557) | 100k 15.4 ms CPU / 7.8 ms card; 1M 86.8 ms / 6.2 ms (94 ms on the card before round 557) | the card within the frame; the CPU over at 1M (within it since round 566: 38 ms) |
 | the card views' first open (557) | 537 ms from an empty pipeline cache, 156 ms from the cache (92.5 s before) | |
 | OptiX kernel compile (558) | 19.3 s cold, 6.6 ms warm (RTX 4070 SUPER) | a one-off, cached |
 | splat trace, 256 x 256 (533 / 534) | CPU 149 / 107 samples / s at 100k / 1M; card (ray queries) 1,752 / 1,320 | card faster |
@@ -4389,7 +4389,7 @@ notes folder's `pass27-timed/`, the detail in `docs/perf/verify-544.md`.
 | Card first open, empty pipeline cache / written | 92.5 s / 0.16 s | **0.54 s / 0.16 s** |
 
 The timed batch of 2026-11-17 (the hub's, normal priority, a quiet machine; RTX 4070 SUPER, 32 threads), on round 557's
-exe. The card meets ADR 0105's 50 ms with room to spare. **The CPU at 1M still misses it (86.8 ms), named:** a
+exe. The card meets ADR 0105's 50 ms with room to spare. **The CPU at 1M still misses it (86.8 ms; round 566 brought it to 38 ms, see "Round 566"), named:** a
 degree-3 splat costs its EWA projection and 48 SH terms every frame, and the 1M array read and written is most of the
 41 ms; the compositing's 37 ms is a million alpha-blended ellipses, front to back. The CPU draws the views only when there
 is no card (or the card refuses a frame: too close, too big); at 100k the CPU is within budget (15.4 ms). What would move
@@ -4449,3 +4449,82 @@ in the world's draw, so it stays as amended.
 normals - at most 43.7 % of the thickness off on the stand-in with the chest turned 0.5 rad, and 0.37 ms a pose for its four
 outlined meshes against 2.37 ms to build today's shell. A blink frame (shape keys as ranges) is 5.5 ms against 3.5 ms posed
 (untimed, on the card).
+
+## Round 565: what the card's draw of a world costs
+
+Round 522 left the posing rows in a world held by "the card's draw of the world". Round 565 put a timestamp after each part
+of a card frame and a timer on each step of the render call (`gpu::RasterDetail`; the `posing` stress rows print them).
+The world's frame is 1 to 2.3 ms of card work at the card's full clock, and 10 to 16 ms once the driver has let the card
+fall to its lowest power state (P8, 210 MHz on an RTX 4070 SUPER, at about 30 % load - `nvidia-smi` beside the run): every
+part of the frame is 4 to 6 times slower there, the copy out of the same bytes included. One part was the editor's doing:
+the world's see-through corners (7 MB) went to the card every frame; each view now keeps them there and sends only a list
+that changed (13.1 -> 10.7 ms of card time a frame in P8). What remains over 16.7 ms is the power
+state's; see `docs/tasks/0547-card-world-draw-cost.md`.
+
+## Round 566: a million splats on the CPU
+
+| Row (1M degree-3 splats, CPU) | Round 557 | Round 566 |
+|---|---|---|
+| Orbit, median frame | 84.4 / 84.2 ms | **38.6 / 37.9 ms** |
+| Orbit, longest of 40 frames | 94.6 / 91.2 ms | **44.0 / 40.5 ms** |
+| Project (in the orbit's last frame) | 38.2 ms | 15.1 / 16.0 ms |
+| Draw (in the orbit's last frame) | 36.3 ms | 15.0 / 14.6 ms |
+| Project / draw alone (the section's first table) | 36.7 / 29.2 ms | 13.0 - 14.1 / 11.6 - 11.7 ms |
+| Orbit, 100k splats, median frame | 14.8 / 15.2 ms | 10.6 / 10.7 ms |
+| Orbit on the card, 1M / 100k (not touched) | 5.3 / 3.2 ms | 6.0 / 3.3 ms |
+
+The hub's timed windows of 2026-11-18 (a quiet machine, normal priority, both build slots held; RTX 4070 SUPER,
+32 threads; each exe twice, round 557's in the first window, round 566's final exe in the third). Every frame of both runs is under ADR 0105's 50 ms: the CPU meets the budget at a million splats. The round's steps,
+each timed against the one before in its own window (the windows differ by a millisecond or two between themselves):
+
+| Step | Orbit, median / longest ms |
+|---|---|
+| Round 557 | 84.4 / 94.6 |
+| The cloud's own order, colours by the span, parallel binning, the tile loop | 49.2 / 54.5 |
+| + the sRGB table, no `floor` calls, the budget counted in parallel | 47.4 / 51.4 (project and draw unchanged: 3 ms was the budget's count) |
+| + straight into the drawing slot, the list's room reused, 8-byte tile boxes | 38.6 / 44.0 |
+
+What the steps showed: after the first, the frame was limited by the memory it moves, not by arithmetic - the table
+instead of three `powf` a splat changed nothing measurable; taking a 64 MB copy, a 64 MB initialisation and a 64 MB
+second read out of the frame took 8 ms.
+
+## Round 567: a million splats imported
+
+`blendity_stress --only splats`, the rows "Round 567", in the hub's timed window (2026-11-18, the machine quiet);
+the best of three reads of 1,000,000 splats of SH degree 3, the better of two runs:
+
+| file | read ms | unpack ms | setup ms | decode ms | axes ms | validate ms | total ms | peak growth MB |
+|---|---|---|---|---|---|---|---|---|
+| PLY binary, 236.5 MB, before | 186.3 | 0 | (in decode) | 253.9 | 118.9 | 29.7 | 588.8 | 435.0 |
+| PLY binary, 236.5 MB | 184.1 | 0 | 27.1 | 19.1 | 11.4 | 31.8 | 273.4 | 435.0 |
+| SPZ v3 gzip, 45.1 MB, before | 32.0 | 253.7 | (in decode) | 76.4 | 123.0 | 29.2 | 514.3 | 356.2 |
+| SPZ v3 gzip, 45.1 MB | 32.3 | 252.7 | 24.7 | 13.4 | 11.5 | 30.2 | 364.9 | 356.2 |
+
+The cloud itself is 225.1 MB. Through the editor's import (the file copied into the project, read on a worker) the
+PLY lands in 0.40 s and the SPZ in 0.48 s; the longest frame while the worker reads was 9.9 ms and the landing frame
+1.3 ms. What is left is outside the readers: the file read for a PLY, the inflate for an SPZ.
+
+## Pass 28: the follow-ups of Passes 26 and 27 (rounds 562-573)
+
+Every row is from its round's own entry and section (the hub's locked timed windows of 2026-11-18, the machine quiet;
+RTX 4070 SUPER, 32 threads); nothing was measured again for this table.
+
+| Row | Before | After | Budget |
+|---|---|---|---|
+| A million splats drawn on the CPU, orbiting, median / longest frame, two runs (round 566) | 84.4 / 94.6 and 84.2 / 91.2 ms | 38.6 / 44.0 and 37.9 / 40.5 ms | 50 ms a frame (ADR 0105): met, every frame |
+| 100,000 splats on the CPU, orbiting, median, two runs (566) | 14.8 / 15.2 ms | 10.6 / 10.7 ms | 50 ms: met |
+| A million splats read from disk, PLY / SPZ (567) | 588.8 / 514.3 ms | 273.4 / 364.9 ms | under 2 s: met |
+| The same through the editor's import, to landing (567) | 1.19 / 0.70 s | 0.40 / 0.48 s; the longest frame 9.9 ms | 50 ms a frame while a job runs: met |
+| The SideRail world on the card, a Puppet handle dragged (565) | 21.1 ms | 19.0 ms | 16.7 ms: not met |
+| The same, Play (565) | 23.7 ms | 24.6 ms | 16.7 ms: not met |
+| The same, scrubbing with two views / with one (565) | 24.3 / 19.1 ms | 22.6 / 18.3 ms | 16.7 ms: not met |
+| The same, a clip playing (565) | 17.6 ms | 17.3 ms | 16.7 ms: not met |
+| The card's own time for the world's frame in its P8 power state (565) | 13.1 ms | 10.7 ms (about 1 ms at full clock) | - |
+| The CPU views' depth on triangles a third of a pixel across, at 8 m (572) | 70 mm off along the ray | right to its last bits | - |
+| Orbiting the Scene view on the CPU / moving an object, two runs, with 572's depth (572) | 7.24, 7.08 / 15.85, 14.52 ms | 7.05, 7.01 / 14.44, 14.82 ms | no slower: met |
+| Sculpt dabs on the 500k-face sphere, a frame; Draw's median frame on the CPU views / on the card, two runs (562) | 1.5 ms; 17.0, 17.2 / 6.9, 7.0 ms | 2.2 ms; 17.9, 18.2 / 7.5, 7.5 ms (the brush's point from the mesh's own faces) | - |
+
+The world rows of round 565 moved less than the 3 ms one build moves between two runs, so they are unchanged, not
+improved. What holds them is not the editor's work: the world's frame is 1 to 2.3 ms for the card at its full clock
+and 10 to 16 ms once the driver has let it fall to P8 (210 MHz), where every part of the frame is 4 to 6 times slower.
+The editor changes no driver or power setting; what could be done is the owner's to decide (round 565's entry).
