@@ -3377,8 +3377,9 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
       }
       {
         Recti nr = lay.row();
-        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper (" + key("edit.adjust_last") + ") when you use it.", u.theme.text_dim);
-        u.tooltip(std::string("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (") + key("edit.adjust_last") + ", bottom left\n"
+        const std::string adjust = key("edit.adjust_last");  // (round 571: with no key bound, no key and no empty bracket)
+        u.label({nr.x + u.px(4), nr.y, nr.w - u.px(8), nr.h}, "Each tool's settings are in its helper" + (adjust.empty() ? std::string() : " (" + adjust + ")") + " when you use it.", u.theme.text_dim);
+        u.tooltip(std::string("Thickness, angle, distance, segments, count and the like show in Adjust Last Operation (") + (adjust.empty() ? std::string() : adjust + ", ") + "bottom left\n"
                   "of the Scene view) after a tool runs, and in the drag helper while Bevel, Inset, Array, Grid, Pipe, Taper\n"
                   "or Recess is dragged. Changing them re-runs the tool, and they are kept for its next use.");
       }
