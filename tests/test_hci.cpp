@@ -600,6 +600,33 @@ void tests_round570_adjust_key() {
     CHECK(l.op.find("Scene view.") != std::string::npos);  // (the sentence ends where the bracket was)
     for (const std::string *s : {&l.drag, &l.box, &l.cone, &l.pull}) CHECK(s->find("(Adjust Last Operation ") != std::string::npos);
   });
+
+  test("hci: Edit Mode's Inspector note on where a tool's settings are names Adjust Last Operation's key from the keymap, and with no key bound shows no key and no empty bracket (round 571, task 0553)", [] {
+    Editor ed;
+    ed.init_headless(1366, 1000);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Default");
+    ed.command("select Cube");
+    ed.command("fsel 0");  // (Edit Mode, faces)
+    const auto note = [&]() {
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      for (const auto &kv : ed.ui_for_test().tooltip_texts)
+        if (kv.second.find("show in Adjust Last Operation") != std::string::npos) return kv.second;
+      return std::string("<not drawn>");
+    };
+    const std::string bound = note();
+    std::printf("    default: '%s'\n", bound.substr(0, bound.find('\n')).c_str());
+    CHECK(bound.find("Adjust Last Operation (F9, bottom left") != std::string::npos);
+    ed.set_binding("edit.adjust_last", {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}});
+    const std::string rebound = note();
+    CHECK(rebound.find("Adjust Last Operation (Ctrl+Shift+U, bottom left") != std::string::npos);
+    ed.set_binding("edit.adjust_last", {});
+    const std::string unbound = note();
+    std::printf("    no key bound: '%s'\n", unbound.substr(0, unbound.find('\n')).c_str());
+    CHECK(unbound.find("Adjust Last Operation (bottom left") != std::string::npos);
+    CHECK(unbound.find("F9") == std::string::npos && unbound.find("()") == std::string::npos && unbound.find("(,") == std::string::npos);
+  });
 }
 
 void run_hci_tests() {
@@ -1024,6 +1051,10 @@ void run_hci_tests() {
       if (size) ed.set_ui_scale_for_test(1.5f);
       ed.set_guides_for_test(false);
       ed.record_buttons_for_test(true);
+      /* Round 569: no frame cap, so no Over / Within budget sentence re-wraps under the walk (the reason is at round
+       * 509's Preferences walk below; this one failed 3 of 10 hci group runs on Linux under load, a stop "focused out
+       * of sight"). */
+      ed.command("fps unlimited");
       ed.command("preferences");
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
       for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
@@ -1332,6 +1363,15 @@ void run_hci_tests() {
     ed.init_headless(1366, 1000);
     ed.set_guides_for_test(false);
     ed.record_buttons_for_test(true);
+    /* Round 569: no frame cap for this walk. With a cap the dialog's frame rate section says "Over budget ..." or
+     * "Within budget ..." by the last 60 frames' measured cost - sentences of different lengths that wrap to a
+     * different number of lines - so on a machine whose frames straddle the cap's budget (Linux's CPU frames of this
+     * 1366 x 1000 window under load: about 8 ms at the default 120) every control below moves a text line up or down
+     * between frames with no input, and a control Tab had just scrolled to the dialog's bottom edge ended a line below
+     * it: "N steps outside the dialog", in some runs and not others (8 of 8 clean with the cap off under the same load
+     * that failed 2 of 8 with it). Unlimited shows neither sentence. What the walk pins is unchanged; that the rows
+     * move under a focused control at all is the product's, reported to the hub, not this test's to judge by chance. */
+    ed.command("fps unlimited");
     ed.command("preferences");
     Kb::settle(ed);
     for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
