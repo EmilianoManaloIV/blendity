@@ -15,10 +15,19 @@ namespace bl {
 
 struct ImportResult;
 
+/* Where a read's time went (round 567: the `splats` stress section's rows; a few clock reads a file). */
+struct SplatReadTimes {
+  double unpack_ms = 0.0;    // SPZ: the gzip / zstd streams inflated
+  double setup_ms = 0.0;     // the header read, a text file's lines found, the cloud's arrays allocated
+  double decode_ms = 0.0;    // the file's bytes to the cloud's arrays
+  double axes_ms = 0.0;      // pointcloud_change_axes
+  double validate_ms = 0.0;  // pointcloud_validate
+};
 /* What a reader leaves besides the cloud: why it refused (`error`), and what it dropped or guessed (`notes`). */
 struct SplatReadReport {
   std::string error;
   std::vector<std::string> notes;
+  SplatReadTimes times;
 };
 
 /* True when `data` is a PLY whose geometry is points only: a vertex element with x, y, z, and no face or edge

@@ -496,6 +496,112 @@ void tests_round559_layout() {
 
 }  // namespace
 
+/* Round 570 (task 0552): the five log lines that named Adjust Last Operation's key as a written "F9" - an Edit Mode operator's "done"
+ * line, the drag helper's line, and the box, the cylinder / cone and the Push/Pull made from construction lines. */
+namespace R570 {
+struct Lines { std::string op, drag, box, cone, pull; };
+
+/* The newest log line since `since` holding `part` (empty when none), and `since` moved past what was read. */
+std::string logged(size_t &since, const char *part) {
+  std::vector<LogEntry> log;
+  since = Log::fetch(since, log);
+  for (size_t i = log.size(); i-- > 0;)
+    if (log[i].text.find(part) != std::string::npos) return log[i].text;
+  for (const LogEntry &e : log) std::printf("      (no '%s' line; logged instead: '%s')\n", part, e.text.c_str());
+  return {};
+}
+
+/* Runs the five operations on a fresh editor after `bind` set the keymap, and returns what each logged. */
+Lines run(const std::function<void(Editor &)> &bind) {
+  Editor ed;
+  ed.init_headless(1200, 800);
+  bind(ed);
+  for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  Lines out;
+  std::vector<LogEntry> skip;
+  size_t since = Log::fetch(0, skip);
+  /* An operator that runs at once: Bevel on one edge. */
+  ed.command("create Cube");
+  const Mesh &m0 = *ed.selected_object()->get<MeshFilter>()->mesh;
+  const auto e = m0.edge_cache()[0];
+  ed.command(strprintf("esel %u %u", e.first, e.second));
+  ed.command("editop bevel");
+  ed.step_frame_headless();
+  out.op = logged(since, "done. Adjust it");
+  /* The drag helper (Recess's, on one face; `edittool` starts the drag, `editop` would run it at once), confirmed with a click in the Scene view. */
+  ed.command("fsel 0");
+  ed.command("edittool recess");
+  ed.step_frame_headless();
+  const Recti sr = ed.scene_rect_for_test();
+  const int cx = sr.x + sr.w / 2 + 40, cy = sr.y + sr.h / 2;
+  ed.step_frame_headless({ev(platform::EventType::MouseMove, cx, cy)});
+  ed.step_frame_headless({ev(platform::EventType::MouseDown, cx, cy)});
+  ed.step_frame_headless({ev(platform::EventType::MouseUp, cx, cy)});
+  ed.step_frame_headless();
+  out.drag = logged(since, "adjusts it");
+  ed.command("edit");
+  ed.command("newscene");
+  /* The solids from construction lines, as the Drawing in Perspective lesson's commands make them. */
+  ed.command("camera 35 -30 6");
+  ed.command("sketch on");
+  ed.step_frame_headless();
+  ed.command("sketchcanvas ground");
+  ed.command("sketchline 0 0 0 1.5 0 0");
+  ed.command("sketchline 0 0 0 0 0 1");
+  ed.command("sketchcanvas plane z 0 0 0");
+  ed.command("sketchline 0 0 0 0 0.8 0");
+  ed.command("sketchbuild box");
+  ed.step_frame_headless();
+  out.box = logged(since, "Box from the construction");
+  /* Push/Pull: the box's top face selected, and a line up from its middle on a wall through it. */
+  ed.command("fsel facing 0 1 0");
+  ed.command("sketchcanvas plane z 0.75 0 0.5");
+  ed.command("sketchline 0.75 0.8 0.5 0.75 1.3 0.5");
+  ed.command("sketchbuild pull");
+  ed.step_frame_headless();
+  out.pull = logged(since, "Push/Pull from the construction");
+  ed.command("sketchcanvas ground");
+  ed.command("sketchcircle -2 0 0 0.5");
+  ed.command("sketchcanvas plane z -2 0 0");
+  ed.command("sketchline -2 0 0 -2 1.2 0");
+  ed.command("sketchbuild cone");
+  ed.step_frame_headless();
+  out.cone = logged(since, "Cone from the construction");
+  return out;
+}
+
+/* Every one of the five was logged and holds `want`; none holds `never` (when given). */
+bool all_say(const Lines &l, const char *state, const char *want, const char *never) {
+  bool ok = true;
+  for (const std::string *s : {&l.op, &l.drag, &l.box, &l.cone, &l.pull}) {
+    std::printf("    %s: '%s'\n", state, s->c_str());
+    if (s->empty() || s->find(want) == std::string::npos) ok = false;
+    if (never && s->find(never) != std::string::npos) ok = false;
+  }
+  return ok;
+}
+}  // namespace R570
+
+void tests_round570_adjust_key() {
+  test("hci: the log lines that point at Adjust Last Operation - an operator's 'done', the drag helper's, a box, a cone and a Push/Pull from construction lines - name the keymap's key: F9, Ctrl+F9 in Maya's preset, a rebound chord (round 570, task 0552)", [] {
+    CHECK(R570::all_say(R570::run([](Editor &) {}), "default", "F9", "Ctrl+"));
+    CHECK(R570::all_say(R570::run([](Editor &ed) { ed.command("keymap Maya"); }), "Maya", "Ctrl+F9", nullptr));
+    const R570::Lines rebound = R570::run([](Editor &ed) { ed.set_binding("edit.adjust_last", {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}}); });
+    CHECK(R570::all_say(rebound, "rebound", "Ctrl+Shift+U", "F9"));
+  });
+
+  test("hci: with no key bound to Adjust Last Operation those log lines name the panel, not F9, and leave no empty bracket (round 570, task 0552)", [] {
+    const R570::Lines l = R570::run([](Editor &ed) { ed.set_binding("edit.adjust_last", {}); });
+    for (const std::string *s : {&l.op, &l.drag, &l.box, &l.cone, &l.pull}) {
+      std::printf("    unbound: '%s'\n", s->c_str());
+      CHECK(!s->empty());
+      CHECK(s->find("F9") == std::string::npos && s->find("()") == std::string::npos && s->find("( ") == std::string::npos);
+    }
+    CHECK(l.op.find("Scene view.") != std::string::npos);  // (the sentence ends where the bracket was)
+    for (const std::string *s : {&l.drag, &l.box, &l.cone, &l.pull}) CHECK(s->find("(Adjust Last Operation ") != std::string::npos);
+  });
+}
+
 void run_hci_tests() {
   test("hci: the live sweep (task 0293) - every layout, window, menu, submenu, dialog and component Inspector opened; their controls checked for clipped labels, overlaps, popups outside the window, help, disabled reasons; the themes' contrast", [] {
     const bool full = env_or("BLENDITY_SWEEP", "") == "full";
@@ -3659,4 +3765,5 @@ void run_hci_tests() {
   run_blockout_openings_tests();
 
   tests_round559_layout();
+  tests_round570_adjust_key();
 }
