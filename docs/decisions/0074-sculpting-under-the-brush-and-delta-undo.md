@@ -78,3 +78,21 @@ and leaves no step.
   face (a negative group) is skipped by the triangulation, so the picture, the id plane (and with it the brush), the
   GPU view and the path tracer all leave it out with no other code knowing; a hide or unhide is a topology change
   (a rebuild), never an in-place frame. The gather skips a vertex all of whose faces are hidden.
+
+## Amended (round 562, task 0544): the brush's point comes from the mesh
+"Turns the depth into a distance along the pixel's ray by bisection (forty halvings; no raycast)" held the brush to the
+depth plane's rounding: the CPU rasterizer's depth on triangles under a pixel across is 1e-5 to 1e-4 of itself off,
+which at 8 m is centimetres to decimetres along the ray - dabs that gathered nothing on a small dense sphere, and two
+tests that broke when a rasterizer change reshuffled the rounding (rounds 554 / 556). As built now:
+- The id plane still says whether the sculpted object is under the pointer. The point is the first shown face of the
+  sculpted mesh on the pixel's ray, from the positions as they are at that dab (`Editor::sculpt_ray_hit`), when the
+  object is drawn as its mesh is or as a Subdivision Surface of it (`sculpt_ray_fits`). Faces looking away are let
+  through when the view culls them.
+- With another modifier or a shape key drawing the object somewhere else, where the ray misses the mesh, and for Paint
+  and Weight Paint, the depth plane's bisection stays.
+- The ray goes through a second grid, of face boxes (`SculptRayGrid`): built once per mesh version from a sample's
+  spread (so one stray face doesn't set the box), kept through strokes by noting the faces a dab, Grab, Drag Dot's
+  take-back or an undo moved and filing them again at the next ray. Under 4,096 faces and with Dyntopo on, every
+  face is tested. It is a cache: any change it wasn't told about builds it again.
+- A consequence the user sees: dabs put down between two frames each land on the surface the dabs before them left,
+  not on the surface as last drawn, so a stroke doesn't depend on the frame rate.

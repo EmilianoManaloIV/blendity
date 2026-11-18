@@ -53,3 +53,10 @@ docs/PERFORMANCE.md).
   candidate for the chain in a later round (a Mirror is a fixed index map; its moved set is derivable).
 - Local re-evaluation is a stencil applied on demand: the same arithmetic as a precomputed stencil table (OpenSubdiv's
   `Far::StencilTable`), without the table (a level-3 table over a dense base runs to hundreds of megabytes).
+
+## Amended (round 562, task 0544): the cage's cast is the ordinary pick
+"The pick reads the surface, then moves onto the cage" (`sculpt_cage_hit`) is now the ordinary pick: Sculpt's point is
+the base mesh's first face on the pixel's ray whenever the object is drawn as its mesh or as a Subdivision Surface of it
+(ADR 0074's amendment), without reading the depth at all. With a Subdivision Surface among other modifiers (a Mirror
+before it) the planes' depth is read first and the point is moved onto the base mesh where the ray finds it, as
+`sculpt_cage_hit` did, against the mesh's own faces fanned from their first corner; the function itself is gone (`Editor::sculpt_ray_hit` does both).
