@@ -58,6 +58,9 @@ uint64_t Editor::lightmap_scene_key() {
       mix(lightmap_hash_of(g, *m));
       mixf(&mr->scale_in_lightmap, 1);
       mix(mr->generate_lightmap_uvs);
+      bool reads_colours = false;  // (task 0537: a Vertex Color material bakes the colours: they and the flag key the bake)
+      for (const MaterialPtr &mp : mr->materials) reads_colours = reads_colours || (mp && mp->vertex_color);
+      if (reads_colours) mix(0x9e3779b9u ^ m->version);  // (only then: the keys saved with bakes before stay valid)
       for (const MaterialPtr &mp : mr->materials)
         if (mp) {
           mixf(&mp->base_color.x, 3);
@@ -491,6 +494,7 @@ void Editor::bake_start() {
   job->env = env_;
   part(1);
   BakeSettings &s = job->settings;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the splats shine on the lightmaps and shade them)
   s.texels_per_unit = ls.texels_per_unit;
   s.max_size = ls.max_size;
   s.padding = ls.padding;
@@ -602,6 +606,7 @@ void Editor::bake_job_run(BakeJob &j) {
   if (j.probe_box_ok || grouped) {
     std::vector<AABB> tris;
     std::vector<PTObject> objs;
+    std::vector<std::vector<Vec4>> colours(j.objects.size());  // (task 0537: a Vertex Color material's colours, as the render sees them)
     for (const BakeObject &o : j.objects) {
       const RenderMesh &rm = o.mesh->render_mesh_tangents();
       for (size_t k = 0; k < rm.tri_count(); k++) {
@@ -610,6 +615,9 @@ void Editor::bake_job_run(BakeJob &j) {
         tris.push_back(b);
       }
       objs.push_back({&rm, o.model, &o.materials});
+      std::vector<Vec4> &c = colours[objs.size() - 1];
+      pt_object_colors(*o.mesh, rm, o.materials, c);
+      if (!c.empty()) objs.back().colors = &c;
     }
     /* Round 455: with Light Probe Groups the probes are theirs, where they were put (Unity moves none); baked as a list,
      * then a grid over their tetrahedra (probe_volume_from_points) is what the views read. */
@@ -627,6 +635,7 @@ void Editor::bake_job_run(BakeJob &j) {
       ps.max_bounces = std::max(0, j.bounces - 1);
       ps.denoise = false;
       ps.use_guiding = false;
+      ps.splats = j.settings.splats;  // (round 533)
       pt.set_settings(ps);
       const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
       pt.build(objs, lights, j.env);
@@ -1271,6 +1280,7 @@ void Editor::preview_step() {
     if (scene_->lighting.lighting_mode == 1) shadowmask_split(lights, false);  // (round 454: logged once, by the bake)
     update_environment();
     BakeSettings s;
+    s.splats = scene_splat_views(*scene_);  // (round 533: as the final bake)
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)
     s.min_chart = 32;  // a small object still gets a few hundred texels, or it looks blocky at a quarter of the resolution
     s.max_size = std::min(ls.max_size, 1024);

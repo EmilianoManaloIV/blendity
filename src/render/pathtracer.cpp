@@ -6,6 +6,7 @@
 #include "../core/cpu.h"
 #include "display.h"
 #include "../core/jobs.h"
+#include "../scene/mesh.h"  // (task 0537: render_vertex_colors_into)
 
 #include <algorithm>
 #include <cmath>
@@ -188,11 +189,15 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   /* GPU devices first: one without ray tracing hardware traverses Blendity's
    * own BVH, so that is built even when the CPU uses Embree. */
   gpu_error_.clear();
+  /* Round 533: the splat clouds (Cycles 5.3's Gaussian splats), a scene of their own beside the meshes. */
+  if (!splats_) splats_ = std::make_shared<SplatSet>();
+  splats_->build(settings_.splats, embree_available() && settings_.use_embree);
+  bool cpu_only = has_volume_;
   /* Round 331: the GPU kernel has no volumes yet - a scene with fog is traced on the CPU, and says so. */
   if (has_volume_ && !settings_.gpus.empty()) gpu_note_ = "a Volume (fog) material: traced on the CPU (the GPU kernel has no volumes yet)";
   else gpu_note_.clear();
-  if (!settings_.gpus.empty() && gpu::available() && !has_volume_) sync_gpus();
-  else if (has_volume_ && !settings_.gpus.empty()) {  // (set aside, open, for the scene without fog: not torn down on every toggle)
+  if (!settings_.gpus.empty() && gpu::available() && !cpu_only) sync_gpus();
+  else if (cpu_only && !settings_.gpus.empty()) {  // (set aside, open, for the scene without fog: not torn down on every toggle)
     stop_all_workers();
     for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
     gpus_.clear();
@@ -514,6 +519,12 @@ bool PathTracer::intersect(const Ray &r, Hit &h) const {
 }
 
 bool PathTracer::occluded(const Ray &r, float tmax) const {
+  /* Round 533: any splat on the way counts (transmittance() then says how much light it lets by). */
+  if (splats_ && !splats_->empty() && splats_->any(r, tmax)) return true;
+  return occluded_meshes(r, tmax);
+}
+
+bool PathTracer::occluded_meshes(const Ray &r, float tmax) const {
 #ifdef BL_WITH_EMBREE
   if (use_embree_) return embree_occluded(embree_.get(), r, tmax);
 #endif
@@ -523,7 +534,18 @@ bool PathTracer::occluded(const Ray &r, float tmax) const {
 }
 
 Vec3 PathTracer::transmittance(const Ray &r, float tmax, const Media *in) const {
-  if (!see_through_) return occluded(r, tmax) ? Vec3(0.0f) : Vec3(1.0f);
+  /* Round 533: the splats let through the product of (1 - alpha) of those the ray crosses - the expected value of
+   * Cycles' stochastic test, without its noise, so a bake's repeated shadow ray converges. */
+  if (splats_ && !splats_->empty()) {
+    const float ts = splats_->transmittance(r, tmax);
+    if (!(ts > 0.0f)) return Vec3(0.0f);
+    if (ts < 1.0f) return transmittance_meshes(r, tmax, in) * ts;
+  }
+  return transmittance_meshes(r, tmax, in);
+}
+
+Vec3 PathTracer::transmittance_meshes(const Ray &r, float tmax, const Media *in) const {
+  if (!see_through_) return occluded_meshes(r, tmax) ? Vec3(0.0f) : Vec3(1.0f);
   if (has_volume_) return transmittance_volumes(r, tmax, in);
   /* Step through see-through surfaces (Cycles: transparent shadows). Glass
    * blocks, as in Cycles without caustics: its light arrives through paths. */
@@ -850,6 +872,7 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
   lens_ = lens;
   if (!(lens_.radius > 0.0f) || !std::isfinite(lens_.radius)) lens_.radius = 0.0f;
   lens_.focus_distance = std::max(1e-4f, lens_.focus_distance);
+  if (lens_.pano.type > 0) lens_.pano.sanitize(), lens_.radius = 0.0f;  // (round 538: no depth of field on a panorama)
   if (width != w_ || height != h_) {
     w_ = width;
     h_ = height;
@@ -865,6 +888,7 @@ size_t PathTracer::memory_bytes() const {
              tlas_.capacity() * sizeof(Node) + instances_.capacity() * sizeof(Instance);
   for (const auto &kv : blas_cache_)
     if (kv.second) n += kv.second->tris.capacity() * sizeof(Tri) + kv.second->prim.capacity() * sizeof(uint32_t) + kv.second->nodes.capacity() * sizeof(Node);
+  if (splats_) n += splats_->memory_bytes();  // (round 533)
   return n;
 }
 
@@ -945,6 +969,15 @@ struct GGX {
 };
 }  // namespace
 
+void pt_object_colors(const Mesh &mesh, const RenderMesh &rm, const std::vector<MaterialPtr> &materials, std::vector<Vec4> &out) {
+  out.clear();
+  for (const MaterialPtr &mp : materials)
+    if (mp && mp->vertex_color) {
+      render_vertex_colors_into(mesh, rm, out);
+      return;
+    }
+}
+
 /* World-space surface data at barycentrics (u, v) of a mesh triangle. */
 const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const {
   const PTObject &ob = objects_[object];
@@ -966,6 +999,8 @@ const Material *PathTracer::surface_at(uint32_t object, uint32_t prim, float u, 
     sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);
     sp.has_tangent = true;
   }
+  if (ob.colors && ob.colors->size() == rm.positions.size())  // (task 0533: read only by a Vertex Color material)
+    sp.vertex_color = (*ob.colors)[tri[0]] * w + (*ob.colors)[tri[1]] * u + (*ob.colors)[tri[2]] * v;
   int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
   const Material *mat = default_material().get();
   if (ob.materials && !ob.materials->empty()) {
@@ -1250,8 +1285,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     Hit h;
     rays++;
     const bool hit_any = intersect(ray, h);
+    /* Round 533: a splat kept before the mesh hit (Cycles 5.3's stochastic test, its seed from the path's numbers). */
+    SplatHit sh;
+    const bool hit_splat = splats_ && !splats_->empty() && splats_->intersect(ray, hit_any ? h.t : 1e30f, pcg_hash(rng++), sh);
     const Ray before_scatter = ray;
-    if (media.n && volume_scatter(media, ray, hit_any ? h.t : 1e30f, beta, L, rng, rays)) {  // (round 331: a scatter in the fog)
+    if (media.n && volume_scatter(media, ray, hit_splat ? sh.t : hit_any ? h.t : 1e30f, beta, L, rng, rays)) {  // (round 331: a scatter in the fog)
       if (bounce == 0 && camera_path && albedo_out) {  // (the denoiser's guides, as Cycles writes a volume's: its colour, no normal, the depth)
         *albedo_out = vmax(Vec3(0.0f), vmin(Vec3(1.0f), media.top()->mat->volume_color));
         *normal_out = Vec3(0.0f);
@@ -1262,6 +1300,23 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       last_pdf = 0.0f;  // (a surface's light found next counts in full: the fog samples no mesh lights)
       since_scatter = 0.0f;
       continue;
+    }
+    if (hit_splat) {
+      /* Round 533: a kept splat shines its SH colour along the ray and scatters nothing (Cycles' default_gsplat
+       * shader: Emission, strength 1). Not light-sampled, so its light found by a bounce counts in full. */
+      Vec3 c = beta * splats_->radiance(sh, ray.dir);
+      if (bounce > 0 && clamp > 0) {
+        const float m = std::max({c.x, c.y, c.z});
+        if (m > clamp) c = c * (clamp / m);
+      }
+      L += c;
+      if (bounce == 0 && camera_path && albedo_out) {  // (the denoiser's guides: the splat's colour and flattest axis)
+        *albedo_out = vmax(Vec3(0.0f), vmin(Vec3(1.0f), splats_->radiance(sh, ray.dir)));
+        *normal_out = splats_->normal(sh, ray.dir);
+        *depth_out = sh.t;  // (as a mesh hit's: the ray's parameter)
+        if (id_out) *id_out = splats_->object_id(sh);
+      }
+      break;
     }
     if (!hit_any) {
       Vec3 Le = env_.radiance(ray.dir);
@@ -1378,7 +1433,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (id_out) *id_out = h.object + 1;
     }
     if (bounce == 0 && camera_path && env_.fog) {  // (task 0248: the fog's share of the pixel is the ramp's colour; the surface's path carries the rest)
-      const float f = env_.fog_amount((since_scatter + h.t) * std::max(0.0f, dot(ray.dir, cam_fwd_)));  // (from the camera, through the see-through passes; round 401: the view depth)
+      const float f = env_.fog_amount((since_scatter + h.t) * (lens_.pano.type > 0 ? 1.0f : std::max(0.0f, dot(ray.dir, cam_fwd_))));  // (from the camera, through the see-through passes; round 401: the view depth; round 538: a panorama has no view axis - the distance itself)
       if (f > 0.0f) {
         L += beta * (env_.fog_color + (env_.fog_far - env_.fog_color) * f) * f;
         beta = beta * (1.0f - f);
@@ -1745,6 +1800,12 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
           Vec4 a = inv_vp_ * Vec4(nx, ny, 0.0f, 1.0f), b = inv_vp_ * Vec4(nx, ny, 1.0f, 1.0f);
           Vec3 pa = a.xyz() / a.w, pb = b.xyz() / b.w;
           Ray r{pa, normalize(pb - pa)};
+          bool outside = false;  // (round 538: a panoramic camera's ray from panoramic.h; where it shows nothing the pixel is black)
+          if (lens_.pano.type > 0) {
+            Vec3 pd;
+            if (panoramic_ray(lens_.pano, (x + jx) / w_, (y + jy) / h_, cam_right_, cam_up_, cam_fwd_, pd)) r = Ray{cam_pos_, pd};
+            else outside = true;
+          }
           if (lens_.radius > 0.0f) {
             /* Thin lens: start on the aperture, aim at where the pinhole ray
              * crosses the focus plane (Cycles: camera_sample_perspective). */
@@ -1761,7 +1822,7 @@ int PathTracer::render_cpu(double budget_ms, int max_samples, std::atomic<int> *
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) guide->segments.Clear();
 #endif
-          Vec3 c = trace(r, rng, &alb, &nrm, &dep, &hit_id, local, guide.get());
+          Vec3 c = outside ? Vec3(0.0f) : trace(r, rng, &alb, &nrm, &dep, &hit_id, local, guide.get());
 #ifdef BL_WITH_OPENPGL
           if (guide && guide->train) {
             /* The path's segments become radiance samples for training. */
@@ -2513,7 +2574,8 @@ static uint64_t gpu_scene_bytes(const gpu::Scene &s) {
          s.verts.size() * sizeof(gpu::GVertex) + s.idx.size() * 4 + s.materials.size() * sizeof(gpu::GMaterial) +
          s.lights.size() * sizeof(gpu::GLight) + s.mesh_lights.size() * sizeof(gpu::GMeshLight) + s.mesh_cdf.size() * 4 +
          s.tex8.size() * 4 + s.texf.size() * 4 + s.textures.size() * sizeof(gpu::GTexInfo) + s.tlas_order.size() * 4 +
-         s.blas.size() * sizeof(gpu::GBlas) + s.object_blas.size() * 4;
+         s.blas.size() * sizeof(gpu::GBlas) + s.object_blas.size() * 4 + s.splats.size() * sizeof(gpu::GSplat) + s.splat_sh.size() * 4 +
+         s.splat_aabbs.size() * 4;  // (round 534: the splats)
 }
 
 /* The level a texture is sent at, tex_skip levels below `lv`, never under 256 texels a side. */
@@ -2558,6 +2620,12 @@ bool PathTracer::build_gpu_scene_fit(gpu::Scene &s, uint64_t memory_mb, int *ski
     if (tb == prev) break;  // nothing smaller left to send
     prev = tb;
   }
+  /* Round 534: the splats are never left off the card alone - its samples are averaged with the CPU's, so it must see
+   * the whole scene; a scene they don't fit renders on the CPU (the caller says so), and the reason is said once. */
+  const uint64_t splat_bytes = s.splats.size() * sizeof(gpu::GSplat) + s.splat_sh.size() * 4 + s.splat_aabbs.size() * 4;
+  if (splat_bytes && !splats_too_big_noted_.exchange(true))
+    Log::warn("gpu: %.0f MB of Gaussian splats with the scene don't fit the card's %llu MB: traced on the CPU", splat_bytes / 1048576.0,
+              (unsigned long long)memory_mb);
   return false;
 }
 
@@ -2648,7 +2716,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     g.flags[0] = m.unlit || m.shading_model == 2 ? 1 : 0;  // (task 0247: Hand-painted traces unlit on the card too)
     g.flags[1] = m.wrap;
     g.flags[2] = settings_.retro.active() && settings_.retro.tex.filter >= 0 ? settings_.retro.tex.filter : m.filter;  // a camera filter's
-    g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0);  // toon, an outline's hull (ADR 0020)
+    g.flags[3] = (m.shading_model == 1 ? 1 : 0) | (m.outline_hull ? 2 : 0) | (m.vertex_color ? 8192 : 0);  // toon, an outline's hull (ADR 0020), Vertex Color (task 0537)
     const float t0[4] = {(float)std::max(1, std::min(8, m.toon_bands)), clampf(m.toon_softness, 0.0f, 0.5f), clampf(m.toon_threshold, 0.0f, 0.95f),
                          clampf(m.toon_specular_smooth, 0.0f, 0.5f)};
     const float t1[4] = {m.toon_shadow.x, m.toon_shadow.y, m.toon_shadow.z, clampf(m.toon_specular_size, 0.0f, 1.0f)};
@@ -2698,6 +2766,12 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   material(*default_material(), false);  // index 0
   struct MeshRec { uint32_t node_off, tri_off, vtx_off, idx_off, blas; };
   std::unordered_map<const RenderMesh *, MeshRec> meshes;
+  /* Task 0537: a mesh's vertices are written once for every object using it - with the colours of whichever of those
+   * objects has them (review 545b2: the first object's, plain, had left a later Vertex Color object white on the card).
+   * Writing them for a plain object is harmless: flag 8192, per material, decides the multiply. */
+  std::unordered_map<const RenderMesh *, const std::vector<Vec4> *> mesh_colors;
+  for (const PTObject &ob : objects_)
+    if (ob.mesh && ob.colors && ob.colors->size() == ob.mesh->positions.size()) mesh_colors.emplace(ob.mesh, ob.colors);
   s.instances.resize(objects_.size());
   s.object_blas.assign(objects_.size(), UINT32_MAX);
   for (size_t o = 0; o < objects_.size(); o++) {
@@ -2719,6 +2793,13 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
         if (v < rm.normals.size()) { gv.n[0] = rm.normals[v].x; gv.n[1] = rm.normals[v].y; gv.n[2] = rm.normals[v].z; }
         if (v < rm.tangents.size()) { gv.t[0] = rm.tangents[v].x; gv.t[1] = rm.tangents[v].y; gv.t[2] = rm.tangents[v].z; gv.t[3] = rm.tangents[v].w; }
         if (v < rm.uvs.size()) { gv.uv[0] = rm.uvs[v].x; gv.uv[1] = rm.uvs[v].y; }
+        /* Task 0537: the vertex colour in the spare lanes (r p.w, g n.w, b uv.z, a uv.w) - white without colours, so a
+         * Vertex Color material on a mesh without them renders as its base colour. */
+        Vec4 vc(1, 1, 1, 1);
+        const auto mc = mesh_colors.find(&rm);
+        if (mc != mesh_colors.end()) vc = (*mc->second)[v];
+        auto ch = [](float x) { return finite_bits(x) ? std::max(0.0f, std::min(x, 1.0f)) : 1.0f; };
+        gv.p[3] = ch(vc.x), gv.n[3] = ch(vc.y), gv.uv[2] = ch(vc.z), gv.uv[3] = ch(vc.w);
         s.verts.push_back(gv);
       }
       for (size_t t = 0; t < rm.tri_count(); t++)
@@ -2779,6 +2860,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
       }
     }
   }
+  gpu::gsplat_gpu_append_all(s, settings_.splats);  // round 534: the splat clouds, instances after the meshes'
   for (const Instance &in : instances_) s.tlas_order.push_back(in.object);
   for (const RenderLight &l : lights_) {
     gpu::GLight g{};
@@ -2858,6 +2940,7 @@ void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint
   /* The key: this build, the camera and the size. */
   uint64_t key = kFnvBasis ^ build_count_ * 0x9E3779B97F4A7C15ull ^ (uint64_t)w_ << 20 ^ (uint64_t)h_ << 40;
   key = fnv1a(inv_vp_.m, sizeof(inv_vp_.m), key);
+  key = fnv1a(&lens_.pano, sizeof(lens_.pano), key);  // (round 538)
   if (key != centre_key_ || centre_dist_.size() != n) {
     centre_dist_.assign(n, 1e6f);
     centre_ids_.assign(n, 0u);
@@ -2869,6 +2952,11 @@ void PathTracer::first_hit_planes(std::vector<float> &distance, std::vector<uint
           if (a.w == 0.0f || bb.w == 0.0f) continue;
           const Vec3 pa = a.xyz() / a.w, pb = bb.xyz() / bb.w;
           Ray r{pa, normalize(pb - pa)};
+          if (lens_.pano.type > 0) {  // (round 538)
+            Vec3 pd;
+            if (!panoramic_ray(lens_.pano, (x + 0.5f) / w_, (y + 0.5f) / h_, cam_right_, cam_up_, cam_fwd_, pd)) continue;
+            r = Ray{cam_pos_, pd};
+          }
           float travelled = 0.0f;
           for (int step = 0; step < 64; step++) {
             Hit h;
@@ -2986,6 +3074,7 @@ PathTracer::GpuSections PathTracer::gpu_scene_sections(const gpu::Scene &s) {
   g = s.nodes.size() > tlas ? mix_bytes(g, s.nodes.data() + tlas, (s.nodes.size() - tlas) * sizeof(gpu::GNode)) : g;
   g = hash_mix(g, (uint64_t)tlas);  // (the software TLAS's node count: the BLAS nodes sit after it, so a split that changes it moves them)
   g = hash_mix(g, (uint64_t)s.nodes.size());
+  g = hash_mix(g, s.splat_hash);  // (round 534: the splats are geometry - a changed cloud is a whole upload)
   h.geometry = g;
   uint64_t i = bytes(kFnvBasis, s.instances);
   i = bytes(i, s.tlas_order);
@@ -3486,6 +3575,15 @@ std::string PathTracer::device_summary() const {
 }
 
 int PathTracer::render(double budget_ms, int max_samples) {
+  if (lens_.pano.type > 0 && (!gpus_.empty() || gpu_starting_)) {  // (round 538: the cards' kernel has no panoramic rays: the CPU traces it, open cards set aside)
+    gpu_note_ = "a panoramic camera: traced on the CPU (the GPU kernel has no panoramic rays yet)";
+    stop_all_workers();
+    for (auto &g : gpus_) parked_gpus_.push_back(std::move(g));
+    gpus_.clear();
+    gpu_starting_ = false;
+    gpu_pending_.clear();
+    Log::info("Path tracer: %s", gpu_note_.c_str());
+  }
   camera_media_ = has_volume_ ? media_at(cam_pos_) : Media{};  // (round 331: after build() and set_camera(), whichever came last)
   /* A material edited between calls resolves its textures here, not in the tracing threads. */
   for (const PTObject &o : objects_)

@@ -6,6 +6,7 @@
 #include "../src/scene/motion_check.h"
 #include "../src/scene/ragdoll.h"
 #include "../src/scene/skin_render.h"  // (round 518: Mesh::skin_pose)
+#include "../src/scene/unity_anim.h"
 
 
 /* ===================================================================== */
@@ -11592,6 +11593,1455 @@ static void tests_round474_more() {
   });
 }
 
+/* ===================================================================== */
+/* Round 541 (task 0521, ADR 0148): quaternion rotation tracks, Convert Rotation, world-space copy / paste, Paste Pose, Align to */
+/* Transform Orientation, scrubbing pauses playback, Wrap Playhead                                                                 */
+/* ===================================================================== */
+
+static void r541_key(AnimationClip &c, const char *path, const char *prop, int axis, float frame, float value, int interp = AnimLinear) {
+  c.track(path, prop, axis).set_key(frame, value, interp, false);
+}
+
+static float r541_mat_err(const Mat4 &a, const Mat4 &b) {
+  float worst = 0.0f;
+  for (int i = 0; i < 16; i++) worst = std::max(worst, std::fabs(a.m[i] - b.m[i]));
+  return worst;
+}
+
+/* A root with a parent that moves and turns, a child bone under it (moving and turning too), and an unparented target. */
+struct R541World {
+  Scene s;
+  GameObject *root = nullptr, *parent = nullptr, *child = nullptr, *target = nullptr, *target2 = nullptr;
+  AnimationClip clip;
+  R541World() {
+    root = s.create("R");
+    parent = s.create("P", root);
+    child = s.create("C", parent);
+    target = s.create("T", root);
+    target2 = s.create("T2", root);
+    child->set_local_position({0, 1, 0});
+    clip.length = 10;
+    r541_key(clip, "P", "Position", 0, 0, 0), r541_key(clip, "P", "Position", 0, 10, 2);
+    r541_key(clip, "P", "Rotation", 1, 0, 0), r541_key(clip, "P", "Rotation", 1, 10, 90);
+    r541_key(clip, "P/C", "Rotation", 2, 0, 0), r541_key(clip, "P/C", "Rotation", 2, 10, 30);
+    r541_key(clip, "P/C", "Position", 1, 0, 1), r541_key(clip, "P/C", "Position", 1, 10, 2);
+  }
+  /* How far `obj` is from the copied matrices over every frame of the paste (0..10 shifted by `at`). */
+  float off_by(GameObject *obj, const WorldCopy &copy, float at = 0.0f) {
+    float worst = 0.0f;
+    for (int f = copy.first; f <= copy.last; f++) {
+      apply_clip(clip, *root, at + (float)(f - copy.first));
+      worst = std::max(worst, r541_mat_err(obj->world_matrix(), copy.sources[0].world[(size_t)(f - copy.first)]));
+    }
+    return worst;
+  }
+};
+
+/* A rig for the Convert Rotation tests: a bone B with a child B2, Euler keys on both. */
+struct R541Rig {
+  Scene s;
+  GameObject *root = nullptr, *b = nullptr, *b2 = nullptr;
+  AnimationClip clip;
+  R541Rig() {
+    root = s.create("Hero");
+    b = s.create("B", root);
+    b->add<Bone>();
+    b2 = s.create("B2", b);
+    b2->set_local_position({0, 1, 0});
+    b2->add<Bone>();
+    for (int k = 0; k < 4; k++) r541_key(clip, "B", "Rotation", 1, 10.0f * (float)k, 90.0f * (float)k);  // 0 -> 270 degrees about Y
+    r541_key(clip, "B", "Rotation", 0, 0, 0), r541_key(clip, "B", "Rotation", 0, 30, 20);
+    r541_key(clip, "B/B2", "Rotation", 2, 0, 0), r541_key(clip, "B/B2", "Rotation", 2, 20, 150), r541_key(clip, "B/B2", "Rotation", 2, 30, 100);
+    clip.length = 30;
+  }
+  float worst_difference(const AnimationClip &a, const AnimationClip &c, std::initializer_list<float> frames) {
+    float worst = 0.0f;
+    for (float f : frames) {
+      apply_clip(a, *root, f);
+      const Mat4 m1 = b->world_matrix(), m2 = b2->world_matrix();
+      apply_clip(c, *root, f);
+      worst = std::max(worst, std::max(r541_mat_err(m1, b->world_matrix()), r541_mat_err(m2, b2->world_matrix())));
+    }
+    return worst;
+  }
+};
+
+/* A number typed into one of the Adjust Last panel's fields (a double click, Ctrl+A, the digits, Enter). */
+static bool r541_type(Editor &ed, const std::string &key, const std::string &text) {
+  ed.record_buttons_for_test(true);
+  Recti r;
+  for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+  if (!ed.button_rect_for_test(key, r)) return false;
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  for (R34ET t : {R34ET::MouseMove, R34ET::MouseDown, R34ET::MouseUp, R34ET::MouseDown, R34ET::MouseUp}) ed.step_frame_headless({r34_mouse(t, x, y)});
+  platform::Event all;
+  all.type = R34ET::KeyDown, all.key = platform::KEY_A, all.mods = platform::MOD_CTRL;
+  ed.step_frame_headless({all});
+  for (char c : text) {
+    platform::Event e;
+    e.type = R34ET::Text, e.codepoint = (uint32_t)c;
+    ed.step_frame_headless({e});
+  }
+  platform::Event enter;
+  enter.type = R34ET::KeyDown, enter.key = platform::KEY_ENTER;
+  ed.step_frame_headless({enter});
+  r34_steps(ed, 3);
+  return true;
+}
+
+/* A key pressed (and let go) with the pointer at (x, y). */
+static void r541_press(Editor &ed, int key, int mods, int x, int y) {
+  platform::Event m, d, u;
+  m.type = R34ET::MouseMove, d.type = R34ET::KeyDown, u.type = R34ET::KeyUp;
+  m.x = d.x = u.x = x;
+  m.y = d.y = u.y = y;
+  d.key = u.key = key;
+  d.mods = u.mods = mods;
+  ed.step_frame_headless({m});
+  ed.step_frame_headless({d, u});
+  r34_steps(ed, 2);
+}
+
+/* An editor with Hero (an Animation clip from `anim new`) and a bone Arm under it, the bone selected. */
+static GameObject *r541_editor_rig(Editor &ed, const char *clip_name) {
+  ed.init_headless(1400, 900);
+  GameObject *hero = ed.scene().create("Hero");
+  GameObject *arm = ed.scene().create("Arm", hero);
+  arm->add<Bone>();
+  ed.command("select Hero");
+  ed.mark_changed_for_test("r541 rig");
+  r34_steps(ed, 2);
+  ed.command(std::string("anim new ") + clip_name);
+  return arm;
+}
+
+static void tests_round541() {
+  test("world-space paste: a child bone under a moving parent pasted onto an unparented object has its world position and rotation on every frame", [] {
+    R541World w;
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(w.clip, *w.root, {w.child}, 0, 10, copy, why));
+    CHECK(copy.sources.size() == 1 && copy.sources[0].name == "C" && copy.sources[0].world.size() == 11);
+    CHECK(paste_world_space(w.clip, *w.root, copy, {w.target}, 0, why) == 1);
+    const float off_target = w.off_by(w.target, copy), off_source = w.off_by(w.child, copy);
+    std::printf("    pasted object off by %g, the source itself by %g (every frame 0..10)\n", (double)off_target, (double)off_source);
+    CHECK(off_target < 1e-3f && off_source < 1e-3f);
+    CHECK(w.clip.find("T", "Position", 1) != nullptr && w.clip.find("T", "Position", 1)->keys.size() == 11);  // (a key on every frame)
+  });
+
+  test("world-space paste: one source goes on every target; two sources and two targets pair by name", [] {
+    R541World w;
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(w.clip, *w.root, {w.child}, 0, 10, copy, why));
+    CHECK(paste_world_space(w.clip, *w.root, copy, {w.target, w.target2}, 0, why) == 2);
+    CHECK(w.off_by(w.target, copy) < 1e-3f && w.off_by(w.target2, copy) < 1e-3f);
+
+    Scene s;
+    GameObject *root = s.create("R"), *src = s.create("Src", root), *dst = s.create("Dst", root);
+    GameObject *a1 = s.create("A", src), *b1 = s.create("B", src), *a2 = s.create("A", dst), *b2 = s.create("B", dst);
+    AnimationClip clip;
+    clip.length = 10;
+    r541_key(clip, "Src/A", "Position", 0, 0, 0), r541_key(clip, "Src/A", "Position", 0, 10, 1);
+    r541_key(clip, "Src/B", "Position", 1, 0, 0), r541_key(clip, "Src/B", "Position", 1, 10, 2);
+    WorldCopy two;
+    CHECK(copy_world_space(clip, *root, {a1, b1}, 0, 10, two, why) && two.sources.size() == 2);
+    CHECK(paste_world_space(clip, *root, two, {b2, a2}, 0, why) == 2);  // (the targets in the other order: by name, not by place)
+    apply_clip(clip, *root, 10.0f);
+    std::printf("    A pasted to %g,%g, B pasted to %g,%g\n", (double)a2->world_position().x, (double)a2->world_position().y, (double)b2->world_position().x, (double)b2->world_position().y);
+    CHECK_NEAR(a2->world_position().x, 1.0f, 1e-3f);
+    CHECK_NEAR(a2->world_position().y, 0.0f, 1e-3f);
+    CHECK_NEAR(b2->world_position().y, 2.0f, 1e-3f);
+    CHECK_NEAR(b2->world_position().x, 0.0f, 1e-3f);
+    /* A target no source is named for: refused with a reason, the clip as it was. */
+    GameObject *other = s.create("Other", root);
+    const std::string before = save_clip_text(clip);
+    why.clear();
+    CHECK(paste_world_space(clip, *root, two, {other}, 0, why) == 0 && !why.empty());
+    CHECK(save_clip_text(clip) == before);
+  });
+
+  test("world-space paste: keys outside the pasted range stay and the ones inside are replaced; Offset Start shifts the motion to the playhead", [] {
+    R541World w;
+    r541_key(w.clip, "T", "Position", 0, 20, 7.0f);   // (after the range: stays)
+    r541_key(w.clip, "T", "Position", 0, 5, 99.0f);   // (inside it: replaced)
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(w.clip, *w.root, {w.child}, 0, 10, copy, why));
+    CHECK(paste_world_space(w.clip, *w.root, copy, {w.target}, 0, why) == 1);
+    const AnimTrack *x = w.clip.find("T", "Position", 0);
+    CHECK(x && x->key_at(20.0f) >= 0 && std::fabs(x->keys[(size_t)x->key_at(20.0f)].value - 7.0f) < 1e-6f);
+    CHECK(x && std::fabs(x->sample(5.0f) - copy.sources[0].world[5].translation().x) < 1e-4f);
+    /* Offset Start: from frame 5 the object has the source's frame 0.. motion. */
+    R541World s;
+    CHECK(copy_world_space(s.clip, *s.root, {s.child}, 0, 10, copy, why));
+    CHECK(paste_world_space(s.clip, *s.root, copy, {s.target}, 5.0f, why) == 1);
+    const float off = s.off_by(s.target, copy, 5.0f);
+    std::printf("    pasted from frame 5: off by %g\n", (double)off);
+    CHECK(off < 1e-3f);
+    const AnimTrack *tx = s.clip.find("T", "Position", 1);
+    CHECK(tx && tx->keys.front().frame == 5.0f && tx->keys.back().frame == 15.0f);
+  });
+
+  test("world-space copy and paste refuse an empty selection, one frame, NaN frames, a clip with no keys, nothing copied, and a target outside the root", [] {
+    R541World w;
+    WorldCopy copy;
+    std::string why;
+    const std::string before = save_clip_text(w.clip);
+    auto refused = [&](bool ok) {
+      CHECK(!ok && !why.empty());
+      why.clear();
+    };
+    refused(copy_world_space(w.clip, *w.root, {}, 0, 10, copy, why));
+    refused(copy_world_space(w.clip, *w.root, {w.child}, 4, 4, copy, why));
+    refused(copy_world_space(w.clip, *w.root, {w.child}, 0, std::nanf(""), copy, why));
+    AnimationClip empty;
+    refused(copy_world_space(empty, *w.root, {w.child}, 0, 10, copy, why));
+    refused(paste_world_space(w.clip, *w.root, WorldCopy(), {w.target}, 0, why) != 0);  // (nothing copied)
+    CHECK(copy_world_space(w.clip, *w.root, {w.child}, 0, 10, copy, why));
+    refused(paste_world_space(w.clip, *w.root, copy, {}, 0, why) != 0);
+    GameObject *outside = w.s.create("Outside");
+    refused(paste_world_space(w.clip, *w.root, copy, {outside}, 0, why) != 0);
+    CHECK(save_clip_text(w.clip) == before);
+  });
+
+  test("Convert Rotation: Euler keys 0 to 270 degrees become quaternion keys of the same orientation in one hemisphere, and back again without a 360 degree jump", [] {
+    R541Rig r;
+    const AnimationClip original = r.clip;
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B", "B/B2"}, true, false) == 2);
+    for (const char *path : {"B", "B/B2"})
+      for (int a = 0; a < 3; a++) CHECK(r.clip.find(path, "Rotation", a) == nullptr);  // (the Rotation tracks are gone)
+    const AnimTrack *qx = r.clip.find("B", "RotationQ", 0), *qw = r.clip.find("B", "RotationQ", 3);
+    CHECK(qx && qw && qx->keys.size() == 4 && qw->keys.size() == 4);  // (the union of the key frames: 0, 10, 20, 30)
+    for (size_t k = 0; qx && k + 1 < qx->keys.size(); k++) {
+      float dot = 0.0f;
+      for (int a = 0; a < 4; a++) dot += r.clip.find("B", "RotationQ", a)->keys[k].value * r.clip.find("B", "RotationQ", a)->keys[k + 1].value;
+      CHECK(dot >= 0.0f);  // (one hemisphere: the curve does not flip between keys)
+    }
+    const float to_q = r.worst_difference(original, r.clip, {0, 10, 20, 30});
+    std::printf("    quaternion clip vs the Euler one at the key frames: worst matrix difference %g\n", (double)to_q);
+    CHECK(to_q < 1e-4f);
+    CHECK(r.clip.tracks[0].label().find("Rotation (Quaternion)") != std::string::npos);
+    /* And back to Euler: continuous keys, the same poses. */
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B", "B/B2"}, false, false) == 2);
+    float jump = 0.0f;
+    for (const char *path : {"B", "B/B2"})
+      for (int a = 0; a < 3; a++) {
+        const AnimTrack *t = r.clip.find(path, "Rotation", a);
+        CHECK(t && !t->keys.empty());
+        for (size_t k = 0; t && k + 1 < t->keys.size(); k++) jump = std::max(jump, std::fabs(t->keys[k + 1].value - t->keys[k].value));
+        CHECK(r.clip.find(path, "RotationQ", a) == nullptr);
+      }
+    const float back = r.worst_difference(original, r.clip, {0, 10, 20, 30});
+    std::printf("    back to Euler: the biggest step between neighbouring keys %g degrees, poses off by %g\n", (double)jump, (double)back);
+    CHECK(jump < 200.0f && back < 1e-4f);
+    const AnimTrack *y = r.clip.find("B", "Rotation", 1);
+    CHECK(y && std::fabs(y->keys.back().value - 270.0f) < 1e-2f);  // (270 stays 270, not -90)
+  });
+
+  test("Convert Rotation: Bake keys every frame; a path without rotation keys has nothing to convert; the file keeps RotationQ", [] {
+    R541Rig r;
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B"}, true, true) == 1);
+    const AnimTrack *q = r.clip.find("B", "RotationQ", 0);
+    CHECK(q && q->keys.size() == 31);  // (frames 0 to 30, one key each)
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B", "Nobody"}, true, false) == 0);  // (already quaternion; no such path)
+    AnimationClip back;
+    CHECK(load_clip_text(save_clip_text(r.clip), back));
+    const AnimTrack *w = back.find("B", "RotationQ", 3);
+    CHECK(w && w->axis == 3 && w->keys.size() == 31);
+    CHECK(save_clip_text(back) == save_clip_text(r.clip));
+  });
+
+  test("RotationQ in Unity: a converted clip exported (m_RotationCurves) and read back poses the rig the same at the key frames", [] {
+    R541Rig r;
+    const AnimationClip original = r.clip;
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B", "B/B2"}, true, false) == 2);
+    std::vector<std::string> notes;
+    const std::string text = clip_to_unity_anim(r.clip, r.root, &notes);
+    const size_t at = text.find("m_RotationCurves:\n");
+    CHECK(at != std::string::npos && text.find("w: ", at) != std::string::npos);
+    CHECK(text.find("m_RotationCurves: []") == std::string::npos);
+    AnimationClip read;
+    std::string why;
+    CHECK(unity_anim_to_clip(text, read, nullptr, &why));
+    const float off = r.worst_difference(original, read, {0, 20, 30});  // (the frames both bones are keyed on)
+    std::printf("    read back from the exported Unity clip: the rig off by %g at the key frames\n", (double)off);
+    CHECK(off < 1e-3f);
+    /* An Euler clip still writes none. */
+    CHECK(clip_to_unity_anim(original, r.root, nullptr).find("m_RotationCurves: []") != std::string::npos);
+  });
+
+  test("RotationQ: a skinned character posed by the quaternion clip has the same vertices as with the Euler clip it was converted from", [] {
+    R69Rig t;
+    AnimationClip clip;
+    clip.length = 20;
+    for (int k = 0; k < 3; k++) {
+      r541_key(clip, "Lower", "Rotation", 1, 10.0f * (float)k, 80.0f * (float)k);
+      r541_key(clip, "Lower/Upper", "Rotation", 2, 10.0f * (float)k, k == 1 ? 100.0f : k == 2 ? 40.0f : 0.0f);
+    }
+    std::vector<std::vector<Vec3>> euler;
+    for (float f : {0.0f, 10.0f, 20.0f}) {
+      apply_clip(clip, *t.rig, f);
+      euler.push_back(t.tube->evaluated_mesh()->positions);
+    }
+    CHECK(convert_rotation_tracks(clip, t.rig, {"Lower", "Lower/Upper"}, true, false) == 2);
+    float worst = 0.0f;
+    size_t i = 0;
+    for (float f : {0.0f, 10.0f, 20.0f}) {
+      apply_clip(clip, *t.rig, f);
+      const std::vector<Vec3> &now = t.tube->evaluated_mesh()->positions;
+      CHECK(now.size() == euler[i].size());
+      for (size_t v = 0; v < now.size() && v < euler[i].size(); v++) worst = std::max(worst, length(now[v] - euler[i][v]));
+      i++;
+    }
+    std::printf("    skinned vertices: the quaternion clip off by %g from the Euler one\n", (double)worst);
+    CHECK(worst < 1e-4f);
+  });
+
+  test("Convert Rotation: Ctrl+R with a bone selected converts by real key events, in one undo step; a plain object leaves the keys alone", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541Convert");
+    ed.command("anim key Arm Rotation 1 0 0");
+    ed.command("anim key Arm Rotation 1 10 90");
+    ed.command("anim key Arm Rotation 1 20 180");
+    r34_steps(ed, 2);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "Rotation", 1) && arm);
+    if (!clip) return;
+    const Recti view = ed.scene_view_rect();
+    ed.command("select Hero");  // (not a bone: the chord is passed on)
+    r34_steps(ed, 2);
+    r541_press(ed, platform::KEY_R, platform::MOD_CTRL, view.x + view.w / 2, view.y + view.h / 2);
+    CHECK(clip->find("Arm", "Rotation", 1) != nullptr && clip->find("Arm", "RotationQ", 0) == nullptr);
+    ed.command("select Arm");
+    r34_steps(ed, 2);
+    const size_t steps = ed.undo_steps_for_test();
+    r541_press(ed, platform::KEY_R, platform::MOD_CTRL, view.x + view.w / 2, view.y + view.h / 2);
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "RotationQ", 3) != nullptr && clip->find("Arm", "Rotation", 1) == nullptr);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    /* Ctrl+R again turns it back; the console does the same. */
+    r541_press(ed, platform::KEY_R, platform::MOD_CTRL, view.x + view.w / 2, view.y + view.h / 2);
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "Rotation", 1) != nullptr && clip->find("Arm", "RotationQ", 0) == nullptr);
+    ed.command("anim rotation quaternion bake");
+    clip = ed.anim_clip_for_test();
+    const AnimTrack *w = clip ? clip->find("Arm", "RotationQ", 3) : nullptr;
+    CHECK(w && w->keys.size() == 21);
+    ed.command("undo");  // one step: the clip is as it was
+    r34_steps(ed, 2);
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "Rotation", 1) && clip->find("Arm", "Rotation", 1)->keys.size() == 3 && clip->find("Arm", "RotationQ", 3) == nullptr);
+    ed.command("anim rotation euler");  // (nothing in quaternion form: nothing to convert)
+    CHECK(ed.run_action_for_test("pose.rotation_convert"));
+  });
+
+  test("Record keys RotationQ for a path that has it, in the hemisphere of its curve", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541Record");
+    ed.command("anim key Arm Rotation 1 0 0");
+    ed.command("anim key Arm Rotation 1 10 90");
+    ed.command("select Arm");
+    ed.command("anim rotation quaternion");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "RotationQ", 3) && arm);
+    if (!clip || !arm) return;
+    ed.command("anim record on");
+    ed.command("anim frame 20");
+    r34_steps(ed, 2);
+    arm->set_local_euler({0, 135, 0});
+    ed.mark_changed_for_test("r541 turn");
+    r34_steps(ed, 2);
+    clip = ed.anim_clip_for_test();
+    const AnimTrack *qy = clip ? clip->find("Arm", "RotationQ", 1) : nullptr;
+    CHECK(qy && qy->key_at(20.0f) >= 0);
+    CHECK(clip && clip->find("Arm", "Rotation", 1) == nullptr);  // (no Euler track made beside it)
+    float dot = 0.0f;
+    for (int a = 0; a < 4 && clip; a++) {
+      const AnimTrack *t = clip->find("Arm", "RotationQ", a);
+      if (t && t->key_at(10.0f) >= 0 && t->key_at(20.0f) >= 0) dot += t->keys[(size_t)t->key_at(10.0f)].value * t->keys[(size_t)t->key_at(20.0f)].value;
+    }
+    CHECK(dot > 0.0f);
+    ed.command("anim record off");
+  });
+
+  test("RotationQ is the dopesheet's Rotation (Quaternion), a track a quaternion's w, and the console keys it", [] {
+    Editor ed;
+    r541_editor_rig(ed, "R541Label");
+    ed.command("anim key Arm RotationQ 0 0 0");
+    ed.command("anim key Arm RotationQ 3 0 1");
+    ed.command("anim key Arm RotationQ 3 10 0.5");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *w = clip ? clip->find("Arm", "RotationQ", 3) : nullptr;
+    CHECK(w && w->keys.size() == 2 && w->label() == "Arm : Rotation (Quaternion).w");
+    CHECK(anim_property_label("RotationQ") == "Rotation (Quaternion)" && anim_property_label("Position") == "Position");
+  });
+
+  test("Paste Pose: influence 0.5 puts the position halfway and the rotation on the slerp halfway", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *l = ed.scene().create("Arm.L", hero), *rr = ed.scene().create("Arm.R", hero);
+    l->add<Bone>(), rr->add<Bone>();
+    l->set_local_position({1, 2, 3}), l->set_local_euler({10, 20, 30});
+    rr->set_local_position({-2, 0, 0}), rr->set_local_euler({0, 40, 0});
+    ed.mark_changed_for_test("r541 pose");
+    ed.command("select Arm.L");
+    ed.command("pose copy");
+    CHECK(ed.pose_clip_size_for_test() == 1);
+    ed.command("select Arm.R");
+    r34_steps(ed, 2);
+    const Transform src = l->local(), before = rr->local();
+    ed.command("pose paste 0.5 selected");  // (Arm.L is not selected, and its name is not Arm.R's: nothing pastes)
+    CHECK(length(rr->local().position - before.position) < 1e-6f);
+    ed.command("select Arm.L");
+    ed.command("pose paste 0.5");  // (the copied Arm.L onto Arm.L itself, half way: it has not moved)
+    CHECK(length(l->local().position - src.position) < 1e-5f);
+    /* Copy Arm.R, move it, paste at 0.5. */
+    ed.command("select Arm.R");
+    ed.command("pose copy");
+    rr->set_local_position({4, 0, 0}), rr->set_local_euler({0, 0, 80});
+    const Transform now = rr->local();
+    ed.command("pose paste 0.5");
+    const Quat want = slerp(now.rotation, before.rotation, 0.5f);
+    std::printf("    position %g (halfway %g), rotation dot with the slerp %g\n", (double)rr->local().position.x, (double)((now.position.x + before.position.x) * 0.5f),
+                (double)std::fabs(rr->local().rotation.x * want.x + rr->local().rotation.y * want.y + rr->local().rotation.z * want.z + rr->local().rotation.w * want.w));
+    CHECK(length(rr->local().position - (now.position + before.position) * 0.5f) < 1e-5f);
+    const Quat got = rr->local().rotation;
+    CHECK(std::fabs(got.x * want.x + got.y * want.y + got.z * want.z + got.w * want.w) > 1.0f - 1e-5f);
+  });
+
+  test("Paste Pose Flipped puts Arm.L's pose on Arm.R with position X and Euler Y and Z negated; Influence and Flipped are F9's, one undo step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *l = ed.scene().create("Arm.L", hero), *rr = ed.scene().create("Arm.R", hero);
+    l->add<Bone>(), rr->add<Bone>();
+    l->set_local_position({1, 2, 3}), l->set_local_euler({10, 20, 30});
+    rr->set_local_position({-2, 0, 0}), rr->set_local_euler({0, 40, 0});
+    ed.mark_changed_for_test("r541 pose");
+    ed.command("select Arm.L");
+    ed.command("pose copy");
+    ed.command("select Arm.R");
+    r34_steps(ed, 2);
+    const Transform before = rr->local();
+    ed.command("pose paste flipped");
+    const Vec3 e = rr->local().euler_hint;
+    std::printf("    Arm.R: position %g %g %g, Euler %g %g %g\n", (double)rr->local().position.x, (double)rr->local().position.y, (double)rr->local().position.z, (double)e.x, (double)e.y, (double)e.z);
+    CHECK(length(rr->local().position - Vec3(-1, 2, 3)) < 1e-5f);
+    const Quat want = Quat::euler({10, -20, -30}), got = rr->local().rotation;
+    CHECK(std::fabs(got.x * want.x + got.y * want.y + got.z * want.z + got.w * want.w) > 1.0f - 1e-5f);
+    CHECK(length(l->local().position - Vec3(1, 2, 3)) < 1e-6f);  // (the source stays)
+    /* F9: the pasted pose is the panel's; Influence 0.5 runs it again from before. */
+    r34_steps(ed, 3);
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "pose");
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r541_type(ed, "adjust:Influence", "0.5"));
+    const Vec3 half = rr->local().position;
+    std::printf("    Influence 0.5 flipped: Arm.R at %g %g %g\n", (double)half.x, (double)half.y, (double)half.z);
+    CHECK(ed.undo_steps_for_test() == steps);  // (the same step, amended)
+    CHECK(std::fabs(half.x - -((before.position.x + 1.0f) * 0.5f)) < 1e-4f && std::fabs(half.y - (before.position.y + 2.0f) * 0.5f) < 1e-4f);  // (blended first, then mirrored)
+    ed.command("undo");
+    r34_steps(ed, 3);
+    rr = ed.scene().find_by_name("Arm.R");  // (an undo restores the scene: look the bone up again)
+    CHECK(rr && length(rr->local().position - before.position) < 1e-5f);  // (one undo step goes back to before the paste)
+    if (!rr) return;
+    /* Flipped at influence 0 mirrors the pose that is there. */
+    ed.command("pose paste 0 flipped");
+    CHECK(std::fabs(rr->local().position.x - 2.0f) < 1e-5f && std::fabs(rr->local().position.y) < 1e-5f);
+  });
+
+  test("Paste Pose keys the pose when Record is on, and the keymap's Ctrl+C / Ctrl+V / Ctrl+Shift+V work in Pose context only", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541Pose");
+    ed.command("anim key Arm Position 0 0 0");
+    arm->set_local_position({3, 0, 0});
+    ed.command("select Arm");
+    r34_steps(ed, 2);
+    const Recti view = ed.scene_view_rect();
+    const int cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+    r541_press(ed, platform::KEY_C, platform::MOD_CTRL, cx, cy);
+    CHECK(ed.pose_clip_size_for_test() == 1);
+    ed.command("anim record on");
+    ed.command("anim frame 12");
+    r34_steps(ed, 2);
+    r541_press(ed, platform::KEY_V, platform::MOD_CTRL, cx, cy);
+    CHECK(length(arm->local().position - Vec3(3, 0, 0)) < 1e-5f);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *t = clip ? clip->find("Arm", "Position", 0) : nullptr;
+    CHECK(t && t->key_at(12.0f) >= 0 && std::fabs(t->keys[(size_t)t->key_at(12.0f)].value - 3.0f) < 1e-4f);
+    ed.command("anim record off");
+    CHECK(ed.run_action_for_test("pose.copy") && ed.run_action_for_test("pose.paste") && ed.run_action_for_test("pose.paste_flipped"));
+    /* A plain object selected: the chord is not the pose's (Ctrl+C copies nothing). */
+    ed.command("select Hero");
+    r34_steps(ed, 2);
+    const size_t held = ed.pose_clip_size_for_test();
+    r541_press(ed, platform::KEY_C, platform::MOD_CTRL, cx, cy);
+    CHECK(ed.pose_clip_size_for_test() == held);
+  });
+
+  test("Align to Transform Orientation: a rotated bone becomes world-aligned, its position stays, its children's world positions are carried", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *p = ed.scene().create("P", hero), *c = ed.scene().create("C", p);
+    p->add<Bone>(), c->add<Bone>();
+    p->set_local_position({1, 0, 0});
+    p->set_local_euler({0, 0, 90});  // (the bone's up is now -X)
+    c->set_local_position({0, 1, 0});
+    ed.mark_changed_for_test("r541 align");
+    ed.command("select P");
+    r34_steps(ed, 2);
+    const Vec3 child_before = c->world_position();
+    CHECK(length(child_before - Vec3(0, 0, 0)) < 1e-4f);  // (1 - 1 along X: the child sits at the origin)
+    ed.command("pose align global");
+    const Quat r = p->world_rotation();
+    std::printf("    P world rotation w %g, position %g %g %g, child at %g %g %g\n", (double)std::fabs(r.w), (double)p->world_position().x, (double)p->world_position().y,
+                (double)p->world_position().z, (double)c->world_position().x, (double)c->world_position().y, (double)c->world_position().z);
+    CHECK(std::fabs(r.w) > 1.0f - 1e-5f);
+    CHECK(length(p->world_position() - Vec3(1, 0, 0)) < 1e-6f);
+    CHECK(length(c->world_position() - Vec3(1, 1, 0)) < 1e-5f);  // (the child follows its parent's new rotation)
+    /* Local: the selected bones take the active one's rotation. */
+    p->set_local_euler({0, 0, 0});
+    GameObject *q = ed.scene().create("Q", hero);
+    q->add<Bone>();
+    q->set_local_euler({0, 50, 0});
+    ed.mark_changed_for_test("r541 align 2");
+    ed.command("select P");
+    ed.command("selectadd Q");
+    r34_steps(ed, 2);
+    ed.command("pose align local");
+    const Quat pr = p->world_rotation(), qr = q->world_rotation();
+    CHECK(std::fabs(pr.x * qr.x + pr.y * qr.y + pr.z * qr.z + pr.w * qr.w) > 1.0f - 1e-5f);
+    CHECK(ed.run_action_for_test("pose.align"));
+    ed.command("pose align global");  // (the orientation is a setting: put back)
+  });
+
+  test("scrubbing the ruler pauses playback and release starts it again from the scrubbed frame; not playing before, not playing after", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    GameObject *hero = ed.scene().create("Hero");
+    GameObject *arm = ed.scene().create("Arm", hero);
+    arm->add<Bone>();
+    ed.command("select Hero");
+    ed.mark_changed_for_test("r541 scrub");
+    ed.command("layout Animation");
+    ed.command("anim new R541Scrub");
+    ed.command("anim key Arm Position 1 0 0");
+    ed.command("anim key Arm Position 1 30 1");
+    ed.command("select Arm");
+    r34_steps(ed, 3);
+    Recti sheet, ruler;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet) && ed.button_rect_for_test("anim_ruler", ruler));
+    if (sheet.w <= 0) return;
+    const float end = std::max(30.0f, ed.anim_clip_for_test()->end_frame()) * 1.1f;
+    auto x_of = [&](float f) { return sheet.x + (int)std::lround(f / end * (float)sheet.w); };
+    const int y = ruler.y + ruler.h / 2;
+    ed.command("anim play");
+    r34_steps(ed, 3);
+    CHECK(ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x_of(20), y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x_of(20), y)});
+    CHECK(!ed.anim_for_test().playing);  // (paused while the ruler is held)
+    CHECK(std::fabs(ed.anim_for_test().frame - 20.0f) <= 1.0f);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x_of(40), y)});
+    r34_steps(ed, 3);
+    std::printf("    scrubbing: playing %d, the playhead at %g\n", (int)ed.anim_for_test().playing, (double)ed.anim_for_test().frame);
+    CHECK(!ed.anim_for_test().playing && std::fabs(ed.anim_for_test().frame - 40.0f) <= 1.0f);  // (the frame follows the mouse, no clock fighting it)
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x_of(40), y)});
+    CHECK(ed.anim_for_test().playing && std::fabs(ed.anim_for_test().play_from - 40.0f) <= 1.0f);  // (playing again from the scrubbed frame)
+    /* Not playing before: not playing after (a plain click on the ruler). */
+    ed.command("anim stop");
+    r34_steps(ed, 2);
+    CHECK(!ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x_of(10), y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x_of(10), y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x_of(10), y)});
+    r34_steps(ed, 2);
+    CHECK(!ed.anim_for_test().playing && std::fabs(ed.anim_for_test().frame - 10.0f) <= 1.0f);
+    /* Esc while scrubbing lets it run again too. */
+    ed.command("anim play");
+    r34_steps(ed, 2);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x_of(25), y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x_of(25), y)});
+    CHECK(!ed.anim_for_test().playing);
+    platform::Event esc;
+    esc.type = R34ET::KeyDown, esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    r34_steps(ed, 2);
+    CHECK(ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x_of(25), y)});
+    ed.command("anim stop");
+  });
+
+  test("Wrap Playhead: on, the next key at the last key is the first and a frame step past the end is frame 0; off, it stays and clamps", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    GameObject *hero = ed.scene().create("Hero");
+    GameObject *arm = ed.scene().create("Arm", hero);
+    arm->add<Bone>();
+    ed.command("select Hero");
+    ed.mark_changed_for_test("r541 wrap");
+    ed.command("layout Animation");
+    ed.command("anim new R541Wrap");
+    ed.command("anim key Arm Position 1 5 0");
+    ed.command("anim key Arm Position 1 20 1");
+    ed.command("select Arm");
+    r34_steps(ed, 3);
+    Recti sheet;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet));
+    const int mx = sheet.x + sheet.w / 2, my = sheet.y + sheet.h / 2;
+    CHECK(!ed.anim_wrap_for_test());  // (off by default)
+    ed.command("anim frame 20");
+    r541_press(ed, platform::KEY_PERIOD, 0, mx, my);
+    std::printf("    wrap off: next key at the last key -> frame %g\n", (double)ed.anim_for_test().frame);
+    CHECK(ed.anim_for_test().frame == 20.0f);
+    ed.command("anim wrap on");
+    CHECK(ed.anim_wrap_for_test());
+    r541_press(ed, platform::KEY_PERIOD, 0, mx, my);
+    std::printf("    wrap on: next key at the last key -> frame %g\n", (double)ed.anim_for_test().frame);
+    CHECK(ed.anim_for_test().frame == 5.0f);  // (round to the first key)
+    r541_press(ed, platform::KEY_COMMA, 0, mx, my);
+    CHECK(ed.anim_for_test().frame == 20.0f);  // (and back round to the last)
+    const float end = ed.anim_clip_for_test()->end_frame();
+    ed.command(strprintf("anim frame %g", (double)end));
+    ed.command("anim step 1");
+    CHECK(ed.anim_for_test().frame == 0.0f);
+    ed.command("anim step -1");
+    CHECK(ed.anim_for_test().frame == end);
+    ed.command("anim wrap off");
+    ed.command("anim step -1000");
+    CHECK(ed.anim_for_test().frame == 0.0f);  // (clamps at 0)
+    ed.command(strprintf("anim frame %g", (double)end));
+    ed.command("anim step 1");
+    CHECK(ed.anim_for_test().frame == end + 1.0f);  // (off: steps are not wrapped)
+  });
+
+  test("the Key menu: Copy / Paste World-Space Animation by the console on a selected bone; the selection pastes the motion in one undo step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero");
+    GameObject *p = ed.scene().create("P", hero), *c = ed.scene().create("C", p), *t = ed.scene().create("T", hero);
+    p->add<Bone>(), c->add<Bone>(), t->add<Bone>();
+    c->set_local_position({0, 1, 0});
+    ed.command("select Hero");
+    ed.mark_changed_for_test("r541 world");
+    ed.command("anim new R541World");
+    ed.command("anim key P Position 0 0 0");
+    ed.command("anim key P Position 0 20 4");
+    ed.command("anim key P Rotation 2 0 0");
+    ed.command("anim key P Rotation 2 20 90");
+    ed.command("select C");
+    r34_steps(ed, 2);
+    ed.command("anim worldcopy 0 20");
+    CHECK(!ed.world_clip_for_test().empty() && ed.world_clip_for_test().last == 20);
+    ed.command("select T");
+    r34_steps(ed, 2);
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("anim worldpaste start");
+    r34_steps(ed, 2);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("T", "Position", 0) && clip->find("T", "Position", 0)->keys.size() == 21);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    /* The pasted bone is where the child bone was at frame 20: (3, 0, 0) (the parent at x 4, turned 90 degrees about Z). */
+    ed.command("anim preview on");
+    ed.command("anim frame 20");
+    r34_steps(ed, 2);
+    const Vec3 wp = t->world_position();
+    std::printf("    T at frame 20: %g %g %g\n", (double)wp.x, (double)wp.y, (double)wp.z);
+    CHECK(length(wp - c->world_position()) < 1e-3f);
+    ed.command("anim preview off");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && (!clip->find("T", "Position", 0) || clip->find("T", "Position", 0)->keys.empty()));
+    /* Refusals leave the copy as it was: a one-frame range, a NaN. */
+    ed.command("anim worldcopy 3 3");
+    ed.command("anim worldcopy nan 9");
+    CHECK(ed.world_clip_for_test().last == 20);
+  });
+}
+
+/* ===================================================================== */
+/* Round 541, the test engineer's group (independent of the implementer's): edge cases from the spec's criteria                   */
+/* ===================================================================== */
+
+static float r541te_dot(const Quat &a, const Quat &b) { return std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w); }
+
+/* An Animation-window editor with Hero / Arm, a Position Y clip keyed 0 -> 30, the bone selected, the sheet and ruler found. */
+struct R541TeAnimEd {
+  Recti sheet, ruler;
+  float end = 33.0f;
+  bool ok = false;
+  explicit R541TeAnimEd(Editor &ed, const char *clip) {
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    GameObject *hero = ed.scene().create("Hero");
+    GameObject *arm = ed.scene().create("Arm", hero);
+    arm->add<Bone>();
+    ed.command("select Hero");
+    ed.mark_changed_for_test("r541te anim");
+    ed.command("layout Animation");
+    ed.command(std::string("anim new ") + clip);
+    ed.command("anim key Arm Position 1 0 0");
+    ed.command("anim key Arm Position 1 30 1");
+    ed.command("select Arm");
+    r34_steps(ed, 3);
+    ok = ed.button_rect_for_test("anim_sheet", sheet) && ed.button_rect_for_test("anim_ruler", ruler) && sheet.w > 0;
+    if (ok) end = std::max(30.0f, ed.anim_clip_for_test()->end_frame()) * 1.1f;
+  }
+  int x_of(float f) const { return sheet.x + (int)std::lround(f / end * (float)sheet.w); }
+  int y() const { return ruler.y + ruler.h / 2; }
+};
+
+static void tests_round541_te() {
+  test("world-space paste: a source under a non-uniformly scaled, turning parent lands on an unparented object frame for frame", [] {
+    Scene s;
+    GameObject *root = s.create("R"), *p = s.create("P", root), *c = s.create("C", p), *t = s.create("T", root);
+    p->set_local_scale({2, 0.5f, 3});
+    c->set_local_position({0, 1, 0});
+    AnimationClip clip;
+    clip.length = 10;
+    r541_key(clip, "P", "Position", 0, 0, 0), r541_key(clip, "P", "Position", 0, 10, 3);
+    r541_key(clip, "P", "Rotation", 1, 0, 0), r541_key(clip, "P", "Rotation", 1, 10, 90);
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(clip, *root, {c}, 0, 10, copy, why));
+    CHECK(paste_world_space(clip, *root, copy, {t}, 0, why) == 1);
+    float worst = 0.0f, worst_pos = 0.0f;
+    for (int f = 0; f <= 10; f++) {
+      apply_clip(clip, *root, (float)f);
+      worst = std::max(worst, r541_mat_err(t->world_matrix(), copy.sources[0].world[(size_t)f]));
+      worst_pos = std::max(worst_pos, length(t->world_position() - copy.sources[0].world[(size_t)f].translation()));
+    }
+    std::printf("    scaled parent: matrix off by %g, position by %g\n", (double)worst, (double)worst_pos);
+    CHECK(worst < 1e-3f && worst_pos < 1e-3f);
+  });
+
+  test("world-space paste: a target under a turning (rotated) parent keeps the source's world pose at every frame", [] {
+    Scene s;
+    GameObject *root = s.create("R"), *src = s.create("Src", root), *q = s.create("Q", root), *t = s.create("T", q);
+    q->set_local_position({1, 2, 0});
+    AnimationClip clip;
+    clip.length = 10;
+    r541_key(clip, "Src", "Position", 0, 0, 0), r541_key(clip, "Src", "Position", 0, 10, 4);
+    r541_key(clip, "Src", "Rotation", 2, 0, 0), r541_key(clip, "Src", "Rotation", 2, 10, 70);
+    r541_key(clip, "Q", "Rotation", 0, 0, 0), r541_key(clip, "Q", "Rotation", 0, 10, 60);
+    r541_key(clip, "Q", "Rotation", 1, 0, 20), r541_key(clip, "Q", "Rotation", 1, 10, 20);
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(clip, *root, {src}, 0, 10, copy, why));
+    CHECK(paste_world_space(clip, *root, copy, {t}, 0, why) == 1);
+    float worst = 0.0f;
+    for (int f = 0; f <= 10; f++) {
+      apply_clip(clip, *root, (float)f);
+      worst = std::max(worst, r541_mat_err(t->world_matrix(), copy.sources[0].world[(size_t)f]));
+    }
+    std::printf("    rotated parent: matrix off by %g\n", (double)worst);
+    CHECK(worst < 1e-3f);
+  });
+
+  test("world-space paste: a target under a scaled parent still has the source's world position", [] {
+    Scene s;
+    GameObject *root = s.create("R"), *src = s.create("Src", root), *q = s.create("Q", root), *t = s.create("T", q);
+    q->set_local_scale({2, 0.5f, 3});
+    AnimationClip clip;
+    clip.length = 10;
+    r541_key(clip, "Src", "Position", 0, 0, 0), r541_key(clip, "Src", "Position", 0, 10, 5);
+    r541_key(clip, "Src", "Position", 2, 0, 1), r541_key(clip, "Src", "Position", 2, 10, -2);
+    r541_key(clip, "Q", "Position", 1, 0, 0), r541_key(clip, "Q", "Position", 1, 10, 3);
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(clip, *root, {src}, 0, 10, copy, why));
+    CHECK(paste_world_space(clip, *root, copy, {t}, 0, why) == 1);
+    float worst = 0.0f;
+    for (int f = 0; f <= 10; f++) {
+      apply_clip(clip, *root, (float)f);
+      worst = std::max(worst, length(t->world_position() - copy.sources[0].world[(size_t)f].translation()));
+    }
+    CHECK(worst < 1e-3f);
+  });
+
+  test("world-space paste: three sources onto three targets by name with one name missing pastes the two that pair and leaves the third alone", [] {
+    Scene s;
+    GameObject *root = s.create("R"), *src = s.create("Src", root), *dst = s.create("Dst", root);
+    GameObject *a1 = s.create("A", src), *b1 = s.create("B", src), *c1 = s.create("C", src);
+    GameObject *a2 = s.create("A", dst), *b2 = s.create("B", dst), *d2 = s.create("D", dst);
+    AnimationClip clip;
+    clip.length = 10;
+    for (const char *n : {"Src/A", "Src/B", "Src/C"}) r541_key(clip, n, "Position", 1, 0, 0), r541_key(clip, n, "Position", 1, 10, n[4] == 'A' ? 1.0f : n[4] == 'B' ? 2.0f : 3.0f);
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(clip, *root, {a1, b1, c1}, 0, 10, copy, why) && copy.sources.size() == 3);
+    const Vec3 d_before = d2->local().position;
+    const int n = paste_world_space(clip, *root, copy, {a2, b2, d2}, 0, why);
+    std::printf("    pasted %d of 3 targets (reason text '%s')\n", n, why.c_str());
+    CHECK(n == 2);
+    apply_clip(clip, *root, 10.0f);
+    CHECK_NEAR(a2->world_position().y, 1.0f, 1e-3f);
+    CHECK_NEAR(b2->world_position().y, 2.0f, 1e-3f);
+    CHECK(clip.find("Dst/D", "Position", 1) == nullptr && length(d2->local().position - d_before) < 1e-6f);
+  });
+
+  test("world-space paste: one target outside the animated root refuses the whole paste and the clip is untouched", [] {
+    R541World w;
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(w.clip, *w.root, {w.child}, 0, 10, copy, why));
+    GameObject *outside = w.s.create("Outside");
+    const std::string before = save_clip_text(w.clip);
+    CHECK(paste_world_space(w.clip, *w.root, copy, {w.target, outside}, 0, why) == 0 && !why.empty());
+    CHECK(save_clip_text(w.clip) == before);
+    CHECK(w.clip.find("T", "Position", 1) == nullptr);
+  });
+
+  test("Convert Rotation: a path with only the Y axis keyed takes X and Z from the object's current angles", [] {
+    Scene s;
+    GameObject *root = s.create("Hero"), *b = s.create("B", root);
+    b->set_local_euler({30, 0, 20});
+    AnimationClip clip;
+    clip.length = 10;
+    r541_key(clip, "B", "Rotation", 1, 0, 0), r541_key(clip, "B", "Rotation", 1, 10, 60);
+    CHECK(convert_rotation_tracks(clip, root, {"B"}, true, false) == 1);
+    for (int a = 0; a < 4; a++) CHECK(clip.find("B", "RotationQ", a) != nullptr);
+    apply_clip(clip, *root, 10.0f);
+    const float d = r541te_dot(b->local().rotation, Quat::euler({30, 60, 20}));
+    std::printf("    Y-only path: dot with the expected orientation %g\n", (double)d);
+    CHECK(d > 1.0f - 1e-5f);
+    apply_clip(clip, *root, 0.0f);
+    CHECK(r541te_dot(b->local().rotation, Quat::euler({30, 0, 20})) > 1.0f - 1e-5f);
+  });
+
+  test("Convert Rotation: axes keyed on different frames give quaternion keys on the union of the frames; Bake fills every whole frame", [] {
+    Scene s;
+    GameObject *root = s.create("Hero"), *b = s.create("B", root);
+    AnimationClip clip;
+    clip.length = 20;
+    r541_key(clip, "B", "Rotation", 0, 4, 0), r541_key(clip, "B", "Rotation", 0, 14, 40);
+    r541_key(clip, "B", "Rotation", 2, 9, 0), r541_key(clip, "B", "Rotation", 2, 11, 30);
+    AnimationClip baked = clip;
+    CHECK(convert_rotation_tracks(clip, root, {"B"}, true, false) == 1);
+    for (int a = 0; a < 4; a++) {
+      const AnimTrack *t = clip.find("B", "RotationQ", a);
+      CHECK(t && t->keys.size() == 4);
+      if (t && t->keys.size() == 4) CHECK(t->keys[0].frame == 4 && t->keys[1].frame == 9 && t->keys[2].frame == 11 && t->keys[3].frame == 14);
+    }
+    CHECK(convert_rotation_tracks(baked, root, {"B"}, true, true) == 1);
+    const AnimTrack *w = baked.find("B", "RotationQ", 3);
+    CHECK(w && w->keys.size() == 11);  // (frames 4 to 14, every whole frame)
+    for (size_t i = 0; w && i < w->keys.size(); i++) CHECK(w->keys[i].frame == 4.0f + (float)i);
+    (void)b;
+  });
+
+  test("Convert Rotation: the quaternion keys turned back to Euler never jump over 180 degrees between neighbours, whatever sign the quaternions had", [] {
+    Scene s;
+    GameObject *root = s.create("Hero"), *b = s.create("B", root);
+    AnimationClip clip;
+    clip.length = 30;
+    const float zs[] = {0, 100, 200, 300};
+    for (int k = 0; k < 4; k++) {
+      Quat q = Quat::euler({0, 0, zs[k]});
+      if (k == 2) q = Quat(-q.x, -q.y, -q.z, -q.w);  // (the same turn, the other hemisphere)
+      const float comp[4] = {q.x, q.y, q.z, q.w};
+      for (int a = 0; a < 4; a++) r541_key(clip, "B", "RotationQ", a, 10.0f * (float)k, comp[a]);
+    }
+    CHECK(convert_rotation_tracks(clip, root, {"B"}, false, false) == 1);
+    float jump = 0.0f;
+    for (int a = 0; a < 3; a++) {
+      const AnimTrack *t = clip.find("B", "Rotation", a);
+      CHECK(t && t->keys.size() == 4);
+      for (size_t k = 0; t && k + 1 < t->keys.size(); k++) jump = std::max(jump, std::fabs(t->keys[k + 1].value - t->keys[k].value));
+    }
+    std::printf("    biggest Euler step between neighbouring keys: %g degrees\n", (double)jump);
+    CHECK(jump < 180.0f);
+    for (int k = 0; k < 4; k++) {
+      apply_clip(clip, *root, 10.0f * (float)k);
+      CHECK(r541te_dot(b->local().rotation, Quat::euler({0, 0, zs[k]})) > 1.0f - 1e-4f);
+    }
+  });
+
+  test("Convert Rotation: the interpolation of the source keys is carried to the new keys", [] {
+    Scene s;
+    GameObject *root = s.create("Hero");
+    s.create("B", root);
+    AnimationClip clip;
+    clip.length = 10;
+    r541_key(clip, "B", "Rotation", 1, 0, 0, AnimConstant), r541_key(clip, "B", "Rotation", 1, 10, 50, AnimLinear);
+    r541_key(clip, "B", "Rotation", 2, 5, 10, AnimLinear);
+    CHECK(convert_rotation_tracks(clip, root, {"B"}, true, false) == 1);
+    const AnimTrack *t = clip.find("B", "RotationQ", 0);
+    CHECK(t && t->keys.size() == 3);
+    if (t && t->keys.size() == 3) {
+      CHECK(t->keys[0].interp == AnimConstant);  // (the key at frame 0: the source's constant)
+      CHECK(t->keys[1].interp == AnimLinear);    // (frame 5 is the Z key's)
+    }
+  });
+
+  test("Convert Rotation: a NaN key leaves finite quaternion keys or refuses, never a NaN curve", [] {
+    R541Rig r;
+    r541_key(r.clip, "B", "Rotation", 1, 10, std::nanf(""));
+    const int n = convert_rotation_tracks(r.clip, r.root, {"B"}, true, false);
+    std::printf("    NaN key: converted %d path(s)\n", n);
+    bool finite = true;
+    for (const AnimTrack &t : r.clip.tracks)
+      for (const AnimKey &k : t.keys)
+        if (t.property == "RotationQ") finite = finite && std::isfinite(k.value);
+    CHECK(finite);
+  });
+
+  test("RotationQ: a sample of zero length leaves the object's rotation as it was", [] {
+    Scene s;
+    GameObject *root = s.create("Hero"), *b = s.create("B", root);
+    b->set_local_euler({30, 40, 50});
+    const Quat before = b->local().rotation;
+    AnimationClip clip;
+    clip.length = 10;
+    for (int a = 0; a < 4; a++) r541_key(clip, "B", "RotationQ", a, 0, 0), r541_key(clip, "B", "RotationQ", a, 10, 0);
+    apply_clip(clip, *root, 5.0f);
+    const Quat now = b->local().rotation;
+    CHECK(std::isfinite(now.x + now.y + now.z + now.w));
+    CHECK(r541te_dot(now, before) > 1.0f - 1e-6f);
+  });
+
+  test("Paste Pose: Selected Only changes the selected bone and not the other; without it both take the pose", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *a = ed.scene().create("A", hero), *b = ed.scene().create("B", hero);
+    a->add<Bone>(), b->add<Bone>();
+    a->set_local_position({1, 0, 0}), b->set_local_position({0, 2, 0});
+    ed.mark_changed_for_test("r541te pose");
+    ed.command("select A");
+    ed.command("selectadd B");
+    ed.command("pose copy");
+    CHECK(ed.pose_clip_size_for_test() == 2);
+    a->set_local_position({9, 9, 9}), b->set_local_position({8, 8, 8});
+    ed.command("select B");
+    r34_steps(ed, 2);
+    ed.command("pose paste selected");
+    CHECK(length(b->local().position - Vec3(0, 2, 0)) < 1e-5f);
+    CHECK(length(a->local().position - Vec3(9, 9, 9)) < 1e-5f);  // (A was not selected)
+    ed.command("pose paste");
+    CHECK(length(a->local().position - Vec3(1, 0, 0)) < 1e-5f);
+  });
+
+  test("Paste Pose: a bone that was not selected at copy time is not pasted", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *a = ed.scene().create("A", hero), *b = ed.scene().create("B", hero);
+    a->add<Bone>(), b->add<Bone>();
+    a->set_local_position({1, 0, 0}), b->set_local_position({0, 2, 0});
+    ed.mark_changed_for_test("r541te pose");
+    ed.command("select A");
+    ed.command("pose copy");
+    b->set_local_position({5, 5, 5});
+    a->set_local_position({7, 7, 7});
+    ed.command("select B");
+    r34_steps(ed, 2);
+    ed.command("pose paste");
+    CHECK(length(b->local().position - Vec3(5, 5, 5)) < 1e-5f);  // (B was not copied; A's pose has no B to go on)
+    CHECK(length(a->local().position - Vec3(1, 0, 0)) < 1e-5f);  // (A is in the rig: it takes its own copied pose)
+  });
+
+  test("Paste Pose Flipped mirrors LeftHand / RightHand names as it does Arm.L / Arm.R", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *l = ed.scene().create("LeftHand", hero), *r = ed.scene().create("RightHand", hero);
+    l->add<Bone>(), r->add<Bone>();
+    l->set_local_position({2, 3, 4});
+    r->set_local_position({-1, 0, 0});
+    ed.mark_changed_for_test("r541te pose");
+    ed.command("select LeftHand");
+    ed.command("pose copy");
+    ed.command("select RightHand");
+    r34_steps(ed, 2);
+    ed.command("pose paste flipped");
+    CHECK(length(r->local().position - Vec3(-2, 3, 4)) < 1e-5f);
+    CHECK(length(l->local().position - Vec3(2, 3, 4)) < 1e-6f);
+    /* and back: RightHand copied, pasted flipped onto LeftHand. */
+    ed.command("pose copy");
+    ed.command("select LeftHand");
+    r34_steps(ed, 2);
+    ed.command("pose paste flipped");
+    CHECK(length(l->local().position - Vec3(2, 3, 4)) < 1e-5f);
+  });
+
+  test("Paste Pose: Influence typed twice in F9 re-runs from the before-state each time and stays one undo step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *a = ed.scene().create("Arm", hero);
+    a->add<Bone>();
+    a->set_local_position({4, 0, 0});
+    ed.mark_changed_for_test("r541te pose");
+    ed.command("select Arm");
+    ed.command("pose copy");
+    a->set_local_position({0, 0, 0});
+    ed.mark_changed_for_test("r541te move");
+    r34_steps(ed, 2);
+    ed.command("pose paste");
+    r34_steps(ed, 3);
+    CHECK(length(a->local().position - Vec3(4, 0, 0)) < 1e-5f);
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "pose");
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r541_type(ed, "adjust:Influence", "0.5"));
+    CHECK(std::fabs(a->local().position.x - 2.0f) < 1e-4f);
+    CHECK(r541_type(ed, "adjust:Influence", "0.25"));
+    std::printf("    Influence 0.5 then 0.25: x = %g, undo steps %zu (was %zu)\n", (double)a->local().position.x, ed.undo_steps_for_test(), steps);
+    CHECK(std::fabs(a->local().position.x - 1.0f) < 1e-4f);  // (from before, not from the 0.5 result)
+    CHECK(ed.undo_steps_for_test() == steps);
+    ed.command("undo");
+    r34_steps(ed, 3);
+    a = ed.scene().find_by_name("Arm");
+    CHECK(a && length(a->local().position) < 1e-5f);
+  });
+
+  test("Align to Transform Orientation: Local with an active object gives the other selected objects its world rotation and leaves their positions", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *a = ed.scene().create("A"), *b = ed.scene().create("B"), *act = ed.scene().create("Act");
+    a->set_local_position({1, 2, 3}), a->set_local_euler({10, 20, 30});
+    b->set_local_position({-4, 0, 5}), b->set_local_euler({0, 0, 70});
+    act->set_local_position({0, 9, 0}), act->set_local_euler({0, 55, 0});
+    ed.mark_changed_for_test("r541te align");
+    ed.command("select A");
+    ed.command("selectadd B");
+    ed.command("selectadd Act");
+    r34_steps(ed, 2);
+    ed.command("pose align local");
+    const Quat want = act->world_rotation();
+    CHECK(r541te_dot(a->world_rotation(), want) > 1.0f - 1e-5f);
+    CHECK(r541te_dot(b->world_rotation(), want) > 1.0f - 1e-5f);
+    CHECK(length(a->world_position() - Vec3(1, 2, 3)) < 1e-5f);
+    CHECK(length(b->world_position() - Vec3(-4, 0, 5)) < 1e-5f);
+    CHECK(length(act->world_position() - Vec3(0, 9, 0)) < 1e-5f);
+    ed.command("pose align global");
+  });
+
+  test("Align to Transform Orientation: an unselected child keeps its place in its parent's new frame; a selected child is squared up too", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *p = ed.scene().create("P"), *c = ed.scene().create("C", p);
+    p->set_local_position({1, 0, 0}), p->set_local_euler({0, 0, 90});
+    c->set_local_position({0, 1, 0}), c->set_local_euler({0, 40, 0});
+    ed.mark_changed_for_test("r541te align");
+    ed.command("select P");
+    r34_steps(ed, 2);
+    ed.command("pose align global");
+    CHECK(r541te_dot(p->world_rotation(), Quat()) > 1.0f - 1e-5f);
+    CHECK(length(c->world_position() - Vec3(1, 1, 0)) < 1e-5f);  // (carried by the parent's turn)
+    p->set_local_euler({0, 0, 90});
+    ed.mark_changed_for_test("r541te align 2");
+    ed.command("select P");
+    ed.command("selectadd C");
+    r34_steps(ed, 2);
+    ed.command("pose align global");
+    CHECK(r541te_dot(p->world_rotation(), Quat()) > 1.0f - 1e-5f);
+    CHECK(r541te_dot(c->world_rotation(), Quat()) > 1.0f - 1e-5f);
+    CHECK(length(p->world_position() - Vec3(1, 0, 0)) < 1e-5f);
+  });
+
+  test("scrubbing: a click on the ruler while playing, with no drag, pauses and starts playing again from that frame", [] {
+    Editor ed;
+    R541TeAnimEd w(ed, "R541TeClick");
+    CHECK(w.ok);
+    if (!w.ok) return;
+    ed.command("anim play");
+    r34_steps(ed, 3);
+    CHECK(ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, w.x_of(12), w.y())});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, w.x_of(12), w.y())});
+    CHECK(!ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, w.x_of(12), w.y())});
+    CHECK(ed.anim_for_test().playing && std::fabs(ed.anim_for_test().play_from - 12.0f) <= 1.0f);
+    ed.command("anim stop");
+  });
+
+  test("scrubbing: a drag along the ruler while not playing follows the mouse and never starts playback", [] {
+    Editor ed;
+    R541TeAnimEd w(ed, "R541TeDrag");
+    CHECK(w.ok);
+    if (!w.ok) return;
+    CHECK(!ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, w.x_of(5), w.y())});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, w.x_of(5), w.y())});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, w.x_of(22), w.y())});
+    r34_steps(ed, 2);
+    CHECK(!ed.anim_for_test().playing && std::fabs(ed.anim_for_test().frame - 22.0f) <= 1.0f);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, w.x_of(22), w.y())});
+    r34_steps(ed, 3);
+    CHECK(!ed.anim_for_test().playing && std::fabs(ed.anim_for_test().frame - 22.0f) <= 1.0f);
+  });
+
+  test("scrubbing: Esc during a scrub resumes playback and the release afterwards does not stop it", [] {
+    Editor ed;
+    R541TeAnimEd w(ed, "R541TeEsc");
+    CHECK(w.ok);
+    if (!w.ok) return;
+    ed.command("anim play");
+    r34_steps(ed, 2);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, w.x_of(8), w.y())});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, w.x_of(8), w.y())});
+    CHECK(!ed.anim_for_test().playing);
+    platform::Event esc;
+    esc.type = R34ET::KeyDown, esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    r34_steps(ed, 2);
+    CHECK(ed.anim_for_test().playing);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, w.x_of(8), w.y())});
+    r34_steps(ed, 2);
+    CHECK(ed.anim_for_test().playing);
+    ed.command("anim stop");
+  });
+
+  test("Wrap Playhead: the Left arrow at frame 0 goes to the clip's end when on and stays at 0 when off; Right at the end goes to 0", [] {
+    Editor ed;
+    R541TeAnimEd w(ed, "R541TeWrapKeys");
+    CHECK(w.ok);
+    if (!w.ok) return;
+    const int mx = w.sheet.x + w.sheet.w / 2, my = w.sheet.y + w.sheet.h / 2;
+    const float end = ed.anim_clip_for_test()->end_frame();
+    ed.command("anim frame 0");
+    r541_press(ed, platform::KEY_LEFT, 0, mx, my);
+    CHECK(ed.anim_for_test().frame == 0.0f);  // (off: clamps)
+    ed.command("anim wrap on");
+    r541_press(ed, platform::KEY_LEFT, 0, mx, my);
+    std::printf("    wrap on: Left at frame 0 -> %g (end %g)\n", (double)ed.anim_for_test().frame, (double)end);
+    CHECK(ed.anim_for_test().frame == end);
+    r541_press(ed, platform::KEY_RIGHT, 0, mx, my);
+    CHECK(ed.anim_for_test().frame == 0.0f);
+    ed.command("anim wrap off");
+    ed.command("anim step -1");
+    CHECK(ed.anim_for_test().frame == 0.0f);
+  });
+
+  test("Wrap Playhead: Previous Key at the first key goes to the last key when on and stays when off", [] {
+    Editor ed;
+    R541TeAnimEd w(ed, "R541TeWrapPrev");
+    CHECK(w.ok);
+    if (!w.ok) return;
+    const int mx = w.sheet.x + w.sheet.w / 2, my = w.sheet.y + w.sheet.h / 2;
+    ed.command("anim frame 0");
+    r541_press(ed, platform::KEY_COMMA, 0, mx, my);
+    CHECK(ed.anim_for_test().frame == 0.0f);
+    ed.command("anim wrap on");
+    r541_press(ed, platform::KEY_COMMA, 0, mx, my);
+    CHECK(ed.anim_for_test().frame == 30.0f);
+    ed.command("anim wrap off");
+  });
+
+  test("Unity export of a clip with one Euler path and one RotationQ path writes both m_EulerCurves and m_RotationCurves, and reads back the same", [] {
+    R541Rig r;
+    const AnimationClip original = r.clip;
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B"}, true, false) == 1);  // (B quaternion, B/B2 stays Euler)
+    CHECK(r.clip.find("B", "RotationQ", 0) && r.clip.find("B/B2", "Rotation", 2));
+    const std::string text = clip_to_unity_anim(r.clip, r.root, nullptr);
+    CHECK(text.find("m_RotationCurves: []") == std::string::npos);
+    CHECK(text.find("m_EulerCurves: []") == std::string::npos);
+    CHECK(text.find("m_RotationCurves:\n") != std::string::npos && text.find("m_EulerCurves:\n") != std::string::npos);
+    AnimationClip read;
+    std::string why;
+    CHECK(unity_anim_to_clip(text, read, nullptr, &why));
+    const float off = r.worst_difference(original, read, {0, 20, 30});
+    std::printf("    mixed clip read back: off by %g\n", (double)off);
+    CHECK(off < 1e-3f);
+  });
+}
+
+/* ===================================================================== */
+/* Round 541, review fixes: flat curves, F9's Flipped, RotationQ keying, the Unity export, rigs under one group, Align, the chords */
+/* ===================================================================== */
+
+static void tests_round541_review() {
+  test("world-space paste: a curve the paste made and left flat keeps one key; a track the target already had is never dropped", [] {
+    R541World w;
+    r541_key(w.clip, "T", "Position", 2, 20, 0.0f);  // (a flat track of the target's own, its key outside the range)
+    WorldCopy copy;
+    std::string why;
+    CHECK(copy_world_space(w.clip, *w.root, {w.child}, 0, 10, copy, why));
+    CHECK(paste_world_space(w.clip, *w.root, copy, {w.target}, 0, why) == 1);
+    const AnimTrack *own = w.clip.find("T", "Position", 2);
+    CHECK(own && own->keys.size() == 12);  // (11 pasted keys and its own: not collapsed, not removed)
+    const AnimTrack *made = w.clip.find("T", "Scale", 0);
+    CHECK(made && made->keys.size() == 1 && std::fabs(made->keys[0].value - 1.0f) < 1e-6f);  // (made by the paste, flat: one key)
+    CHECK(w.off_by(w.target, copy) < 1e-3f);
+  });
+
+  test("world-space paste with Preview on: the flat value is a key, so it is still there after Preview goes off", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero");
+    GameObject *p = ed.scene().create("P", hero), *c = ed.scene().create("C", p), *t = ed.scene().create("T", hero);
+    p->add<Bone>(), c->add<Bone>(), t->add<Bone>();
+    t->set_local_position({0, 0, 3});  // (its rest z is not the flat value 0 the paste makes)
+    ed.command("select Hero");
+    ed.mark_changed_for_test("r541 flat");
+    ed.command("anim new R541Flat");
+    ed.command("anim key P Position 0 0 0");
+    ed.command("anim key P Position 0 10 4");
+    ed.command("select C");
+    r34_steps(ed, 2);
+    ed.command("anim preview on");
+    ed.command("anim worldcopy 0 10");
+    ed.command("select T");
+    r34_steps(ed, 2);
+    ed.command("anim worldpaste");
+    r34_steps(ed, 2);
+    ed.command("anim preview off");
+    r34_steps(ed, 2);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *z = clip ? clip->find("T", "Position", 2) : nullptr;
+    CHECK(z && z->keys.size() == 1 && std::fabs(z->keys[0].value) < 1e-6f);
+    ed.command("anim preview on");
+    ed.command("anim frame 5");
+    r34_steps(ed, 2);
+    CHECK(std::fabs(ed.scene().find_by_name("T")->local().position.z) < 1e-5f);
+  });
+
+  test("Paste Pose F9: Flipped on then off puts both bones back right in one undo step, and a later Copy Pose does not change what it pastes", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *hero = ed.scene().create("Hero"), *l = ed.scene().create("Arm.L", hero), *rr = ed.scene().create("Arm.R", hero);
+    l->add<Bone>(), rr->add<Bone>();
+    l->set_local_position({1, 2, 3}), rr->set_local_position({-2, 0, 0});
+    ed.mark_changed_for_test("r541 f9");
+    ed.command("select Arm.L");
+    ed.command("pose copy");
+    ed.command("select Arm.R");
+    r34_steps(ed, 2);
+    ed.command("pose paste flipped");
+    r34_steps(ed, 3);
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "pose");
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("select Arm.R");
+    ed.command("pose copy");  // (a later Copy Pose: F9 must still paste Arm.L)
+    ed.command("select Arm.R");
+    r34_steps(ed, 2);
+    Recti flip;
+    ed.record_buttons_for_test(true);
+    r34_steps(ed, 2);
+    CHECK(ed.button_rect_for_test("adjust:Flipped", flip));
+    if (flip.w <= 0) return;
+    r34_click(ed, flip.x + flip.h / 2, flip.y + flip.h / 2);  // (off)
+    r34_steps(ed, 2);
+    GameObject *ln = ed.scene().find_by_name("Arm.L"), *rn = ed.scene().find_by_name("Arm.R");
+    std::printf("    Flipped off: Arm.L at %g %g %g, Arm.R at %g %g %g\n", (double)ln->local().position.x, (double)ln->local().position.y, (double)ln->local().position.z,
+                (double)rn->local().position.x, (double)rn->local().position.y, (double)rn->local().position.z);
+    CHECK(length(rn->local().position - Vec3(-2, 0, 0)) < 1e-5f);  // (Arm.R as it was)
+    CHECK(length(ln->local().position - Vec3(1, 2, 3)) < 1e-5f);   // (Arm.L onto itself)
+    CHECK(ed.button_rect_for_test("adjust:Flipped", flip));
+    r34_click(ed, flip.x + flip.h / 2, flip.y + flip.h / 2);  // (on again)
+    r34_steps(ed, 2);
+    ln = ed.scene().find_by_name("Arm.L"), rn = ed.scene().find_by_name("Arm.R");
+    CHECK(length(rn->local().position - Vec3(-1, 2, 3)) < 1e-5f && length(ln->local().position - Vec3(1, 2, 3)) < 1e-5f);
+    CHECK(ed.undo_steps_for_test() == steps);
+  });
+
+  test("RotationQ keying: Insert Keyframe, Set Key and `anim key` without a value key the quaternion on a path that has it", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541KeyQ");
+    ed.command("anim key Arm Rotation 1 0 0");
+    ed.command("anim key Arm Rotation 1 10 90");
+    ed.command("select Arm");
+    ed.command("anim rotation quaternion");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && arm && clip->find("Arm", "RotationQ", 3));
+    if (!clip || !arm) return;
+    arm->set_local_euler({0, 135, 0});
+    ed.command("anim frame 20");
+    arm->set_local_euler({0, 135, 0});
+    ed.anim_key_property_for_test(arm, "Rotation", 3);  // (Insert Keyframe on the Rotation field)
+    clip = ed.anim_clip_for_test();
+    CHECK(clip->find("Arm", "RotationQ", 1) && clip->find("Arm", "RotationQ", 1)->key_at(20.0f) >= 0);
+    CHECK(clip->find("Arm", "Rotation", 1) == nullptr);
+    arm->set_local_euler({0, 150, 0});
+    ed.command("anim frame 25");
+    arm->set_local_euler({0, 150, 0});
+    CHECK(ed.run_action_for_test("anim.key"));  // (Set Key)
+    clip = ed.anim_clip_for_test();
+    CHECK(clip->find("Arm", "RotationQ", 3)->key_at(25.0f) >= 0 && clip->find("Arm", "Rotation", 1) == nullptr);
+    arm->set_local_euler({0, 160, 0});
+    ed.command("anim key Arm Rotation 1 30");  // (no value)
+    clip = ed.anim_clip_for_test();
+    CHECK(clip->find("Arm", "RotationQ", 0)->key_at(30.0f) >= 0 && clip->find("Arm", "Rotation", 1) == nullptr);
+    float dot = 0.0f;  // (the hemisphere of the curve is kept: 25 -> 30)
+    for (int a = 0; a < 4; a++) dot += clip->find("Arm", "RotationQ", a)->keys[(size_t)clip->find("Arm", "RotationQ", a)->key_at(25.0f)].value * clip->find("Arm", "RotationQ", a)->keys[(size_t)clip->find("Arm", "RotationQ", a)->key_at(30.0f)].value;
+    CHECK(dot > 0.0f);
+  });
+
+  test("Unity export of a RotationQ path: m_LocalRotation editor curves, and a path keyed both ways exports only the quaternion", [] {
+    R541Rig r;
+    CHECK(convert_rotation_tracks(r.clip, r.root, {"B", "B/B2"}, true, false) == 2);
+    r541_key(r.clip, "B", "Rotation", 1, 0, 0.0f), r541_key(r.clip, "B", "Rotation", 1, 30, 45.0f);  // (B keyed both ways now)
+    const std::string text = clip_to_unity_anim(r.clip, r.root, nullptr);
+    CHECK(text.find("attribute: m_LocalRotation.x") != std::string::npos && text.find("attribute: m_LocalRotation.w") != std::string::npos);
+    CHECK(text.find("localEulerAnglesRaw") == std::string::npos);  // (B's Euler is not exported beside its quaternion)
+    CHECK(text.find("m_EulerCurves: []") != std::string::npos);
+    AnimationClip read;
+    std::string why;
+    CHECK(unity_anim_to_clip(text, read, nullptr, &why));
+    AnimationClip q_only = r.clip;
+    for (int a = 0; a < 3; a++) q_only.tracks.erase(std::remove_if(q_only.tracks.begin(), q_only.tracks.end(), [](const AnimTrack &t) { return t.property == "Rotation"; }), q_only.tracks.end());
+    CHECK(r.worst_difference(q_only, read, {0, 20, 30}) < 1e-3f);
+  });
+
+  test("Paste Pose: two rigs under one group - the paste reaches the active bone's rig only", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *group = ed.scene().create("Group");
+    GameObject *rigs[2];
+    GameObject *arms[2][2];
+    for (int i = 0; i < 2; i++) {
+      rigs[i] = ed.scene().create(i ? "RigB" : "RigA", group);
+      rigs[i]->add<Armature>();
+      arms[i][0] = ed.scene().create("Arm.L", rigs[i]), arms[i][1] = ed.scene().create("Arm.R", rigs[i]);
+      arms[i][0]->add<Bone>(), arms[i][1]->add<Bone>();
+      arms[i][1]->set_local_position({-2, 0, 0});
+    }
+    arms[1][0]->set_local_position({1, 2, 3});
+    ed.mark_changed_for_test("r541 two rigs");
+    ed.select_for_test(arms[1][0]->id, false);
+    ed.command("pose copy");
+    ed.select_for_test(arms[1][1]->id, false);
+    r34_steps(ed, 2);
+    ed.command("pose paste flipped");
+    CHECK(length(arms[1][1]->local().position - Vec3(-1, 2, 3)) < 1e-5f);  // (RigB's Arm.R)
+    CHECK(length(arms[0][1]->local().position - Vec3(-2, 0, 0)) < 1e-6f);  // (RigA's Arm.R, found first by name, is left alone)
+  });
+
+  test("Align to Transform Orientation: `pose align local` does not change the transform orientation; the pose chords need the pointer over the Scene view", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541Chord");
+    ed.command("anim key Arm Rotation 1 0 0");
+    ed.command("anim key Arm Rotation 1 10 90");
+    arm->set_local_euler({0, 0, 90});
+    ed.command("select Arm");
+    r34_steps(ed, 2);
+    ed.command("pose align local");  // (one bone: it is the active one, nothing to change - and the setting stays Global)
+    arm->set_local_euler({0, 0, 90});
+    ed.command("pose align");
+    CHECK(std::fabs(arm->world_rotation().w) > 1.0f - 1e-5f);
+    /* Bones selected, the pointer over the Hierarchy: Ctrl+R does not convert. */
+    const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+    r541_press(ed, platform::KEY_R, platform::MOD_CTRL, h.x + h.w / 2, h.y + h.h / 2);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "Rotation", 1) != nullptr && clip->find("Arm", "RotationQ", 0) == nullptr);
+    const Recti view = ed.scene_view_rect();
+    r541_press(ed, platform::KEY_R, platform::MOD_CTRL, view.x + view.w / 2, view.y + view.h / 2);
+    clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "RotationQ", 0) != nullptr);
+  });
+
+  test("console nits: `pose paste flip` and `anim worldcopy 5` are refused; `anim stop` during a held scrub ends playback for good", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    GameObject *hero = ed.scene().create("Hero"), *arm = ed.scene().create("Arm", hero);
+    arm->add<Bone>();
+    arm->set_local_position({1, 0, 0});
+    ed.command("select Hero");
+    ed.mark_changed_for_test("r541 nits");
+    ed.command("layout Animation");
+    ed.command("anim new R541Nits");
+    ed.command("anim key Arm Position 1 0 0");
+    ed.command("anim key Arm Position 1 30 1");
+    ed.command("select Arm");
+    r34_steps(ed, 3);
+    ed.command("pose copy");
+    arm->set_local_position({5, 0, 0});
+    ed.command("pose paste flip");
+    CHECK(std::fabs(arm->local().position.x - 5.0f) < 1e-6f);  // (not taken as influence 0 - and not pasted)
+    ed.command("anim worldcopy 5");
+    CHECK(ed.world_clip_for_test().empty());
+    Recti sheet, ruler;
+    CHECK(ed.button_rect_for_test("anim_sheet", sheet) && ed.button_rect_for_test("anim_ruler", ruler));
+    if (sheet.w <= 0) return;
+    const float end = std::max(30.0f, ed.anim_clip_for_test()->end_frame()) * 1.1f;
+    const int x = sheet.x + (int)std::lround(20.0f / end * (float)sheet.w), y = ruler.y + ruler.h / 2;
+    ed.command("anim play");
+    r34_steps(ed, 3);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
+    CHECK(!ed.anim_for_test().playing);
+    ed.command("anim stop");
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y)});
+    r34_steps(ed, 2);
+    CHECK(!ed.anim_for_test().playing);
+  });
+
+  /* Round 548 read a chord's modifiers as its key went down: Ctrl pressed and let go within one frame (a quick tap, or a
+   * slow frame) used to leave the frame's last modifiers - none - on R, C and V. The Pose chords go through the same
+   * keymap dispatch, so each is pressed and released with Ctrl in a single frame here. */
+  test("Pose chords pressed and let go within one frame: Ctrl+R converts, Ctrl+C / Ctrl+V copy and paste the pose (round 541 on round 548's chord reading)", [] {
+    Editor ed;
+    GameObject *arm = r541_editor_rig(ed, "R541QuickChord");
+    ed.command("anim key Arm Rotation 1 0 0");
+    ed.command("anim key Arm Rotation 1 10 90");
+    ed.command("select Arm");
+    r34_steps(ed, 2);
+    const Recti view = ed.scene_view_rect();
+    const int x = view.x + view.w / 2, y = view.y + view.h / 2;
+    auto quick = [&](int key) {
+      platform::Event m, cd, kd, ku, cu;
+      m.type = R34ET::MouseMove, cd.type = kd.type = R34ET::KeyDown, ku.type = cu.type = R34ET::KeyUp;
+      m.x = cd.x = kd.x = ku.x = cu.x = x;
+      m.y = cd.y = kd.y = ku.y = cu.y = y;
+      cd.key = cu.key = platform::KEY_CTRL, kd.key = ku.key = key;
+      cd.mods = kd.mods = ku.mods = platform::MOD_CTRL, cu.mods = 0;
+      ed.step_frame_headless({m});
+      ed.step_frame_headless({cd, kd, ku, cu});
+      r34_steps(ed, 2);
+    };
+    quick(platform::KEY_R);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("Arm", "RotationQ", 3) != nullptr && clip->find("Arm", "Rotation", 1) == nullptr);
+    if (!arm) return;
+    arm->set_local_position({0.25f, 0.5f, 0.75f});
+    quick(platform::KEY_C);
+    arm->set_local_position({3, 3, 3});
+    quick(platform::KEY_V);
+    CHECK(length(arm->local().position - Vec3(0.25f, 0.5f, 0.75f)) < 1e-5f);
+  });
+}
+
+/* Round 559 (task 0541): the Key menu's tooltips name the chords the keymap gives, not ones written by hand. The Key
+ * button clicked and a row hovered by real mouse events, the clock moved past the tooltip's delay. */
+static std::string r559_key_menu_tip(const char *preset, const char *row, const char *rebind = nullptr) {
+  Editor ed;
+  r541_editor_rig(ed, "R559Tips");
+  ed.command("layout Animation");  // (the Animation window, whose toolbar has the Key menu)
+  ed.command(std::string("keymap ") + preset);
+  if (rebind) ed.command(std::string("keymap bind ") + rebind);
+  ed.record_buttons_for_test(true);
+  ed.set_clock_for_test(100.0);
+  r34_steps(ed, 3);
+  Recti key;
+  if (!ed.button_rect_for_test("anim:Key", key)) return "(no Key button)";
+  const int kx = key.x + key.w / 2, ky = key.y + key.h / 2;
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, kx, ky)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, kx, ky)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseUp, kx, ky)});
+  r34_steps(ed, 2);
+  Recti r;
+  if (!ed.button_rect_for_test(std::string("menu:") + row, r)) return "(no row)";
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+  ed.set_clock_for_test(102.0);
+  for (int i = 0; i < 2; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+  return ed.ui_for_test().tooltip_text_for_test();
+}
+
+static void tests_round559() {
+  test("the Key menu's tooltips say the preset's own chords: Paste Pose's Adjust Last is F9 in Unity's and Ctrl+F9 in Maya's; Convert to Quaternion names Ctrl+R (round 559)", [] {
+    const std::string unity = r559_key_menu_tip("Unity", "Paste Pose"), maya = r559_key_menu_tip("Maya", "Paste Pose");
+    std::printf("    Unity: '%s'\n    Maya: '%s'\n", unity.c_str(), maya.c_str());
+    CHECK(unity.find("F9 afterwards") != std::string::npos && unity.find("Ctrl+F9") == std::string::npos);
+    CHECK(maya.find("Ctrl+F9 afterwards") != std::string::npos);
+    const std::string convert = r559_key_menu_tip("Unity", "Convert to Quaternion");
+    CHECK(convert.find("Ctrl+R in the Scene view") != std::string::npos);
+    /* (Ctrl+R is the chord in every preset, so a rebinding shows the tooltip reads the keymap rather than a literal.) */
+    const std::string rebound = r559_key_menu_tip("Unity", "Convert to Quaternion", "pose.rotation_convert Ctrl+Shift+Q");
+    CHECK(rebound.find("Ctrl+Shift+Q in the Scene view") != std::string::npos && rebound.find("Ctrl+R") == std::string::npos);
+  });
+}
+
 /* ---------------------------------------------------------------- round 518 (task 0501, ADR 0146): the skin poses the
  * render mesh - the rest's render vertices moved by the same blend as the deform, normals and tangents turned by the
  * bones (Unity's way), no render mesh built whole or moved in place on a pose. */
@@ -13309,6 +14759,10 @@ void run_animation_tests() {
   tests_round473_more();
   tests_round474();
   tests_round474_more();
+  tests_round541();
+  tests_round541_te();
+  tests_round541_review();
+  tests_round559();
   tests_round518();
   tests_round518_more();
   tests_round519();

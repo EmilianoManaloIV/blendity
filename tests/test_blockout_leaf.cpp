@@ -5,6 +5,7 @@
 
 #include "../src/scene/blockout.h"
 #include "../src/scene/raycast.h"
+#include "../src/render/canvas.h"
 
 #include <array>
 #include <limits>
@@ -315,7 +316,8 @@ R499Wall r499_wall(Editor &ed, int style, int method, float cell = 0.01f) {
 std::vector<GameObject *> r515_leaves(const GameObject &door) {
   std::vector<GameObject *> out;
   for (GameObject *c : door.children)
-    if (c->get<BlockoutLeaf>()) out.push_back(c);
+    if (c->get<BlockoutLeaf>() && c->get<BlockoutLeaf>()->kind == kPartKindLeaf)  // (round 547: the Frame and the Glass are parts too; these helpers count the leaves)
+      out.push_back(c);
   return out;
 }
 
@@ -630,7 +632,7 @@ static void tests_round515_doorway() {
       r515_settle(ed);
       CHECK(r515_bytes(*s.bo) == bytes && r515_leaves(*s.door).empty());
       CHECK(r498_class(*s.bo, *s.door, kClassLeaf).faces == 0);  // (no Leaf faces in the Blockout's mesh at all: the leaf is an object)
-      CHECK(r498_class(*s.bo, *s.door, kClassSolid).faces >= 4 && r498_class(*s.bo, *s.door, kClassCut).faces >= 4);
+      CHECK(r498_class(*s.bo, *s.door, kClassSolid).faces >= 4 && r498_class(*s.bo, *s.door, kClassCut).faces >= 3);  // (round 547: the Solid faces are the Frame object's; the hole's reveal is three faces - the jambs and the head - of the Cut class)
     }
   });
 }
@@ -665,7 +667,7 @@ static void tests_round515_follow() {
     CHECK(copy && copy != s.door && copy->get<BlockoutPiece>());
     if (!copy) return;
     const std::vector<GameObject *> mine = r515_leaves(*copy);
-    CHECK(mine.size() == 2 && r515_leaves(*s.door).size() == 2 && ed.scene().object_count() == before + 3);
+    CHECK(mine.size() == 2 && r515_leaves(*s.door).size() == 2 && ed.scene().object_count() == before + 4);  // (round 547: the door, its Frame and its two leaves)
     for (GameObject *l : mine) CHECK(l != leaves[0] && l != leaves[1] && l->parent == copy);
     const uint64_t copy_id = copy->id, second = mine[1]->id;  // (an undo makes the objects again: the ids, not the pointers, are kept)
     /* A leaf deleted by hand turns the copy's Leaf off, in one undo step; the other leaf goes with it. */
@@ -686,7 +688,7 @@ static void tests_round515_follow() {
     ed.select_for_test(copy_id, false);
     ed.command("delete");
     r515_settle(ed);
-    CHECK(ed.scene().object_count() == objects - 3 && ed.scene().find(second) == nullptr);
+    CHECK(ed.scene().object_count() == objects - 4 && ed.scene().find(second) == nullptr);  // (round 547: the door, its Frame and its two leaves go)
     ed.command("undo");
     r515_settle(ed);
     const GameObject *door_back = ed.scene().find(copy_id);
@@ -827,7 +829,7 @@ static void tests_round515_object() {
       std::printf("    %s: %zu mesh node(s), %zu named Leaf\n", name.c_str(), meshes, leaf_nodes);
       CHECK(meshes >= 1);
       if (std::string(format) == "obj") continue;  // (an OBJ is flat: a mesh per object, no node's place to read back)
-      CHECK(meshes == 2 && leaf_nodes == 1);
+      CHECK(meshes == 3 && leaf_nodes == 1);  // (round 547: the Blockout's mesh, the door's Frame and its leaf)
     }
     /* Keep Transforms (glTF): the leaf's node is where its pivot is - the hinge - and turned as the leaf is, its vertices around the pivot. */
     const std::string dir = ed.resolve_asset_path_for_test("Assets/Exports");
@@ -906,7 +908,7 @@ static void tests_round515_old() {
     ed.command("window Inspector");
     ed.record_buttons_for_test(true);
     r477_settle(ed, 3);
-    CHECK(r496_has(ed, "field:Open Amount") && r496_has(ed, strprintf("shown:Made by Door '%s' - its shape follows the door's numbers", s.door->name.c_str()).c_str()));
+    CHECK(r496_has(ed, "field:Open Amount") && r496_has(ed, strprintf("shown:Made by Door '%s' - its shape follows the door's numbers; its modifiers are yours", s.door->name.c_str()).c_str()));
     CHECK(r479_type(ed, "field:Open Amount", "0.6"));
     CHECK_NEAR(s.door->get<BlockoutPiece>()->open_amount, 0.6f, 1e-6f);
     r515_settle(ed);
@@ -1211,7 +1213,7 @@ GameObject *r515te_door_in(GameObject &root) {
 /* Every leaf object in the scene, wherever it stands (an orphan or a stray one counts). */
 size_t r515te_all_leaves(Editor &ed) {
   size_t n = 0;
-  ed.scene().for_each([&](GameObject &g) { n += g.get<BlockoutLeaf>() != nullptr; });
+  ed.scene().for_each([&](GameObject &g) { n += (g.get<BlockoutLeaf>() && g.get<BlockoutLeaf>()->kind == kPartKindLeaf); });
   return n;
 }
 
@@ -1889,6 +1891,8 @@ static void tests_round515_te_events() {
   });
 }
 
+void tests_round552();
+
 void tests_round515_te() {
   tests_round515_te_undo();
   tests_round515_te_loops();
@@ -1897,5 +1901,69 @@ void tests_round515_te() {
   tests_round515_te_multi();
   tests_round515_te_files();
   tests_round515_te_events();
+  tests_round552();
 }
 // r515te-end
+
+// r552-begin
+/* ===================================================================== */
+/* Round 552 (task 0532): the leaf sync told scenes apart by address      */
+/* ===================================================================== */
+
+/* CI reddened round 515's "opens with the leaf objects made" now and then (#425, #426, #431): after `newscene` and an open,
+ * the opened scene could land where the closed one had been, so the sync kept the closed scene's leaf ids, found the
+ * reopened door (the same saved id) missing a leaf it remembered, and turned its Leaf off as if the user had deleted it.
+ * Here the same place is made on purpose - the scene read into the very Scene object - so the case runs every time. */
+void tests_round552() {
+  test("blockout door leaf (552): a scene opened where the closed one was (the same address) still makes its door's leaf, and the door's Leaf stays on", [] {
+    Editor ed;
+    const R499Scene s = r515_door(ed, kDoorSingle);
+    CHECK(s.door != nullptr);
+    if (!s.door) return;
+    const uint64_t door_id = s.door->id;
+    std::vector<GameObject *> leaves = r515_leaves(*s.door);
+    CHECK(leaves.size() == 1);
+    ed.scene().destroy(leaves);  // (no walk after it: the sync still remembers the leaf, as when a round 499 scene is opened next)
+    const std::string text = save_scene_text(ed.scene());
+    Scene loaded;
+    std::string error;
+    CHECK(load_scene_text(text, loaded, error));
+    const Scene *place = &ed.scene();
+    ed.scene() = std::move(loaded);  // (another scene at the same address - what the allocator did on the CI runners)
+    CHECK(&ed.scene() == place);
+    ed.mark_changed_for_test("test scene read in place");
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r515_settle(ed);
+    GameObject *door = ed.scene().find(door_id);
+    CHECK(door && door->get<BlockoutPiece>() && door->get<BlockoutPiece>()->leaf);
+    if (!door) return;
+    CHECK(r515_leaves(*door).size() == 1);
+  });
+
+  /* The Render view's texture stream (round 447) is dropped when the scene it loads for is gone. It told scenes apart by
+   * address too: a scene opened where the closed one was kept the closed scene's batch, landed its files and published
+   * its failures for the scene opened. */
+  test("textures stream in (552): a scene opened where the closed one was (the same address) drops the batch the closed one started", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    std::vector<std::pair<std::string, bool>> files;
+    for (int i = 0; i < 2; i++) {
+      const std::string tex = fs::join(test_dir(), strprintf("r552_stream_%d.png", i));
+      std::vector<uint32_t> px(1024 * 1024, 0xFF3060A0u + (uint32_t)i);
+      CHECK(write_png(tex, px.data(), 1024, 1024, 1024));
+      files.push_back({tex, true});
+    }
+    const uint64_t streamed = ed.streamed_files_for_test();
+    ed.texture_stream_start_for_test(files);
+    CHECK(ed.texture_streaming_for_test());
+    const Scene *place = &ed.scene();
+    ed.scene() = Scene();  // (another scene at the same address, with nothing in it that wants a texture)
+    CHECK(&ed.scene() == place);
+    ed.step_frame_headless();
+    std::printf("    after one frame: streaming %d, files landed %llu\n", (int)ed.texture_streaming_for_test(), (unsigned long long)(ed.streamed_files_for_test() - streamed));
+    CHECK(!ed.texture_streaming_for_test());
+    CHECK(ed.streamed_files_for_test() == streamed);  // (dropped, not landed: the batch was the closed scene's)
+    for (const auto &f : files) fs::remove_file(f.first);
+  });
+}
+// r552-end

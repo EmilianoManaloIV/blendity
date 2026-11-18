@@ -334,6 +334,166 @@ void sweep_config(Sweep &sw, int w, int h, const char *theme, float scale, bool 
   }
 }
 
+/* ---- Round 559: the labels clipped on Pass 27's panels ---- */
+struct R559 {
+  struct Cfg { int w, h; float scale; };
+  static std::vector<Cfg> configs() { return {{1024, 768, 1.5f}, {1024, 768, 1.0f}, {1366, 768, 1.0f}}; }
+  static std::string cfg_name(const Cfg &c) { return strprintf("%dx%d x%.1f", c.w, c.h, c.scale); }
+  static void open(Editor &ed, const Cfg &c, const char *layout) {
+    ed.init_headless(c.w, c.h);
+    ed.set_guides_for_test(false);
+    ed.set_ui_scale_for_test(c.scale);
+    ed.record_buttons_for_test(true);
+    ed.command(std::string("layout ") + layout);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  }
+  static void settle(Editor &ed) {
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  }
+  /* A button's word fits whole: Context::button leaves 8 px of padding (and drops its icon when the word fits only without). */
+  static bool button_whole(Editor &ed, const std::string &key, const std::string &cfg) {
+    Recti r;
+    if (!ed.button_rect_for_test(key, r)) {
+      std::printf("      [%s] button '%s' is not drawn\n", cfg.c_str(), key.c_str());
+      return false;
+    }
+    const int tw = ed.text_width_for_test(key), room = r.w - ed.ui_for_test().px(8);
+    if (tw > room) std::printf("      [%s] '%s' is cut: %d px of text in %d px\n", cfg.c_str(), key.c_str(), tw, room);
+    return tw <= room;
+  }
+  /* A dropdown's shown word fits: Context::combo leaves its height (the arrow's column) and 5 px of margin. */
+  static bool combo_whole(Editor &ed, const std::string &shown, const std::string &cfg) {
+    for (const auto &c : ed.ui_for_test().controls) {
+      if (std::string(c.kind) != "combo" || c.label != shown || c.layer != 0) continue;
+      const int room = c.r.w - c.r.h - ed.ui_for_test().px(5), tw = ed.text_width_for_test(shown);
+      if (tw > room) std::printf("      [%s] dropdown '%s' is cut: %d px of text in %d px\n", cfg.c_str(), shown.c_str(), tw, room);
+      return tw <= room;
+    }
+    std::printf("      [%s] dropdown showing '%s' is not drawn\n", cfg.c_str(), shown.c_str());
+    return false;
+  }
+  /* A checkbox row's name fits: the box starts after the name, which starts 4 px in from the row (where a Radius name does). */
+  static bool checkbox_name_whole(Editor &ed, const char *name, const char *anchor, const std::string &cfg) {
+    Recti box, ref;
+    bool have_ref = false;
+    if (!ed.button_rect_for_test(std::string("field:") + name, box)) {
+      std::printf("      [%s] checkbox '%s' is not drawn\n", cfg.c_str(), name);
+      return false;
+    }
+    for (const auto &c : ed.ui_for_test().controls)
+      if (std::string(c.kind) == "draglabel" && c.label == anchor && !have_ref) ref = c.r, have_ref = true;
+    if (!have_ref) {
+      std::printf("      [%s] anchor row '%s' is not drawn\n", cfg.c_str(), anchor);
+      return false;
+    }
+    const int need = ref.x + ed.text_width_for_test(name), have = box.x - ed.ui_for_test().px(4);
+    if (need > have) std::printf("      [%s] '%s' is cut: its text ends at %d, the box starts at %d\n", cfg.c_str(), name, need, box.x);
+    return need <= have;
+  }
+};
+
+void tests_round559_layout() {
+  test("hci: a point cloud's Type shows \"Gaussian Splats\" whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Default");
+      ed.command("create Gaussian Splats");
+      R559::settle(ed);
+      CHECK(R559::combo_whole(ed, "Gaussian Splats", R559::cfg_name(c)));
+    }
+  });
+
+  test("hci: the camera's Panorama Type shows \"Equirectangular\" whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Default");
+      ed.command("select Main Camera");
+      GameObject *cam = ed.scene().find_by_name("Main Camera");
+      CHECK(cam && cam->get<Camera>());
+      if (!cam || !cam->get<Camera>()) return;
+      cam->get<Camera>()->panoramic_type = 1;
+      R559::settle(ed);
+      CHECK(R559::combo_whole(ed, "Equirectangular", R559::cfg_name(c)));
+    }
+  });
+
+  test("hci: Vertex Paint's mode row, Front Faces Only and the New Point / New Corner Layer buttons show their words whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Default");
+      ed.command("select Cube");
+      ed.command("vpaint on");
+      R559::settle(ed);
+      const std::string cfg = R559::cfg_name(c);
+      std::string rig;
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind("Vertex Groups", 0) == 0) rig = kv.first;
+      /* The Rigging button: its words in one line, or wrapped over a button grown by the lines (a 180 px Inspector at x1.5). */
+      Recti rr;
+      CHECK(!rig.empty() && ed.button_rect_for_test(rig, rr));
+      const ui::Context &uc = ed.ui_for_test();
+      const bool one_line = ed.text_width_for_test(rig) + uc.px(8) <= rr.w;
+      if (!one_line) std::printf("      [%s] Rigging button wraps: %d px wide, %d px high\n", cfg.c_str(), rr.w, rr.h);
+      CHECK(one_line || rr.h > uc.row_h() + uc.px(2));  // (wrapped: a line more than a row)
+      Recti toggle;
+      CHECK(ed.button_rect_for_test("vp:Toggle", toggle));
+      CHECK(R559::button_whole(ed, "Exit Vertex Paint", cfg));
+      CHECK(R559::checkbox_name_whole(ed, "Front Faces Only", "Radius", cfg));
+      CHECK(R559::button_whole(ed, "New Point Layer", cfg) && R559::button_whole(ed, "New Corner Layer", cfg));
+    }
+  });
+
+  test("hci: Weight Paint's Brush, Unified Strength and Falloff show their words whole at 1024x768 x1.5, x1 and 1366x768 x1 (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Rigging");
+      ed.command("select Cube");
+      ed.command("vgroup add R559");
+      ed.command("weightpaint on");
+      R559::settle(ed);
+      const std::string cfg = R559::cfg_name(c);
+      CHECK(R559::combo_whole(ed, "Add Weight", cfg));
+      CHECK(R559::checkbox_name_whole(ed, "Unified Strength", "Radius", cfg));
+      CHECK(R559::checkbox_name_whole(ed, "Front Faces Only", "Radius", cfg));
+      CHECK(R559::combo_whole(ed, "Smooth", cfg));  // (Falloff's default, Smooth: a listed control, so it must be found)
+    }
+  });
+
+  test("hci: the Animation window's toolbar keeps every button inside the window at 1024x768 x1.5, x1 and 1366x768 x1, AutoPosing whole and Ragdoll reachable when the build has one (round 559)", [] {
+    for (const R559::Cfg &c : R559::configs()) {
+      Editor ed;
+      R559::open(ed, c, "Animation");
+      std::remove(resolve_asset_path("Assets/Animations/R559Box.anim").c_str());
+      GameObject *box = ed.scene().create("R559Box");
+      GameObject *lid = ed.scene().create("Lid", box);
+      lid->set_local_position({0, 2, 0});
+      ed.command("select R559Box");
+      ed.mark_changed_for_test("R559 box");
+      ed.step_frame_headless();
+      ed.command("anim new");
+      ed.command("anim key Lid Position 1 10 0");
+      ed.command("window Animation");
+      R559::settle(ed);
+      const Recti win = ed.window_rect_for_test(WindowKind::Animation);
+      CHECK(!win.empty());
+      const std::string cfg = R559::cfg_name(c);
+      int drawn = 0;
+      for (const char *k : {"Preview", "Add Property", "Fit", "Key", "Wrap", "Puppet", "Retarget", "Dopesheet", "Curves", "Center of Mass", "Contacts",
+                            "Flight", "AutoPhysics", "AutoPosing", "Ragdoll"}) {
+        Recti r;
+        if (!ed.button_rect_for_test(k, r)) continue;
+        drawn++;
+        const bool in = inside(r, win);
+        if (!in) std::printf("      [%s] '%s' %s lies outside the window %s\n", cfg.c_str(), k, rect_str(r).c_str(), rect_str(win).c_str());
+        CHECK(in);
+      }
+      CHECK(drawn >= 12);
+      CHECK(R559::button_whole(ed, "AutoPosing", cfg));
+      std::remove(resolve_asset_path("Assets/Animations/R559Box.anim").c_str());
+    }
+  });
+}
+
 }  // namespace
 
 void run_hci_tests() {
@@ -664,35 +824,64 @@ void run_hci_tests() {
      * control after it - buttons, tick boxes, dropdowns, folds - not only on fields, so the list holds every stop and the
      * walk is read from the focused control's rectangle (focus_rect_for_test: the focus ring's, or the edited field's). The
      * click that starts the walk is still in a field, and the order and the Shift+Tab step back are what they were. */
-    auto stops_in = [](Editor &ed, const Recti &region, int layer) {
+    /* `whole` (a dialog): every stop of the layer, wherever the dialog's scroll has put it, as a rectangle in the dialog's
+     * content - the screen's moved down by the dialog's scroll - so a stop keeps one rectangle while Tab scrolls the dialog.
+     * Round 560 (task 0542): round 543's version ended the list at the first stop the dialog cut off (a Preferences row half
+     * out of Linux's dialog, which Tab focused and nobody could see); Tab now scrolls a cut-off stop into view, and the walk
+     * is every stop again. */
+    auto stops_in = [](Editor &ed, const Recti &region, int layer, bool whole = false) {
       std::vector<Recti> out;
       std::set<std::string> seen;
       bool started = false;
+      const int scroll = whole ? ed.ui_for_test().top_popup_scroll() : 0;
       for (const auto &c : ed.ui_for_test().controls) {
-        if (!c.tab_stop || c.layer != layer || c.r.w <= 0 || !inside(c.r, region)) continue;
+        if (!c.tab_stop || c.layer != layer || c.r.w <= 0) continue;
+        /* (Round 543: a panel's list ends at the first stop the region cuts off, rather than skipping it - Tab walks every
+         * stop in drawing order, so a skipped one in the middle put the list and the walk one apart.) */
+        if (!whole && !inside(c.r, region)) {
+          if (started) break;
+          continue;
+        }
         started = started || std::string(c.kind) == "number" || std::string(c.kind) == "text";
-        if (started && seen.insert(rect_str(c.r)).second) out.push_back(c.r);
+        const Recti at{c.r.x, c.r.y + scroll, c.r.w, c.r.h};
+        if (started && seen.insert(rect_str(at)).second) out.push_back(at);
       }
       return out;
     };
-    /* Click the first stop (a field), Tab once for each of the others, then Shift+Tab once: where the focus lands each time. */
-    auto walk = [](Editor &ed, const std::vector<Recti> &stops, const char *what) {
+    /* Click the first stop (a field), Tab once for each of the others, then Shift+Tab once: where the focus lands each time.
+     * In a dialog (`dialog`) the focus is read in the dialog's content, and the focused stop must be inside the dialog's
+     * visible part - the user sees what Tab reached. */
+    auto walk = [](Editor &ed, const std::vector<Recti> &stops, const char *what, bool dialog = false) {
+      auto focused = [&] {
+        const Recti at = ed.ui_for_test().focus_rect_for_test();
+        return Recti{at.x, at.y + (dialog ? ed.ui_for_test().top_popup_scroll() : 0), at.w, at.h};
+      };
+      auto seen_now = [&] {
+        if (!dialog) return true;
+        const Recti at = ed.ui_for_test().focus_rect_for_test(), dlg = ed.top_popup_rect_for_test();
+        return at.y >= dlg.y && at.bottom() <= dlg.bottom();
+      };
       const Recti first = stops.front();
       for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, first.x + first.w / 2, first.y + first.h / 2)});
       ed.step_frame_headless();
       ed.step_frame_headless();
       std::set<std::string> visited;
-      int failed = -1;
+      int failed = -1, unseen = 0;
       for (size_t k = 0; k < stops.size() && failed < 0; k++) {
         if (k > 0) {
           ed.step_frame_headless({ev(ET::KeyDown, 5, 5, platform::KEY_TAB)});
           ed.step_frame_headless();
         }
-        const Recti at = ed.ui_for_test().focus_rect_for_test();
+        const Recti at = focused();
         const bool right = rect_str(at) == rect_str(stops[k]) && visited.insert(rect_str(at)).second;
         if (!right) {
           failed = (int)k;
           std::printf("    %s: Tab step %zu should focus %s but focuses %s\n", what, k, rect_str(stops[k]).c_str(), rect_str(at).c_str());
+        }
+        if (!seen_now()) {
+          unseen++;
+          std::printf("    %s: Tab step %zu focuses %s, outside the dialog's visible part %s\n", what, k,
+                      rect_str(ed.ui_for_test().focus_rect_for_test()).c_str(), rect_str(ed.top_popup_rect_for_test()).c_str());
         }
       }
       bool back_ok = false;
@@ -701,11 +890,11 @@ void run_hci_tests() {
         e.mods = platform::MOD_SHIFT;
         ed.step_frame_headless({e});
         ed.step_frame_headless();
-        back_ok = rect_str(ed.ui_for_test().focus_rect_for_test()) == rect_str(stops[stops.size() - 2]);
-        if (!back_ok) std::printf("    %s: Shift+Tab should focus %s\n", what, rect_str(stops[stops.size() - 2]).c_str());
+        back_ok = rect_str(focused()) == rect_str(stops[stops.size() - 2]) && seen_now();
+        if (!back_ok) std::printf("    %s: Shift+Tab should focus %s, in sight\n", what, rect_str(stops[stops.size() - 2]).c_str());
       }
-      std::printf("    %s: %zu stops, first failing step %d, Shift+Tab back %d\n", what, stops.size(), failed, (int)back_ok);
-      return failed < 0 && back_ok;
+      std::printf("    %s: %zu stops, first failing step %d, %d focused out of sight, Shift+Tab back %d\n", what, stops.size(), failed, unseen, (int)back_ok);
+      return failed < 0 && unseen == 0 && back_ok;
     };
     /* The Inspector of a selected cube. A stop scrolled out of the Inspector's view is left out (only stops whose whole
      * rectangle is in the window are walked). */
@@ -721,10 +910,12 @@ void run_hci_tests() {
       CHECK(stops.size() >= 3);
       if (stops.size() >= 3) CHECK(walk(ed, stops, "Inspector"));
     }
-    /* Preferences: its fields are in a popup layer; Tab from its first reaches each in its own layer. */
-    {
+    /* Preferences: its fields are in a popup layer; Tab from its first reaches each in its own layer - every stop in the
+     * dialog, scrolled into sight when the dialog cuts it off (round 560: at 1024 x 768 x1.5 most of them are). */
+    for (const int size : {0, 1}) {
       Editor ed;
-      ed.init_headless(1366, 1000);
+      ed.init_headless(size ? 1024 : 1366, size ? 768 : 1000);
+      if (size) ed.set_ui_scale_for_test(1.5f);
       ed.set_guides_for_test(false);
       ed.record_buttons_for_test(true);
       ed.command("preferences");
@@ -734,10 +925,10 @@ void run_hci_tests() {
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
       }
       for (int i = 0; i < 3; i++) ed.step_frame_headless();
-      const std::vector<Recti> stops = stops_in(ed, ed.top_popup_rect_for_test(), 1);
-      std::printf("    Preferences: %zu stops in its dialog\n", stops.size());
+      const std::vector<Recti> stops = stops_in(ed, ed.top_popup_rect_for_test(), 1, true);
+      std::printf("    Preferences at %s: %zu stops in its dialog\n", size ? "1024x768 x1.5" : "1366x1000", stops.size());
       CHECK(stops.size() >= 2);
-      if (stops.size() >= 2) CHECK(walk(ed, stops, "Preferences"));
+      if (stops.size() >= 2) CHECK(walk(ed, stops, "Preferences", true));
     }
   });
 
@@ -3221,7 +3412,242 @@ void run_hci_tests() {
     CHECK(g.v == 2 && g.open_lists() == 0 && g.combo_label() == "Three");
   });
 
+  /* ---------------------------------------------------------------- round 560 (task 0542): what does not fit */
+  /* The controls an Adjust Last panel drew (layer 0, inside the panel's columns, and inside the panel - or, when its rows
+   * scroll, under a clip inside it), in drawing order, and whether the last is in sight (inside the clip it was drawn under). */
+  struct R560Rows {
+    size_t n = 0;
+    bool last_seen = false;
+    Recti last;
+  };
+  auto r560_rows = [](Editor &ed, const Recti &panel) {
+    R560Rows out;
+    for (const auto &c : ed.ui_for_test().controls) {
+      if (c.layer != 0 || !c.tab_stop || c.r.x < panel.x || c.r.right() > panel.right()) continue;
+      if (!inside(c.clip, panel) && !inside(c.r, panel)) continue;
+      out.n++;
+      out.last = c.r;
+      out.last_seen = c.r.y >= c.clip.y && c.r.bottom() <= c.clip.bottom();
+    }
+    return out;
+  };
+  /* Wheel down over a panel until its last row is in sight (or 20 turns). */
+  auto r560_wheel_to_end = [&](Editor &ed, const std::function<Recti()> &panel) {
+    for (int i = 0; i < 20 && !r560_rows(ed, panel()).last_seen; i++) {
+      const Recti p = panel();
+      ed.step_frame_headless({ev(platform::EventType::MouseMove, p.x + p.w / 2, p.bottom() - p.h / 4)});
+      platform::Event w = ev(platform::EventType::Wheel, p.x + p.w / 2, p.bottom() - p.h / 4);
+      w.wheel_y = -1.0f;
+      ed.step_frame_headless({w});
+      ed.step_frame_headless();
+    }
+    return r560_rows(ed, panel()).last_seen;
+  };
+  /* One panel's case: the panel inside the Scene view (not over its toolbar, not under the tab strip) at the window's height
+   * `h`, and its last row reached by the wheel. Returns whether the rows had to scroll. */
+  auto r560_panel_case = [&](const char *what, int h, const std::function<void(Editor &)> &make, const std::function<Recti(Editor &)> &rect) {
+    Editor ed;
+    ed.init_headless(1024, h);
+    ed.set_ui_scale_for_test(1.5f);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Default");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    make(ed);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const Recti view = ed.scene_rect_for_test(), p0 = rect(ed);
+    const R560Rows before = r560_rows(ed, p0);
+    const bool scrolled = before.n > 0 && !before.last_seen;
+    const bool reached = r560_wheel_to_end(ed, [&] { return rect(ed); });
+    const Recti p1 = rect(ed);
+    std::printf("    %s at 1024x%d x1.5: the Scene view %s, the panel %s (%zu rows, the last %s), after the wheel %s, the last row %s\n", what, h,
+                rect_str(view).c_str(), rect_str(p0).c_str(), before.n, before.last_seen ? "in sight" : "cut off", rect_str(p1).c_str(), reached ? "in sight" : "still cut off");
+    CHECK(p0.w > 0 && before.n >= 3);
+    CHECK(p0.y >= view.y && p0.bottom() <= view.bottom() && p0.x >= view.x);  // (never over the view's toolbar or under the tab strip)
+    CHECK(reached);
+    CHECK(rect_str(p0) == rect_str(p1));  // (the wheel scrolls the rows, not the panel)
+    return scrolled;
+  };
+
+  test("Adjust Last Operation (F9) in a short Scene view stays inside the view, and its rows scroll to the last with the wheel - Edit Mode's panel (round 560, task 0542)", [&] {
+    auto make = [](Editor &ed) {
+      ed.command("create Cube");
+      const Mesh &m0 = *ed.selected_object()->get<MeshFilter>()->mesh;
+      const auto e = m0.edge_cache()[0];
+      ed.command(strprintf("esel %u %u", e.first, e.second));
+      ed.command("editop bevel");
+    };
+    auto rect = [](Editor &ed) { return ed.last_op_rect_for_test(); };
+    r560_panel_case("Bevel's panel", 768, make, rect);
+    CHECK(r560_panel_case("Bevel's panel", 400, make, rect));  // (a short window: the rows do not fit and must scroll)
+  });
+
+  test("Adjust Last in Object Mode (a primitive just added) in a short Scene view stays inside the view and its rows scroll to the last (round 560, task 0542)", [&] {
+    auto make = [](Editor &ed) { ed.command("create Torus"); };
+    auto rect = [](Editor &ed) { return ed.obj_last_rect_for_test(); };
+    r560_panel_case("Add Torus's panel", 768, make, rect);
+    CHECK(r560_panel_case("Add Torus's panel", 400, make, rect));
+  });
+
+  test("hci: a dialog taller than the window shows a scrollbar; dragging its thumb to the bottom brings the last row into sight and keeps the dialog open - Preferences at 1024x768 x1.5 (round 560, task 0542)", [] {
+    using ET = platform::EventType;
+    Editor ed;
+    ed.init_headless(1024, 768);
+    ed.set_ui_scale_for_test(1.5f);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("preferences");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto last_stop = [&] {
+      Recti last, clip;
+      for (const auto &c : ed.ui_for_test().controls)
+        if (c.layer == 1 && c.tab_stop && c.r.w > 0) last = c.r, clip = c.clip;
+      return std::make_pair(last, last.y >= clip.y && last.bottom() <= clip.bottom());
+    };
+    Recti thumb;
+    const bool bar = ed.button_rect_for_test("popup:scrollbar", thumb);
+    const Recti dlg = ed.top_popup_rect_for_test();
+    const bool last_seen_before = last_stop().second;
+    std::printf("    Preferences at 1024x768 x1.5: the dialog %s, scrollbar thumb %s, the last stop %s\n", rect_str(dlg).c_str(), bar ? rect_str(thumb).c_str() : "none",
+                last_seen_before ? "in sight" : "cut off");
+    CHECK(bar && thumb.h > 0 && thumb.x >= dlg.x && thumb.right() <= dlg.right());
+    CHECK(!last_seen_before);  // (the dialog does not fit: that is what the bar is for)
+    if (!bar) return;
+    const int x = thumb.x + thumb.w / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x, thumb.y + thumb.h / 2)});
+    ed.step_frame_headless({ev(ET::MouseDown, x, thumb.y + thumb.h / 2)});
+    for (int y = thumb.y + thumb.h / 2; y < dlg.bottom() + 40; y += 40) ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+    ed.step_frame_headless({ev(ET::MouseUp, x, dlg.bottom() + 40)});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti thumb2;
+    ed.button_rect_for_test("popup:scrollbar", thumb2);
+    const auto [last, seen] = last_stop();
+    std::printf("    after the drag: thumb %s, the last stop %s %s, popups open %zu, Preferences open %d\n", rect_str(thumb2).c_str(), rect_str(last).c_str(),
+                seen ? "in sight" : "cut off", ed.popup_count_for_test(), (int)ed.prefs_open_for_test());
+    CHECK(seen && ed.ui_for_test().top_popup_scroll() > 0);
+    CHECK(thumb2.bottom() >= dlg.bottom() - 4);  // (the thumb at the track's end)
+    CHECK(ed.popup_count_for_test() == 1 && ed.prefs_open_for_test());  // (a press on the bar is not a click outside, nor on a row under it)
+    /* A wheel turn up from there scrolls back, as before (the wheel kept working). */
+    platform::Event w = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+    w.wheel_y = 1.0f;
+    const int at_end = ed.ui_for_test().top_popup_scroll();
+    ed.step_frame_headless({ev(ET::MouseMove, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2)});
+    ed.step_frame_headless({w});
+    ed.step_frame_headless();
+    CHECK(ed.ui_for_test().top_popup_scroll() < at_end);
+  });
+
+  test("hci: a list that fits draws no scrollbar and its rows keep the list's whole width; a list longer than the window draws one (round 560, task 0542)", [] {
+    Grouped few({"One", "Two", "Three"}, 0);
+    few.open_by_key();
+    const Recti list = few.u.top_popup_rect(), row = few.row("Three");
+    std::printf("    a three-row list: %s, its row %s, scrollbar %d\n", rect_str(list).c_str(), rect_str(row).c_str(), (int)few.u.button_rects.count("popup:scrollbar"));
+    CHECK(few.u.button_rects.count("popup:scrollbar") == 0);
+    CHECK(row.w >= list.w - 4);
+    std::vector<std::string> names;
+    for (int i = 0; i < 40; i++) names.push_back("Choice " + std::to_string(i));
+    std::vector<const char *> many;
+    for (const auto &n : names) many.push_back(n.c_str());
+    Grouped lots(many, 0);
+    lots.open_by_key();
+    std::printf("    a forty-row list in a 300 px window: %s, scrollbar %d\n", rect_str(lots.u.top_popup_rect()).c_str(), (int)lots.u.button_rects.count("popup:scrollbar"));
+    CHECK(lots.u.button_rects.count("popup:scrollbar") == 1);
+  });
+
+  test("hci: a list's scrollbar dragged and let go over a row only scrolls - the row is not picked and the list stays open (round 560, task 0542)", [] {
+    std::vector<std::string> names;
+    for (int i = 0; i < 40; i++) names.push_back("Choice " + std::to_string(i));
+    std::vector<const char *> many;
+    for (const auto &n : names) many.push_back(n.c_str());
+    Grouped g(many, 5);
+    g.open_by_key();
+    const Recti thumb = g.u.button_rects.count("popup:scrollbar") ? g.u.button_rects.at("popup:scrollbar") : Recti{};
+    const Recti list = g.u.top_popup_rect();
+    CHECK(thumb.h > 0);
+    if (thumb.h <= 0) return;
+    g.u.in.mx = thumb.x + thumb.w / 2, g.u.in.my = thumb.y + thumb.h / 2;
+    g.frame();
+    g.u.in.pressed[0] = g.u.in.down[0] = true;
+    g.frame();
+    g.u.in.pressed[0] = false;
+    /* Down the list and off the bar's strip onto the rows, as a hand drifts in a long drag. */
+    g.u.in.mx = list.x + list.w / 2, g.u.in.my = list.y + list.h / 2;
+    g.frame();
+    g.u.in.down[0] = false, g.u.in.released[0] = true;
+    g.frame();
+    g.u.in.released[0] = false;
+    g.settle();
+    std::printf("    after the drag let go over the rows: value %d, %zu list(s) open, the list scrolled to %d\n", g.v, g.open_lists(), g.u.top_popup_scroll());
+    CHECK(g.v == 5 && g.open_lists() == 1);
+    CHECK(g.u.top_popup_scroll() > 0);
+    /* And a plain click on a row still picks it. */
+    const Recti row = g.row("Choice 20");
+    if (row.h > 0) {
+      g.click(row);
+      CHECK(g.v == 20 && g.open_lists() == 0);
+    }
+  });
+
+  test("hci: tick boxes are drawn at least 16 px (x the UI scale) wherever their row is that tall - Preferences' and a Cube's Inspector at x1 and x1.5 (round 560, task 0542)", [] {
+    for (const float scale : {1.0f, 1.5f}) {
+      Editor ed;
+      ed.init_headless(1366, 1000);
+      ed.set_ui_scale_for_test(scale);
+      ed.set_guides_for_test(false);
+      ed.record_buttons_for_test(true);
+      ed.command("layout Default");
+      ed.command("select Cube");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const int want = (int)std::lround(16.0f * scale);
+      int boxes = 0, small = 0, smallest = 1 << 30;
+      auto count = [&] {
+        for (const auto &c : ed.ui_for_test().controls) {
+          if (std::string(c.kind) != "checkbox" || c.mark.w <= 0) continue;
+          boxes++;
+          smallest = std::min(smallest, c.mark.w);
+          if (c.mark.w != c.mark.h) small++;
+          else if (c.mark.w < want && c.r.h >= want + 2) small++;  // (room for a bigger box and not drawn so)
+        }
+      };
+      count();
+      ed.command("preferences");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      count();
+      std::printf("    x%.1f: %d tick boxes, the smallest %d px (want %d), %d smaller than their row allows\n", scale, boxes, smallest, want, small);
+      CHECK(boxes >= 5);
+      CHECK(small == 0);
+      CHECK(smallest >= want - 2);  // (a box in a row a few px short of 16 px takes the row)
+    }
+  });
+
+  test("hci: a centred label wider than its room is drawn from its left edge and ends in '...', as a left-aligned one - not cut on both sides (round 560, task 0542: a disabled 'Add Spring Bones')", [] {
+    auto draw = [](ui::Align a, const char *text, int w) {
+      ui::Context u;
+      Image img;
+      img.resize(300, 60);
+      u.begin_frame(&img, 1.0);
+      u.canvas.fill_rect({0, 0, 300, 60}, 0xFF000000u);
+      u.label({20, 10, w, 24}, text, 0xFFFFFFFFu, a);
+      u.end_frame();
+      return img.pixels;
+    };
+    const char *text = "Add Spring Bones";
+    const auto centred = draw(ui::Align::Center, text, 60), left = draw(ui::Align::Left, text, 60);
+    const auto right = draw(ui::Align::Right, text, 60);
+    CHECK(centred == left);
+    CHECK(right == left);
+    /* Text that fits is still centred: its pixels differ from the left-aligned drawing. */
+    CHECK(draw(ui::Align::Center, "Add", 120) != draw(ui::Align::Left, "Add", 120));
+  });
+
   /* Round 513 (task 0495): Draw Piece draws a door or a window. Run from here, in the hci group, because a new group needs the shard table: the tests are
    * this round's HCI conditions (the grouped Shape list, the keyboard, the preview, the refusals' words) and its behaviour. */
   run_blockout_openings_tests();
+
+  tests_round559_layout();
 }

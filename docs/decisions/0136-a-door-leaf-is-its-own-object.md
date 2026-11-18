@@ -76,6 +76,11 @@ hinge. Keeping it in the boolean costs a rebuild per change of angle, the swing 
 - **A render-only leaf the editor draws but does not save:** cheap, but Unity export, collision and the owner's animating
   need a real object.
 
+## Amended in round 547 (task 0527, ADR 0149)
+The leaf's mechanism is now every styled opening's: its mark (`BlockoutLeaf`) has a kind (Leaf, Frame, Glass) and a copy
+index, and a door's frame and a window's frame and glass are objects made the same way. A leaf keeps the modifier stack
+the user puts on it through every rebuild; when a style change makes a second leaf, it takes a copy of the first's stack.
+
 ## Not decided here
 - Swinging windows (casements) as parts - the same mechanism would serve; not asked for.
 - Door hardware, glass in a leaf, a leaf's own material per door beyond the Leaf class override.

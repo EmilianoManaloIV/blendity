@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace bl {
@@ -270,6 +271,8 @@ struct DrawItem {
   Vec3 local_key{0, 1, 0};   // the key light's direction in the item's own space (task 0149: the face shadow map), set by the renderer
   /* Gouraud mode: a colour per render vertex instead of albedo (Weight Paint's weight colours, task 0046). */
   const std::vector<Vec3> *vertex_colors = nullptr;
+  /* Task 0533: the mesh's render colour layer per render vertex, for materials with Vertex Color (nullptr: none). */
+  const std::vector<Vec4> *material_colors = nullptr;
   /* Camera Flatten (round 334): `model` places the flattened shape; the normals, the face shadow map's key and the
    * object's own space for shading come from `shade_model`, the true placement. */
   bool flattened = false;
@@ -367,6 +370,7 @@ struct RenderTarget {
   }
 };
 
+class SplatPass;  // gsplat_raster.h (round 532)
 struct Shade8Tri;  // a triangle as the 8-wide shader takes it (raster.cpp, task 0091)
 
 class Renderer3D {
@@ -391,6 +395,15 @@ class Renderer3D {
    * and then shading over most of them cost 2 ms a view on 8 threads). env must live until flush(). */
   void clear_environment(const Mat4 &inv_view_proj, const Environment &env, ViewTransform vt, float exposure);
   void add(const DrawItem &item) { items_.push_back(item); }
+  /* Round 532: Gaussian splats the next flush() blends in after the opaque pass and before the see-through one (null =
+   * none; cleared by flush). The pass must live until flush() returns. */
+  void set_splats(const SplatPass *p) { splats_ = p; }
+  /* The renderer's own splat pass (review 532): it moves with the renderer - the editor swaps each window's renderer
+   * into its views - so each view keeps the sorted orders of its own camera; made on first use. */
+  SplatPass &splat_pass();
+  /* Round 557: the scene has no splats any more - the room the pass kept for them goes back (76 MB of screen splats each
+   * at 1M, and the sorted orders). */
+  void release_splat_pass() { own_splats_.reset(); }
   void flush();
 
   /* Overlays drawn after flush() (grid, wireframes, gizmo lines). */
@@ -490,6 +503,8 @@ class Renderer3D {
                   std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const;
 
   uint64_t uses_ = 0;
+  const SplatPass *splats_ = nullptr;  // (round 532)
+  std::shared_ptr<SplatPass> own_splats_;  // (round 532: splat_pass(); shared_ptr - SplatPass is incomplete here)
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
   LightingEnv env_;

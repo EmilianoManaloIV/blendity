@@ -116,6 +116,56 @@ void tests_round492() {
   });
 }
 
+/* Round 550 (task 0530): a run without BLENDITY_TEST_DIR gets a scratch folder of its own; old runs' folders go. */
+void tests_round550() {
+  test("a test run without BLENDITY_TEST_DIR works in a folder of its own, run-<stamp>-<n> under the shared one, and removes run folders begun more than a day ago - another run's files never reach its scratch project (round 550)", [] {
+    const std::string base = fs::join(test_dir(), "r550_runs");
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(base), ec);
+    fs::make_dirs(base);
+    const unsigned long long now = test_run_stamp();
+    const double tick_s = (double)std::chrono::system_clock::period::num / (double)std::chrono::system_clock::period::den;
+    const unsigned long long two_days = (unsigned long long)(48.0 * 3600.0 / tick_s), an_hour = (unsigned long long)(3600.0 / tick_s);
+    const std::string old_run = test_run_dir(base, now - two_days, 1), new_run = test_run_dir(base, now - an_hour, 2), other = fs::join(base, "keep-me");
+    for (const std::string &d : {old_run, new_run, other}) fs::make_dirs(fs::join(d, "Assets/Materials"));
+    prune_test_runs(base, 24.0 * 3600.0, now);
+    CHECK(!fs::exists(old_run));  // (begun two days ago: gone, whatever its folder's time says)
+    CHECK(fs::exists(new_run) && fs::exists(other));  // (begun an hour ago; not a run folder at all)
+    /* Two runs begun on the same tick get different folders. */
+    CHECK(test_run_dir(base, now, 1) != test_run_dir(base, now, 2));
+    CHECK(fs::filename(test_run_dir(base, now, 7)).rfind("run-", 0) == 0);
+    /* This run's own folder: BLENDITY_TEST_DIR when set (run_suites.py, these runs), a run- folder when not. */
+    const char *own = std::getenv("BLENDITY_TEST_DIR");
+    CHECK((own && *own) ? test_dir() == std::string(own) : fs::filename(test_dir()).rfind("run-", 0) == 0);
+    std::filesystem::remove_all(std::filesystem::u8path(base), ec);
+  });
+}
+
+/* Round 555 (task 0536): a slice of a group in its order, plus a named test - to find which earlier test leaves state
+ * behind for a later one. The child runs this group's own tests, which do nothing in a child. */
+void tests_round555() {
+  test("tests: BLENDITY_TEST_RANGE=1-1 with BLENDITY_TEST_ALSO naming the third test runs the first and the third, each numbered, in order, and not the second (round 555)", [] {
+    auto set = [](const char *k) {  // (set and not empty: the test before this one clears FILTER with "", which POSIX keeps as "")
+      const char *v = std::getenv(k);
+      return v && *v;
+    };
+    if (in_child() || set("BLENDITY_TEST_FILTER") || set("BLENDITY_TEST_RANGE")) return;
+    set_env("BLENDITY_TEST_CHILD", "1");
+    set_env("BLENDITY_TEST_RANGE", "1-1");
+    set_env("BLENDITY_TEST_ALSO", "--list-groups names every test group");
+    std::string out;
+    const int code = run_self({"--group", "runner"}, out);
+    set_env("BLENDITY_TEST_RANGE", "");
+    set_env("BLENDITY_TEST_ALSO", "");
+    set_env("BLENDITY_TEST_CHILD", "");
+    CHECK(code == 0);
+    const size_t first = out.find("#1 [ ok ] tests: --group nosuch"), third = out.find("#3 [ ok ] tests: --list-groups names every test group");
+    CHECK(first != std::string::npos && third != std::string::npos && first < third);
+    CHECK(!has(out, "#2 ") && !has(out, "tests: --group board,nosuch"));
+    if (first == std::string::npos || third == std::string::npos) std::printf("    the child printed:\n%s\n", out.c_str());
+  });
+}
+
 }  // namespace
 
-void run_runner_tests() { tests_round492(); }
+void run_runner_tests() { tests_round492(); tests_round550(); tests_round555(); }

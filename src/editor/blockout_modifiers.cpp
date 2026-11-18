@@ -122,7 +122,7 @@ uint64_t Editor::blockout_pick_piece_shown(GameObject &g, int view_x, int view_y
     const blockout::FaceOwners *ask = owners ? owners->get() : own.get();
     if (ask) ask->at(on, n, owner, side);
   }
-  const GameObject *piece = scene_->find(owner);
+  const GameObject *piece = scene_->find(blockout_piece_owner(owner));  // (a made id - a styled window's part, an opening's copy - names its owner)
   if (!piece || !piece->get<BlockoutPiece>()) return 0;
   return blockout_of_piece(*piece) == &g ? piece->id : 0;
 }

@@ -3,6 +3,7 @@
 #include "../src/scene/raycast.h"
 #include "../src/scene/stroke_object.h"
 #include "test_common.h"
+#include "test_panoramic.h"
 #include "../src/core/view_perf.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
@@ -456,7 +457,10 @@ static void round28_tests() {
   });
   test("Inspector: a modifier's menu (Apply, Duplicate) acts on a click", [&] {
     Editor ed;
-    ed.init_headless(1600, 900);
+    /* 1000 high, not 900 (round 559): with Linux's wider font the Rigging button and the Vertex Paint toggle take a row
+     * each, and the Array modifier's header then sat 20 px from the window's bottom, under its edge. The menu is what is
+     * tested, not where the Inspector ends. */
+    ed.init_headless(1600, 1000);
     ed.step_frame_headless();
     ed.command("select Cube");
     ed.command("component ArrayModifier");
@@ -1736,6 +1740,7 @@ static void coverage_tests() {
     for (const char *id : {"mode.vertex", "mode.edge", "mode.face", "mesh.extrude", "mesh.inset", "mesh.bevel", "mesh.bridge", "mesh.connect", "mesh.dissolve",
                            "mesh.duplicate", "mesh.fill", "mesh.merge_center", "mesh.merge_distance", "mesh.push_pull", "mesh.push_through",
                            "mesh.recalc_normals", "mesh.shrink_fatten", "mesh.to_sphere", "mesh.triangulate", "mesh.tris_to_quads", "mesh.proportional",
+                           "mesh.relax_loops", "mesh.space_loops", "mesh.circularize", "mesh.flatten_loops", "mesh.curve_loops",  // (LoopTools, round 537)
                            "select.invert", "select.linked", "select.more", "select.less", "edit.duplicate", "edit.delete", "mesh.knife", "transform.grab",
                            "transform.rotate", "transform.scale", "mode.edit_toggle"}) {
       ed.command("edit face");
@@ -14701,6 +14706,2026 @@ static void tests_round508_te_open() {
   });
 }
 
+/* ---- Round 536 (task 0516): Edit Mode's Dimensions ---- */
+
+/* A cube of the given size in Edit Mode, vertex mode, with every vertex selected (none when `select` is false). */
+static GameObject *r536_cube(Editor &ed, const char *name, float size, bool select = true) {
+  GameObject *g = ed.scene().create(name);
+  g->add<MeshFilter>()->mesh = primitives::cube(size);
+  g->add<MeshRenderer>();
+  ed.mark_changed_for_test(name);
+  ed.command("edit off");  // (a test makes several objects: each is edited in turn)
+  ed.command(std::string("select ") + name);
+  ed.command("edit vertex");
+  std::string vs = "vsel";
+  const size_t n = g->get<MeshFilter>()->mesh->vert_count();
+  for (size_t v = 0; select && v < n; v++) vs += " " + std::to_string(v);
+  ed.command(vs);
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  return g;
+}
+
+/* The size of a mesh's vertices (all of them) along each local axis. */
+static Vec3 r536_extent(const Mesh &m) {
+  Vec3 lo(1e30f), hi(-1e30f);
+  for (const Vec3 &p : m.positions)
+    for (int k = 0; k < 3; k++) lo[k] = std::min(lo[k], p[k]), hi[k] = std::max(hi[k], p[k]);
+  return hi - lo;
+}
+
+static bool r536_same_positions(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0;
+}
+
+static bool r536_finite(const Mesh &m) {
+  for (const Vec3 &p : m.positions)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
+  return true;
+}
+
+static Vec3 r536_median(const Mesh &m) {
+  Vec3 s(0.0f);
+  for (const Vec3 &p : m.positions) s += p;
+  return s / (float)m.positions.size();
+}
+
+static void tests_round536() {
+  test("dimensions: a 2 x 2 x 2 cube selected shows 2 2 2 (global and local); typing 5 into the Inspector's Y field scales the selection to 5 about its median in one undo step, and F9's Y typed 3 re-runs from before (3, not 7.5), still one step, Ctrl+Z gives the cube back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    GameObject *g = r536_cube(ed, "DimCube", 2.0f);
+    auto type_into = [&](const std::string &key, const std::string &text) {
+      Recti r;
+      for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+      if (!ed.button_rect_for_test(key, r)) return false;
+      const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp, ET::MouseDown, ET::MouseUp}) {
+        platform::Event e;
+        e.type = t, e.x = x, e.y = y;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+      for (char c : text) {
+        platform::Event e;
+        e.type = ET::Text, e.codepoint = (uint32_t)c;
+        ed.step_frame_headless({e});
+      }
+      ed.step_frame_headless({key_ev(platform::KEY_ENTER)});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      return true;
+    };
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(count == g->get<MeshFilter>()->mesh->vert_count());
+    CHECK(std::fabs(gs.x - 2) < 1e-5f && std::fabs(gs.y - 2) < 1e-5f && std::fabs(gs.z - 2) < 1e-5f);
+    CHECK(std::fabs(ls.x - 2) < 1e-5f && std::fabs(ls.y - 2) < 1e-5f && std::fabs(ls.z - 2) < 1e-5f);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const Vec3 med0 = r536_median(*before);
+    const size_t steps0 = ed.undo_steps_for_test();
+    const bool typed = type_into("field:Dimensions Y", "5");
+    const Vec3 e1 = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    typed Y 5 (%d): size %.4f %.4f %.4f, undo steps %zu -> %zu (%s)\n", (int)typed, e1.x, e1.y, e1.z, steps0, ed.undo_steps_for_test(), ed.undo_label_for_test(0).c_str());
+    CHECK(typed);
+    CHECK(std::fabs(e1.y - 5.0f) < 1e-4f && std::fabs(e1.x - 2.0f) < 1e-4f && std::fabs(e1.z - 2.0f) < 1e-4f);
+    CHECK(length(r536_median(*g->get<MeshFilter>()->mesh) - med0) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1 && ed.undo_label_for_test(0) == "Edit: dimensions");
+    CHECK(ed.last_op_name_for_test() == "dimensions");
+    /* F9: Y typed 3 starts again from the 2-high cube. */
+    const bool typed9 = type_into("lastop:Y", "3");
+    const Vec3 e2 = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    F9 Y 3 (%d): size %.4f %.4f %.4f, undo steps %zu\n", (int)typed9, e2.x, e2.y, e2.z, ed.undo_steps_for_test());
+    CHECK(typed9);
+    CHECK(std::fabs(e2.y - 3.0f) < 1e-4f && std::fabs(e2.x - 2.0f) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+    ed.command("undo");
+    CHECK(r536_same_positions(*ed.scene().find_by_name("DimCube")->get<MeshFilter>()->mesh, *before));
+  });
+  test("dimensions: on an object turned 90 degrees about Z and scaled 2 in X, Global and Local read different sizes, and a typed local X changes the size along the object's own X", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimTurned", 2.0f);
+    g->set_local_euler({0, 0, 90});
+    g->set_local_scale({2, 1, 1});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    std::printf("    turned + scaled: global %.3f %.3f %.3f, local %.3f %.3f %.3f\n", gs.x, gs.y, gs.z, ls.x, ls.y, ls.z);
+    CHECK(std::fabs(gs.x - 2) < 1e-4f && std::fabs(gs.y - 4) < 1e-4f && std::fabs(gs.z - 2) < 1e-4f);
+    CHECK(std::fabs(ls.x - 2) < 1e-4f && std::fabs(ls.y - 2) < 1e-4f && std::fabs(ls.z - 2) < 1e-4f);
+    ed.command("editop dimensions 3 - - local");
+    const Vec3 le = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(std::fabs(le.x - 3) < 1e-4f && std::fabs(le.y - 2) < 1e-4f && std::fabs(ls.x - 3) < 1e-4f);
+    CHECK(std::fabs(gs.y - 6) < 1e-4f && std::fabs(gs.x - 2) < 1e-4f);  // (local X is world Y here)
+    /* Global: the world X size (the object's local Y) goes to 4. */
+    ed.command("editop dimensions 4 - -");
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(std::fabs(gs.x - 4) < 1e-4f && std::fabs(gs.y - 6) < 1e-4f && std::fabs(ls.y - 4) < 1e-4f);
+  });
+  test("dimensions: one selected face scales alone (the other vertices keep their positions bit for bit); a size on the flat axis is refused with a message and leaves the mesh and the undo steps alone, the other axes work, 0 flattens a sized axis", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimFace", 2.0f, false);
+    ed.command("fsel facing 0 1 0");
+    ed.step_frame_headless();
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const std::vector<uint8_t> sel = ed.vert_sel_for_test();
+    const size_t picked = (size_t)std::count(sel.begin(), sel.end(), 1);
+    CHECK(picked >= 4 && picked < before->vert_count());
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    CHECK(count == picked && std::fabs(gs.y) < 1e-6f && std::fabs(gs.x - 2) < 1e-5f);
+    /* The flat axis (Y): refused, nothing changes. */
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop dimensions - 3 -");
+    ed.step_frame_headless();  // (a pending undo step would show here)
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    /* X works: only the selected vertices move. */
+    ed.command("editop dimensions 4 - -");
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    bool others_kept = true, selected_moved = false;
+    for (size_t v = 0; v < before->vert_count(); v++) {
+      const bool same = std::memcmp(&before->positions[v], &after.positions[v], sizeof(Vec3)) == 0;
+      if (!sel[v]) others_kept = others_kept && same;
+      else selected_moved = selected_moved || !same;
+    }
+    std::printf("    one face: %zu of %zu vertices selected, others untouched %d, undo steps %zu -> %zu\n", picked, before->vert_count(), (int)others_kept, steps0, ed.undo_steps_for_test());
+    CHECK(others_kept && selected_moved);
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x - 4) < 1e-4f);
+    /* 0 on a sized axis flattens it (Blender allows it). */
+    ed.command("editop dimensions 0 - -");
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x) < 1e-6f && r536_finite(*g->get<MeshFilter>()->mesh));
+  });
+  test("dimensions: one vertex reads 0 everywhere and typing a size is refused (positions bit for bit, no undo step); nothing selected changes nothing; NaN, inf and negatives never write a non-finite position; a 1e-6 to 1e6 scale stays finite", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimPoint", 2.0f, false);
+    ed.command("vsel 0");
+    ed.step_frame_headless();
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 1 && gs.x == 0 && gs.y == 0 && gs.z == 0 && ls.x == 0);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop dimensions 1 - -");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    /* Nothing selected. */
+    ed.command("vsel");
+    ed.step_frame_headless();
+    ed.command("editop dimensions 3 - -");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    /* NaN / inf / negative on the whole cube. */
+    std::string vs = "vsel";
+    for (size_t v = 0; v < before->vert_count(); v++) vs += " " + std::to_string(v);
+    ed.command(vs);
+    ed.step_frame_headless();
+    for (const char *bad : {"nan", "inf", "-inf"}) {
+      ed.command(std::string("editop dimensions ") + bad + " - -");
+      CHECK(r536_finite(*g->get<MeshFilter>()->mesh));
+      CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    }
+    ed.command("editop dimensions -3 - -");  // a negative size is 0: flat
+    const Vec3 neg = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh) && neg.x == 0 && std::fabs(neg.y - 2) < 1e-5f);
+    /* A huge factor on a tiny cube. */
+    GameObject *t = r536_cube(ed, "DimTiny", 2e-6f);
+    ed.command("editop dimensions 1000000 - -");
+    const Mesh &tm = *t->get<MeshFilter>()->mesh;
+    std::printf("    1e-6 -> 1e6: x size %.6g, finite %d, %zu faces\n", r536_extent(tm).x, (int)r536_finite(tm), tm.face_count());
+    CHECK(r536_finite(tm) && std::fabs(r536_extent(tm).x - 1e6f) < 1e6f * 1e-3f && tm.face_count() == primitives::cube(1.0f)->face_count());
+  });
+  test("dimensions: the Inspector's bounds are cached by the mesh, its version and the selection (not walked every frame); a million vertices' frame cost is printed", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    GameObject *g = r536_cube(ed, "DimCache", 2.0f);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const uint64_t c0 = ed.edit_dims_computes_for_test();
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    CHECK(ed.edit_dims_computes_for_test() == c0);  // (the Inspector drew five frames from the cache)
+    ed.command("vsel 0 1");
+    ed.step_frame_headless();
+    CHECK(ed.edit_dims_computes_for_test() > c0);   // (another selection: walked again)
+    const uint64_t c1 = ed.edit_dims_computes_for_test();
+    ed.command("editop dimensions 3 - -");
+    ed.step_frame_headless();
+    CHECK(ed.edit_dims_computes_for_test() > c1);   // (another mesh version)
+    /* A million vertices: the cached frame's cost against the walk's. */
+    GameObject *big = ed.scene().create("DimBig");
+    auto mesh = std::make_shared<Mesh>();
+    for (int i = 0; i < 1000000; i++) mesh->add_vert({(float)(i % 1000), (float)(i / 1000), 0.0f});
+    const uint32_t tri[3] = {0, 1, 2};
+    mesh->add_face(tri, 3, nullptr, 0);
+    big->add<MeshFilter>()->mesh = mesh;
+    big->add<MeshRenderer>();
+    ed.mark_changed_for_test("DimBig");
+    ed.command("edit off");
+    ed.command("select DimBig");
+    ed.command("edit vertex");
+    ed.vert_sel_for_test().assign(mesh->vert_count(), 1);
+    (void)g;
+    Vec3 gs, ls;
+    size_t count = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    ed.edit_dims_for_test(gs, ls, count);
+    const auto t1 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; i++) ed.edit_dims_for_test(gs, ls, count);
+    const auto t2 = std::chrono::steady_clock::now();
+    std::printf("    1M vertices selected: first walk %.2f ms, a cached look %.3f ms (size %.0f x %.0f)\n", std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                std::chrono::duration<double, std::milli>(t2 - t1).count() / 20.0, gs.x, gs.y);
+    CHECK(count == 1000000 && std::fabs(gs.x - 999) < 1e-3f);
+  });
+}
+
+/* ---- Round 536 (task 0516), the test engineer's additions ---- */
+
+/* Double-clicks the control recorded as `key`, types `text` and presses Enter. `step` runs one frame with events (the main
+ * window's, or a floating window's). False when the control is not on screen. */
+static bool r536_type_with(const std::function<bool(const std::string &, Recti &)> &find, const std::function<void(std::vector<platform::Event>)> &step, const std::string &key, const std::string &text) {
+  using ET = platform::EventType;
+  Recti r;
+  for (int i = 0; i < 4 && !find(key, r); i++) step({});
+  if (!find(key, r)) return false;
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp, ET::MouseDown, ET::MouseUp}) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    step({e});
+  }
+  step({key_ev(platform::KEY_A, platform::MOD_CTRL)});
+  for (char c : text) {
+    platform::Event e;
+    e.type = ET::Text, e.codepoint = (uint32_t)c;
+    step({e});
+  }
+  step({key_ev(platform::KEY_ENTER)});
+  step({});
+  step({});
+  return true;
+}
+
+static bool r536_type(Editor &ed, const std::string &key, const std::string &text) {
+  return r536_type_with([&](const std::string &k, Recti &r) { return ed.button_rect_for_test(k, r); }, [&](std::vector<platform::Event> ev) { ed.step_frame_headless(std::move(ev)); }, key, text);
+}
+
+/* An object with this mesh in Edit Mode, vertex mode, every vertex selected. */
+static GameObject *r536_object(Editor &ed, const char *name, MeshPtr mesh, bool select = true) {
+  GameObject *g = ed.scene().create(name);
+  g->add<MeshFilter>()->mesh = mesh;
+  g->add<MeshRenderer>();
+  ed.mark_changed_for_test(name);
+  ed.command("edit off");
+  ed.command(std::string("select ") + name);
+  ed.command("edit vertex");
+  std::string vs = "vsel";
+  for (size_t v = 0; select && v < mesh->vert_count(); v++) vs += " " + std::to_string(v);
+  ed.command(vs);
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  return g;
+}
+
+static void tests_round536_engineer() {
+  test("dimensions: edge select mode measures and scales the vertices of the selected edge; the rest of the cube stays bit for bit", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimEdge", 2.0f, false);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    const uint32_t *f0 = before->face_verts(0);
+    const uint32_t a = f0[0], b = f0[1];
+    ed.command(strprintf("esel %u %u", a, b));
+    ed.step_frame_headless();
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count));
+    const Vec3 d = before->positions[a] - before->positions[b];
+    int axis = std::fabs(d.x) > 1e-3f ? 0 : std::fabs(d.y) > 1e-3f ? 1 : 2;
+    std::printf("    edge %u-%u: %zu verts, size %.3f %.3f %.3f, axis %d\n", a, b, count, gs.x, gs.y, gs.z, axis);
+    CHECK(count == 2 && std::fabs(gs[axis] - 2) < 1e-5f);
+    const Vec3 mid0 = (before->positions[a] + before->positions[b]) * 0.5f;
+    std::string cmd = "editop dimensions";
+    for (int k = 0; k < 3; k++) cmd += k == axis ? " 4" : " -";
+    ed.command(cmd);
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    CHECK(std::fabs(length(after.positions[a] - after.positions[b]) - 4.0f) < 1e-4f);
+    CHECK(length((after.positions[a] + after.positions[b]) * 0.5f - mid0) < 1e-4f);
+    for (size_t v = 0; v < before->vert_count(); v++)
+      if (v != a && v != b) CHECK(std::memcmp(&before->positions[v], &after.positions[v], sizeof(Vec3)) == 0);
+  });
+
+  test("dimensions: F9 after the selection changed re-runs on the selection the operator started from, with X / Y / Z typed in F9's own fields", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    GameObject *g = r536_cube(ed, "DimF9Sel", 2.0f);
+    ed.command("editop dimensions - 5 -");
+    CHECK(ed.last_op_name_for_test() == "dimensions");
+    ed.step_frame_headless();  // (the console op's undo step lands on the next frame)
+    const size_t steps1 = ed.undo_steps_for_test();
+    ed.command("vsel 0");  // (the selection moves on: one vertex)
+    ed.step_frame_headless();
+    const bool t1 = r536_type(ed, "lastop:Y", "3");
+    Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    F9 Y 3 after vsel 0 (%d): size %.3f %.3f %.3f, undo %zu -> %zu, last op '%s'\n", (int)t1, e.x, e.y, e.z, steps1, ed.undo_steps_for_test(), ed.last_op_name_for_test().c_str());
+    CHECK(t1);
+    CHECK(std::fabs(e.y - 3) < 1e-4f && std::fabs(e.x - 2) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps1);
+    /* X and Z typed in F9 too (each re-runs from the 2 x 2 x 2 cube). */
+    CHECK(r536_type(ed, "lastop:X", "4"));
+    e = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(std::fabs(e.x - 4) < 1e-4f && std::fabs(e.y - 3) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+    CHECK(r536_type(ed, "lastop:Z", "1"));
+    e = r536_extent(*g->get<MeshFilter>()->mesh);
+    CHECK(std::fabs(e.x - 4) < 1e-4f && std::fabs(e.y - 3) < 1e-4f && std::fabs(e.z - 1) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps1);
+  });
+
+  test("dimensions: a quad strip (open, boundary edges) and two faces that share only a vertex measure and scale without a hole or a crash", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    auto strip = std::make_shared<Mesh>();
+    for (int i = 0; i < 4; i++) strip->add_vert({(float)i, 0, 0}), strip->add_vert({(float)i, 1, 0});
+    for (uint32_t i = 0; i < 3; i++) strip->add_face({2 * i, 2 * i + 2, 2 * i + 3, 2 * i + 1});
+    GameObject *g = r536_object(ed, "DimStrip", strip);
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 8 && std::fabs(gs.x - 3) < 1e-5f && std::fabs(gs.y - 1) < 1e-5f && gs.z == 0);
+    ed.command("editop dimensions 6 2 -");
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    const Vec3 e = r536_extent(m);
+    CHECK(r536_finite(m) && m.face_count() == 3 && std::fabs(e.x - 6) < 1e-4f && std::fabs(e.y - 2) < 1e-4f);
+    ed.command("editop dimensions - - 1");  // flat in Z: refused
+    CHECK(r536_extent(*g->get<MeshFilter>()->mesh).z == 0);
+    /* Two quads that touch at one vertex (a bow tie). */
+    auto bow = std::make_shared<Mesh>();
+    const uint32_t c = bow->add_vert({0, 0, 0});
+    const uint32_t p[6] = {bow->add_vert({1, 0, 0}), bow->add_vert({1, 1, 0}), bow->add_vert({0, 1, 0}),
+                           bow->add_vert({-1, 0, 0}), bow->add_vert({-1, -1, 0}), bow->add_vert({0, -1, 0})};
+    bow->add_face({c, p[0], p[1], p[2]});
+    bow->add_face({c, p[3], p[4], p[5]});
+    GameObject *h = r536_object(ed, "DimBow", bow);
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 7 && std::fabs(gs.x - 2) < 1e-5f && std::fabs(gs.y - 2) < 1e-5f);
+    ed.command("editop dimensions 4 - -");
+    const Mesh &bm = *h->get<MeshFilter>()->mesh;
+    CHECK(r536_finite(bm) && bm.face_count() == 2 && std::fabs(r536_extent(bm).x - 4) < 1e-4f);
+    CHECK(length(bm.positions[c]) < 1e-5f);  // (the shared vertex is the median here, so it stays)
+  });
+
+  test("dimensions: a mesh with a zero-area face scales finitely, and the degenerate face alone has size along one axis only", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    auto m = std::make_shared<Mesh>(*primitives::cube(2.0f));
+    const uint32_t s = m->add_vert({-1, 5, 0}), t = m->add_vert({0, 5, 0}), u = m->add_vert({1, 5, 0});
+    m->add_face({s, t, u});  // collinear: no area
+    const size_t faces = m->face_count();
+    GameObject *g = r536_object(ed, "DimDegen", m);
+    Vec3 gs, ls;
+    size_t count = 0;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.y - 6.0f) < 1e-5f);
+    ed.command("editop dimensions 4 3 4");
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh) && g->get<MeshFilter>()->mesh->face_count() == faces);
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x - 4) < 1e-4f && std::fabs(gs.y - 3) < 1e-4f && std::fabs(gs.z - 4) < 1e-4f);
+    /* Only the degenerate triangle: a line along X. */
+    ed.command(strprintf("vsel %u %u %u", s, t, u));
+    ed.step_frame_headless();
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && count == 3 && gs.y == 0 && gs.z == 0 && gs.x > 0);
+    ed.command("editop dimensions - 2 -");
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    ed.command("editop dimensions 1 - -");
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh) && std::fabs(r536_extent(*g->get<MeshFilter>()->mesh).x - 4) < 1e-4f);  // (the cube still spans 4)
+    CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.x - 1) < 1e-4f);
+  });
+
+  test("dimensions: an object scaled 1e4 or 1e-4 reads its global size and local size, and typed sizes land in the right frame", [] {
+    for (float sc : {1e4f, 1e-4f}) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      GameObject *g = r536_cube(ed, "DimScale", 2.0f);
+      g->set_local_scale({sc, sc, sc});
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      Vec3 gs, ls;
+      size_t count = 0;
+      CHECK(ed.edit_dims_for_test(gs, ls, count));
+      std::printf("    scale %g: global %.6g, local %.6g\n", sc, gs.x, ls.x);
+      CHECK(std::fabs(gs.x - 2 * sc) < 2 * sc * 1e-4f && std::fabs(ls.x - 2) < 1e-4f);
+      ed.command(strprintf("editop dimensions %.9g - -", 4 * sc));  // global X: twice the size
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      CHECK(r536_finite(m) && std::fabs(r536_extent(m).x - 4) < 4e-3f && std::fabs(r536_extent(m).y - 2) < 2e-3f);
+      ed.command("editop dimensions - 3 - local");
+      CHECK(r536_finite(m) && std::fabs(r536_extent(*g->get<MeshFilter>()->mesh).y - 3) < 3e-3f);
+      CHECK(ed.edit_dims_for_test(gs, ls, count) && std::fabs(gs.y - 3 * sc) < 3 * sc * 1e-3f);
+    }
+  });
+
+  test("dimensions: dragging a field is one undo step, not one a frame", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    using ET = platform::EventType;
+    GameObject *g = r536_cube(ed, "DimDrag", 2.0f);
+    Recti r;
+    for (int i = 0; i < 4 && !ed.button_rect_for_test("field:Dimensions Y", r); i++) ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("field:Dimensions Y", r));
+    const size_t steps0 = ed.undo_steps_for_test();
+    const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+    platform::Event mv;
+    mv.type = ET::MouseMove, mv.x = x, mv.y = y;
+    ed.step_frame_headless({mv});
+    platform::Event down;
+    down.type = ET::MouseDown, down.x = x, down.y = y;
+    ed.step_frame_headless({down});
+    for (int i = 1; i <= 12; i++) {
+      platform::Event m2;
+      m2.type = ET::MouseMove, m2.x = x + i * 10, m2.y = y;
+      ed.step_frame_headless({m2});
+    }
+    platform::Event up;
+    up.type = ET::MouseUp, up.x = x + 120, up.y = y;
+    ed.step_frame_headless({up});
+    ed.step_frame_headless();
+    const Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    dragged +120 px: size %.3f %.3f %.3f, undo %zu -> %zu\n", e.x, e.y, e.z, steps0, ed.undo_steps_for_test());
+    CHECK(e.y > 2.5f && std::fabs(e.x - 2) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+    ed.command("undo");
+    CHECK(std::fabs(r536_extent(*ed.scene().find_by_name("DimDrag")->get<MeshFilter>()->mesh).y - 2) < 1e-5f);
+  });
+
+  test("dimensions: the console refuses bad arguments (abc, nan, outside Edit Mode) and leaves mesh and undo stack alone; '- 2 -' works", [] {
+    for (const char *bad : {"editop dimensions abc", "editop dimensions abc 2 2", "editop dimensions 2 xyz -", "editop dimensions nan nan nan", "editop dimensions - - 1e999"}) {
+      Editor ed;  // (a fresh editor a line: one bad line must not hide behind the one before)
+      ed.init_headless(1000, 700);
+      GameObject *g = r536_cube(ed, "DimConsole", 2.0f);
+      const MeshPtr before = g->get<MeshFilter>()->mesh;
+      ed.step_frame_headless();
+      const size_t steps0 = ed.undo_steps_for_test();
+      ed.command(bad);
+      ed.step_frame_headless();
+      std::printf("    '%s': same mesh %d, finite %d, undo %zu\n", bad, (int)r536_same_positions(*g->get<MeshFilter>()->mesh, *before), (int)r536_finite(*g->get<MeshFilter>()->mesh), ed.undo_steps_for_test());
+      CHECK(r536_finite(*g->get<MeshFilter>()->mesh));
+      CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));  // (a word that is no number must not become a size of 0)
+      CHECK(ed.undo_steps_for_test() == steps0);
+    }
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimConsole", 2.0f);
+    ed.command("editop dimensions - 2 -");  // already 2: nothing to do, nothing broken
+    CHECK(r536_finite(*g->get<MeshFilter>()->mesh));
+    ed.command("editop dimensions - 7 -");
+    CHECK(std::fabs(r536_extent(*g->get<MeshFilter>()->mesh).y - 7) < 1e-4f);
+    ed.command("edit off");
+    const MeshPtr obj = g->get<MeshFilter>()->mesh;
+    ed.command("editop dimensions 1 1 1");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *obj));
+  });
+
+  test("dimensions: the Modeling Tools window's Edit Mode section has the same block and typing there scales the selection in one undo step", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *g = r536_cube(ed, "DimTools", 2.0f);
+    const int id = ed.open_window_for_test(WindowKind::Tools, 500, 2600)  /* (tall: the Edit Mode section is far down the list) */;
+    CHECK(id != 0);
+    EditorWindow *w = ed.window_for_test(id);
+    CHECK(w != nullptr);
+    if (!w) return;
+    w->ui.record_buttons = true;  // (a floating window has its own UI context, so its own recorded rects)
+    auto step = [&](std::vector<platform::Event> ev) { ed.step_window_headless(id, std::move(ev)); };
+    auto find = [&](const std::string &k, Recti &r) {
+      const auto it = w->ui.button_rects.find(k);
+      if (it == w->ui.button_rects.end()) return false;
+      r = it->second;
+      return true;
+    };
+    for (int i = 0; i < 3; i++) step({});
+    Recti r;
+    const bool found = find("field:Dimensions Y", r);
+    std::printf("    tools window field found: %d\n", (int)found);
+    CHECK(found);
+    const size_t steps0 = ed.undo_steps_for_test();
+    const bool typed = r536_type_with(find, step, "field:Dimensions Y", "5");
+    const Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    typed (%d): size %.3f %.3f %.3f, undo %zu -> %zu\n", (int)typed, e.x, e.y, e.z, steps0, ed.undo_steps_for_test());
+    CHECK(typed && std::fabs(e.y - 5) < 1e-4f && std::fabs(e.x - 2) < 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps0 + 1);
+  });
+}
+
+static void tests_round536_review() {
+  test("dimensions: switching F9's Orientation re-measures the axes you did not type (global X typed on a turned, stretched object, then Local: the other axes keep the object's own sizes)", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimSwitch", 2.0f);
+    g->set_local_euler({0, 0, 90});
+    g->set_local_scale({2, 1, 1});
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("editop dimensions 3 - -");  // global: the world X size (the object's Y) to 3; Y stays at its 4
+    ed.command("redo orientation 1");        // local: X (typed) 3 along the object's X, Y and Z are the object's own 2 and 2
+    const Vec3 e = r536_extent(*g->get<MeshFilter>()->mesh);
+    std::printf("    after the switch: local extent %.3f %.3f %.3f\n", e.x, e.y, e.z);
+    CHECK(std::fabs(e.x - 3) < 1e-4f && std::fabs(e.y - 2) < 1e-4f && std::fabs(e.z - 2) < 1e-4f);
+  });
+  test("dimensions: a size the selection already has is not an operation (no undo step, no warning-level refusal); a sixth word that is not global or local refuses", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    GameObject *g = r536_cube(ed, "DimNoop", 2.0f);
+    const MeshPtr before = g->get<MeshFilter>()->mesh;
+    ed.step_frame_headless();
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop dimensions 2 2 2");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before));
+    CHECK(ed.undo_steps_for_test() == steps0 && ed.last_op_name_for_test().empty());
+    ed.command("editop dimensions 4 - - sideways");
+    ed.step_frame_headless();
+    CHECK(r536_same_positions(*g->get<MeshFilter>()->mesh, *before) && ed.undo_steps_for_test() == steps0);
+  });
+  test("dimensions: during a G drag the Inspector shows the last sizes and does not walk the mesh again every frame", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *g = r536_cube(ed, "DimDrag", 2.0f);
+    (void)g;
+    using ET = platform::EventType;
+    const Recti sv = ed.window_rect_for_test(WindowKind::Scene);
+    const int cx = sv.x + sv.w / 2, cy = sv.y + sv.h / 2;
+    auto mouse = [&](int x, int y) {
+      platform::Event e;
+      e.type = ET::MouseMove, e.x = x, e.y = y;
+      ed.step_frame_headless({e});
+    };
+    mouse(cx, cy);
+    mouse(cx, cy);
+    ed.step_frame_headless({key_ev(platform::KEY_G)});
+    CHECK(ed.transform_active_for_test());
+    const uint64_t c0 = ed.edit_dims_computes_for_test();
+    for (int i = 1; i <= 8; i++) mouse(cx + 10 * i, cy);
+    std::printf("    G drag: recomputes %llu -> %llu\n", (unsigned long long)c0, (unsigned long long)ed.edit_dims_computes_for_test());
+    CHECK(ed.edit_dims_computes_for_test() == c0);
+    ed.step_frame_headless({key_ev(platform::KEY_ESCAPE)});
+  });
+}
+
+/* ---- Round 537 (task 0517): LoopTools in the editor (Relax, Space, To Circle, Flatten, Curve) ---- */
+namespace lt537e {
+static const char *const kOps[5] = {"relax_loops", "space_loops", "circularize", "flatten_loops", "curve_loops"};
+
+static const Mesh *edited_mesh(Editor &ed) {
+  GameObject *g = ed.active_object_for_test();
+  MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  return mf && mf->mesh ? mf->mesh.get() : nullptr;
+}
+static bool same_positions(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].z != b[i].z) return false;
+  return true;
+}
+/* A Cube's top face with its border cut once (the Learn lesson's first step), the ring's vertices found (by angle) in
+ * the mesh as it is then. */
+static std::vector<size_t> cube_top_ring(Editor &ed) {
+  ed.command("create Cube");
+  ed.command("edit face");
+  ed.command("fsel facing 0 1 0");
+  ed.command("editop subdivide_edges");
+  const Mesh *m = edited_mesh(ed);
+  std::vector<size_t> ring;
+  if (!m) return ring;
+  float top = -1e30f, half = 0;
+  for (Vec3 p : m->positions) top = std::max(top, p.y), half = std::max(half, std::fabs(p.x));
+  for (size_t i = 0; i < m->positions.size(); i++) {
+    const Vec3 p = m->positions[i];
+    if (p.y > top - 1e-3f && std::max(std::fabs(p.x), std::fabs(p.z)) > 0.98f * half) ring.push_back(i);
+  }
+  std::sort(ring.begin(), ring.end(), [&](size_t a, size_t b) {
+    return std::atan2(m->positions[a].z, m->positions[a].x) < std::atan2(m->positions[b].z, m->positions[b].x);
+  });
+  return ring;
+}
+
+/* A selection each operator works on, on the default Plane (10 m, 10 x 10 quads; vertex z * 11 + x, face z * 10 + x):
+ * Relax / Space the edge ring round the middle 2 x 2 faces, jittered (edge mode: Blender refuses faces for them);
+ * To Circle and Flatten the middle 2 x 2 faces (Flatten jittered first); Curve three vertices of row 2, lifted. */
+static void plane_setup(Editor &ed, int which) {
+  ed.command("create Plane");
+  if (which <= 1) {
+    ed.command("esel 48 49 49 50 50 61 61 72 72 71 71 70 70 59 59 48");
+    ed.command("editop randomize");
+    ed.command("redo amount 0.3");
+    return;
+  }
+  if (which == 4) {
+    ed.command("edit vertex");
+    ed.command("vsel 22 27 32");
+    ed.command("editop randomize");
+    ed.command("redo amount 0.8");
+    return;
+  }
+  ed.command("edit face");
+  ed.command("fsel 44 45 54 55");
+  if (which == 3) {
+    ed.command("editop randomize");
+    ed.command("redo amount 0.3");
+  }
+}
+}  // namespace lt537e
+
+static void tests_round537() {
+  using namespace lt537e;
+  test("LoopTools: the five operators are in the Mesh menu's Deform group, in every selection mode, each with its keymap action and no default key", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    std::set<std::string> in_keymap;
+    for (const ShortcutAction &a : shortcut_actions())
+      if (std::string(a.id).rfind("mesh.", 0) == 0) in_keymap.insert(a.id);
+    for (const char *op : kOps) {
+      const EditOpInfo *info = find_edit_op(op);
+      CHECK(info != nullptr);
+      if (!info) continue;
+      CHECK(std::string(kEditGroups[edit_op_group(op)]) == "Deform");
+      CHECK((info->elements & 7) == 7);
+      CHECK(std::string(info->label).size() > 3 && std::string(info->tip).size() > 10);
+      CHECK(in_keymap.count(info->keys) == 1);  // (the op's own action: the menu shows its key)
+      CHECK(ed.shortcut_for_test(info->keys).empty());
+    }
+    CHECK(in_keymap.count("mesh.relax_loops") && in_keymap.count("mesh.space_loops") && in_keymap.count("mesh.circularize") &&
+          in_keymap.count("mesh.flatten_loops") && in_keymap.count("mesh.curve_loops"));
+  });
+  test("LoopTools: Edit Mode on a Plane - each operator runs from `editop` on its selection, changes the mesh and becomes the last operation", [] {
+    for (int which = 0; which < 5; which++) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      plane_setup(ed, which);
+      CHECK(edited_mesh(ed) != nullptr);
+      if (!edited_mesh(ed)) return;
+      const std::vector<Vec3> start = edited_mesh(ed)->positions;
+      ed.command(std::string("editop ") + kOps[which]);
+      const Mesh *m = edited_mesh(ed);
+      CHECK(m != nullptr);
+      if (!m) return;
+      std::printf("    %s: last operation '%s', mesh %s\n", kOps[which], ed.last_op_name_for_test().c_str(), same_positions(start, m->positions) ? "unchanged" : "changed");
+      CHECK(ed.last_op_name_for_test() == kOps[which]);
+      CHECK(!same_positions(start, m->positions));
+      bool finite = true;
+      for (Vec3 p : m->positions) finite = finite && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+      CHECK(finite);
+    }
+  });
+  test("LoopTools: To Circle on a Cube's cut top face makes the border round, and F9 (Custom Radius, a new radius) re-runs it from the mesh as it was in one undo step", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const std::vector<size_t> ring = cube_top_ring(ed);
+    CHECK(ring.size() == 8);
+    if (ring.size() != 8 || !edited_mesh(ed)) return;
+    ed.step_frame_headless();  // (an edit becomes an undo step at the end of its frame: subdivide's first)
+    const std::vector<Vec3> before = edited_mesh(ed)->positions;
+    const size_t steps0 = ed.undo_steps_for_test();
+    ed.command("editop circularize");
+    ed.step_frame_headless();
+    CHECK(ed.last_op_name_for_test() == "circularize");
+    const size_t steps1 = ed.undo_steps_for_test();
+    std::printf("    undo steps: %zu before To Circle, %zu after\n", steps0, steps1);
+    CHECK(steps1 == steps0 + 1);
+    const std::vector<Vec3> first = edited_mesh(ed)->positions;
+    float mean = 0;
+    for (size_t i : ring) mean += std::hypot(first[i].x, first[i].z) / 8.0f;
+    for (size_t i : ring) CHECK_NEAR(std::hypot(first[i].x, first[i].z), mean, 2e-3f * mean);  // (corners were 1.41x the midpoints; now one radius)
+    for (size_t i : ring) CHECK_NEAR(first[i].y, before[i].y, 1e-3);                            // (flat, at the face's height)
+    CHECK(!same_positions(before, first));
+    /* F9: the radius from the panel's numbers (Custom Radius on, Radius 0.2) replaces the first run, it doesn't add to it. */
+    ed.command("redo clamp 1");
+    ed.set_last_op_size_for_test({0.2f, 1.0f, 0.0f});
+    ed.step_frame_headless();
+    const std::vector<Vec3> second = edited_mesh(ed)->positions;
+    std::printf("    first run radius %.3f; F9 with Custom Radius 0.2 gives %.3f\n", mean, std::hypot(second[ring[0]].x, second[ring[0]].z));
+    for (size_t i : ring) CHECK_NEAR(std::hypot(second[i].x, second[i].z), 0.2f, 2e-3);
+    CHECK(ed.last_op_name_for_test() == "circularize");
+    CHECK(ed.undo_steps_for_test() == steps1);  // (the re-run replaced the step, it did not push another)
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(edited_mesh(ed) && same_positions(before, edited_mesh(ed)->positions));  // (one undo: back to before the operator)
+  });
+  test("LoopTools: F9 on Relax Edge Loops with more Iterations re-runs from the mesh as it was and rounds the ring further", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const std::vector<size_t> ring = cube_top_ring(ed);
+    if (ring.size() != 8 || !edited_mesh(ed)) return;
+    ed.command("edit edge");  // (Relax works on edge loops; with faces selected it refuses, as Blender's)
+    ed.command("editop relax_loops");
+    CHECK(ed.last_op_name_for_test() == "relax_loops" && ed.last_op_segments_for_test() == 1);
+    auto spread = [&] {
+      const std::vector<Vec3> &p = edited_mesh(ed)->positions;
+      float lo = 1e30f, hi = 0;
+      for (size_t i : ring) lo = std::min(lo, std::hypot(p[i].x, p[i].z)), hi = std::max(hi, std::hypot(p[i].x, p[i].z));
+      return hi - lo;
+    };
+    const float one = spread();
+    ed.command("redo segments 6");
+    const float six = spread();
+    std::printf("    radius spread after 1 iteration %.4f, after F9 with 6: %.4f\n", one, six);
+    CHECK(ed.last_op_segments_for_test() == 6 && six < one);
+    ed.command("redo segments 1");
+    CHECK_NEAR(spread(), one, 1e-5);  // (back to one iteration from the same start: the runs don't pile up)
+  });
+  test("LoopTools: every operator refuses a selection it cannot work on with a warning and leaves the mesh and the undo stack alone", [] {
+    for (const char *op : kOps) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      ed.command("edit vertex");
+      ed.command("vsel 0");  // (one vertex: no loop, no plane)
+      const std::vector<Vec3> before = edited_mesh(ed)->positions;
+      const size_t steps = ed.undo_steps_for_test();
+      std::vector<LogEntry> sink;
+      const size_t log_base = Log::fetch(0, sink);
+      ed.command(std::string("editop ") + op);
+      std::vector<LogEntry> got;
+      Log::fetch(log_base, got);
+      bool warned = false;
+      for (const LogEntry &e : got) warned = warned || e.level != LogLevel::Info;
+      CHECK(same_positions(before, edited_mesh(ed)->positions));
+      CHECK(ed.undo_steps_for_test() == steps);
+      CHECK(warned);
+      CHECK(ed.last_op_name_for_test() != op);
+    }
+  });
+  test("LoopTools: each operator's keymap action runs it from a key, in the Unity and the Blender preset", [] {
+    for (const char *preset : {"Unity", "Blender"}) {
+      for (int which = 0; which < 5; which++) {
+        Editor ed;
+        ed.init_headless(1000, 700);
+        ed.step_frame_headless();
+        ed.command(std::string("keymap ") + preset);
+        CHECK(ed.keymap_preset_name() == preset);
+        plane_setup(ed, which);
+        if (!edited_mesh(ed)) return;
+        const std::string action = std::string("mesh.") + kOps[which];
+        CHECK(ed.shortcut_for_test(action).empty());
+        ed.command("keymap bind " + action + " Ctrl+Alt+Shift+F6");
+        const Recti r = ed.scene_view_rect();
+        ed.step_frame_headless({mouse_ev(platform::EventType::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+        const std::vector<Vec3> start = edited_mesh(ed)->positions;
+        ed.step_frame_headless({key_ev(platform::KEY_F6, platform::MOD_CTRL | platform::MOD_ALT | platform::MOD_SHIFT)});
+        platform::Event up;
+        up.type = platform::EventType::KeyUp, up.key = platform::KEY_F6;
+        ed.step_frame_headless({up});
+        std::printf("    %s / %s: last operation '%s'\n", preset, action.c_str(), ed.last_op_name_for_test().c_str());
+        CHECK(ed.last_op_name_for_test() == kOps[which]);
+        CHECK(edited_mesh(ed) && !same_positions(start, edited_mesh(ed)->positions));
+      }
+    }
+  });
+  test("LoopTools: the Learn lesson has a Try-it step for every operator, each step's commands run without a warning, and it has questions", [] {
+    int at = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "LoopTools: Loops to Circles, Curves and Planes") at = i;
+    CHECK(at >= 0);
+    if (at < 0) return;
+    const std::string body = lesson(at).body;
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    std::set<std::string> ops_seen;
+    int questions = 0, steps = 0;
+    std::istringstream lines(body);
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      steps++;
+      const std::string cmds = line.substr(6, line.find(" | ") - 6);
+      size_t a = 0;
+      std::vector<LogEntry> sink;
+      const size_t base = Log::fetch(0, sink);
+      while (a <= cmds.size()) {  // (as the Learn tab runs them: ';'-separated console commands)
+        const size_t e = cmds.find(';', a);
+        std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) {
+          const std::string verb = c.substr(0, c.find(' '));
+          CHECK(ed.command_suggestions_for_test(verb).size() > 0 && ed.command_suggestions_for_test(verb)[0] == verb);
+          if (c.rfind("editop ", 0) == 0) ops_seen.insert(c.substr(7));
+          ed.command(c);
+        }
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+      ed.step_frame_headless();
+      std::vector<LogEntry> got;
+      Log::fetch(base, got);
+      bool warned = false;
+      for (const LogEntry &e : got)
+        if (e.level != LogLevel::Info) warned = true, std::printf("    Try it '%s' warned: %s\n", cmds.c_str(), e.text.c_str());
+      CHECK(!warned);
+    }
+    for (const char *op : kOps) {
+      if (!ops_seen.count(op)) std::printf("    no Try-it step runs `editop %s`\n", op);
+      CHECK(ops_seen.count(op) == 1);
+    }
+    CHECK(steps >= 5 && questions >= 3);
+  });
+}
+
+/* ---------------------------------------------------------------- round 542 (task 0522): the sky's sun and the lighting keep */
+static void tests_round542() {
+  test("Sky world's sun: Sun Lights Scene, Sun Intensity, Turbidity and the world changed with no edit show the same frame - the views drawn with the lighting keep on are the ones drawn with it off", [] {
+    R506Switches restore;
+    Editor ed;
+    r506_open(ed);
+    /* A Sky world with its Directional Light switched off: the sky's own sun lights the scene. */
+    GameObject *dir = ed.scene().find_by_name("Directional Light");
+    CHECK(dir != nullptr && dir->get<Light>() != nullptr);
+    if (!dir || !dir->get<Light>()) return;
+    dir->get<Light>()->enabled = false;
+    ed.scene().environment.mode = 1;
+    ed.mark_changed_for_test("a Sky world, no sun lamp");
+    r506_orbit(ed, 4);
+    EnvironmentSettings &es = ed.scene().environment;
+    /* Each change made straight on the settings, no undo step: only the keep's key can see it. */
+    const std::pair<const char *, std::function<void()>> edits[] = {
+        {"Sun Lights Scene off", [&] { es.sun_lights_scene = false; }},
+        {"Sun Lights Scene on", [&] { es.sun_lights_scene = true; }},
+        {"Sun Intensity 3", [&] { es.sun_intensity = 3.0f; }},
+        {"Turbidity 8", [&] { es.turbidity = 8.0f; }},
+        {"the Gradient world", [&] { es.mode = 0; }},
+    };
+    for (const auto &[name, edit] : edits) {
+      const R506Result r = r506_edit(ed, edit);
+      std::printf("    %s: %zu pixels changed, %zu differ from the keeps-off picture\n", name, r.shown, r.kept_vs_fresh);
+      CHECK(r.shown > 0);
+      CHECK(r.kept_vs_fresh == 0);
+    }
+    /* Verify mode (every keep hit walked again and compared): back to the Sky, then the switch flipped with no edit. */
+    es.mode = 1;
+    r506_orbit(ed, 4);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    es.sun_lights_scene = false;
+    r506_orbit(ed, 3);
+    es.sun_lights_scene = true, es.sun_intensity = 1.5f;
+    r506_orbit(ed, 3);
+    ed.set_render_cache_verify(false);
+    std::printf("    stale lighting found in verify mode: %llu\n", (unsigned long long)(Editor::render_cache_mismatches_all() - m0));
+    CHECK(Editor::render_cache_mismatches_all() == m0);
+  });
+  test("Learn (round 542): the lesson's Try-its for the sky's sun - the Directional Light deleted under a Sky world lights by the sky's sun, Sun Lights Scene off adds none, back on at Sun Intensity 2 twice as strong", [] {
+    /* The Try-its as the lesson has them: its "! cmd:" lines after the section's heading, run as the Learn tab runs them. */
+    std::vector<std::string> tries;
+    for (int i = 0; i < lesson_count(); i++) {
+      const std::string body = lesson(i).body;
+      const size_t at = body.find("# The sky's sun lights the scene");
+      if (at == std::string::npos) continue;
+      size_t p = at;
+      while ((p = body.find("! cmd:", p)) != std::string::npos) {
+        const size_t bar = body.find(" | ", p), end = body.find('\n', p);
+        if (bar != std::string::npos && bar < end) tries.push_back(body.substr(p + 6, bar - p - 6));
+        p = end == std::string::npos ? body.size() : end;
+      }
+    }
+    CHECK(tries.size() == 3);
+    if (tries.size() != 3) return;
+    Editor ed;
+    ed.init_headless(800, 600);
+    auto strip = [](std::string s) {
+      while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+      while (!s.empty() && s.back() == ' ') s.pop_back();
+      return s;
+    };
+    auto run = [&](const std::string &line) {
+      for (size_t s = 0; s <= line.size();) {
+        const size_t e = line.find(';', s);
+        const std::string c = strip(line.substr(s, e == std::string::npos ? std::string::npos : e - s));
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        s = e + 1;
+      }
+    };
+    auto suns = [&](float *intensity) {
+      int n = 0;
+      for (const RenderLight &l : ed.make_lighting_for_test().lights)
+        if (l.type == RenderLight::Directional) n++, *intensity = l.intensity;
+      return n;
+    };
+    float i1 = 0.0f, i2 = 0.0f, unused = 0.0f;
+    run(tries[0]);
+    CHECK(ed.scene().find_by_name("Directional Light") == nullptr && ed.scene().environment.mode == 1);
+    CHECK(suns(&i1) == 1 && i1 > 0.0f);  // (the sky's own sun: no lamp is left)
+    run(tries[1]);
+    CHECK(!ed.scene().environment.sun_lights_scene && suns(&unused) == 0);
+    run(tries[2]);
+    CHECK(ed.scene().environment.sun_lights_scene && ed.scene().environment.sun_intensity == 2.0f);
+    CHECK(suns(&i2) == 1 && std::fabs(i2 - 2.0f * i1) < 1e-4f * i1);
+    std::printf("    the sky's sun: intensity %.3f, at Sun Intensity 2: %.3f\n", i1, i2);
+  });
+}
+
+/* ---- Round 535 (task 0515): Quad Sphere in the Create menu and F9, Snap to Object Origins by real events ---- */
+namespace {
+using R535ET = platform::EventType;
+
+platform::Event r535_ev(R535ET t, int x, int y, int key = 0, int mods = 0) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y, e.key = key, e.mods = mods;
+  return e;
+}
+
+void r535_key(Editor &ed, int key, int mods = 0) {
+  ed.step_frame_headless({r535_ev(R535ET::KeyDown, 0, 0, key, mods)});
+  ed.step_frame_headless({r535_ev(R535ET::KeyUp, 0, 0, key, mods)});
+  ed.step_frame_headless();
+}
+
+void r535_move(Editor &ed, int x, int y, int mods = 0) { ed.step_frame_headless({r535_ev(R535ET::MouseMove, x, y, 0, mods)}); }
+
+void r535_click(Editor &ed, int x, int y, int mods = 0) {
+  r535_move(ed, x, y, mods);
+  ed.step_frame_headless({r535_ev(R535ET::MouseDown, x, y, 0, mods)});
+  ed.step_frame_headless({r535_ev(R535ET::MouseUp, x, y, 0, mods)});
+}
+
+/* The start scene's own meshes (a Cube, a Sphere, a Plane) switched off: the drawing tools' origin snap only takes an
+ * origin in sight, and those stood between the camera and the origins these tests aim at. */
+void r535_hide_start_meshes(Editor &ed) {
+  for (GameObject *g : ed.scene().roots)
+    if (g->get<MeshFilter>()) g->active = false;
+}
+
+/* An editor with two cubes: "CubeA" (selected) and "CubeB", the camera looking at both. */
+struct R535Scene {
+  Editor ed;
+  GameObject *a = nullptr, *b = nullptr;
+  R535Scene(Vec3 pa = {-1.5f, 0.5f, 0.0f}, Vec3 pb = {1.5f, 1.0f, 1.5f}) {
+    ed.init_headless(1100, 760);
+    ed.step_frame_headless();
+    r535_hide_start_meshes(ed);
+    ed.command("create Cube");
+    b = ed.selected_object();
+    b->name = "CubeB";
+    b->set_world_position(pb);
+    ed.command("create Cube");
+    a = ed.selected_object();
+    a->name = "CubeA";
+    a->set_world_position(pa);
+    ed.command("camera 0 30 8 0 0.7 0.5");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+  }
+  bool px(Vec3 w, int &x, int &y) { return ed.project_to_window(w, x, y); }
+};
+
+/* The Move gizmo with V held, dragged from CubeA's origin to CubeB's origin pixel. */
+void r535_v_drag(R535Scene &s) {
+  s.ed.command("select CubeA");
+  s.ed.command("tool move");
+  s.ed.step_frame_headless();
+  int fx = 0, fy = 0, tx = 0, ty = 0;
+  CHECK(s.px(s.a->world_position(), fx, fy) && s.px(s.b->world_position(), tx, ty));
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseMove, fx, fy), r535_ev(R535ET::KeyDown, fx, fy, platform::KEY_V)});
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseDown, fx, fy)});
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseMove, (fx + tx) / 2, (fy + ty) / 2)});
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseMove, tx, ty)});
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseMove, tx, ty)});
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseUp, tx, ty)});
+  s.ed.step_frame_headless({r535_ev(R535ET::KeyUp, tx, ty, platform::KEY_V)});
+  s.ed.step_frame_headless();
+}
+
+/* Modal G on CubeA (an optional axis key), the mouse taken to CubeB's origin pixel with Ctrl held, a click to confirm. */
+void r535_modal_ctrl_grab(R535Scene &s, int axis_key = 0) {
+  s.ed.command("select CubeA");
+  s.ed.command("tool move");
+  s.ed.step_frame_headless();
+  int fx = 0, fy = 0, tx = 0, ty = 0;
+  CHECK(s.px(s.a->world_position(), fx, fy) && s.px(s.b->world_position(), tx, ty));
+  r535_move(s.ed, fx, fy);
+  r535_move(s.ed, fx, fy);
+  r535_key(s.ed, platform::KEY_G);
+  CHECK(s.ed.transform_active_for_test());
+  if (axis_key) r535_key(s.ed, axis_key);
+  r535_move(s.ed, (fx + tx) / 2, (fy + ty) / 2, platform::MOD_CTRL);
+  r535_move(s.ed, tx, ty, platform::MOD_CTRL);
+  r535_move(s.ed, tx, ty, platform::MOD_CTRL);
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseDown, tx, ty, 0, platform::MOD_CTRL)});
+  s.ed.step_frame_headless({r535_ev(R535ET::MouseUp, tx, ty, 0, platform::MOD_CTRL)});
+  s.ed.step_frame_headless();
+  CHECK(!s.ed.transform_active_for_test());
+}
+
+/* The Tools window's Snapping row: 1 on, 0 off, -1 when the button is not found (scrolled into view with the wheel). */
+int r535_tools_state(Editor &ed, Recti *rect = nullptr) {
+  Recti r;
+  for (int i = 0; i < 40; i++) {
+    ed.step_frame_headless();
+    const Recti win = ed.window_rect_for_test(WindowKind::Tools);
+    for (int on = 0; on < 2; on++) {
+      if (!ed.button_rect_for_test(on ? "Snap to Object Origins (on)" : "Snap to Object Origins (off)", r)) continue;
+      if (r.y < win.y || r.bottom() > win.bottom()) continue;
+      if (rect) *rect = r;
+      return on;
+    }
+    const int mx = win.x + win.w / 2, my = win.y + win.h / 2;
+    r535_move(ed, mx, my);
+    platform::Event w = r535_ev(R535ET::Wheel, mx, my);
+    w.wheel_y = -1.0f;
+    ed.step_frame_headless({w});
+  }
+  return -1;
+}
+
+/* Pixels of the Object Origin marker's colour (0xFF70D0) around a world point. */
+int r535_marker_pixels(Editor &ed, Vec3 world) {
+  int x = 0, y = 0;
+  if (!ed.project_to_window(world, x, y)) return -1;
+  const Image &fb = ed.framebuffer();
+  int n = 0;
+  for (int yy = y - 8; yy <= y + 8; yy++)
+    for (int xx = x - 8; xx <= x + 8; xx++) {
+      if (xx < 0 || yy < 0 || xx >= fb.width || yy >= fb.height) continue;
+      const uint32_t p = fb.pixels[(size_t)yy * fb.width + xx];
+      n += std::abs((int)((p >> 16) & 255) - 0xFF) <= 3 && std::abs((int)((p >> 8) & 255) - 0x70) <= 3 && std::abs((int)(p & 255) - 0xD0) <= 3;
+    }
+  return n;
+}
+
+/* A number typed into an F9 field by real events. */
+bool r535_type(Editor &ed, const std::string &key, const std::string &text) {
+  Recti r;
+  for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+  if (!ed.button_rect_for_test(key, r)) return false;
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  for (R535ET t : {R535ET::MouseMove, R535ET::MouseDown, R535ET::MouseUp, R535ET::MouseDown, R535ET::MouseUp}) ed.step_frame_headless({r535_ev(t, x, y)});
+  ed.step_frame_headless({r535_ev(R535ET::KeyDown, 0, 0, platform::KEY_A, platform::MOD_CTRL)});
+  for (char c : text) {
+    platform::Event e;
+    e.type = R535ET::Text, e.codepoint = (uint32_t)c;
+    ed.step_frame_headless({e});
+  }
+  ed.step_frame_headless({r535_ev(R535ET::KeyDown, 0, 0, platform::KEY_ENTER)});
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  return true;
+}
+
+size_t r535_named(Editor &ed, const char *name) {
+  size_t n = 0;
+  ed.scene().for_each([&](GameObject &g) { n += g.name == name; });
+  return n;
+}
+}  // namespace
+
+static void tests_round535() {
+  test("round 535: create \"Quad Sphere\" in the console adds an object named Quad Sphere with 96 quads on a 0.5 sphere", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Quad Sphere");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->name == "Quad Sphere");
+    const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+    CHECK(mf && mf->mesh && mf->mesh->face_count() == 96 && mf->mesh->vert_count() == 98);
+    bool round = mf && mf->mesh;
+    if (round) for (const Vec3 &p : mf->mesh->positions) round = round && std::fabs(length(p) - 0.5f) < 1e-5f;
+    CHECK(round);
+    ed.command("create quad sphere");  // (kinds are matched without case; the second one takes Unity's "(1)", as every create does)
+    CHECK(r535_named(ed, "Quad Sphere") == 1 && r535_named(ed, "Quad Sphere (1)") == 1);
+  });
+
+  test("round 535: GameObject > 3D Object > Quad Sphere, clicked, adds a Quad Sphere", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti r;
+    CHECK(ed.button_rect_for_test("menubar:GameObject", r));
+    r535_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("submenu:3D Object", r));
+    r535_move(ed, r.x + r.w / 2, r.y + r.h / 2);
+    ed.step_frame_headless();
+    bool found = false;
+    for (int i = 0; i < 4 && !(found = ed.button_rect_for_test("menu:Quad Sphere", r)); i++) ed.step_frame_headless();
+    CHECK(found);
+    if (!found) return;
+    r535_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    ed.step_frame_headless();
+    GameObject *g = ed.scene().find_by_name("Quad Sphere");
+    CHECK(g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh->face_count() == 96);
+  });
+
+  test("round 535: F9 after creating a Quad Sphere shows Radius, Subdivisions and Method; Subdivisions 8 gives 384 faces in the same undo step, Method switches the mapping", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    ed.command("create Quad Sphere");
+    GameObject *g = ed.selected_object();
+    const Recti v = ed.scene_view_rect();
+    r535_move(ed, v.x + v.w / 2, v.y + v.h / 2);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti r;
+    if (!ed.button_rect_for_test("adjust:Subdivisions", r)) r535_key(ed, platform::KEY_F9);  // (F9 opens a closed panel)
+    ed.step_frame_headless();
+    CHECK(ed.button_rect_for_test("adjust:Radius", r) && ed.button_rect_for_test("adjust:Subdivisions", r) && ed.button_rect_for_test("adjust:Method", r));
+    const size_t objects0 = ed.scene().object_count();
+    CHECK(r535_type(ed, "adjust:Subdivisions", "8"));
+    g = ed.scene().find_by_name("Quad Sphere");
+    CHECK(g && g->get<MeshFilter>()->mesh->face_count() == 384 && g->get<MeshFilter>()->mesh->vert_count() == 386);
+    CHECK(ed.scene().object_count() == objects0);
+    /* Method: Even Angle gives the other mapping. */
+    const MeshPtr even_area = g->get<MeshFilter>()->mesh;
+    CHECK(ed.button_rect_for_test("adjust:Method", r));
+    r535_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti item;
+    CHECK(ed.button_rect_for_test("menu:Even Angle", item));
+    r535_click(ed, item.x + item.w / 2, item.y + item.h / 2);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    g = ed.scene().find_by_name("Quad Sphere");
+    const MeshPtr angle = primitives::quad_sphere(0.5f, 8, 1), area = primitives::quad_sphere(0.5f, 8, 0);
+    bool is_angle = g && g->get<MeshFilter>()->mesh->vert_count() == angle->vert_count(), differs = false, was_area = even_area->vert_count() == area->vert_count();
+    for (size_t i = 0; is_angle && i < angle->vert_count(); i++) {
+      is_angle = is_angle && length(g->get<MeshFilter>()->mesh->positions[i] - angle->positions[i]) < 1e-5f;
+      differs = differs || length(angle->positions[i] - area->positions[i]) > 1e-3f;
+      was_area = was_area && length(even_area->positions[i] - area->positions[i]) < 1e-5f;
+    }
+    CHECK(differs && was_area && is_angle);
+    /* One Ctrl+Z takes the whole object away (the F9 re-runs were no steps of their own). */
+    r535_move(ed, v.x + v.w / 2, v.y + v.h / 2);
+    ed.step_frame_headless({r535_ev(R535ET::KeyDown, 0, 0, platform::KEY_Z, platform::MOD_CTRL)});
+    ed.step_frame_headless();
+    CHECK(r535_named(ed, "Quad Sphere") == 0 && ed.scene().object_count() == objects0 - 1);
+  });
+
+  test("round 535: F9 on a Quad Sphere keeps its place, turn and material", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    ed.command("create Quad Sphere");
+    GameObject *g = ed.selected_object();
+    g->set_world_position({2.0f, 1.0f, -3.0f});
+    g->set_local_euler({0, 40, 0});
+    const Quat q0 = g->world_rotation();
+    MeshRenderer *mr0 = g->get<MeshRenderer>();
+    CHECK(mr0 != nullptr);
+    if (!mr0) return;
+    MaterialPtr red = std::make_shared<Material>();
+    red->name = "R535Red";
+    red->base_color = {0.9f, 0.1f, 0.2f};
+    red->metallic = 0.7f;
+    if (mr0->materials.empty()) mr0->materials.push_back(red);
+    else mr0->materials[0] = red;
+    const Recti v = ed.scene_view_rect();
+    r535_move(ed, v.x + v.w / 2, v.y + v.h / 2);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    Recti r;
+    if (!ed.button_rect_for_test("adjust:Radius", r)) r535_key(ed, platform::KEY_F9);
+    CHECK(r535_type(ed, "adjust:Subdivisions", "3"));
+    g = ed.scene().find_by_name("Quad Sphere");
+    CHECK(g && g->get<MeshFilter>()->mesh->face_count() == 54);
+    CHECK(g && length(g->world_position() - Vec3(2.0f, 1.0f, -3.0f)) < 1e-5f);
+    const Quat q1 = g ? g->world_rotation() : Quat();
+    CHECK(std::fabs(q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w) > 0.99999f);  // (turned 40 degrees about Y still)
+    const MeshRenderer *mr1 = g ? g->get<MeshRenderer>() : nullptr;
+    CHECK(mr1 && !mr1->materials.empty() && mr1->materials[0] && mr1->materials[0]->name == "R535Red" &&
+          length(mr1->materials[0]->base_color - Vec3(0.9f, 0.1f, 0.2f)) < 1e-6f && mr1->materials[0]->metallic == 0.7f);
+  });
+
+  test("round 535: snap origins toggles, `snap origins on` / `off` set it, and the Tools > Snapping button flips it by a real click", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("layout Default");
+    ed.command("window Modeling Tools");
+    ed.command("alltools on");
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    CHECK(r535_tools_state(ed) == 0);  // (off by default: nothing existing changes)
+    ed.command("snap origins");
+    CHECK(r535_tools_state(ed) == 1);
+    ed.command("snap origins");
+    CHECK(r535_tools_state(ed) == 0);
+    ed.command("snap origins on");
+    CHECK(r535_tools_state(ed) == 1);
+    ed.command("snap origins on");
+    CHECK(r535_tools_state(ed) == 1);
+    ed.command("snap origins off");
+    CHECK(r535_tools_state(ed) == 0);
+    Recti r;
+    CHECK(r535_tools_state(ed, &r) == 0);
+    r535_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    ed.step_frame_headless();
+    CHECK(r535_tools_state(ed) == 1);
+    CHECK(r535_tools_state(ed, &r) == 1);
+    r535_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    ed.step_frame_headless();
+    CHECK(r535_tools_state(ed) == 0);
+    ed.command("snap bogus");  // (a warning, no change)
+    CHECK(r535_tools_state(ed) == 0);
+  });
+
+  test("round 535: Move gizmo with V held lands CubeA's origin exactly on CubeB's with origins on, and not with origins off", [] {
+    {
+      R535Scene s;
+      s.ed.command("snap origins on");
+      const Vec3 target = s.b->world_position();
+      r535_v_drag(s);
+      std::printf("    origins on: CubeA at (%.5f %.5f %.5f), CubeB at (%.5f %.5f %.5f)\n", s.a->world_position().x, s.a->world_position().y, s.a->world_position().z,
+                  target.x, target.y, target.z);
+      CHECK(length(s.a->world_position() - target) < 1e-5f);
+      CHECK(length(s.b->world_position() - target) < 1e-7f);  // (the target stays put)
+    }
+    {
+      R535Scene s;
+      s.ed.command("snap origins off");
+      const Vec3 target = s.b->world_position();
+      r535_v_drag(s);
+      std::printf("    origins off: CubeA at (%.5f %.5f %.5f)\n", s.a->world_position().x, s.a->world_position().y, s.a->world_position().z);
+      CHECK(length(s.a->world_position() - Vec3(-1.5f, 0.5f, 0.0f)) > 1e-3f);  // (it moved)
+      CHECK(length(s.a->world_position() - target) > 1e-4f);
+    }
+  });
+
+  test("round 535: V drag with origins on snaps onto the origin of an Empty a few pixels from the drop point, not onto the disabled cube on it", [] {
+    R535Scene s;
+    s.ed.command("snap origins on");
+    s.ed.command("create Empty");
+    GameObject *q = s.ed.selected_object();
+    /* The drop point is CubeB's pixel; the sphere's origin sits a few pixels beside it, and the disabled CubeB exactly on it:
+     * snapping onto the disabled cube would give another answer. */
+    q->set_world_position(s.b->world_position() + Vec3(0.07f, 0.0f, 0.0f));
+    s.b->active = false;
+    s.ed.step_frame_headless();
+    r535_v_drag(s);
+    std::printf("    CubeA at (%.5f %.5f %.5f), sphere at (%.5f %.5f %.5f)\n", s.a->world_position().x, s.a->world_position().y, s.a->world_position().z,
+                q->world_position().x, q->world_position().y, q->world_position().z);
+    CHECK(length(s.a->world_position() - q->world_position()) < 1e-5f);
+    CHECK(length(s.a->world_position() - s.b->world_position()) > 1e-3f);
+  });
+
+  test("round 535: modal G with Ctrl over another object's origin lands the pivot on it; a Y lock changes only Y; origins off leaves the grid step", [] {
+    {
+      R535Scene s;
+      s.ed.command("snap origins on");
+      r535_modal_ctrl_grab(s);
+      std::printf("    G+Ctrl: CubeA at (%.5f %.5f %.5f)\n", s.a->world_position().x, s.a->world_position().y, s.a->world_position().z);
+      CHECK(length(s.a->world_position() - s.b->world_position()) < 1e-5f);
+    }
+    {
+      R535Scene s({-1.5f, 0.5f, 0.0f}, {1.5f, 1.13f, 1.5f});  // (1.13 is off the 0.25 grid: a grid step cannot pass by chance)
+      s.ed.command("snap origins on");
+      r535_modal_ctrl_grab(s, platform::KEY_Y);
+      const Vec3 p = s.a->world_position();
+      std::printf("    G+Y+Ctrl: CubeA at (%.5f %.5f %.5f)\n", p.x, p.y, p.z);
+      CHECK_NEAR(p.y, 1.13f, 1e-5f);
+      CHECK_NEAR(p.x, -1.5f, 1e-5f);
+      CHECK_NEAR(p.z, 0.0f, 1e-5f);
+    }
+    {
+      R535Scene s;
+      s.ed.command("snap origins off");
+      r535_modal_ctrl_grab(s);
+      const Vec3 p = s.a->world_position(), d = p - Vec3(-1.5f, 0.5f, 0.0f);
+      std::printf("    origins off, G+Ctrl: CubeA moved by (%.5f %.5f %.5f)\n", d.x, d.y, d.z);
+      bool grid = true;
+      for (int k = 0; k < 3; k++) grid = grid && std::fabs(d[k] / 0.25f - std::round(d[k] / 0.25f)) < 1e-3f;
+      CHECK(grid);
+      CHECK(length(p - s.b->world_position()) > 1e-3f);
+    }
+  });
+
+  test("round 535: modal G with Ctrl ignores a disabled object's origin, falling back to the grid", [] {
+    R535Scene s;
+    s.ed.command("snap origins on");
+    s.b->active = false;
+    s.ed.step_frame_headless();
+    r535_modal_ctrl_grab(s);
+    const Vec3 d = s.a->world_position() - Vec3(-1.5f, 0.5f, 0.0f);
+    bool grid = true;
+    for (int k = 0; k < 3; k++) grid = grid && std::fabs(d[k] / 0.25f - std::round(d[k] / 0.25f)) < 1e-3f;
+    CHECK(grid);
+    CHECK(length(s.a->world_position() - Vec3(1.5f, 1.0f, 1.5f)) > 1e-3f);
+  });
+
+  test("round 535: a drawing tool's click over another object's origin puts the point there and shows the Object Origin marker; with origins off it does not", [] {
+    for (int on = 1; on >= 0; on--) {
+      R535Scene s({-1.5f, 0.5f, 0.0f}, {1.5f, 0.5f, 1.0f});
+      s.ed.command(on ? "snap origins on" : "snap origins off");
+      s.ed.command("select CubeA");
+      s.ed.command("edit face");
+      s.ed.command("draw rectangle");
+      s.ed.step_frame_headless();
+      const Vec3 target = s.b->world_position();
+      int tx = 0, ty = 0;
+      CHECK(s.px(target, tx, ty));
+      r535_move(s.ed, tx + 3, ty - 2);  // (a few pixels off: inside the 10 px reach)
+      s.ed.step_frame_headless();
+      s.ed.step_frame_headless();
+      const int marker = r535_marker_pixels(s.ed, target);
+      std::printf("    origins %s: marker pixels %d\n", on ? "on" : "off", marker);
+      if (on) CHECK(marker > 4);
+      else CHECK(marker == 0);
+      s.ed.step_frame_headless({r535_ev(R535ET::MouseDown, tx + 3, ty - 2)});
+      s.ed.step_frame_headless({r535_ev(R535ET::MouseUp, tx + 3, ty - 2)});
+      s.ed.step_frame_headless();
+      const auto &pts = s.ed.draw_points_for_test();
+      std::printf("    origins %s: %zu point(s)%s\n", on ? "on" : "off", pts.size(), pts.empty() ? "" : strprintf(", first at (%.4f %.4f %.4f)", pts[0].x, pts[0].y, pts[0].z).c_str());
+      if (on) CHECK(pts.size() == 1 && length(pts[0] - target) < 1e-5f);
+      else CHECK(pts.empty() || length(pts[0] - target) > 1e-3f);
+    }
+  });
+
+  test("round 535: a drawing tool's click over the edited Plane's own origin (on its surface, in sight) counts as an origin", [] {
+    Editor ed;
+    ed.init_headless(1100, 760);
+    ed.step_frame_headless();
+    r535_hide_start_meshes(ed);
+    ed.command("create Plane");
+    GameObject *pl = ed.selected_object();
+    pl->name = "PlaneA";
+    pl->set_world_position({0.0f, 0.0f, 0.0f});
+    ed.command("snap origins on");
+    ed.command("camera 0 60 6 0 0 0");
+    ed.command("select PlaneA");
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    int ox = 0, oy = 0;
+    CHECK(ed.project_to_window(pl->world_position(), ox, oy));
+    r535_move(ed, ox + 2, oy + 2);
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    std::printf("    over the plane's own origin the hint says '%s'\n", ed.draw_hint_label_for_test().c_str());
+    CHECK(ed.draw_hint_label_for_test() == "Object Origin");
+    ed.step_frame_headless({r535_ev(R535ET::MouseDown, ox + 2, oy + 2)});
+    ed.step_frame_headless({r535_ev(R535ET::MouseUp, ox + 2, oy + 2)});
+    const auto &pts = ed.draw_points_for_test();
+    CHECK(pts.size() == 1 && length(pts[0] - pl->world_position()) < 1e-5f);
+  });
+
+  test("round 535: a drawing tool's click over an Empty's origin puts the point there and the hint says Object Origin", [] {
+    R535Scene s({-1.5f, 0.5f, 0.0f}, {1.5f, 0.5f, 1.0f});
+    s.ed.command("create Empty");
+    GameObject *e = s.ed.selected_object();
+    e->set_world_position({3.0f, 0.0f, 1.0f});
+    s.ed.command("snap origins on");
+    s.ed.command("select CubeA");
+    s.ed.command("edit face");
+    s.ed.command("draw rectangle");
+    s.ed.step_frame_headless();
+    int tx = 0, ty = 0;
+    CHECK(s.px(e->world_position(), tx, ty));
+    r535_move(s.ed, tx + 3, ty - 2);
+    s.ed.step_frame_headless();
+    s.ed.step_frame_headless();
+    CHECK(s.ed.draw_hint_label_for_test() == "Object Origin");
+    CHECK(r535_marker_pixels(s.ed, e->world_position()) > 4);
+    s.ed.step_frame_headless({r535_ev(R535ET::MouseDown, tx + 3, ty - 2)});
+    s.ed.step_frame_headless({r535_ev(R535ET::MouseUp, tx + 3, ty - 2)});
+    const auto &pts = s.ed.draw_points_for_test();
+    CHECK(pts.size() == 1 && length(pts[0] - e->world_position()) < 1e-5f);
+  });
+
+  test("round 535: a child of the moving object is not a snap target for a V drag or for G+Ctrl", [] {
+    for (int modal = 0; modal < 2; modal++) {
+      R535Scene s;
+      s.ed.command("snap origins on");
+      s.b->active = false;  // (no other target: only the child's origin is under the mouse)
+      s.ed.command("create Cube");
+      GameObject *c = s.ed.selected_object();
+      c->name = "ChildOfA";
+      c->set_world_position(s.b->world_position());
+      s.ed.scene().set_parent(c, s.a, -1, true);
+      s.ed.step_frame_headless();
+      const Vec3 under_mouse = c->world_position();
+      if (modal) r535_modal_ctrl_grab(s);
+      else r535_v_drag(s);
+      std::printf("    %s: CubeA at (%.5f %.5f %.5f), the child's origin was at (%.3f %.3f %.3f)\n", modal ? "G+Ctrl" : "V drag", s.a->world_position().x,
+                  s.a->world_position().y, s.a->world_position().z, under_mouse.x, under_mouse.y, under_mouse.z);
+      CHECK(length(s.a->world_position() - under_mouse) > 1e-3f);  // (snapping onto it would put CubeA's origin on it)
+    }
+  });
+
+  test("round 535: Edit Mode G+Ctrl over another object's origin lands the selection's pivot on it", [] {
+    R535Scene s;
+    s.ed.command("snap origins on");
+    s.ed.command("select CubeA");
+    s.ed.command("edit vertex");
+    s.ed.command("vsel 0 1 2 3 4 5 6 7");
+    s.ed.step_frame_headless();
+    int fx = 0, fy = 0, tx = 0, ty = 0;
+    CHECK(s.px(s.a->world_position(), fx, fy) && s.px(s.b->world_position(), tx, ty));
+    r535_move(s.ed, fx, fy);
+    r535_move(s.ed, fx, fy);
+    r535_key(s.ed, platform::KEY_G);
+    CHECK(s.ed.transform_active_for_test());
+    r535_move(s.ed, (fx + tx) / 2, (fy + ty) / 2, platform::MOD_CTRL);
+    r535_move(s.ed, tx, ty, platform::MOD_CTRL);
+    r535_move(s.ed, tx, ty, platform::MOD_CTRL);
+    s.ed.step_frame_headless({r535_ev(R535ET::MouseDown, tx, ty, 0, platform::MOD_CTRL)});
+    s.ed.step_frame_headless({r535_ev(R535ET::MouseUp, tx, ty, 0, platform::MOD_CTRL)});
+    s.ed.step_frame_headless();
+    CHECK(!s.ed.transform_active_for_test());
+    const Mesh &m = *s.a->get<MeshFilter>()->mesh;
+    Vec3 centre(0.0f);
+    for (const Vec3 &p : m.positions) centre += s.a->world_matrix().point(p);
+    centre = centre / (float)m.positions.size();
+    std::printf("    edit-mode pivot ended at (%.5f %.5f %.5f), CubeB's origin (%.5f %.5f %.5f)\n", centre.x, centre.y, centre.z, s.b->world_position().x,
+                s.b->world_position().y, s.b->world_position().z);
+    CHECK(length(centre - s.b->world_position()) < 1e-4f);
+  });
+
+  test("round 535: the drawing hint names \"Object Origin\" over another object's origin, and not over the edited cube's own origin hidden behind its face", [] {
+    {
+      R535Scene s({-1.5f, 0.5f, 0.0f}, {1.5f, 0.5f, 1.0f});
+      s.ed.command("snap origins on");
+      s.ed.command("select CubeA");
+      s.ed.command("edit face");
+      s.ed.command("draw rectangle");
+      s.ed.step_frame_headless();
+      int tx = 0, ty = 0;
+      CHECK(s.px(s.b->world_position(), tx, ty));
+      r535_move(s.ed, tx + 2, ty + 2);
+      s.ed.step_frame_headless();
+      s.ed.step_frame_headless();
+      std::printf("    over CubeB's origin the hint says '%s'\n", s.ed.draw_hint_label_for_test().c_str());
+      CHECK(s.ed.draw_hint_label_for_test() == "Object Origin");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1100, 760);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      GameObject *a = ed.selected_object();
+      a->name = "CubeA";
+      a->set_world_position({0.0f, 0.5f, 0.0f});
+      ed.command("snap origins on");
+      ed.command("camera 0 0 6 0 0.5 0");  // (the cube face-on: its origin is right behind the face centre)
+      ed.command("select CubeA");
+      ed.command("edit face");
+      ed.command("draw rectangle");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      int ox = 0, oy = 0;
+      CHECK(ed.project_to_window(a->world_position(), ox, oy));
+      r535_move(ed, ox + 3, oy + 3);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::printf("    over the cube's hidden origin the hint says '%s'\n", ed.draw_hint_label_for_test().c_str());
+      CHECK(ed.draw_hint_label_for_test() != "Object Origin");
+      ed.step_frame_headless({r535_ev(R535ET::MouseDown, ox + 3, oy + 3)});
+      ed.step_frame_headless({r535_ev(R535ET::MouseUp, ox + 3, oy + 3)});
+      const auto &pts = ed.draw_points_for_test();
+      CHECK(pts.size() == 1 && length(pts[0] - a->world_position()) > 0.3f);  // (it stays on the face, not inside the cube)
+    }
+  });
+
+  test("round 535: `snap origins yes` warns and leaves the setting as it was, on or off", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("layout Default");
+    ed.command("window Modeling Tools");
+    ed.command("alltools on");
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    CHECK(r535_tools_state(ed) == 0);
+    ed.command("snap origins yes");
+    CHECK(r535_tools_state(ed) == 0);
+    ed.command("snap origins on");
+    CHECK(r535_tools_state(ed) == 1);
+    ed.command("snap origins yes");
+    CHECK(r535_tools_state(ed) == 1);
+  });
+
+  test("round 535: the Learn lessons name the Quad Sphere step and Snap to Object Origins", [] {
+    bool found = false;
+    for (int i = 0; i < lesson_count(); i++) {
+      const std::string body = lesson(i).body;
+      found = found || (body.find("create Quad Sphere") != std::string::npos && body.find("snap origins on") != std::string::npos);
+    }
+    CHECK(found);
+  });
+}
+
+/* ---- Round 538 (task 0518), the test engineer's: panoramic cameras - the Inspector by real events, save and reload, the console ---- */
+namespace {
+
+bool r538e_has(Editor &ed, const char *key) {
+  Recti r;
+  return ed.button_rect_for_test(key, r);
+}
+
+/* A dropdown in the Inspector (found by the option it shows now) opened and one of its items clicked. */
+bool r538e_pick(Editor &ed, const char *shown, const char *item) {
+  ed.record_buttons_for_test(true);
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  Recti c;
+  for (const ui::Context::ControlRec &k : ed.ui_for_test().controls)
+    if (std::string(k.kind) == "combo" && k.label == shown && k.r.w > 0) {
+      c = k.r;
+      break;
+    }
+  if (c.w <= 0) return false;
+  r535_click(ed, c.x + c.w / 2, c.y + c.h / 2);
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  Recti it;
+  if (!ed.button_rect_for_test(std::string("menu:") + item, it)) return false;
+  r535_click(ed, it.x + it.w / 2, it.y + it.h / 2);
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+  return true;
+}
+
+bool r538e_combo_shows(Editor &ed, const char *shown) {
+  for (const ui::Context::ControlRec &k : ed.ui_for_test().controls)
+    if (std::string(k.kind) == "combo" && k.label == shown && k.r.w > 0) return true;
+  return false;
+}
+
+Camera *r538e_camera(Editor &ed) {
+  GameObject *g = ed.scene().find_by_name("Main Camera");
+  return g ? g->get<Camera>() : nullptr;
+}
+
+/* A 1600x1000 editor with the Main Camera selected and the Inspector showing it. */
+void r538e_open(Editor &ed) {
+  ed.init_headless(1600, 1000);
+  ed.record_buttons_for_test(true);
+  ed.step_frame_headless();
+  ed.command("select Main Camera");
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+}
+
+std::string r538e_without_panoramic(const std::string &text) {
+  std::istringstream is(text);
+  std::string out;
+  for (std::string line; std::getline(is, line);) {
+    size_t i = 0;
+    while (i < line.size() && line[i] == ' ') i++;
+    const std::string t = line.substr(i);
+    static const char *const drop[] = {"Panoramic_Type", "Latitude_", "Longitude_", "Fisheye_", "Height_Min", "Height_Max"};
+    bool skip = false;
+    for (const char *d : drop) skip = skip || t.rfind(d, 0) == 0;
+    if (!skip) out += line + "\n";
+  }
+  return out;
+}
+
+std::vector<std::string> r538e_log_since(size_t at) {
+  std::vector<LogEntry> said;
+  Log::fetch(at, said);
+  std::vector<std::string> out;
+  for (const LogEntry &e : said) out.push_back(e.text);
+  return out;
+}
+}  // namespace
+
+static void tests_round538() {
+  test("round 538: Camera > Projection set to Panoramic in the Inspector shows Panorama Type and Equirectangular's Latitude and Longitude rows only; each other type shows only its own rows; Perspective takes them all away", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    CHECK(cam && cam->panoramic_type == 0 && !cam->orthographic);
+    if (!cam) return;
+    CHECK(r538e_combo_shows(ed, "Perspective"));
+    CHECK(!r538e_combo_shows(ed, "Equirectangular") && !r538e_has(ed, "field:Latitude Min"));
+    CHECK(r538e_has(ed, "field:Field Of View"));
+    CHECK(r538e_pick(ed, "Perspective", "Panoramic"));
+    CHECK(cam->panoramic_type == 1);  // (Equirectangular first, as Blender's default)
+    CHECK(r538e_combo_shows(ed, "Panoramic") && r538e_combo_shows(ed, "Equirectangular"));
+    for (const char *f : {"field:Latitude Min", "field:Latitude Max", "field:Longitude Min", "field:Longitude Max"}) CHECK(r538e_has(ed, f));
+    for (const char *f : {"field:Fisheye Field Of View", "field:Fisheye Lens (mm)", "field:Height Min", "field:Height Max", "field:Field Of View"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Equirectangular", "Fisheye Equidistant"));
+    CHECK(cam->panoramic_type == 2);
+    CHECK(r538e_has(ed, "field:Fisheye Field Of View"));
+    for (const char *f : {"field:Latitude Min", "field:Longitude Min", "field:Fisheye Lens (mm)", "field:Height Min"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Fisheye Equidistant", "Fisheye Equisolid"));
+    CHECK(cam->panoramic_type == 3);
+    CHECK(r538e_has(ed, "field:Fisheye Field Of View") && r538e_has(ed, "field:Fisheye Lens (mm)"));
+    for (const char *f : {"field:Latitude Min", "field:Longitude Min", "field:Height Min"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Fisheye Equisolid", "Central Cylindrical"));
+    CHECK(cam->panoramic_type == 4);
+    for (const char *f : {"field:Height Min", "field:Height Max", "field:Longitude Min", "field:Longitude Max"}) CHECK(r538e_has(ed, f));
+    for (const char *f : {"field:Latitude Min", "field:Fisheye Field Of View", "field:Fisheye Lens (mm)"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Central Cylindrical", "Mirror Ball"));
+    CHECK(cam->panoramic_type == 5);
+    for (const char *f : {"field:Latitude Min", "field:Longitude Min", "field:Fisheye Field Of View", "field:Fisheye Lens (mm)", "field:Height Min"}) CHECK(!r538e_has(ed, f));
+
+    CHECK(r538e_pick(ed, "Panoramic", "Perspective"));
+    CHECK(cam->panoramic_type == 0 && !cam->orthographic);
+    CHECK(!r538e_combo_shows(ed, "Mirror Ball") && r538e_has(ed, "field:Field Of View"));
+    CHECK(r538e_pick(ed, "Perspective", "Orthographic"));
+    CHECK(cam->orthographic && cam->panoramic_type == 0);  // (Orthographic stays Unity's bool)
+    CHECK(r538e_pick(ed, "Orthographic", "Panoramic"));
+    CHECK(cam->panoramic_type == 1 && !cam->orthographic);  // (panoramic and orthographic don't both stay on)
+  });
+
+  test("round 538: typing the Panorama numbers into the Inspector's fields sets them, and undo puts the last one back", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    CHECK(r538e_pick(ed, "Perspective", "Panoramic"));
+    CHECK(r535_type(ed, "field:Latitude Min", "-30"));
+    CHECK(r535_type(ed, "field:Latitude Max", "45"));
+    CHECK(r535_type(ed, "field:Longitude Min", "-90"));
+    CHECK(r535_type(ed, "field:Longitude Max", "90"));
+    CHECK_NEAR(cam->latitude_min, -30.0, 1e-3);
+    CHECK_NEAR(cam->latitude_max, 45.0, 1e-3);
+    CHECK_NEAR(cam->longitude_min, -90.0, 1e-3);
+    CHECK_NEAR(cam->longitude_max, 90.0, 1e-3);
+    CHECK(r538e_pick(ed, "Equirectangular", "Fisheye Equisolid"));
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "220"));
+    CHECK(r535_type(ed, "field:Fisheye Lens (mm)", "14"));
+    CHECK_NEAR(cam->fisheye_fov, 220.0, 1e-3);
+    CHECK_NEAR(cam->fisheye_lens, 14.0, 1e-3);
+    CHECK(r538e_pick(ed, "Fisheye Equisolid", "Central Cylindrical"));
+    CHECK(r535_type(ed, "field:Height Min", "-0.5"));
+    CHECK(r535_type(ed, "field:Height Max", "2"));
+    CHECK_NEAR(cam->cylinder_min, -0.5, 1e-3);
+    CHECK_NEAR(cam->cylinder_max, 2.0, 1e-3);
+    ed.command("undo");
+    ed.step_frame_headless();
+    cam = r538e_camera(ed);  // (an undo restores the scene: the old component pointer is gone)
+    CHECK(cam && std::fabs(cam->cylinder_max - 1.0f) < 1e-3f);  // (the last typed number is back to its default)
+  });
+
+  test("round 538: bad numbers typed into the Inspector (latitude min above max, a field of view of 0 and 400, nan, inf, 1/0) are clamped or refused: the fields stay finite and in range and the editor keeps drawing", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    CHECK(r538e_pick(ed, "Perspective", "Panoramic"));
+    CHECK(r535_type(ed, "field:Latitude Min", "80"));
+    CHECK(r535_type(ed, "field:Latitude Max", "-20"));  // (min above max: allowed to be typed; the picture copes)
+    CHECK(r535_type(ed, "field:Longitude Min", "5000"));
+    CHECK(cam->longitude_min >= -360.0f && cam->longitude_min <= 360.0f);
+    CHECK(r535_type(ed, "field:Latitude Min", "nan"));
+    CHECK(std::isfinite(cam->latitude_min) && cam->latitude_min >= -90.0f && cam->latitude_min <= 90.0f);
+    CHECK(r535_type(ed, "field:Latitude Max", "1/0"));
+    CHECK(std::isfinite(cam->latitude_max) && cam->latitude_max >= -90.0f && cam->latitude_max <= 90.0f);
+    CHECK(r538e_pick(ed, "Equirectangular", "Fisheye Equisolid"));
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "0"));
+    CHECK(cam->fisheye_fov >= 1.0f && cam->fisheye_fov <= 360.0f);
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "400"));
+    CHECK(cam->fisheye_fov >= 1.0f && cam->fisheye_fov <= 360.0f);
+    CHECK(r535_type(ed, "field:Fisheye Field Of View", "inf"));
+    CHECK(std::isfinite(cam->fisheye_fov) && cam->fisheye_fov >= 1.0f && cam->fisheye_fov <= 360.0f);
+    CHECK(r535_type(ed, "field:Fisheye Lens (mm)", "0"));
+    CHECK(std::isfinite(cam->fisheye_lens) && cam->fisheye_lens > 0.0f);
+    CHECK(r538e_pick(ed, "Fisheye Equisolid", "Central Cylindrical"));
+    CHECK(r535_type(ed, "field:Height Min", "99999"));
+    CHECK(std::isfinite(cam->cylinder_min) && cam->cylinder_min <= 100.0f);
+    for (int i = 0; i < 6; i++) ed.step_frame_headless();  // (every view draws the camera again)
+    ed.command("select Main Camera");
+    ed.command("camera panoramic mirror ball");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(cam->panoramic_type == 5);
+  });
+
+  test("round 538: a scene saved with a panoramic camera loads it with the type and every number as they were", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    cam->panoramic_type = 3;
+    cam->latitude_min = -30, cam->latitude_max = 45, cam->longitude_min = -90, cam->longitude_max = 120;
+    cam->fisheye_fov = 220, cam->fisheye_lens = 14, cam->cylinder_min = -0.5f, cam->cylinder_max = 2.0f;
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Panoramic_Type 3") != std::string::npos);
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    GameObject *g = back.find_by_name("Main Camera");
+    const Camera *c = g ? g->get<Camera>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    CHECK(c->panoramic_type == 3 && !c->orthographic);
+    CHECK_NEAR(c->latitude_min, -30.0, 1e-4);
+    CHECK_NEAR(c->latitude_max, 45.0, 1e-4);
+    CHECK_NEAR(c->longitude_min, -90.0, 1e-4);
+    CHECK_NEAR(c->longitude_max, 120.0, 1e-4);
+    CHECK_NEAR(c->fisheye_fov, 220.0, 1e-4);
+    CHECK_NEAR(c->fisheye_lens, 14.0, 1e-4);
+    CHECK_NEAR(c->cylinder_min, -0.5, 1e-4);
+    CHECK_NEAR(c->cylinder_max, 2.0, 1e-4);
+    /* Saved with its panoramic setting off, with Orthographic on: it comes back Orthographic, not panoramic. */
+    cam->panoramic_type = 0;
+    cam->orthographic = true;
+    Scene back2;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back2, err));
+    const Camera *c2 = back2.find_by_name("Main Camera") ? back2.find_by_name("Main Camera")->get<Camera>() : nullptr;
+    CHECK(c2 && c2->panoramic_type == 0 && c2->orthographic);
+    /* Each type survives the file. */
+    cam->orthographic = false;
+    for (int type = 1; type <= 5; type++) {
+      cam->panoramic_type = type;
+      Scene again;
+      CHECK(load_scene_text(save_scene_text(ed.scene()), again, err));
+      GameObject *ag = again.find_by_name("Main Camera");
+      CHECK(ag && ag->get<Camera>() && ag->get<Camera>()->panoramic_type == type);
+    }
+  });
+
+  test("round 538: a scene saved before panoramic cameras (no Panoramic Type, Latitude, Longitude, Fisheye or Height lines) loads its camera as perspective, field of view and all", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    cam->fov = 47.0f;
+    cam->panoramic_type = 2;  // (so the saved text has the lines to strip)
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Panoramic_Type 2") != std::string::npos);
+    const std::string old = r538e_without_panoramic(text);
+    CHECK(old.find("Panoramic") == std::string::npos && old.find("Fisheye") == std::string::npos);
+    CHECK(old.find("Orthographic") != std::string::npos);  // (the lines that were there before stay)
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(old, back, err));
+    GameObject *g = back.find_by_name("Main Camera");
+    const Camera *c = g ? g->get<Camera>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    CHECK(c->panoramic_type == 0 && !c->orthographic);
+    CHECK_NEAR(c->fov, 47.0, 1e-4);
+    const Mat4 want = Mat4::perspective(47.0f * kDeg2Rad, 1.5f, c->near_clip, c->far_clip), got = c->projection(1.5f);
+    float worst = 0;
+    for (int i = 0; i < 16; i++) worst = std::max(worst, std::fabs(want.m[i] - got.m[i]));
+    CHECK(worst < 1e-4f);  // (a perspective projection)
+    CHECK_NEAR(c->latitude_min, -90.0, 1e-4);   // (Blender's defaults where the file says nothing)
+    CHECK_NEAR(c->longitude_max, 180.0, 1e-4);
+    CHECK_NEAR(c->fisheye_fov, 180.0, 1e-4);
+    CHECK_NEAR(c->fisheye_lens, 10.5, 1e-4);
+    CHECK_NEAR(c->cylinder_max, 1.0, 1e-4);
+  });
+
+  test("round 538: `camera panoramic equirectangular` makes the selected camera Equirectangular, each other name picks its type, `off` puts it back, and the Inspector follows", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    const struct { const char *cmd; int type; } steps[] = {
+        {"camera panoramic equirectangular", 1}, {"camera panoramic fisheye equidistant", 2}, {"camera panoramic fisheye equisolid", 3},
+        {"camera panoramic central cylindrical", 4}, {"camera panoramic mirror ball", 5}, {"camera panoramic Equirectangular", 1},
+        {"camera panoramic cylindrical", 4}, {"camera panoramic off", 0}};
+    for (const auto &s : steps) {
+      ed.command(s.cmd);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      if (cam->panoramic_type != s.type) std::printf("    '%s' left panoramic_type %d, wanted %d\n", s.cmd, cam->panoramic_type, s.type);
+      CHECK(cam->panoramic_type == s.type);
+      CHECK(r538e_combo_shows(ed, s.type ? "Panoramic" : "Perspective"));
+    }
+    ed.command("camera panoramic equirectangular");
+    ed.step_frame_headless();
+    CHECK(cam->panoramic_type == 1);
+    ed.command("undo");
+    ed.step_frame_headless();
+    cam = r538e_camera(ed);  // (undo restores the scene: the old pointer is gone)
+    CHECK(cam && cam->panoramic_type == 0);  // (one step, back to what it was)
+    ed.command("redo");
+    ed.step_frame_headless();
+    cam = r538e_camera(ed);
+    CHECK(cam && cam->panoramic_type == 1);
+  });
+
+  test("round 538: `camera panoramic` refuses with a warning when no camera is selected, for a name it doesn't know, and for no name, and changes nothing", [] {
+    Editor ed;
+    r538e_open(ed);
+    Camera *cam = r538e_camera(ed);
+    if (!cam) return;
+    ed.command("camera panoramic mirror ball");
+    CHECK(cam->panoramic_type == 5);
+    const size_t objects = ed.scene().object_count();
+    std::vector<LogEntry> sink;
+    size_t at = Log::fetch(0, sink);
+    ed.command("select Cube");
+    ed.command("camera panoramic equirectangular");
+    ed.step_frame_headless();
+    const std::vector<std::string> said = r538e_log_since(at);
+    bool refused = false;
+    for (const std::string &s : said) refused = refused || s.find("camera") != std::string::npos;
+    CHECK(refused);  // (it says something: a silent no-op is no refusal)
+    CHECK(cam->panoramic_type == 5);  // (the unselected camera was left alone)
+    CHECK(ed.scene().object_count() == objects);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && !cube->get<Camera>());
+    ed.command("select Main Camera");
+    for (const char *bad : {"camera panoramic banana", "camera panoramic 99", "camera panoramic equirectangular fisheye"}) {
+      ed.command(bad);
+      ed.step_frame_headless();
+      if (cam->panoramic_type != 5) std::printf("    '%s' changed panoramic_type to %d\n", bad, cam->panoramic_type);
+      CHECK(cam->panoramic_type == 5);
+    }
+    ed.command("camera panoramic");  // (no name at all: whatever it does, the type stays one of the six)
+    CHECK(cam->panoramic_type >= 0 && cam->panoramic_type <= 5);
+    /* The orbit command that shares the word keeps working. */
+    ed.command("camera 25 20 7 1 2 3");
+    ed.step_frame_headless();
+    CHECK(length(ed.scene_view_pivot_for_test() - Vec3(1, 2, 3)) < 1e-3f);
+  });
+
+  test("round 538: `camera panoramic` acts on the selected camera, not on the other camera in the scene", [] {
+    Editor ed;
+    r538e_open(ed);
+    ed.command("create Camera");
+    GameObject *second = ed.selected_object();
+    CHECK(second && second->get<Camera>());
+    if (!second) return;
+    ed.command("camera panoramic fisheye equidistant");
+    CHECK(second->get<Camera>()->panoramic_type == 2);
+    CHECK(r538e_camera(ed)->panoramic_type == 0);  // (the Main Camera wasn't selected)
+  });
+
+  test("round 538: the Learn lesson 'Panoramic Cameras' has its three questions and a Try-it whose commands add a panoramic camera, turn it into a fisheye and turn it off", [] {
+    int found = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Panoramic Cameras") found = i;
+    CHECK(found >= 0);
+    if (found < 0) return;
+    const std::string body = lesson(found).body;
+    size_t questions = 0;
+    std::vector<std::string> cmds;
+    std::istringstream is(body);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      cmds.push_back(line.substr(6, line.find(" | ") - 6));
+    }
+    CHECK(questions >= 2 && cmds.size() == 3);
+    if (cmds.size() != 3) return;
+    Editor ed;
+    ed.init_headless(900, 600);
+    auto run = [&](const std::string &all) {  // (as the Learn tab runs them: ';'-separated console commands)
+      size_t a = 0;
+      while (a <= all.size()) {
+        const size_t e = all.find(';', a);
+        std::string c = all.substr(a, e == std::string::npos ? std::string::npos : e - a);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) ed.command(c);
+        if (e == std::string::npos) break;
+        a = e + 1;
+      }
+    };
+    run(cmds[0]);
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 1);
+    run(cmds[1]);
+    CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 2);
+    run(cmds[2]);
+    CHECK(g && g->get<Camera>() && g->get<Camera>()->panoramic_type == 0);
+  });
+}
+
+/* ---- round 544 (task 0524): Pass 27's write-up walks the pass's Learn lessons ---- */
+namespace walk544 {
+/* A feature's lesson: the lesson titled `needle`, or the one whose body has a `# needle` section heading. -1: none. */
+static int lesson_holding(const std::string &needle) {
+  for (int i = 0; i < lesson_count(); i++) {
+    if (std::string(lesson(i).title) == needle) return i;
+    const std::string body = lesson(i).body;
+    if (body.find("\n# " + needle) != std::string::npos || body.rfind("# " + needle, 0) == 0) return i;
+  }
+  return -1;
+}
+
+/* Runs the Try-it lines of a lesson's `# section` (from its heading to the next `# ` line; the whole lesson when
+ * `section` is empty) in order in a fresh editor, as the Learn tab does (';'-separated console commands); returns the
+ * number of steps that logged a warning or an error (each printed). A section only: the big lessons hold many passes'
+ * sections, and some older Try-its warn on an empty scene on purpose ("select a mesh with a Skin modifier"). */
+static int walk(int at, const std::string &section, int &steps, int &questions) {
+  Editor ed;
+  ed.init_headless(1200, 800);
+  ed.step_frame_headless();
+  int warned_steps = 0;
+  std::istringstream lines(std::string(lesson(at).body));
+  std::string line;
+  bool in = section.empty();
+  while (std::getline(lines, line)) {
+    if (!section.empty() && line.rfind("# ", 0) == 0) in = line == "# " + section;
+    if (!in) continue;
+    if (line.rfind("? ", 0) == 0) questions++;
+    if (line.rfind("! cmd:", 0) != 0) continue;
+    steps++;
+    const std::string cmds = line.substr(6, line.find(" | ") - 6);
+    std::vector<LogEntry> sink;
+    const size_t base = Log::fetch(0, sink);
+    size_t a = 0;
+    while (a <= cmds.size()) {
+      const size_t e = cmds.find(';', a);
+      std::string c = cmds.substr(a, e == std::string::npos ? std::string::npos : e - a);
+      while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+      while (!c.empty() && c.back() == ' ') c.pop_back();
+      if (!c.empty()) ed.command(c);
+      if (e == std::string::npos) break;
+      a = e + 1;
+    }
+    ed.step_frame_headless();
+    std::vector<LogEntry> got;
+    Log::fetch(base, got);
+    bool warned = false;
+    for (const LogEntry &e : got)
+      if (e.level != LogLevel::Info) warned = true, std::printf("    '%s' Try it '%s' warned: %s\n", lesson(at).title, cmds.c_str(), e.text.c_str());
+    warned_steps += warned;
+  }
+  return warned_steps;
+}
+}  // namespace walk544
+
+static void tests_round544() {
+  test("learn (Pass 27's write-up): every feature of the pass has a lesson or a section, its lesson's Try-it steps run without a warning, and it has questions", [] {
+    struct Feature {
+      const char *rounds, *needle;
+    };
+    const Feature features[] = {{"530 - 534", "Point clouds and Gaussian splats"},
+                                {"535", "Quad Sphere"},
+                                {"536", "Typing a size (Dimensions)"},
+                                {"537", "LoopTools: Loops to Circles, Curves and Planes"},
+                                {"538", "Panoramic Cameras"},
+                                {"539", "Automasking the weight brush"},
+                                {"540", "Each brush keeps its own size"},
+                                {"541", "Blender 5.3's animation tools: rotation, world space, poses, scrubbing"},
+                                {"542", "The sky's sun lights the scene (Blender 5.3)"},
+                                {"543", "Shadows traced by the card (round 543)"},
+                                {"545", "Vertex colours and Vertex Paint"},
+                                {"547", "Windows with a style"}};  // (547's "# The frame and the glass are objects" is text; its steps 6-10 are this lesson's Try it)
+    for (const Feature &f : features) {
+      int at = walk544::lesson_holding(f.needle);
+      if (at < 0 && std::string(f.needle) == "Quad Sphere")  // (round 535: a Try-it line in a lesson, not a section of its own)
+        for (int i = 0; i < lesson_count() && at < 0; i++)
+          if (std::string(lesson(i).body).find("! cmd:create Quad Sphere") != std::string::npos) at = i;
+      std::printf("    round %s: '%s' -> %s\n", f.rounds, f.needle, at >= 0 ? lesson(at).title : "NO LESSON");
+      CHECK(at >= 0);
+      if (at < 0) continue;
+      const bool own_lesson = std::string(lesson(at).title) == f.needle || std::string(f.needle) == "Quad Sphere";
+      int steps = 0, questions = 0;
+      const int warned = walk544::walk(at, own_lesson ? std::string() : std::string(f.needle), steps, questions);
+      std::printf("      %d Try-it step(s), %d warned, %d question(s)\n", steps, warned, questions);
+      CHECK(steps > 0 && warned == 0 && questions > 0);
+    }
+  });
+  /* The label audit (Pass 27's HCI sweep): two tooltips wrote F9 by hand, wrong in Maya's preset, whose Adjust Last is
+   * Ctrl+F9 (round 559 fixed the Animation window's). The Inspector drawn, each tooltip found by its words. */
+  test("the Inspector's Dimensions and a repeated window's tooltips name Adjust Last's chord from the keymap: F9 in Unity's preset, Ctrl+F9 in Maya's, none when it is unbound (round 544)", [] {
+    auto tip_with = [](Editor &ed, const char *words) {
+      ed.record_buttons_for_test(true);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      for (const auto &kv : ed.ui_for_test().tooltip_texts)
+        if (kv.second.find(words) != std::string::npos) return kv.second;
+      return std::string("(none)");
+    };
+    for (const char *preset : {"Unity", "Maya", "unbound"}) {
+      const bool unbound = std::string(preset) == "unbound";
+      const std::string chord = std::string(preset) == "Maya" ? "Ctrl+F9" : unbound ? "" : "F9";
+      Editor ed;
+      ed.init_headless(1400, 2400);  // (tall: the Dimensions rows sit far down the Inspector)
+      ed.command(std::string("keymap ") + (unbound ? "Unity" : preset));
+      if (unbound) ed.set_binding("edit.adjust_last", {});  // (no chord: the tooltips say nothing of one)
+      r536_cube(ed, "R544Dims", 2.0f);
+      const std::string dims = tip_with(ed, "re-runs it");
+      std::printf("    %s, Dimensions: '...%s'\n", preset, dims.substr(dims.size() > 60 ? dims.size() - 60 : 0).c_str());
+      CHECK(dims.find(unbound ? std::string("Adjust Last Operation re-runs it") : "Adjust Last Operation (" + chord + ") re-runs it") != std::string::npos);
+      CHECK(chord == "Ctrl+F9" || dims.find("Ctrl+F9") == std::string::npos);
+      ed.command("edit off");
+      ed.command("newscene");
+      ed.command("blockout draw room auto at 0 0 0 normal 0 1 0 size 4 8 2.6");
+      ed.command("blockout add window 1 1.8 0.9");
+      for (const char *c : {"component ArrayModifier", "set ArrayModifier.Count 3"}) ed.command(c);  // (round 546's lesson: the window selected)
+      const std::string win = tip_with(ed, "set the first opening's size");
+      std::printf("    %s, a repeated window: '%s'\n", preset, win.c_str());
+      CHECK(win.find(unbound ? std::string("Its handles set the first opening's size") : "Its handles and " + chord + " set the first opening's size") != std::string::npos);
+      CHECK(chord == "Ctrl+F9" || win.find("Ctrl+F9") == std::string::npos);
+    }
+  });
+}
+
 /* Round 549 (task 0529): a click or a ray exactly on the edge two triangles of a face share lands on the face. CI's new runners
  * (ubuntu-26.04) put round 513's window test's ray through the far wall's diagonal and it missed both triangles. */
 static void tests_round549() {
@@ -14738,6 +16763,38 @@ static void tests_round549() {
       }
     std::printf("    %zu rays through the diagonal, %zu missed (the plain ray-triangle test would miss %zu of them here)\n", tried, missed, plain_missed);
     CHECK(missed == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 556 (task 0538): a test run never reads the user's preferences */
+static void tests_round556() {
+  test("test runs (round 556): a test editor's preferences path is in the run's own folder - the runner's default, and set_env's \"\" - never the user's ~/.blendity", [] {
+    const std::string user_prefs = fs::normalize(fs::join(fs::join(fs::home_dir(), ".blendity"), "prefs.txt"));
+    const std::string run = fs::normalize(test_dir());
+    auto under_run = [&](const std::string &p) {
+      const std::string n = fs::normalize(p);
+      return n.size() > run.size() && n.compare(0, run.size(), run) == 0;
+    };
+    {
+      Editor ed;  // (the runner's own setting: main() points BLENDITY_PREFS_DIR at the run's folder unless a caller chose one)
+      ed.init_headless(320, 200);  // (the preferences' path is set up here, as every test's editor gets it)
+      std::printf("    the run's editor reads %s\n", ed.prefs_path_for_test().c_str());
+      CHECK(!ed.prefs_path_for_test().empty());
+      CHECK(fs::normalize(ed.prefs_path_for_test()) != user_prefs);
+      const char *env = std::getenv("BLENDITY_PREFS_DIR");
+      if (env && fs::normalize(env) == fs::normalize(fs::join(test_dir(), "prefs"))) CHECK(under_run(ed.prefs_path_for_test()));  // (the runner's choice, not a caller's)
+    }
+    const char *was = std::getenv("BLENDITY_PREFS_DIR");
+    const std::string keep = was ? was : "";
+    set_env("BLENDITY_PREFS_DIR", "");  // ("" is the run's own preferences - before, an empty path: a prefs.txt in the working folder)
+    {
+      Editor ed;
+      ed.init_headless(320, 200);
+      CHECK(!ed.prefs_path_for_test().empty() && under_run(ed.prefs_path_for_test()));
+      CHECK(fs::normalize(ed.prefs_path_for_test()) != user_prefs);
+      CHECK(ed.prefs_path_for_test() != "prefs.txt" && fs::normalize(ed.prefs_path_for_test()) != fs::normalize("prefs.txt"));
+    }
+    set_env("BLENDITY_PREFS_DIR", keep);
   });
 }
 
@@ -14848,6 +16905,15 @@ void run_editor_tests() {
   tests_round508_te();
   tests_round508_te_open();
   tests_round515_collider_wire();
+  tests_round536();
+  tests_round536_engineer();
+  tests_round536_review();
+  tests_round537();
+  tests_round542();
+  tests_round535();
+  tests_round538();
+  tests_round544();
   tests_round549();
+  tests_round556();
   coverage_tests();
 }

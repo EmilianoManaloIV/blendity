@@ -140,7 +140,7 @@ endif()
 file(GLOB BLENDITY_SOURCES CONFIGURE_DEPENDS
   src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp)
 # Blender's own bundled dependencies (extern/README.md)
-list(APPEND BLENDITY_SOURCES extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp)
+list(APPEND BLENDITY_SOURCES extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp extern/sky/source/sky_multiple_scattering.cpp)
 # QuadriFlow (task 0241, ADR 0077): Blender's bundled copy, compiled when Eigen is among the libraries.
 set(BL_QUADRIFLOW_INCS "")
 if("BL_WITH_EIGEN" IN_LIST BL_LIB_DEFS)

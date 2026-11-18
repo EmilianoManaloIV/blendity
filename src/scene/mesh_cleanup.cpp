@@ -443,6 +443,7 @@ void remove_vertices(Mesh &m, const std::vector<uint8_t> &drop) {
       np.push_back(m.positions[i]);
     }
   for (uint32_t &v : m.corner_verts) v = remap[v];
+  m.remap_color_vertices(remap, np.size());  // (task 0525, ADR 0152)
   for (VertexGroup &g : m.vertex_groups) {
     if (g.weights.size() != remap.size()) continue;
     std::vector<float> w(np.size(), 0.0f);

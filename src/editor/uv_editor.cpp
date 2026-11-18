@@ -625,7 +625,8 @@ void Editor::draw_uv_editor(const Recti &r) {
   }
   /* Keyboard (when the UV editor has focus). */
   if (focused_ == WindowKind::UVEditor && !u.wants_keyboard()) {
-    if (in.ctrl() && in.key_pressed[platform::KEY_A]) std::fill(uv_sel_.begin(), uv_sel_.end(), in.shift() ? 0 : 1);
+    if (in.key_pressed[platform::KEY_A] && (in.chord_mods(platform::KEY_A) & platform::MOD_CTRL))  // (round 548: the chords as their keys went down)
+      std::fill(uv_sel_.begin(), uv_sel_.end(), (in.chord_mods(platform::KEY_A) & platform::MOD_SHIFT) ? 0 : 1);
     if (in.key_pressed[platform::KEY_U]) uv_op("unwrap");
     if (in.key_pressed[platform::KEY_L] && hot) {
       /* Select linked: the UV island under the mouse. */
@@ -646,20 +647,23 @@ void Editor::draw_uv_editor(const Recti &r) {
       uv_pan_ = Vec2(0, 0);
     }
     /* Arrows nudge the selection by 1/64 (Shift: 1/8), like Blender's UV editor with snapping. */
-    const float step = in.shift() ? 0.125f : 1.0f / 64.0f;
+    bool nudge_shift = in.shift();
+    for (const int ak : {platform::KEY_LEFT, platform::KEY_RIGHT, platform::KEY_UP, platform::KEY_DOWN})
+      if (in.key_pressed[ak]) nudge_shift = (in.chord_mods(ak) & platform::MOD_SHIFT) != 0;
+    const float step = nudge_shift ? 0.125f : 1.0f / 64.0f;
     if (in.key_pressed[platform::KEY_LEFT]) uv_transform("move", -step, 0);
     if (in.key_pressed[platform::KEY_RIGHT]) uv_transform("move", step, 0);
     if (in.key_pressed[platform::KEY_UP]) uv_transform("move", 0, step);
     if (in.key_pressed[platform::KEY_DOWN]) uv_transform("move", 0, -step);
-    if (in.ctrl() && in.key_pressed[platform::KEY_I]) uv_select("invert");
+    if (in.key_pressed[platform::KEY_I] && (in.chord_mods(platform::KEY_I) & platform::MOD_CTRL)) uv_select("invert");
     /* The gizmo's tools, as in the Scene view: the keymap's tool actions (task 0255; Unity's W E R Y). */
     if (action_pressed("tool.move")) tool_ = Tool::Move;
     if (action_pressed("tool.rotate")) tool_ = Tool::Rotate;
     if (action_pressed("tool.scale")) tool_ = Tool::Scale;
     if (action_pressed("tool.transform")) tool_ = Tool::Transform;
-    if (in.key_pressed[platform::KEY_1] && !in.ctrl()) uv_select_mode_ = 0;
-    if (in.key_pressed[platform::KEY_2] && !in.ctrl()) uv_select_mode_ = 1;
-    if (in.key_pressed[platform::KEY_3] && !in.ctrl()) uv_select_mode_ = 2;
+    if (in.key_pressed[platform::KEY_1] && !(in.chord_mods(platform::KEY_1) & platform::MOD_CTRL)) uv_select_mode_ = 0;
+    if (in.key_pressed[platform::KEY_2] && !(in.chord_mods(platform::KEY_2) & platform::MOD_CTRL)) uv_select_mode_ = 1;
+    if (in.key_pressed[platform::KEY_3] && !(in.chord_mods(platform::KEY_3) & platform::MOD_CTRL)) uv_select_mode_ = 2;
   }
   /* Island count only changes with the mesh: cache it by mesh + version. */
   static const Mesh *islands_mesh = nullptr;

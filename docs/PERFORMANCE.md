@@ -4357,3 +4357,41 @@ The whole suite again on a merge of every open round, and the survey's ranked li
 `docs/perf/verify-511.md`. The new `stress/results/baseline.md` is that run's. The rows still over budget are listed
 there with their cause and owner; three card rows while dragging (toon, glass in Solid, camera filters) give one of two
 levels from run to run on the same build and want a quiet repeat before anyone calls them a regression.
+
+## Pass 27: Blender 5.3's features timed (round 544)
+
+The hub's batched timed window, 2026-11-17 06:31 - 06:43, on the tree joining every Pass 27 round; the logs in the
+notes folder's `pass27-timed/`, the detail in `docs/perf/verify-544.md`.
+
+| Row | Result | Budget |
+|---|---|---|
+| splat import, 100k splats (round 531) | PLY binary 38.8 ms, SPZ v3 36.2 ms, PLY ASCII 729 ms | 1M under 2 s (not measured; ~0.4 s estimated) |
+| splat draw, orbiting, 1280 x 720 (532, 557) | 100k 15.4 ms CPU / 7.8 ms card; 1M 86.8 ms / 6.2 ms (94 ms on the card before round 557) | the card within the frame; the CPU over at 1M |
+| the card views' first open (557) | 537 ms from an empty pipeline cache, 156 ms from the cache (92.5 s before) | |
+| OptiX kernel compile (558) | 19.3 s cold, 6.6 ms warm (RTX 4070 SUPER) | a one-off, cached |
+| splat trace, 256 x 256 (533 / 534) | CPU 149 / 107 samples / s at 100k / 1M; card (ray queries) 1,752 / 1,320 | card faster |
+| LoopTools, 10k-vertex loops (537) | 1.4 - 9.2 ms an operator | under 100 ms |
+| panoramic F12, 2048 x 1024 (538) | 197 - 221 ms; perspective 202 - 207 ms | within 7 % of perspective |
+| sky sun on / off (542) | 2.80 / 2.92 ms a frame | within 10 % |
+| RT shadows, SideRail (543) | 4.3 - 9.4 ms a frame | within the frame |
+| half-float albedo, 4K (551) | 2.29 ms a frame after, 2.37 before | within 5 % |
+
+## Round 557: a million splats, and the card's first open
+
+| Row | Before (round 544's window) | After |
+|---|---|---|
+| Orbit, 1M splats, card, median / longest frame | 93.7 ms | **6.2 / 6.8 ms** |
+| Orbit, 1M splats, CPU, median / longest frame | 108.4 ms | 86.8 / 91.3 ms |
+| Orbit, 100k splats, card / CPU, median frame | 16.0 / 15.7 ms | 7.8 / 15.4 ms |
+| CPU project, 1M (in the orbit's last frame) | 40.5 ms | 41.0 ms |
+| CPU draw, 1M (in the orbit's last frame) | 45.1 ms | 36.9 ms |
+| Sort, 1M (a worker's; what the frame waits) | 0.05 ms | 0.05 ms |
+| Card first open, empty pipeline cache / written | 92.5 s / 0.16 s | **0.54 s / 0.16 s** |
+
+The timed batch of 2026-11-17 (the hub's, normal priority, a quiet machine; RTX 4070 SUPER, 32 threads), on round 557's
+exe. The card meets ADR 0105's 50 ms with room to spare. **The CPU at 1M still misses it (86.8 ms), named:** a
+degree-3 splat costs its EWA projection and 48 SH terms every frame, and the 1M array read and written is most of the
+41 ms; the compositing's 37 ms is a million alpha-blended ellipses, front to back. The CPU draws the views only when there
+is no card (or the card refuses a frame: too close, too big); at 100k the CPU is within budget (15.4 ms). What would move
+it further: SH evaluated once per sort (the view direction barely changes while orbiting), and a coarser tile pass for
+splats under a pixel.

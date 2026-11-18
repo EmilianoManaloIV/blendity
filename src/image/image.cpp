@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "icc_profile.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1438,6 +1439,14 @@ std::string encode_jpeg(const uint32_t *pixels, int w, int h, int stride, int qu
   auto u16 = [&](int v) { u8(v >> 8); u8(v & 255); };
   u16(0xFFD8);
   u16(0xFFE0); u16(16); s += "JFIF"; u8(0); u8(1); u8(1); u8(0); u16(1); u16(1); u8(0); u8(0);
+  /* Round 542 (task 0522, Blender 5.3): the sRGB ICC profile in one APP2 ICC_PROFILE marker (chunk 1 of 1) - it fits in
+   * one (a marker holds 65533 bytes). */
+  {
+    const std::string &icc = srgb_icc_profile();
+    u16(0xFFE2); u16(2 + 14 + (int)icc.size());
+    s.append("ICC_PROFILE\0", 12); u8(1); u8(1);
+    s += icc;
+  }
   for (int t = 0; t < 2; t++) {
     u16(0xFFDB); u16(67); u8(t);
     for (int k = 0; k < 64; k++) u8(q[t][kZigzag[k]]);

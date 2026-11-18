@@ -6,6 +6,9 @@
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
 #include "view_keeps.h"
+#include "panoramic_view.h"
+#include "scene_splats.h"
+#include "../scene/pointcloud_object.h"
 #include "../core/view_perf.h"
 #include "../core/profiling.h"
 #include "../render/dof.h"
@@ -14,6 +17,7 @@
 #include "../core/core.h"
 #include "../core/jobs.h"
 #include "../render/sky.h"
+#include "../render/sky_sun.h"
 
 #include <algorithm>
 #include <cassert>
@@ -279,7 +283,7 @@ void Editor::texture_stream_land() {
 }
 
 void Editor::texture_stream_poll() {
-  if (tex_stream_ && tex_stream_->scene != scene_.get()) tex_stream_.reset();  // (another scene: cancelled between two files, dropped)
+  if (tex_stream_ && tex_stream_->scene != (scene_ ? scene_->serial : 0)) tex_stream_.reset();  // (another scene: cancelled between two files, dropped)
   if (tex_stream_ && tex_stream_->done.load(std::memory_order_acquire)) texture_stream_land();
   if (upload_waiting_) {  // (the card's budget ran out last frame: the views draw again with the rest)
     upload_waiting_ = false;
@@ -325,7 +329,7 @@ void Editor::texture_stream_start(std::vector<std::pair<std::string, bool>> file
   auto st = std::make_unique<TextureStream>();
   st->files = std::move(files);
   st->loaded.assign(st->files.size(), 0);
-  st->scene = scene_.get();
+  st->scene = scene_ ? scene_->serial : 0;
   for (const auto &f : st->files) st->mtimes.push_back(texture_file_mtime(f.first));
   TextureStream *raw = st.get();
   st->thread = std::thread([raw] { texture_stream_run(*raw); });
@@ -379,6 +383,7 @@ void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, 
 static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
   if (a.mesh != b.mesh || a.id != b.id || a.materials != b.materials || a.lightmap != b.lightmap || a.lightmap_uv != b.lightmap_uv) return false;
   if (a.lightmap_dir != b.lightmap_dir || a.shadowmask != b.shadowmask || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
+  if (a.material_colors != b.material_colors) return false;  // (task 0533)
   if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
   if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
   if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
@@ -489,7 +494,7 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
 const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, uint64_t *gen) {
   ItemsCache &c = solid_cache_[game];
   *gen = 0;
-  const bool kept_kind = view_perf::on(view_perf::SolidItems) && &s == scene_.get() && !edit_mode_ && !weight_paint_ && !sculpt_;
+  const bool kept_kind = view_perf::on(view_perf::SolidItems) && &s == scene_.get() && !edit_mode_ && !weight_paint_ && !vertex_paint_ && !sculpt_;
   uint64_t base = 0;
   bool hit = false;
   if (kept_kind) {
@@ -598,6 +603,12 @@ DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRe
   it.receive_shadows = mr.receive_shadows;
   it.cast_shadows = mr.cast_shadows;  // (round 415)
   it.id = (uint32_t)g.id;
+  /* Task 0533: the vertex colours, only where a material reads them (worked out here, on the main thread). */
+  for (const MaterialPtr &mp : mr.materials)
+    if (mp && mp->vertex_color) {
+      it.material_colors = m.render_vertex_colors(*it.mesh);
+      break;
+    }
   return it;
 }
 
@@ -793,6 +804,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   mix((uint64_t)rasterized | (uint64_t)unity_lights_gamma() << 1 | (uint64_t)scene_->lighting.baked_gi << 2);
   mix((uint64_t)(uintptr_t)&ld), mix((uint64_t)ld.light_modes.size()), mix(lighting_gen_);
   mix((uint64_t)reflection_probe_bakes_.size()), mix(reflection_probe_gen_);
+  mix(sky_sun_key(es));  // (round 542: the sky's sun is in the list)
   for (const auto &[id, bake] : reflection_probe_bakes_) mix(id), mix((uint64_t)(uintptr_t)&bake);
   const uint64_t epoch = edit_epoch::now(), structure = edit_epoch::structure();  // (read before the walks: a bump during them walks again next frame)
   const bool stale = view_perf::stale(view_perf::Lighting);  // (a test's: the invalidation skipped)
@@ -823,6 +835,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   {
     view_perf::Timed walk_time(view_perf::counters.lighting_ms);
     std::vector<view_keeps::LightingKeep::Tracked> tracked;
+    bool sun_light = false;  // (an enabled Directional Light: it is the sky's sun)
     scene_->for_each([&](GameObject &g) {
       auto *l = g.get<Light>();
       if (l || g.get<ReflectionProbeComponent>()) {  // (their placement is what the keep is kept on)
@@ -833,6 +846,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
       }
       if (!g.active_in_hierarchy()) return;
       if (!l || !l->enabled) return;
+      if (l->type == 0) sun_light = true;  // (a Baked one too: it still turns the sky, as update_environment's walk)
       /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
        * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
       if (rasterized && l->mode == 2) return;
@@ -846,6 +860,10 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
     env.reflection_probes = render_reflection_probes();  // (round 401)
     Vec3 sun = lk.sun;
     update_environment(nullptr, &sun);
+    /* Round 542 (task 0522, Blender 5.3): with no Directional Light, the Sky world's sun lights the scene - in this list,
+     * so the rasterizers and the path tracer take the same light. */
+    const std::optional<RenderLight> sky_sun = sun_light ? std::nullopt : sky_sun_light(es, sun);
+    if (sky_sun) env.lights.push_back(*sky_sun);
     /* Verify mode: the walks the keep would have answered with, compared to these. */
     if (holds && !interval && !same_lighting(env.lights, env.reflection_probes, sun, lk)) note_render_cache_mismatch();
     lk.lights = env.lights, lk.probes = env.reflection_probes, lk.sun = sun, lk.key = key, lk.valid = true;
@@ -951,7 +969,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   Component *outline = nullptr, *flatten = nullptr, *vshapes = nullptr;
   bool bone = false;
   const LightProbeGroupComponent *pgroup = nullptr;
+  const PointCloudObject *cloud = nullptr;  // (round 532: the views draw its splats)
+  Component *pcloud = nullptr;  // (round 533: the path tracers trace splat clouds)
   for (auto &c : g.components) switch (c->render_role()) {
+      case Component::RenderRole::PointCloud:
+        if (!cloud) cloud = static_cast<const PointCloudObject *>(c.get()), pcloud = c.get();
+        break;
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
       case Component::RenderRole::ViewShapes: if (!vshapes) vshapes = c.get(); break;
@@ -985,6 +1008,21 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
       const Mat4 w = g.world_matrix();
       mix(w.m, sizeof(w.m));
+    }
+    if (cloud) {  // (round 532: the views draw its splats - where it is, which cloud and its version, how)
+      const Mat4 w = g.world_matrix();
+      const PointCloud *d = cloud->data.get();
+      const uint64_t key[4] = {d ? d->uid.v : 0, d ? d->version : 0,
+                               (uint64_t)cloud->enabled | (uint64_t)g.active_in_hierarchy() << 1 | (uint64_t)(d ? (int)d->type : 0) << 2,
+                               (uint64_t)std::hash<float>()(cloud->point_size)};
+      mix(w.m, sizeof(w.m));
+      mix(key, sizeof(key));
+    }
+    if (pcloud) {  // (round 533: a splat cloud moved or edited is a new traced picture and a new bake - its cloud's pointer and version)
+      const Mat4 w = g.world_matrix();
+      const uint64_t key = hash_component(*pcloud) ^ (uint64_t)pcloud->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+      mix(w.m, sizeof(w.m));
+      mix(&key, 8);
     }
     if (pgroup) {  // (round 455: a probe moved - or the group - is a new bake: the lighting's out-of-date check re-runs; the Scene view draws them)
       const Mat4 w = g.world_matrix();
@@ -1130,6 +1168,8 @@ uint64_t Editor::scene_hash_tail() {
   mix(&es.strength, 4);
   mix(&es.rotation, 4);
   mix(&es.turbidity, 4);
+  const uint64_t sky_sun = sky_sun_key(es);  // (round 542)
+  mix(&sky_sun, 8);
   mix(&es.color, sizeof(Vec3));
   mix(&es.sky, sizeof(Vec3) * 3);
   mix(es.hdri.path.data(), es.hdri.path.size());
@@ -1141,6 +1181,10 @@ uint64_t Editor::scene_hash_tail() {
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
+  /* Round 532 (review): a worker's splat order landed - here, not in an object's part, which the scene hash reuses while
+   * the edit counter holds (a landing sort moves no counter: it would be a change the counter missed). */
+  const uint64_t splat_gen = gsplat_sort_generation();
+  mix(&splat_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
   mix(&scene_->lighting.shadowmask_mode, sizeof(int));  // (round 454: Distance Shadowmask redraws without a rebake)
   mix(&scene_->lighting.shadow_distance, sizeof(float));
@@ -1463,6 +1507,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     r3d.clear_sky(inv, {0.33f, 0.47f, 0.68f}, {0.70f, 0.74f, 0.79f}, {0.27f, 0.26f, 0.25f});
   else r3d.clear_environment(inv, env_, env.view_transform, env.exposure);
   for (const DrawItem &it : *use) r3d.add(it);
+  scene_splats_prepare(*scene_, r3d, rt, v, p, env.view_transform, env.exposure);  // (round 532: blended in by flush())
   r3d.flush();
 }
 
@@ -1615,6 +1660,7 @@ void Editor::set_cpu_threads(int n) {
 
 void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                            const Camera *cam, float aspect, bool game, bool scene_lights, bool animate) {
+  if (cam && cam->panoramic_type > 0) return render_panoramic(r3d, rt, v, eye, owner, cam, game, scene_lights);  // (round 538)
   const FilterStack &fs = camera_filters(owner);
   /* The Scene view fills whatever the stack says: its overlays and picking use the full view's projection. */
   const int fit = cam ? fs.fit : (int)FilterStack::Fill;
@@ -1714,13 +1760,14 @@ PTSettings Editor::make_pt_settings(const RenderSettings &rs) const {
   s.use_guiding = rs.path_guiding;
   s.view_transform = view_transform_from_setting(rs.view_transform);
   s.exposure = rs.exposure;
+  s.splats = scene_splat_views(*scene_);  // (round 533: the Gaussian splat objects, traced after the meshes)
   return s;
 }
 
 static void build_pt(PathTracer &pt, Editor &, const std::vector<DrawItem> &items, const LightingEnv &env,
                      const Environment &world) {
   std::vector<PTObject> objs;
-  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model});
+  for (const DrawItem &it : items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model, it.material_colors});
   pt.build(objs, env.lights, world);
 }
 
@@ -1831,6 +1878,10 @@ bool Editor::start_moonray(int w, int h, const Mat4 &v, const Mat4 &p, const Cam
     Log::warn("MoonRay: an orthographic camera isn't sent yet: rendering with the path tracer instead");
     return false;
   }
+  if (cam && cam->panoramic_type > 0) {  // (round 538: the export has no panoramic lens)
+    Log::warn("MoonRay: a panoramic camera isn't sent yet: rendering with the path tracer instead");
+    return false;
+  }
   const RenderSettings &rs = scene_->render;
   render_filtered_ = false;  // (camera filters are Blendity's: noted, not drawn)
   if (!render_filters_.empty()) Log::info("MoonRay: the camera's filters aren't applied to its render");
@@ -1868,6 +1919,7 @@ static PTLens camera_lens(const Camera *cam, float aspect) {
   l.focus_distance = cam->focus_distance;
   l.blades = cam->blades >= 3 ? cam->blades : 0;
   l.rotation = cam->blade_rotation * kDeg2Rad;
+  if (cam->panoramic_type > 0 && finite_bits(aspect) && aspect > 1e-3f && aspect < 1e3f) l.pano = panoramic_params_for(*cam, (int)(aspect * 1000.0f), 1000);  // (round 538)
   return l;
 }
 
@@ -1973,14 +2025,17 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   j->far_distance = cam ? cam->far_clip : 1000.0f;
   j->play_time = play_time_;
   j->filters = render_filters_;
-  j->filtered = render_filtered_ && (traced || owner);
+  const bool pano_cam = cam && cam->panoramic_type > 0;  // (round 538: no filters or supersampling; its faces are drawn at the picture's size)
+  if (pano_cam) j->filters = FilterStack();  // (a panorama takes none, traced or not: the retro stages would warp it)
+  j->filtered = render_filtered_ && (traced || owner) && !pano_cam;
+  if (pano_cam && !traced) j->pano = panoramic_params_for(*cam, w, h), j->near_clip = cam->near_clip;
   struct FinalRender {  // the quality tier's caps are for the editor's views, not for renders
     bool &flag;
     explicit FinalRender(bool &f) : flag(f) { flag = true; }
     ~FinalRender() { flag = false; }
   } final_render(final_render_);
   /* The target the items are gathered for: the outlines' width goes by its height. */
-  j->aa = traced || preview ? 1 : std::max(1, std::min(4, rs.raster_aa));
+  j->aa = traced || preview || pano_cam ? 1 : std::max(1, std::min(4, rs.raster_aa));
   int target_h = h * j->aa;
   if (j->filtered && !traced) {
     filter_layout(j->filters, cam ? j->filters.fit : (int)FilterStack::Fill, w, h, j->iw, j->ih, j->dst);
@@ -1999,6 +2054,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   }
   collect_hold_ = &j->meshes;  // (the outline shells the items point at are held with the meshes)
   j->items = collect_items(true, true);
+  j->splats = scene_splat_draws(*scene_);  // (round 532)
   collect_hold_ = nullptr;
   outline_view_.on = false;
   flatten_view_.on = false;
@@ -2148,7 +2204,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     if (j->filtered) j->filters.apply_raster(j->opt);
     const Camera *look = cam ? cam : owner ? owner->camera() : nullptr;
     if (look && look->clear_flags == 1) j->clear_mode = 1, j->clear_color = to_display_pixel(look->background, ViewTransform::Standard, 0.0f);
-    if (cam && cam->dof && !cam->orthographic) {
+    if (cam && cam->dof && !cam->orthographic && !pano_cam) {
       const int th = j->filtered ? j->ih : h * j->aa, tw = j->filtered ? j->iw : w * j->aa;
       const float aspect = j->filtered && j->boxed ? j->dst.w / (float)std::max(1, j->dst.h) : w / (float)h;
       DofParams &d = j->dof_params;
@@ -2214,9 +2270,10 @@ void Editor::raster_picture(RenderJob &j) {
     if (!j.shadow.valid()) j.env.shadow = nullptr, j.env.shadow_light = -1;
   }
   Renderer3D r3d;
+  Mat4 view = j.view;  // (a panoramic render's cube faces look their own ways)
   auto draw = [&](RenderTarget &rt, const Mat4 &p, bool override_on, uint32_t override_color) {
-    r3d.begin(&rt, j.view, p, j.env, j.opt);
-    const Mat4 inv = (p * j.view).inverse();
+    r3d.begin(&rt, view, p, j.env, j.opt);
+    const Mat4 inv = (p * view).inverse();
     if (override_on) {  // a transparent render's black / white pass (task 0035)
       r3d.clear(override_color);
       if (!rt.hdr.empty()) std::fill(rt.hdr.begin(), rt.hdr.end(), Vec3(0.0f));  // no light there for bloom in either pass
@@ -2224,9 +2281,25 @@ void Editor::raster_picture(RenderJob &j) {
     else if (j.clear_mode == 1) r3d.clear(j.clear_color);
     else r3d.clear_environment(inv, j.environment, j.env.view_transform, j.env.exposure);
     for (const DrawItem &it : j.items) r3d.add(it);
+    SplatPass splats;  // (round 532: sorted in the frame - a final picture waits for its order)
+    if (!j.splats.empty()) {
+      splats.prepare(j.splats, SplatView{view, p, rt.width, rt.height, j.env.view_transform, j.env.exposure}, false);  // (round 538: a cube face's own view)
+      r3d.set_splats(&splats);
+    }
     r3d.flush();
   };
+  PanoramicState pano_state;
   auto once = [&](bool override_on, uint32_t override_color) {
+    if (j.pano.type > 0) {  // (round 538: the cube faces a panoramic camera needs, each resampled into the picture)
+      PanoramicCameraFrame fr;
+      fr.eye = j.eye, fr.right = {j.view.m[0], j.view.m[4], j.view.m[8]}, fr.up = {j.view.m[1], j.view.m[5], j.view.m[9]};
+      fr.forward = {j.view.m[2], j.view.m[6], j.view.m[10]}, fr.near_clip = j.near_clip, fr.far_clip = j.far_distance;
+      panoramic_render(j.pano, j.w, j.h, fr, pano_state, j.img.pixels.data(), j.w, [&](int, const Mat4 &fv, const Mat4 &fp, RenderTarget &frt) {
+        view = fv;
+        draw(frt, fp, override_on, override_color);
+      });
+      return;
+    }
     if (!j.filtered) {
       /* Rasterized: supersample then box-filter down (SSAA). */
       Image big;
@@ -2418,7 +2491,7 @@ void Editor::trace_picture(RenderJob &j, PathTracer &pt) {
   pt.set_settings(j.ps);  // before build(): it picks the ray backend
   {
     std::vector<PTObject> objs;
-    for (const DrawItem &it : j.items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model});
+    for (const DrawItem &it : j.items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model, it.material_colors});
     pt.build(objs, j.env.lights, j.environment);
   }
   pt.set_camera(j.view, j.proj_filtered, j.tw, j.th, j.lens);
@@ -2978,6 +3051,8 @@ uint64_t Editor::scene_view_key(const Recti &view) {
   mix(&edit_obj_, 8);
   const uint64_t wp[4] = {(uint64_t)weight_paint_, wp_obj_, wp_version_, (uint64_t)wp_group_};  // the painted weights (task 0046)
   mix(wp, sizeof(wp));
+  const uint64_t vp[3] = {(uint64_t)vertex_paint_, vp_obj_, vp_version_};  // the painted colours (task 0525)
+  mix(vp, sizeof(vp));
   mix(selection_.data(), selection_.size() * sizeof(uint64_t));
   mix(vert_sel_.data(), vert_sel_.size());
   mix(face_sel_.data(), face_sel_.size());
@@ -3120,7 +3195,8 @@ void Editor::draw_camera_preview(const Recti &view) {
     /* Rebuild when the scene, this camera or the inset size changes; then add
      * a few milliseconds of samples every frame until the preview count. */
     uint64_t hash = camera_render_hash(g, cam) ^ trace_settings_hash() ^ ((uint64_t)w << 40) ^ ((uint64_t)h << 20) ^ g->id;
-    const FilterStack &filters = camera_filters(g);
+    static const FilterStack kNoFilters;  // (round 538: a panorama takes no camera filters)
+    const FilterStack &filters = cam->panoramic_type > 0 ? kNoFilters : camera_filters(g);
     int tw = w, th = h;
     Recti tdst{0, 0, w, h};
     if (!filters.empty()) filter_layout(filters, w, h, tw, th, tdst);

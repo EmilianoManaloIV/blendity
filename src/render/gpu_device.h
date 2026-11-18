@@ -10,6 +10,8 @@
 // Blender's vulkan + shaderc libraries have no GPU devices at all.
 #pragma once
 
+#include "gsplat_gpu.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -88,7 +90,10 @@ struct GLight { float a[4], b[4], c[4], d[4], e[4]; };  // see gpu_kernel.h Ligh
 struct GMeshLight { uint32_t obj, prim; float area, power; };
 struct GTexInfo { uint32_t offset; int32_t w, h; uint32_t flags; };
 /* One unique mesh, for hardware acceleration structures. */
-struct GBlas { uint32_t vtx_off, vtx_count, idx_off, tri_count; };
+struct GBlas {
+  uint32_t vtx_off, vtx_count, idx_off, tri_count;
+  uint32_t kind = 0;  // round 534: kBlasSplats - a splat cloud's AABBs (idx_off its first splat / AABB, tri_count how many)
+};
 
 struct Scene {
   GParams params{};
@@ -107,6 +112,11 @@ struct Scene {
   std::vector<uint32_t> tlas_order;  // TLAS leaf slot -> object
   std::vector<GBlas> blas;           // unique meshes
   std::vector<uint32_t> object_blas; // object -> blas
+  /* Round 534 (gsplat_gpu.h): Gaussian splats - bindings 17 and 18, and each splat's box for the hardware structures. */
+  std::vector<GSplat> splats;
+  std::vector<float> splat_sh;       // RGB triples
+  std::vector<float> splat_aabbs;    // 6 per splat: min, max (the cloud's space)
+  uint64_t splat_hash = 0;           // which clouds, at which versions (the upload's sections compare it, not 300 MB of bytes)
 };
 
 /* One GPU rendering samples of the full frame into its own accumulation
@@ -182,6 +192,13 @@ void drop_ready_renderers_for_test();
 void drop_ready_renderers();  // (task 0170: the backend changed - the spares were opened for the other one)
 /* The pipeline cache file of a device (task 0037): a Vulkan VkPipelineCache kept on disk. */
 std::string pipeline_cache_file(int index, bool hardware_rt);
+/* Round 557: the rasterizer's pipeline cache file (its graphics pipelines: a new build's first card view takes them from
+ * here when the driver's own per-program cache is cold). */
+std::string raster_pipeline_cache_file(int index);
+/* A cache file's data for device `index` (its trailer checked and removed, its header naming this card and driver),
+ * false and empty otherwise; and storing vkGetPipelineCacheData's bytes atomically. */
+bool pipeline_cache_load(int index, const std::string &path, std::string &blob);
+void pipeline_cache_store(const std::string &path, std::string data);
 
 class Compute {
  public:

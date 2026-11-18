@@ -241,19 +241,21 @@ double sampled_slope(const AnimTrack &t, float frame, float rate) {
   return (double)(t.sample(frame + h) - t.sample(frame - h)) / (2.0f * h) * rate;
 }
 
-/* A vector property's three axis tracks as one runtime curve at the union of their frames. */
-AnimCurveOut vector_curve(const std::string &path, const std::vector<const AnimTrack *> &ts, const Vec3 &fill, float rate) {
+/* A vector property's three axis tracks (a quaternion's four, round 541) as one runtime curve at the union of their frames.
+ * `fill` is each component's value where it has no track. */
+AnimCurveOut vector_curve(const std::string &path, const std::vector<const AnimTrack *> &ts, const std::vector<double> &fill, float rate) {
   AnimCurveOut c;
-  c.path = path, c.comps = 3;
+  const size_t comps = ts.size();
+  c.path = path, c.comps = (int)comps;
   c.frames = union_frames(ts);
   for (float f : c.frames) {
-    std::vector<double> v(3, 0.0), in(3, 0.0), out(3, 0.0);
+    std::vector<double> v(comps, 0.0), in(comps, 0.0), out(comps, 0.0);
     int left = kClampedAuto, right = kClampedAuto;
     bool broken = false, any_key = false;
-    for (int a = 0; a < 3; a++) {
-      const AnimTrack *t = ts[(size_t)a];
+    for (size_t a = 0; a < comps; a++) {
+      const AnimTrack *t = ts[a];
       if (!t) {
-        v[(size_t)a] = fill[a];
+        v[a] = fill[a];
         continue;
       }
       const int ki = t->key_at(f);
@@ -288,7 +290,9 @@ AnimCurveOut float_curve(const std::string &path, const std::string &attribute, 
 void write_vec(std::ostringstream &os, const char *indent, const char *name, const std::vector<double> &v, int comps) {
   os << indent << "  " << name << ": ";
   if (comps == 1) return (void)(os << num(v[0]) << "\n");
-  os << "{x: " << num(v[0]) << ", y: " << num(v[1]) << ", z: " << num(v[2]) << "}\n";
+  os << "{x: " << num(v[0]) << ", y: " << num(v[1]) << ", z: " << num(v[2]);
+  if (comps == 4) os << ", w: " << num(v[3]);  // (round 541: a quaternion curve)
+  os << "}\n";
 }
 
 void write_keys(std::ostringstream &os, const AnimCurveOut &c, float rate, const char *indent) {
@@ -330,13 +334,29 @@ Vec3 fill_value(const GameObject *root, const std::string &path, const std::stri
 }
 
 struct Lists {
-  std::vector<AnimCurveOut> pos, eul, scl, flt, editor, euler_editor;
+  std::vector<AnimCurveOut> pos, eul, scl, flt, editor, euler_editor, quat;
   int dropped = 0;
 };
 
+/* Round 541 (ADR 0148): a "RotationQ" path as an m_RotationCurves curve - Unity's quaternion interpolation. No editor curves
+ * (the Euler hints are left out); a component with no track is the object's own rotation, else identity. */
+void quaternion_lists(const std::string &path, const std::vector<const AnimTrack *> &ts, const GameObject *root, float rate, Lists &l) {
+  std::vector<double> fill{0.0, 0.0, 0.0, 1.0};
+  GameObject *g = root ? anim_target(*const_cast<GameObject *>(root), path) : nullptr;
+  for (int a = 0; a < 4 && g; a++) {
+    float x = (float)fill[(size_t)a];
+    if (read_anim_value(*g, "RotationQ", a, x)) fill[(size_t)a] = x;
+  }
+  l.quat.push_back(vector_curve(path, ts, fill, rate));
+  for (size_t a = 0; a < 4 && a < ts.size(); a++) {  // (Unity's own quaternion clips keep m_LocalRotation.x..w in m_EditorCurves too)
+    if (ts[a]) l.editor.push_back(float_curve(path, std::string("m_LocalRotation.") + "xyzw"[a], kClassTransform, *ts[a], 1.0f, rate));
+  }
+}
+
 void vector_lists(const std::string &path, const std::string &prop, const std::vector<const AnimTrack *> &ts, const GameObject *root, float rate, std::vector<std::string> *notes, Lists &l) {
   const bool any_missing = !ts[0] || !ts[1] || !ts[2];
-  const Vec3 fill = any_missing ? fill_value(root, path, prop, notes) : Vec3(0.0f);
+  const Vec3 fill_v = any_missing ? fill_value(root, path, prop, notes) : Vec3(0.0f);
+  const std::vector<double> fill{fill_v.x, fill_v.y, fill_v.z};
   std::vector<AnimCurveOut> &runtime = prop == "Position" ? l.pos : prop == "Rotation" ? l.eul : l.scl;
   runtime.push_back(vector_curve(path, ts, fill, rate));
   const char *attr = prop == "Position" ? "m_LocalPosition." : prop == "Rotation" ? "localEulerAnglesRaw." : "m_LocalScale.";
@@ -417,21 +437,25 @@ std::string clip_to_unity_anim(const AnimationClip &c, const GameObject *root, s
   for (const AnimTrack &t : c.tracks) {
     if (!by_path.count(t.path)) path_order.push_back(t.path);
     std::vector<const AnimTrack *> &ts = by_path[t.path][t.property];
-    if (ts.size() < 3) ts.resize(3, nullptr);
-    if (t.axis >= 0 && t.axis < 3) ts[(size_t)t.axis] = &t;
+    const size_t comps = t.property == "RotationQ" ? 4 : 3;  // (round 541: a quaternion's w is axis 3)
+    if (ts.size() < comps) ts.resize(comps, nullptr);
+    if (t.axis >= 0 && (size_t)t.axis < comps) ts[(size_t)t.axis] = &t;
   }
   Lists l;
   for (const std::string &path : path_order)
     for (const auto &[prop, ts] : by_path[path]) {
-      if (is_transform_property(prop)) vector_lists(path, prop, ts, root, rate, notes, l);
+      if (prop == "Rotation" && by_path[path].count("RotationQ")) continue;  // (a path keyed both ways plays its RotationQ, as apply_clip does: only that is exported)
+      if (prop == "RotationQ") quaternion_lists(path, ts, root, rate, l);
+      else if (is_transform_property(prop)) vector_lists(path, prop, ts, root, rate, notes, l);
       else if (prop.rfind(kBlendShapePrefix, 0) == 0 || prop == "Active") float_lists(path, prop, ts[0], rate, l);
       else l.dropped++;
     }
   if (l.dropped && notes) notes->push_back(std::to_string(l.dropped) + " track(s) of other properties (lights, materials, components) left out: Unity's clip has no field for them");
   std::ostringstream os;
   os << "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!74 &7400000\nAnimationClip:\n  m_ObjectHideFlags: 0\n  m_CorrespondingSourceObject: {fileID: 0}\n"
-        "  m_PrefabInstance: {fileID: 0}\n  m_PrefabAsset: {fileID: 0}\n  m_Name: " << yaml_scalar(c.name) << "\n  serializedVersion: 6\n  m_Legacy: 0\n  m_Compressed: 0\n  m_UseHighQualityCurve: 1\n"
-        "  m_RotationCurves: []\n  m_CompressedRotationCurves: []\n";
+        "  m_PrefabInstance: {fileID: 0}\n  m_PrefabAsset: {fileID: 0}\n  m_Name: " << yaml_scalar(c.name) << "\n  serializedVersion: 6\n  m_Legacy: 0\n  m_Compressed: 0\n  m_UseHighQualityCurve: 1\n";
+  write_curve_list(os, "m_RotationCurves", l.quat, rate, false);  // (round 541: "RotationQ" tracks; empty it is `[]` as before)
+  os << "  m_CompressedRotationCurves: []\n";
   write_curve_list(os, "m_EulerCurves", l.eul, rate, false);
   write_curve_list(os, "m_PositionCurves", l.pos, rate, false);
   write_curve_list(os, "m_ScaleCurves", l.scl, rate, false);
@@ -461,7 +485,7 @@ std::string unity_package_clip_data(const std::string &data, const std::string &
   if (zeroed)
     for (const std::string &n : notes) *zeroed += n.find("written as 0") != std::string::npos;
   if (dropped)
-    for (const AnimTrack &t : clip.tracks) *dropped += !is_transform_property(t.property) && t.property.rfind(kBlendShapePrefix, 0) != 0 && t.property != "Active";
+    for (const AnimTrack &t : clip.tracks) *dropped += !is_transform_property(t.property) && t.property != "RotationQ" && t.property.rfind(kBlendShapePrefix, 0) != 0 && t.property != "Active";
   return out;
 }
 

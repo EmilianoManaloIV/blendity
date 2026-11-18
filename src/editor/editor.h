@@ -27,6 +27,7 @@
 #include "../render/texture_bake.h"
 #include "../render/pathtracer.h"
 #include "../render/raster.h"
+#include "../render/gsplat_raster.h"  // (round 532: RenderJob::splats)
 #include "../render/lightmapper.h"
 #include "../render/voxel_gi.h"
 #include "../render/probe_volume.h"
@@ -63,6 +64,7 @@
 #include "../scene/auto_rig.h"
 #include "../scene/skin_weights.h"
 #include "../scene/skin_render.h"  // (round 519: SkinBinding, the card's weights and boxes)
+#include "paint_automask.h"  // (task 0525: what Weight Paint and Vertex Paint share)
 #include "ui.h"
 #include "livelink.h"
 #include "../scene/partfield.h"
@@ -95,6 +97,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "brush_slots.h"
 #include "view_keeps.h"
 
 namespace bl {
@@ -148,14 +151,29 @@ extern const char *const kRectModes[3];    // Corner, Center, 3 Points (Plastici
 extern const char *const kCircleModes[3];  // Center, 2 Points, 3 Points
 
 /* Weight Paint's brush (task 0046): radius in screen pixels (at UI scale 1). */
-struct WeightBrush {
+/* The automasking (task 0519, Blender 5.3) comes from PaintAutomaskFields, shared with Vertex Paint (task 0525). */
+struct WeightBrush : PaintAutomaskFields {
   int mode = 0;  // kWeightBrushModes
   float radius = 50.0f, strength = 0.5f, weight = 1.0f;
   int falloff = 0;  // kWeightFalloffs
   bool mirror_x = false, front_only = true;
 };
-extern const char *const kWeightBrushModes[4];  // Add, Subtract, Draw, Blur (task 0046)
+extern const char *const kWeightBrushModes[4];  // Add Weight, Subtract, Set Weight, Blur (task 0046; names task 0519)
 extern const char *const kWeightFalloffs[6];
+/* Vertex Paint's brush (task 0525, Blender's vertex paint brushes): radius in screen pixels (at UI scale 1); colour
+ * linear RGB. */
+struct VertexBrush : PaintAutomaskFields {
+  int tool = 0;   // kVertexPaintTools: Draw, Blur, Average, Smear
+  int blend = 0;  // kVertexPaintBlends: Mix, Add, Subtract, Multiply, Lighten, Darken
+  Vec3 color{1.0f, 0.0f, 0.0f};
+  float alpha = 1.0f;  // the colour's alpha (what Mix paints into the layer's alpha)
+  float radius = 50.0f, strength = 1.0f;
+  int falloff = 0;  // kWeightFalloffs
+  bool mirror_x = false, front_only = true;
+};
+struct ToolTargets;  // (vertex_paint.cpp: what Blur, Average and Smear move towards)
+extern const char *const kVertexPaintTools[4];
+extern const char *const kVertexPaintBlends[6];
 /* Sculpt Mode's brush (task 0236). */
 struct SculptBrush {
   int kind = 0;  // kSculptBrushes: Draw, Smooth, Grab, Clay Buildup, Inflate, Flatten, Pinch, Crease, Scrape, Snake Hook, Mask
@@ -556,6 +574,7 @@ struct AnimEditorState {
   uint64_t other_layout = 0;
   size_t other_count = 0;
   int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
+  bool scrub_resume = false;  // (round 541: playback was running when the ruler was pressed - it starts again on release)
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
   float view_start = 0.0f, view_span = 0.0f;  // (task 0267: the frames the sheet shows; span 0: the whole clip)
@@ -758,6 +777,10 @@ struct PaintBrush {
   float wet = 0.0f;        // how much of the colour picked up under the last dab the brush carries
   float jitter_h = 0.0f, jitter_s = 0.0f, jitter_v = 0.0f;
   float grain_scale = 1.0f;
+  /* Round 540 (Blender 5.3's curve_hardness / curve_spacing): off at first, so nothing changes until they are turned on. On,
+   * a dab's hardness is hardness * curve(pressure) and the step between dabs spacing * (1.5 - curve(pressure)). */
+  bool hardness_pressure = false, spacing_pressure = false;
+  std::vector<Vec2> hardness_curve{Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f)}, spacing_curve{Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f)};
 };
 
 bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p);
@@ -1001,7 +1024,7 @@ class Editor {
     std::thread thread;
     std::atomic<bool> done{false};
     std::atomic<bool> cancel{false};  // (checked per file: a shutdown or a scene switch doesn't wait for the batch)
-    const Scene *scene = nullptr;     // (the scene it was for: another one drops it)
+    uint64_t scene = 0;               // (Scene::serial of the scene it was for: another one drops it - round 552: not its address, which an open can hand back)
     std::vector<std::pair<std::string, bool>> files;
     std::vector<int64_t> mtimes;  // (each file's mtime before its load: a failure holds while the file is as it was)
     std::vector<char> loaded;     // (per file: it decoded; the rest are published as failed)
@@ -1278,6 +1301,7 @@ class Editor {
   bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
   bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
   bool open_scene_for_test(const std::string &p) { return open_scene(p); }
+  std::string draw_hint_label_for_test() const { return draw_hint_label_; }
   std::string redo_label_for_test() const { return redo_.empty() ? std::string() : redo_.back().label; }
   std::vector<std::string> palette_guide_steps_for_test(const std::string &layout);
   float edit_brush_radius_for_test() const { return edit_brush_radius(); }
@@ -1459,9 +1483,30 @@ class Editor {
     return n;
   }
   int sculpt_brush_kind_for_test() const { return sculpt_brush_.kind; }
+  /* Round 540: the per-brush banks (brush_slots.cpp). */
+  BrushBank &sculpt_bank_for_test() { return sculpt_bank_; }
+  BrushBank &weight_bank_for_test() { return wp_bank_; }
+  BrushBank &paint_bank_for_test() { return paint_bank_; }
+  void brush_banks_sync_for_test() { brush_banks_sync(); }
+  std::string brushes_path_for_test() const { return brushes_path(); }
+  std::string brushes_text_for_test() { return brushes_text(); }
+  void brushes_load_text_for_test(const std::string &s) { brushes_load_text(s); }
+  float paint_last_dab_hardness_for_test() const { return paint_last_dab_hardness_; }
+  float paint_spacing_for_test(float pressure) { return paint_spacing_now(pressure); }
   const std::vector<Vec2> &sculpt_dab_px_for_test() const { return sculpt_dab_px_; }
   Shading shading_for_test() const { return shading_; }
   WeightBrush &wp_brush_for_test() { return wp_brush_; }
+  VertexBrush &vp_brush_for_test() { return vp_brush_; }  // (task 0525)
+  bool vertex_paint_for_test() const { return vertex_paint_; }
+  /* Task 0537: the Scene view's last card frame as it was handed over (instances, the colour buffer, the see-through
+   * corners), copied only while on - so tests pin the packings (toon5.y's sign, SeeCorner's halves). */
+  struct GpuFrameSnapshot {
+    std::vector<gpu::RasterInstance> instances;
+    std::vector<float> vertex_colors;
+    std::vector<gpu::SeeCorner> see_through;
+  };
+  void set_gpu_frame_snapshot_for_test(bool on) { gpu_frame_snapshot_on_ = on; }
+  const GpuFrameSnapshot &gpu_frame_snapshot_for_test() const { return gpu_frame_snapshot_; }
   bool bake_object_textures_for_test(int size) { return bake_object_textures(size); }
   void set_background_gpu_open_for_test(bool on) {
     cam_preview_pt_.set_background_gpu_open(on);
@@ -1834,6 +1879,8 @@ class Editor {
   Vec2 sketch_ruler_for_test(int i) const { return sketch_.ruler[i]; }
   float sketch_ellipse_rx_for_test() const { return sketch_.ell_rx; }
   bool last_op_valid_for_test() { return last_op_valid(); }
+  Recti last_op_rect_for_test() const { return last_op_rect_; }    // (round 560: the F9 panels where they drew)
+  Recti obj_last_rect_for_test() const { return obj_last_rect_; }
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
@@ -2045,9 +2092,11 @@ class Editor {
     prefs_for_test_ = true;
   }
   void save_prefs_for_test() { save_prefs(); }
+  const std::string &prefs_path_for_test() const { return prefs_path_; }  // (round 556: where this editor reads its preferences)
   void dock_reset_for_test(const std::string &preset) { dock_reset(preset); }
   void load_prefs_for_test() { load_prefs(); }
   void select_for_test(uint64_t id, bool add) { select(id, add ? SEL_ADD : SEL_REPLACE); }
+  void blockout_sync_leaves_for_test() { blockout_sync_leaves(); }  // (round 547: what the part sync costs a walk)
   void boolean_for_test(int op, bool apply, uint64_t kept) { boolean_selected(op, apply, kept); }  // (task 0255)
   void project_open_folder_for_test(const std::string &dir, const std::string &search = "") { project_dir_ = dir; project_search_ = search; project_listed_ = -100; }
   std::vector<std::string> button_labels_for_test() const {
@@ -2062,6 +2111,10 @@ class Editor {
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
+  /* Round 541 (task 0521): Wrap Playhead on / off, what Copy Pose and Copy World-Space Animation hold. */
+  bool anim_wrap_for_test() const { return anim_wrap_; }
+  size_t pose_clip_size_for_test() const { return pose_clip_.size(); }
+  const WorldCopy &world_clip_for_test() const { return world_clip_; }
   /* Round 406: the Animation window's rows as drawn - a single row's value field by its label, and typing into it. */
   const std::map<std::string, float> &anim_row_values_for_test() const { return anim_row_values_for_test_; }
   bool anim_set_row_value_for_test(const std::string &label, float v) {
@@ -2570,6 +2623,9 @@ class Editor {
    * rt for overlays. */
   void render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const GameObject *owner,
                      const Camera *cam, float aspect, bool game = true, bool scene_lights = true, bool animate = false);
+  /* Round 538 (src/editor/panoramic_view.cpp): a panoramic camera's picture, from the cube faces it needs. */
+  void render_panoramic(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, Vec3 eye, const GameObject *owner, const Camera *cam, bool game, bool scene_lights);
+  std::map<const void *, PanoramicState> pano_;  // (one face target a view - its Renderer3D names it: the Game view and the Camera Preview no longer share and reallocate one)
   /* The enabled filter components on a camera's GameObject, in order. */
   const FilterStack &camera_filters(const GameObject *owner);
   struct FilterCacheEntry {
@@ -3272,6 +3328,7 @@ class Editor {
   bool anim_changed(uint64_t id, const std::string &property, int axis, float v) const;
   bool anim_record_vector(AnimationClip &clip, const std::string &path, int prop, const float *shown, const float *now, float frame);
   bool anim_record_object(AnimationClip &clip, GameObject &root, GameObject &g, const float *shown, const float *now);  // (round 472)
+  bool anim_record_quat(AnimationClip &clip, const std::string &path, const GameObject &g, const float *shown, const float *now, float frame);  // (round 541: a "RotationQ" path)
   void anim_snapshot_others(GameObject &root, const AnimationClip *clip, const std::vector<GameObject *> &walk);  // (round 472)
   const std::vector<uint32_t> &anim_other_tracks(const AnimationClip &clip);  // (round 472)
   uint64_t record_reads_last_ = 0;  // (round 472: the objects Record read the numbers of in its last pass)
@@ -3312,6 +3369,31 @@ class Editor {
   void anim_key_all();  // (task 0258: a key at the playhead on every track)
   void anim_toggle_play();
   void anim_toggle_record();
+  /* ---- Round 541 (task 0521, ADR 0148): Blender 5.3's animation tools (pose_clipboard.cpp, animation_window.cpp) ---- */
+  bool anim_wrap_ = false;  // Wrap Playhead: frame steps and key jumps wrap inside the clip (a session setting; off by default)
+  void anim_step_frame(int delta);  // a frame step: clamps at 0, or wraps in 0..end when Wrap Playhead is on
+  void anim_scrub_begin();          // the ruler pressed: playback that runs is paused (and remembered)
+  void anim_scrub_end();            // released (or Esc): it runs again from the scrubbed frame
+  /* Convert Rotation: the selected objects' paths. `mode` 0: each path the other way round (Euler to quaternion, quaternion to
+   * Euler), 1 to quaternion, 2 to Euler. One undo step; refuses with a message when nothing converts. */
+  void anim_rotation_convert(int mode, bool bake);
+  /* Copy / Paste World-Space Animation; Paste at the playhead (Offset Start) or the original frames (None). */
+  WorldCopy world_clip_;
+  void anim_world_copy(bool custom, float start, float end);
+  void anim_world_paste(bool from_playhead);
+  /* Pose clipboard: the selected bones' local transforms by name (Copy Pose), Paste Pose with an influence, flipped or not. */
+  struct PoseClipBone {
+    std::string name;
+    Transform local;
+  };
+  std::vector<PoseClipBone> pose_clip_;
+  bool pose_context() const;  // the Scene view with only bones selected (and not in Edit Mode)
+  void pose_copy();
+  bool pose_paste(const std::vector<PoseClipBone> &clip, float influence, bool flipped, bool selected_only, std::vector<std::pair<uint64_t, Transform>> *before = nullptr);
+  void pose_paste_step(float influence, bool flipped, bool selected_only);  // (pose_paste with its undo step and F9's panel)
+  void pose_align(int orientation = -1);  // (0 Global, 1 Local, else the current transform orientation, left as it is)
+  void pose_command(const std::vector<std::string> &t);
+  void draw_anim_key_menu();
   bool anim_shortcuts_stand_down() const;  // (a window with arrow keys of its own has the keyboard, or the view is flown)
   bool action_asked_for_ = false;  // (task 0260: the palette or the Wheel named the action - no stand-down)
   const std::vector<std::string> &anim_clip_paths();
@@ -3467,10 +3549,31 @@ class Editor {
   int wp_effective_mode(bool ctrl, bool eraser) const;  // (task 0259)
   int wp_stroke_mode_ = 0;  // (decided once when the stroke begins: Ctrl or the eraser then makes an Add stroke a Subtract one)
   int wp_group(const Mesh &m) const;  // the group being painted (pinned while painting)
-  void wp_prepare(const Mesh &m);
   void wp_abort_stroke();
   const std::vector<Vec3> *wp_colors(const Mesh &m, const RenderMesh &rm);
   void weight_paint_command(const std::vector<std::string> &t);
+  /* Task 0525: what Weight Paint and Vertex Paint share (paint_automask.cpp). */
+  bool paint_pick_start(const PaintMeshHelpers &h, const Mesh &m, const Mat4 &W, const Mat4 &N, float x, float y, float R, uint64_t obj, size_t &start,
+                        Vec3 &area);
+  bool paint_dab_amounts(const PaintDab &d, PaintMeshHelpers &h, PaintAutomask &am, std::vector<float> &amount, std::vector<float> &mask);
+  /* Vertex Paint (task 0525, ADR 0152; vertex_paint.cpp). */
+  bool set_vertex_paint(bool on);
+  Mesh *vp_mesh();
+  bool vp_update(const Recti &view);  // the brush owns the mouse
+  void vp_draw(const Recti &view);
+  bool vp_begin_stroke();
+  void vp_end_stroke();
+  void vp_abort_stroke();
+  void vp_dab(float x, float y);
+  void vp_stroke_to(float x, float y, bool first);
+  bool vp_draw_dab(const Mesh &m, ColorAttribute &layer, const std::vector<float> &amount);
+  void vp_smear_targets(const Mesh &m, const Mat4 &W, const std::vector<Vec4> &vc, const std::vector<float> &amount, ToolTargets &t);
+  const std::vector<Vec3> *vp_colors(const Mesh &m, const RenderMesh &rm);
+  void vertex_paint_command(const std::vector<std::string> &t);
+  void color_attribute_command(const std::vector<std::string> &t);
+  /* After an edit (the undo step's carry, beside the vertex groups'): Point colour layers the operator left the wrong
+   * size come back by position from the mesh before; layers that no longer match go and are reported (ADR 0152). */
+  void carry_colors(MeshPtr &mesh, const Mesh *before, uint64_t obj);
   void frame_selected();
   Camera *main_camera(const Scene &s, GameObject **owner = nullptr);
   /* Makes g the scene's Active Camera (ADR 0016): one undo step; nullptr goes back to the name rule. */
@@ -3504,6 +3607,7 @@ class Editor {
   GameObject *add_bone(GameObject *parent, float length);
   IKConstraint *add_ik(GameObject *bone);
   void draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay);
+  void draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay, Recti toggle);  // (task 0525: the toggle in the Rigging row)
   bool draw_reflected(const std::function<void(Reflector &)> &fields, ui::Layout &lay);
   uint64_t wp_last_active_ = 0;  // Weight Paint: the selection last seen (a bone selected picks its group)
   const std::vector<std::string> &texture_asset_paths();
@@ -3701,9 +3805,55 @@ class Editor {
     int axis = 0;           // array: 0 X, 1 Y, 2 Z (the selection's own axes)
     float amount2 = 0.0f;   // taper: end scale; recess: border
     Vec3 size{1, 1, 1};     // sketch_box: the lengths; sketch_cylinder: base radius, height, top radius (task 0225)
+    unsigned dims_keep = 7;  // dimensions: the axes (bit k) the user did not type: they follow the selection's size in the frame
+    int dims_frame = 0;      // dimensions: the orientation `size` was measured in (a switch re-measures the untouched axes)
+    int lock = 0;           // LoopTools: the locked local axes, bit 0 X, 1 Y, 2 Z (round 537)
     std::string message;
   };
   bool edit_op_redoable(const std::string &op) const;
+  /* Round 536 (task 0516): Edit Mode's Dimensions. The selected vertices' size, global (world axes, world units) and local
+   * (the object's axes, object units), cached by the mesh's pointer and version, the object's matrix and the selection. */
+  struct EditDims {
+    const Mesh *mesh = nullptr;
+    uint64_t version = 0;
+    float world[16] = {};
+    uint64_t sel_hash = 0;
+    size_t sel_size = 0;
+    size_t count = 0;  // selected vertices
+    Vec3 global_size{0.0f}, local_size{0.0f};
+    bool filled = false;
+  };
+  EditDims edit_dims_;
+  uint64_t edit_dims_computes_ = 0;  // (the tests: how often the bounds were walked)
+  bool dims_local_ = false;          // the Inspector's Global / Local switch
+  bool dims_drag_ = false;           // a field is being dragged: its changes amend one operator instead of starting new ones
+  const EditDims &edit_dimensions(const GameObject &g, const Mesh &m);
+  void edit_dimensions_command(const std::vector<std::string> &t);  // (editor_commands.cpp's editop)
+  Vec3 dims_current_size(const LastOp &L) const;  // L.before's selection's size in L.orientation's frame
+  void dims_follow_orientation(LastOp &L) const;  // an Orientation switch: the untouched axes take the new frame's sizes
+  /* Runs `dimensions` with the wanted size (an axis whose bit is set in keep_mask keeps the size it has). */
+  void edit_dimensions_op(Vec3 wanted, unsigned keep_mask, int orientation);
+  /* `quiet`: refused only because nothing would change (said as info, not a warning). */
+  bool run_dimensions(Mesh &m, const LastOp &L, const Mat4 &world, std::string &err, bool &quiet);  // (scene_view.cpp)
+  void apply_dimensions_edit(Vec3 size, int axis, float v);                             // (panels.cpp)
+  bool dims_refused_ = false;  // this press of a field was refused: stay quiet until it is released
+  void draw_edit_dimensions(ui::Layout &lay);                                        // (panels.cpp)
+  Vec3 dims_request_{0.0f};
+  unsigned dims_request_keep_ = 7;
+  int dims_request_orientation_ = 0;
+ public:
+  /* The tests: the cache's numbers, and the bounds walked so far. */
+  bool edit_dims_for_test(Vec3 &global, Vec3 &local, size_t &count) {
+    GameObject *g = edit_object();
+    if (!g || !edit_mesh_ptr()) return false;
+    const EditDims &d = edit_dimensions(*g, **edit_mesh_ptr());
+    global = d.global_size, local = d.local_size, count = d.count;
+    return true;
+  }
+  uint64_t edit_dims_computes_for_test() const { return edit_dims_computes_; }
+ private:
+  int run_looptools(Mesh &m, const LastOp &L);  // LoopTools (round 537): the vertices it moved
+  Vec3 looptools_view_dir(const LastOp &L);       // Flatten's View plane in the edited object's space
   /* A redoable operator's start (task 0165): the selection flushed, LastOp filled from the mesh as it is, run_last_op. */
   void begin_redoable_op(const std::string &op, GameObject &g, MeshPtr &mp);
   /* The faces an operator reads, from the vertices or the edges in those modes; how many are selected. */
@@ -3742,6 +3892,15 @@ class Editor {
   }
   bool was_moving_ = false;  // last frame's: the frame after a move ends always draws (held and cheap pictures go)
   bool other_views_follow_ = false;
+  /* Round 543 (task 0523): Preferences > Ray-Traced Shadows - the card's views trace their shadows (ray queries) in place of
+   * the sun's map, every light casting; off by default, and only where the card can (Raster::can_trace_shadows). */
+  bool rt_shadows_ = false;
+  bool rt_shadows_available() const;
+  void set_rt_shadows(bool on);  // saved; the views drawn again
+  void print_rt_shadow_stats() const;  // (the windowed check's line)
+ public:
+  bool rt_shadows_for_test() const { return rt_shadows_; }
+ private:
   bool cpu_fallback_noticed_ = false;  // task 0199: Auto's fall back to the CPU said once (kept in the preferences)
   void views_command(const std::string &what, const std::string &value);
   bool hold_other_views() const { return !other_views_follow_ && scene_moving() && !(playing_ && !paused_); }
@@ -3912,6 +4071,7 @@ class Editor {
   void transform_command(const std::string &what, const std::vector<std::string> &v);
   void log_all_commands();
   bool round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line);
+  void camera_panoramic_command(const std::vector<std::string> &t);  // (round 538: `camera panoramic <type|off>`, panoramic_view.cpp)
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
@@ -3972,6 +4132,7 @@ class Editor {
   public:
   FixModelOptions &fix_model_options_for_test() { return fix_model_options_; }
   private:
+  int action_mods_ = -1;  // (round 548: the modifiers as the shortcut's key went down while handle_shortcuts runs an action; -1 from a menu)
   const std::vector<AvatarCheck> &avatar_checklist(GameObject &root);
   void run_avatar_fix(const AvatarCheck &c);  // (its object selected by id first)
   /* The checklist kept half a second for the window (review 356: humanoid::map, gait::analyse and the budget every frame). */
@@ -4256,6 +4417,20 @@ class Editor {
   Vec3 rest_on_surface(GameObject *g, Vec3 p, Vec3 n, const Quat &start_rot, bool align, Quat &rot);
   void drop_objects_on_surface(const std::vector<GameObject *> &objs, int mx, int my);
   bool nearest_vertex_on_screen(const Recti &view, int mx, int my, float radius, bool selected_only, bool skip_selected, Vec3 &out);
+  /* Snap to Object Origins (round 535; origin_snap.cpp). Off by default; the console's `snap origins`, Tools > Snapping. */
+  bool snap_origins_ = false;
+  /* The active object whose origin projects nearest the mouse within `radius` px; skip_moving leaves out the selection and
+   * what is under it, selected_only keeps only the selection (the V drag's anchor); `accept`, when given, turns an origin away
+   * (the drawing tools': off the drawing plane, or hidden behind a face). */
+  bool nearest_origin_on_screen(const Recti &view, int mx, int my, float radius, bool skip_moving, Vec3 &out, bool selected_only = false,
+                                const std::function<bool(GameObject &, const Vec3 &)> &accept = {});
+  /* With the setting on, an origin nearer the mouse than `target` (found) takes its place; `anchor` looks at the selection's origins. */
+  void prefer_origin_target(const Recti &view, int mx, int my, float radius, bool anchor, bool skip_moving, bool &found, Vec3 &target);
+  /* Modal G + Ctrl: the pivot onto an origin under the mouse (within 16 px), kept to the axis or plane lock; false when none. */
+  bool modal_origin_snap(const Recti &view, const Vec3 &lock_axis, Vec3 &move);
+  void snap_command(const std::vector<std::string> &t);  /* `snap origins [on|off]` */
+  std::string draw_hint_label_;  // the drawing tools' last snap label drawn at the mouse (round 535's tests)
+  bool origin_visible(GameObject &owner, Vec3 origin);  // nothing between the eye and the origin (its own solid only counts while edited)
   void toggle_pilot_camera();
   void update_pilot_camera();
   void align_camera_to_view();
@@ -4349,9 +4524,17 @@ class Editor {
   void blockout_sync_door(GameObject &door);
   void blockout_leaf_made(GameObject &leaf, const BlockoutLeafPlan &plan, const std::string &material, float texture_scale, uint64_t key);  // (mesh, collider, materials, key)
   void blockout_leaf_command(const std::vector<std::string> &t);  // (blockout leaf select)
+  uint64_t pick_part_target(uint64_t hit, int mx, int my);  // (round 547: a click on a Frame or Glass selects its opening, a second click on the same spot the part)
+  struct PickPartSpot {
+    uint64_t part = 0;
+    int x = 0, y = 0;
+  } pick_part_spot_;
+  void blockout_part_command(const std::vector<std::string> &t);  // (round 547: blockout part select [frame|glass|leaf] | opening)
+  void blockout_parts_select(bool to_parts, int kind, const char *command);
   void draw_blockout_leaf_extras(GameObject &g, BlockoutLeaf &leaf, ui::Layout &lay);  // (the Inspector's "Made by Door ..." line)
+  std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_fixed_seen_;  // (round 547: the same for an opening's Frame and Glass - kept apart, since one gone is made again and turns nothing off)
   std::unordered_map<uint64_t, std::vector<uint64_t>> blockout_leaves_seen_;  // (door id -> its leaf objects' ids as the last walk left them: one gone with the door still there was deleted by hand)
-  const Scene *blockout_leaves_scene_ = nullptr;  // (the scene those ids are of: another scene - a load, an undo - starts them again; the address can repeat, the ids are checked against the scene too)
+  uint64_t blockout_leaves_scene_ = 0;  // (Scene::serial of the scene those ids are of: another scene - a load, an undo - starts them again. Not its address: a scene opened after `newscene` can land where the closed one was, and its door, of the same saved id, read the closed scene's leaf as deleted by hand - round 552)
   std::vector<uint64_t> blockout_sync_doors_, blockout_sync_strays_;  // (the walk's scratch: not allocated again for a scene whose doors did not change)
   bool blockout_preview_now_ = false, blockout_preview_was_ = false, blockout_preview_ended_ = false;  // (a preview or Play moves objects: leaves only follow; the walk after it ends settles them)
   void blockout_join_step(const char *label);  // (a change the leaf sync makes: the pending step's, or the last kept one amended - never a step of its own after a user's)
@@ -5089,7 +5272,7 @@ class Editor {
   Vec2 sculpt_last_px_;
   bool set_sculpt(bool on);
   Mesh *sculpt_mesh();
-  bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist);
+  bool sculpt_hit(const Recti &view, float x, float y, Vec3 &world, float &dist, uint64_t obj = 0);  // (obj 0: the sculpted object; task 0519: Weight Paint's)
   float sculpt_world_radius(float px, float dist) const;
   void sculpt_build_grid(const Mesh &m, float cell);
   void sculpt_gather(const Mesh &m, Vec3 centre, float radius, std::vector<uint32_t> &ids, std::vector<float> &d) const;
@@ -5356,6 +5539,18 @@ class Editor {
   float paint_grain_at(int x, int y) const;
   void paint_dab_begin(float pressure);
   void paint_dab_finish();
+  float paint_dab_hardness_ = -1.0f;       // (round 540: this dab's hardness through the pressure curve; -1 outside a dab: the field's)
+  float paint_last_dab_hardness_ = 1.0f;   // (the last dab's, for tests)
+  float paint_spacing_now(float pressure);  // (the step between dabs in radii: spacing, through the curve when Spacing Pressure is on)
+  /* Round 540: size, strength and colour per brush (brush_slots.cpp). */
+  BrushBank sculpt_bank_, wp_bank_, paint_bank_;
+  void brush_banks_sync();
+  std::string brushes_text();
+  void brushes_load_text(const std::string &text);
+  std::string brushes_path() const;
+  void brushes_save();
+  void brushes_load();
+  void brush_command(const std::vector<std::string> &t);
   Vec3 paint_dab_colour() const;
   Bitmap paint_stencil_;
   Vec2 paint_stencil_offset_;
@@ -5536,21 +5731,42 @@ class Editor {
   float sculpt_stroke_move_ = 0.0f;  // (the farthest a vertex moved this stroke: the gather reaches that much past the radius, the grid being the stroke's start)
   /* Weight Paint (task 0046). */
   WeightBrush wp_brush_;
-  bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false, wp_mirror_done_ = false;
-  uint64_t wp_obj_ = 0, wp_version_ = 0, wp_cache_version_ = 0;
+  bool weight_paint_ = false, wp_stroking_ = false, wp_dabbed_ = false;
+  uint64_t wp_obj_ = 0, wp_version_ = 0;
   const Scene *wp_scene_ = nullptr;        // the scene the mode started in (ids restart in every scene)
   const Mesh *wp_stroke_mesh_ = nullptr;   // the mesh a stroke writes (anything else ends it)
-  const Mesh *wp_cache_mesh_ = nullptr;    // what wp_normals_ / wp_nb_ / wp_mirror_ were made for
+  PaintMeshHelpers wp_mh_;                 // normals, neighbours, the X-mirror map (task 0525: shared with Vertex Paint's kind)
   int wp_group_ = 0;
   std::vector<float> wp_start_, wp_alpha_;  // a stroke's starting weights and strongest amount per vertex
+  /* Task 0519: a stroke's automask. wp_stroke_flip_: Ctrl at the stroke's start with Set Weight paints 1 - Weight. */
+  PaintAutomask wp_am_;
+  bool wp_stroke_flip_ = false;
   Shading wp_saved_shading_ = Shading::Shaded;
   Vec2 wp_last_;
-  std::vector<Vec3> wp_normals_;
-  std::vector<uint32_t> wp_nb_off_, wp_nb_, wp_mirror_;
   std::vector<Vec3> wp_colors_;
   uint64_t wp_colors_serial_ = 0, wp_colors_version_ = ~0ull;
   int wp_colors_group_ = -1;
   int active_vgroup_ = 0;        // the Inspector's chosen vertex group
+  /* Vertex Paint (task 0525, ADR 0152): the mode, its object and scene, a stroke's starting colours and strongest
+   * amount per element (vertex or corner, as the layer's domain), the helpers and the automask. */
+  VertexBrush vp_brush_;
+  bool vertex_paint_ = false, vp_stroking_ = false, vp_dabbed_ = false;
+  uint64_t vp_obj_ = 0, vp_version_ = 0;
+  const Scene *vp_scene_ = nullptr;
+  const Mesh *vp_stroke_mesh_ = nullptr;
+  std::vector<Vec4> vp_start_;
+  std::vector<float> vp_alpha_;
+  bool vp_stroke_flip_ = false;  // (Ctrl at the stroke's start: Add subtracts, Subtract adds, Mix paints the inverse colour)
+  Shading vp_saved_shading_ = Shading::Shaded;
+  Vec2 vp_last_, vp_smear_dir_;
+  PaintMeshHelpers vp_mh_;
+  PaintAutomask vp_am_;
+  std::vector<Vec3> vp_colors_;
+  uint64_t vp_colors_serial_ = 0, vp_colors_version_ = ~0ull;
+  std::string colors_dropped_note_;  // (ADR 0152) what the last edit dropped, shown in the Inspector until dismissed
+  bool gpu_frame_snapshot_on_ = false;  // (task 0537: tests only)
+  GpuFrameSnapshot gpu_frame_snapshot_;
+  uint64_t colors_dropped_obj_ = 0;
   float vgroup_weight_ = 1.0f;   // what Assign gives
   std::string vgroup_name_edit_;
   uint64_t pt_obj_ = 0;     // the curve or lattice whose points are selected (only while it is the active object)
@@ -6182,6 +6398,10 @@ class Editor {
     int opening = 0, hinge = 0, slide = 0;
     bool leaf = true, wings = false;
     float leaf_thickness = 0.04f, open_amount = 0.0f, drum_radius = 1.0f;
+    /* Paste Pose (round 541, kind "pose"): `a` is the influence, `flag` Flipped, `m` Selected Only; the transforms of the bones
+     * it can touch before the paste, put back before each re-run. */
+    std::vector<std::pair<uint64_t, Transform>> pose_before;
+    std::vector<PoseClipBone> pose_clip;  // the pose it pasted: a later Copy Pose does not change what F9 pastes again
   };
   bool obj_last_valid() const;
   const ObjLastOp &obj_last_for_test() const { return obj_last_; }
@@ -6193,12 +6413,22 @@ class Editor {
   void record_primitive_last(GameObject *g, const std::string &kind);
   void record_uv_last(uint64_t obj, const std::string &op, MeshPtr before, const std::vector<uint8_t> *mask);
   void record_draw_last(uint64_t obj, MeshPtr before, const Mat4 &before_xf);
+  void record_pose_last(std::vector<std::pair<uint64_t, Transform>> before, std::vector<PoseClipBone> clip, float influence, bool flipped, bool selected_only);  // (round 541: Paste Pose's F9)
+  void pose_last_rerun();
   void amend_last_step();
   void obj_last_note_result();
   void obj_last_end() { obj_last_ = ObjLastOp{}; }
   void obj_last_rerun();
   void blockout_last_rerun();  // (round 479: a Blockout piece just made)
   void draw_obj_last_panel(const Recti &view);
+  /* Round 560 (task 0542): where an Adjust Last panel goes - the view's bottom left, never above the view's top - and
+   * whether its rows scroll (they do when they are taller than the room left under the header: the caller runs them in a
+   * begin_scroll on `body`). */
+  struct AdjustPanelPlace {
+    Recti r, body;
+    bool scrolls = false;
+  };
+  AdjustPanelPlace adjust_panel_place(const Recti &view, int w, int head_h, int body_h);
   /* Plasticity's construction lines while drawing: X / Y / Z lay a guide along that axis (local
    * or global, as Snap Axes says) through the last point or the point under the mouse; Ctrl+click
    * on an edge lays one along the edge. A polyline point on a guide may leave the drawing plane. */
@@ -6235,6 +6465,8 @@ class Editor {
     bool on_space_plane = false;  // in open space, on the drawing plane
   };
   DrawHit draw_hit(const Recti &view, int mx, int my);
+  /* A drawing tool's point on an origin (within 10 px, in the drawing plane; round 535): fills `h` and returns true. */
+  bool draw_origin_hit(const Recti &view, int mx, int my, DrawHit &h);
   void draw_begin(int shape);
   bool draw_update(const Recti &view);
   void draw_preview(const Recti &view);
@@ -6739,6 +6971,7 @@ class Editor {
    * (render_job_holds_lighting / _gi). The worker publishes its picture, status and stats under `mutex`. ---- */
   struct RenderJob {
     std::vector<DrawItem> items;
+    std::vector<SplatDraw> splats;  // (round 532: the point clouds, their arrays held - drawn by the worker's rasterizer)
     std::vector<std::shared_ptr<const Mesh>> meshes;
     std::vector<std::shared_ptr<std::vector<MaterialPtr>>> material_lists;
     std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> snapped;  // (a filter's vertex snapping: the copies the tracer reads)
@@ -6763,6 +6996,8 @@ class Editor {
     int w = 0, h = 0, aa = 1;
     bool preview = false, transparent = false, traced = false, denoise = false;
     float far_distance = 1000.0f, play_time = 0.0f;
+    PanoramicParams pano;  // (round 538: a panoramic camera's rasterized render - type 0 otherwise; drawn from cube faces at w x h)
+    float near_clip = 0.3f;
     /* The rasterizer's. */
     RasterOptions opt;
     int clear_mode = 0;  // 0 the world, 1 a solid colour
@@ -7541,7 +7776,7 @@ class Editor {
   bool blockout_join(GameObject &active, std::vector<GameObject *> others);  // (the others' pieces under the active Blockout, each in its place in the world; one undo step)
   const std::vector<Vec3> &blockout_targets(std::vector<uint64_t> excluded);  // (the other Blockouts' world corners, kept for the length of a drag)
   struct BlockoutCross {
-    const void *scene = nullptr;
+    uint64_t scene = 0;  // (Scene::serial: an address an open hands back would keep another scene's corners - round 552)
     uint64_t structure = 0;
     int frame = -10;
     std::vector<uint64_t> excluded;
@@ -7559,6 +7794,7 @@ class Editor {
   void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
   bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }
   uint64_t streamed_files_for_test() const { return streamed_files_; }
+  void texture_stream_start_for_test(std::vector<std::pair<std::string, bool>> files) { texture_stream_start(std::move(files)); }  // (round 552)
   bool render_job_running_for_test() const { return render_job_ && !render_job_->done.load(); }
   bool bake_job_running_for_test() const { return bake_job_ && !bake_job_->done.load(); }
   bool texbake_running_for_test() const { return texbake_job_ && !texbake_job_->done.load(); }

@@ -23,6 +23,9 @@ FIXED_IN = {"sketch_select.cpp": ("Alt+Backspace", "Ctrl+D", "Ctrl+T"),
 SKIP_FILES = {"keymap.cpp", "lessons.cpp"}  # the keymap defines them; the lessons teach them in prose
 OTHER_TOOLS = re.compile(r"(?:\b|\\n)(?:Blender|Unity|Unreal|Maya|3ds Max|SketchUp|ProBuilder|UModeler|Substance|ZBrush|Photoshop|Krita|Procreate|Lightroom)\b")  # (after an escaped newline too)
 FIXED = re.compile(r"\(Esc\)|\bAlt\+F4\b|Shift\+X/Y/Z|Shift\+arrows|hold V\b|Ctrl\+Shift to drop|Ctrl with any brush|Ctrl snap|\bEsc: |Arrows / A D")  # (the same in every preset, or a modal's own letters: not labels the keymap owns)
+# A whole line of comment: `//`, a `/*` block's opening that does not close on the line, or a block's continuation (`*`
+# then a space, a `/` or the line's end). Not `*why = "...";` - a pointer written to is code, and its text may be shown.
+COMMENT_LINE = re.compile(r"\s*(?://|/\*(?!.*\*/)|\*(?:\s|/|$))")
 GESTURE = re.compile(r"\b(?:Ctrl|Shift|Alt|Cmd)\+(?:LMB|MMB|RMB|click|drag|wheel|tap|hold|corner|edge|Shift while|Alt while)|\bwhile dragging\b|\+click\b|\+drag\b|\+wheel\b", re.I)
 
 
@@ -34,6 +37,7 @@ def main():
         with open(os.path.join(SRC, name), encoding="utf-8", errors="replace") as f:
             for n, line in enumerate(f, 1):
                 if "shortcut_text(" in line or "Log::" in line or "help(" in line: continue  # (keymap-driven, log lines and help prose are not labels)
+                if COMMENT_LINE.match(line): continue  # (round 559: a comment quoting a test's name is not a label anyone sees)
                 if "key(" in line or "op_keys(" in line or "brush_keys(" in line: continue  # (tasks 0254, 0261: the chord comes from the keymap on this line)
                 for m in SHORTCUT.finditer(line):
                     lit = m.group(1)

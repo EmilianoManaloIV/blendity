@@ -8,6 +8,7 @@
 #include "../texture/surface.h"
 #include "../scene/stroke_object.h"
 #include "../scene/blockout_piece_stack.h"  // (round 514: a Blockout piece's modifiers)
+#include "../scene/pointcloud_object.h"     // (round 530: a point cloud's icon)
 
 #include "../core/core.h"
 #include <cstring>
@@ -30,6 +31,7 @@ static Icon object_icon(const GameObject &g) {
   if (g.get<Blockout>()) return Icon::Cube;  // (round 477: the result's mesh - its pieces below show the Subtract below)
   if (const BlockoutPiece *bp = g.get<BlockoutPiece>()) return bp->operation == 1 ? Icon::Close : Icon::Plus;
   if (g.get<MeshFilter>()) return Icon::Cube;
+  if (g.get<PointCloudObject>()) return Icon::Vertex;  // (round 530)
   return Icon::Empty;
 }
 
@@ -57,7 +59,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty")) create_object("Empty", child);
     u.submenu("3D Object", u.px(170), [this, child] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Quad Sphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
     u.submenu("Blockout", u.px(190), [this, child] { blockout_menu_items(child); });  // (round 477)
@@ -78,6 +80,11 @@ void Editor::draw_hierarchy(const Recti &r) {
         if (ui_.menu_item(k)) create_object(std::string("Curve: ") + k, child);
     });
     if (u.menu_item("Lattice")) create_object("Lattice", child);
+    u.submenu("Point Cloud", u.px(170), [this, child] {  // (round 530)
+      if (ui_.menu_item("Points", nullptr, false, true, Icon::Vertex)) create_object("Point Cloud", child);
+      if (ui_.menu_item("Gaussian Splats", nullptr, false, true, Icon::Vertex)) create_object("Gaussian Splats", child);
+      if (ui_.menu_item("Test Splats", nullptr, false, true, Icon::Vertex)) create_object("Test Splats", child);
+    });
     if (u.menu_item("Armature")) create_object("Armature", child);
   };
   u.popup(create_menu, u.px(200), [create_body] { create_body(false); });
@@ -570,6 +577,31 @@ struct InspectorReflector : Reflector {
     const Recti own = lay.row();
     return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
   }
+  /* Round 559: where an enumeration's dropdown goes, so its longest word shows whole - as vec3_rect places three numbers:
+   * in the field column when it holds it; else starting right after the label's word; only when even that is too narrow
+   * on a row of its own under the label, at the full width ("Gaussian Splats" at 1024 x 1.5). A row of its own moves every
+   * control under it, so it is the last resort (Linux's wider font sent a narrow Inspector's Style, Opening and Falloff
+   * each to a row, and the fields under them off the window). Sized by the longest word, not the chosen one, so picking
+   * another does not move the rows under it. */
+  Recti enum_rect(const Recti &row, const char *label, const char *const *opts, int count) {
+    int widest = 0;
+    for (int i = 0; i < count; i++)
+      if (ui::Context::combo_choosable(opts[i])) widest = std::max(widest, u.font.text_width(opts[i]));  // (headings and separators never show)
+    const Recti f = field_rect(row);
+    const int need = widest + f.h + u.px(5);  // (the combo's text room is its width less its arrow column and margin)
+    if (f.w >= need) return f;
+    const int after_word = u.px(4) + u.font.text_width(label) + u.px(8);
+    const Recti beside{row.x + after_word, row.y, row.w - after_word - u.px(6), row.h};
+    if (beside.x <= f.x && beside.w >= need) return beside;
+    const Recti own = lay.row();
+    return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
+  }
+  /* The label's rect beside a dropdown placed by enum_rect: it ends where the dropdown begins (its right-click menu too). */
+  Recti enum_label_rect(const Recti &row, const Recti &f) {
+    Recti lr = label_rect(row);
+    if (f.y == row.y) lr.w = std::max(0, std::min(lr.w, f.x - lr.x - u.px(4)));
+    return lr;
+  }
   FieldEdit &record(FieldEdit::Kind k, const char *n) {
     edits.emplace_back();
     edits.back().kind = k;
@@ -607,7 +639,8 @@ struct InspectorReflector : Reflector {
     const std::string prop = anim_prefix + n;
     const int state = keyable ? ed.anim_property_state(anim_obj, prop) : 0;
     if (state) draw_key_marker(label, state == 2);
-    if (keyable && u.hovered(label) && u.in.key_pressed[platform::KEY_I] && u.in.mods == 0 && !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
+    if (keyable && u.hovered(label) && u.in.chord(platform::KEY_I, 0) &&  // (round 548: I's own chord)
+         !u.any_editing()) {  // (Shift+I, Ctrl+I stay the keymap's)
       u.in.key_pressed[platform::KEY_I] = false;
       ed.anim_key_property(anim_obj, prop, axes);
     }
@@ -738,15 +771,24 @@ struct InspectorReflector : Reflector {
   void field(const char *n, bool &v) override {
     if (skip()) return;
     Recti row = lay.row();
-    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = field_rect(row);  // (task 0251: found by label, as the int field is)
-    u.label(label_rect(row), n);
-    if (u.checkbox(field_rect(row), v) || field_menu(n, label_rect(row), defaults ? &defaults->b : nullptr, v)) {
+    /* Round 559: a box is small, so a name longer than the label column ("Front Faces Only" at 1024 x 1.5) takes the
+     * room it needs and the box moves after it, rather than the name ending in "...". */
+    Recti fr = field_rect(row), lr = label_rect(row);
+    const int need = u.font.text_width(n) + u.px(8);
+    const int keep = std::min(row.h, u.font.line_height()) + u.px(2);  // (the box checkbox draws, and a little room around it)
+    if (need > lr.w && fr.w > keep) {
+      const int shift = std::min(need - lr.w, fr.w - keep);
+      lr.w += shift, fr.x += shift, fr.w -= shift;
+    }
+    if (u.record_buttons) u.button_rects["field:" + record_prefix + n] = fr;  // (task 0251: found by label, as the int field is)
+    u.label(lr, n);
+    if (u.checkbox(fr, v) || field_menu(n, lr, defaults ? &defaults->b : nullptr, v)) {
       record(FieldEdit::Bool, n).b_new = v;
       changed = true;
     }
-    if (mixed && mixed->count(n) && !u.hovered(field_rect(row))) {  // the box as checkbox draws it, with a dash instead of a tick
+    if (mixed && mixed->count(n) && !u.hovered(fr)) {  // the box as checkbox draws it, with a dash instead of a tick
       const int sz = std::min(row.h, u.font.line_height()) - u.px(1);
-      const Recti box{field_rect(row).x, row.y + (row.h - sz) / 2, sz, sz};
+      const Recti box{fr.x, row.y + (row.h - sz) / 2, sz, sz};
       u.frame(box, u.theme.field, u.theme.field_border, u.px(2));
       u.label(box, "-", u.theme.text_dim, ui::Align::Center);
     }
@@ -864,15 +906,17 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     if (dim) {  // (a field with no effect now: its value shown, not editable; the help says why)
-      u.label(label_rect(row), n, u.theme.text_dim);
-      const Recti f = field_rect(row);
+      const Recti f = enum_rect(row, n, opts, count);  // (round 559: placed as the editable one is, so greying it moves nothing)
+      u.label(enum_label_rect(row, f), n, u.theme.text_dim);
       u.frame(f, u.theme.field, u.theme.field_border, u.px(2));
       u.label({f.x + u.px(5), f.y, f.w - u.px(8), f.h}, opts[std::max(0, std::min(count - 1, v))], u.theme.text_dim);
       if (u.record_buttons) u.button_rects["greyed:" + record_prefix + n] = f;
       return;
     }
-    u.label(label_rect(row), n);
-    if (u.combo(fid(n), field_rect(row), v, opts, count) || field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
+    const Recti f = enum_rect(row, n, opts, count);
+    const Recti lr = enum_label_rect(row, f);
+    u.label(lr, n);
+    if (u.combo(fid(n), f, v, opts, count) || field_menu(n, lr, defaults ? &defaults->i : nullptr, v)) {
       record(FieldEdit::Enum, n).i_new = v;
       if (material && std::strcmp(n, "Toon Style") == 0) apply_toon_style(*material, v);  // (task 0148: the preset's fields, picked again too)
       changed = true;
@@ -1558,6 +1602,38 @@ bool Editor::inspector_any_open(GameObject *g) const {
   return mods == foldouts_.end() ? false : mods->second;
 }
 
+/* Round 546 (ADR 0150): what a door's or window's modifiers do, under its Modifiers section - its Array and Mirror repeat the whole
+ * opening, the rest reshape its hole; Width, Head and Sill stay one opening's size; repeats run after the others whatever their order;
+ * and why its copies were refused, when they were. */
+/* `adjust`: Adjust Last Operation's shortcut as the keymap has it (F9; Ctrl+F9 in Maya's preset), empty when unbound. */
+static void draw_opening_modifier_rows(ui::Context &u, ui::Layout &lay, const GameObject &g, const std::string &adjust) {
+  auto row = [&](const std::string &text, bool warn, const std::string &tip) {
+    Recti nr = lay.row();
+    u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, text, warn ? u.theme.warning : u.theme.text_dim);
+    u.tooltip(tip);
+  };
+  std::string why;
+  const size_t copies = blockout_opening_placements(g, &why).size();
+  bool repeats = false, repeat_above = false;
+  for (const auto &c : g.components) {
+    if (!c->is_modifier() || !c->enabled) continue;
+    if (blockout_opening_repeat(*c)) repeats = true;
+    else if (repeats && blockout_piece_modifier_refusal(c->type_name()).empty()) repeat_above = true;  // (a reshaping modifier below a repeat: it still runs first)
+  }
+
+  row(copies > 1 ? strprintf("Array and Mirror repeat the whole opening: %zu copies. The others reshape its hole.", copies)
+                 : std::string("Array and Mirror repeat the whole opening; the others reshape its hole."),
+      false,
+      "Each copy is the whole door or window - its hole, frame, glass, sill board and a door's leaf - placed in the opening's own axes "
+      "(an Array steps along them in multiples of its size, a Mirror mirrors across its middle). Bevel and the others reshape the hole only; "
+      "the frame, glass and leaf take modifiers of their own.");
+  row("Width, Head and Sill are one opening's size, before its modifiers.", false,
+      adjust.empty() ? std::string("Its handles set the first opening's size; the copies follow it.")
+                     : "Its handles and " + adjust + " set the first opening's size; the copies follow it.");
+  if (repeat_above) row("Array and Mirror run after the others, whatever their order here.", true, "The hole is reshaped first, then repeated.");
+  if (!why.empty()) row("Its copies: " + why + ".", true, "The Blockout's status says the same.");
+}
+
 void Editor::inspector_fold_all(GameObject *g, bool open) {
   if (!g) return;
   for (size_t ci = 0; ci < g->components.size(); ci++) {
@@ -2007,9 +2083,46 @@ void Editor::draw_inspector(const Recti &r) {
           Recti wrow = lay.row(u.row_h() + u.px(2));
           const size_t ng = mf->mesh->vertex_groups.size();
           const std::string label = ng ? strprintf("Vertex Groups (%zu), Weight Paint: Rigging...", ng) : std::string("Vertex Groups, Weight Paint: Rigging...");
-          if (u.button({wrow.x + u.px(4), wrow.y, wrow.w - u.px(8), wrow.h}, label, weight_paint_ && wp_obj_ == g->id, Icon::Vertex))
-            dock_open(WindowKind::Rigging);
+          /* Task 0525: Vertex Paint shares the row when both buttons' words fit it (round 559: else it takes the next row). */
+          /* Round 559: each button is as wide as its words (and icon) need; when the two don't fit one row (1024 x 1.5) the
+           * Vertex Paint toggle takes a row under the Rigging one, instead of both ending in "...". */
+          const int icon_room = wrow.h - u.px(6) + u.px(4) + u.px(8);  // (a button's icon, its gap and its margins)
+          const int vpw = std::max(u.px(120), u.font.text_width("Exit Vertex Paint") + icon_room);
+          const int rig_need = u.font.text_width(label) + icon_room;
+          const bool one_row = wrow.w - vpw - u.px(12) >= rig_need;
+          const int rigw = one_row ? wrow.w - vpw - u.px(12) : wrow.w - u.px(8);
+          /* Even a row to itself can be too narrow for the words (a 180 px Inspector at x1.5): the button then grows by the lines
+           * the words wrap to, and the words are drawn over it, centered. */
+          const std::vector<std::pair<size_t, size_t>> lines = u.wrap_lines(label, rigw - u.px(8));
+          const bool wrapped = !one_row && lines.size() > 1 && u.font.text_width(label) + icon_room > rigw;
+          const int lh = u.font.line_height();
+          Recti rig_r{wrow.x + u.px(4), wrow.y, rigw, wrow.h};
+          if (wrapped) {
+            rig_r.h += ((int)lines.size() - 1) * lh;
+            lay.space(((int)lines.size() - 1) * lh);
+          }
+          const bool rig_hit = u.button(rig_r, wrapped ? std::string() : label, weight_paint_ && wp_obj_ == g->id, wrapped ? Icon::None : Icon::Vertex);
+          if (wrapped) {
+            /* The button drew no words (they are drawn wrapped below), so its record is put back under its own name: the sweep
+             * and the tests read the label, and an unnamed "" entry would be left in button_rects. */
+            if (u.record_buttons) {
+              u.button_rects.erase(std::string());
+              u.button_rects[label] = rig_r;
+              if (!u.controls.empty() && u.controls.back().label.empty()) u.controls.back().label = label;
+            }
+            for (size_t i = 0; i < lines.size(); i++) {
+              std::string line = label.substr(lines[i].first, lines[i].second - lines[i].first);
+              while (!line.empty() && line.back() == ' ') line.pop_back();  // (the break's space, which would tip the centering)
+              u.label({rig_r.x + u.px(4), rig_r.y + u.px(3) + (int)i * lh, rig_r.w - u.px(8), lh}, line, u.theme.text_bright, ui::Align::Center);
+            }
+          }
+          if (rig_hit) dock_open(WindowKind::Rigging);
           u.tooltip("Opens the Rigging window: skeletons, skins, vertex groups, Weight Paint and IK (Window > Rigging).");
+          if (one_row) draw_vertex_paint_controls(g, mf, lay, {wrow.x + wrow.w - vpw - u.px(4), wrow.y, vpw, wrow.h});
+          else {
+            const Recti vrow = lay.row(u.row_h() + u.px(2));
+            draw_vertex_paint_controls(g, mf, lay, {vrow.x + u.px(4), vrow.y, vrow.w - u.px(8), vrow.h});
+          }
         }
         Recti row = lay.row(u.row_h() + u.px(2));
         const bool edit_hit = u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, with_key(edit_mode_ ? "Exit Edit Mode" : "Enter Edit Mode", "mode.edit_toggle"), edit_mode_, Icon::Vertex);
@@ -2080,7 +2193,8 @@ void Editor::draw_inspector(const Recti &r) {
       u.tooltip(mod_piece ? "Refused on a Blockout piece: Bake the Blockout to Mesh to keep the result as a mesh."
                 : on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
                             : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
-      if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
+      if (mod_piece && mod_piece->opening != 0) draw_opening_modifier_rows(u, lay, *g, shortcut_text("edit.adjust_last"));  // (round 546: a door's or window's own lines)
+      else if (mod_piece) {  // (round 514: what a piece's stack does, or why this piece takes none - on screen, not only in the console)
         const std::string why = blockout_piece_stack_refusal(*mod_piece);
         const bool live = mods.empty() || blockout_piece_stack_live(*g);  // (no modifiers yet: nothing to warn of)
         Recti nr = lay.row();
@@ -2088,7 +2202,7 @@ void Editor::draw_inspector(const Recti &r) {
                 !why.empty() ? "This piece takes no modifiers: " + why + "." : live ? std::string("Runs on this piece's own shape before it is added or cut.")
                                                                             : std::string("Its modifiers do nothing yet - the Blockout's status says why."),
                 why.empty() && live ? u.theme.text_dim : u.theme.warning);
-        u.tooltip(!why.empty() ? "Modifiers on a room, a door or window, a preset or an Intersect piece are not built yet: a stack put on one stays on it and does nothing."
+        u.tooltip(!why.empty() ? "Modifiers on a room, a preset or an Intersect piece are not built yet: a stack put on one stays on it and does nothing."
                   : live ? "The modifiers run on this piece's shape, in its own axes (a Mirror mirrors across its planes, an Array steps along them), and the piece then builds "
                            "as a mesh: slower and less exact than its numbers, and its Blend radius is not used - nor that of the pieces it touches. The other pieces keep "
                            "their numbers. Moving the piece does not run them again; changing a number or a modifier does."
@@ -3071,6 +3185,66 @@ void Editor::draw_export_options() {
 }
 
 
+/* Edit Mode's Dimensions (Blender's Transform panel, N): the selected vertices' size, X / Y / Z, in the world's axes or
+ * the object's. Typing one scales the selection about its median to that size (the redoable operator `dimensions`, so
+ * F9 re-runs it); dragging a field amends one operator instead of starting one a frame. */
+void Editor::draw_edit_dimensions(ui::Layout &lay) {
+  auto &u = ui_;
+  GameObject *g = edit_object();
+  MeshPtr *mp = edit_mesh_ptr();
+  if (!g || !mp || !*mp) return;
+  if (!u.in.down[0]) dims_drag_ = dims_refused_ = false;
+  const EditDims &d = edit_dimensions(*g, **mp);
+  const bool any = d.count > 0;
+  const Vec3 size = dims_local_ ? d.local_size : d.global_size;  // (a copy: the cache is rebuilt by the edit below)
+  u.push_id("dimensions");
+  Recti hr = lay.row(u.row_h() + u.px(2));
+  u.label({hr.x + u.px(4), hr.y, hr.w / 2 - u.px(8), hr.h}, "Dimensions", u.theme.accent);
+  static const char *kFrames[] = {"Global", "Local"};
+  int frame = dims_local_ ? 1 : 0;
+  if (u.combo(u.id("frame"), {hr.x + hr.w / 2, hr.y, hr.w / 2 - u.px(6), hr.h}, frame, kFrames, 2)) dims_local_ = frame == 1;
+  const std::string adjust = shortcut_text("edit.adjust_last");  // (F9; Ctrl+F9 in Maya's preset, whose F9 is Vertex mode)
+  u.tooltip(std::string("The size of the selected vertices. Global: along the world's axes, in world units. Local: along the object's own\n"
+                        "axes, in the object's units (Blender: the Transform panel's Global / Local switch). Type a size to scale the\n"
+                        "selection to it about its median, as S does; Adjust Last Operation") +
+            (adjust.empty() ? std::string() : " (" + adjust + ")") + " re-runs it.");
+  static const char *kAxes[] = {"X", "Y", "Z"};
+  for (int k = 0; k < 3; k++) {
+    Recti row = lay.row();
+    const int lw = row.w * 2 / 5;
+    u.label({row.x + u.px(4), row.y, lw - u.px(8), row.h}, kAxes[k]);
+    const Recti f{row.x + lw, row.y, row.w - lw - u.px(6), row.h};
+    if (u.record_buttons) u.button_rects[std::string("field:Dimensions ") + kAxes[k]] = f;
+    if (!any) {  // nothing selected: a greyed field with a dash, and nothing to change
+      u.frame(f, u.theme.field, u.theme.field_border, u.px(2));
+      u.label(f, "-", u.theme.text_dim, ui::Align::Center);
+      continue;
+    }
+    float v = size[k];
+    if (u.float_field(u.id(kAxes[k]), f, v, 0.01f, 0.0f, 1e30f)) apply_dimensions_edit(size, k, v);
+    u.tooltip(strprintf("The selection's size along %s. Typing a number scales it to that size (0 flattens it); a selection with\n"
+                        "no size along this axis (a flat face, one vertex) can't be scaled along it.", kAxes[k]));
+  }
+  u.pop_id();
+}
+
+/* One Dimensions field changed to `v`: the other two axes keep the size they have. */
+void Editor::apply_dimensions_edit(Vec3 size, int axis, float v) {
+  if (dims_refused_ && ui_.in.down[0]) return;  // (a drag of a field that was refused: said once, not every frame)
+  const int orientation = dims_local_ ? 1 : 0;
+  const bool amend = dims_drag_ && ui_.in.down[0] && last_op_valid() && last_op_.op == "dimensions" && last_op_.orientation == orientation;
+  if (amend) {
+    last_op_.size[axis] = v;
+    last_op_.dims_keep &= ~(1u << axis);
+    run_last_op(false);
+    return;
+  }
+  size[axis] = v;
+  edit_dimensions_op(size, 7u & ~(1u << axis), orientation);
+  dims_drag_ = ui_.in.down[0] && last_op_valid() && last_op_.op == "dimensions";
+  dims_refused_ = ui_.in.down[0] && !dims_drag_;
+}
+
 /* Edit Mode's tools: selection mode, n-gon / knife / drawing, the mode's settings and
  * operators. Shared by the Inspector and the Modeling Tools window. */
 void Editor::draw_edit_tools(ui::Layout &lay) {
@@ -3208,6 +3382,7 @@ void Editor::draw_edit_tools(ui::Layout &lay) {
                   "of the Scene view) after a tool runs, and in the drag helper while Bevel, Inset, Array, Grid, Pipe, Taper\n"
                   "or Recess is dragged. Changing them re-runs the tool, and they are kept for its next use.");
       }
+      draw_edit_dimensions(lay);
       {
         /* The tools in groups, Select first (one place for every way of selecting); each
          * group shows what this selection mode can use. Mark / Clear and similar pairs
@@ -3641,6 +3816,18 @@ void Editor::draw_performance_settings(ui::Layout *lay) {
             "it shows the window too; the little it doesn't draw yet (realtime GI's per-pixel light, a retro filter's snapped vertices,\n"
             "a live procedural seen very close) draws on the CPU, as before. With no GPU everything draws on the CPU. " + key("render.image") + " renders stay on the CPU.");
   text("Now: " + gpu_view_status(), u.theme.text_dim);
+  /* Round 543 (task 0523): shadows traced on the card, as Blender 5.3's Workbench - greyed out where the card can't. */
+  if (rt_shadows_available()) {
+    bool on = rt_shadows_;
+    if (u.toggle_row(row(u.row_h()), "Ray-Traced Shadows", on)) set_rt_shadows(on);
+    u.tooltip("On: the views drawn on the graphics card trace each pixel's shadows with its ray tracing (Vulkan ray queries) in place\n"
+              "of the sun's shadow map - exact at any distance, and every light with Shadows on casts them (the map has the sun\n"
+              "alone). Hard-edged; see-through surfaces keep the map. Off (the default): the shadow map.");
+  } else {
+    text(std::string("Ray-Traced Shadows: ") + (rt_shadows_ ? "on, " : "off, ") + "not available here", u.theme.text_dim);
+    u.tooltip(gpu_view_ ? "This graphics card has no ray tracing (Vulkan ray queries): the views use the shadow map."
+                        : "The views draw on the CPU: ray-traced shadows need a graphics card with ray tracing (Vulkan ray queries).");
+  }
   /* Task 0199: each window - its views' device and who shows it. */
   /* (While a secondary window draws, its state is the members' and its entry holds the main window's, swapped.) */
   auto label = [&](int id) { return id == 0 ? std::string("Main window: ") : strprintf("Window %d: ", id); };
@@ -3962,6 +4149,37 @@ bool Editor::draw_reflected(const std::function<void(Reflector &)> &fields, ui::
   return ir.changed;
 }
 
+/* The automasking options (task 0519, Blender 5.3; shared by Weight and Vertex Paint since task 0525): they hold parts
+ * of the mesh back from the brush, and multiply. */
+static void reflect_automask(Reflector &br, PaintAutomaskFields &a) {
+  if (br.group("Automasking", false)) {
+    br.field("Topology", a.am_topology);
+    br.help("Only the connected piece the stroke starts on.");
+    br.field("Mesh Boundary", a.am_boundary);
+    br.help("Keeps the brush off the mesh's open edges, fading in over Propagation Steps edges.");
+    if (a.am_boundary) br.field("Propagation Steps", a.am_boundary_steps, 1, 20);
+    br.enumeration("Cavity", a.am_cavity, kWeightCavityModes, 3);
+    br.help("Cavity paints the hollows more than the ridges; Inverted the ridges more than the hollows.");
+    if (a.am_cavity != 0) {
+      br.field("Cavity Factor", a.am_cavity_factor, 0.01f, 0.0f, 5.0f);
+      br.field("Cavity Blur", a.am_cavity_blur, 0, 25);
+    }
+    br.field("View Normal", a.am_view_normal);
+    br.help("Only the faces turned towards you, up to Limit degrees.");
+    if (a.am_view_normal) {
+      br.field("View Limit", a.am_view_limit, 1.0f, 0.0f, 180.0f);
+      br.field("View Falloff", a.am_view_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+    br.field("Area Normal", a.am_area_normal);
+    br.help("Only the faces turned the way the surface faced where the stroke began.");
+    if (a.am_area_normal) {
+      br.field("Area Limit", a.am_area_limit, 1.0f, 0.0f, 180.0f);
+      br.field("Area Falloff", a.am_area_falloff, 0.01f, 0.0001f, 1.0f);
+    }
+  }
+  br.group_end();
+}
+
 /* Weight Paint's toggle and, while painting `g`, the brush (task 0046; in the Rigging window since task 0052). */
 void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay) {
   auto &u = ui_;
@@ -3974,13 +4192,18 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (!painting) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", wp_brush_.mode, kWeightBrushModes, 4);
-  br.help("Add raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Draw moves towards Weight, Blur evens out with the neighbours.");
+  brush_banks_sync();  // (round 540: the Radius and Strength below are this brush's)
+  br.help("Add Weight raises (Ctrl, or the pen's eraser end, lowers instead), Subtract lowers, Set Weight moves towards Weight (Ctrl: towards 1 - Weight), Blur evens out with the neighbours.");
   br.field("Radius", wp_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", wp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", wp_bank_.unified_size);
+  br.field("Unified Strength", wp_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
   br.field("Weight", wp_brush_.weight, 0.01f, 0.0f, 1.0f);
   br.enumeration("Falloff", wp_brush_.falloff, kWeightFalloffs, 6);
   br.field("Mirror X", wp_brush_.mirror_x);
   br.field("Front Faces Only", wp_brush_.front_only);
+  reflect_automask(br, wp_brush_);
   br.field("Clean Below", wp_clean_below_, 0.005f, 0.0f, 1.0f);  // (task 0287: Clean's threshold)
   const int hw = (lay.area.w - u.px(16)) / 2;
   Recti brow = lay.row(u.row_h() + u.px(2));
@@ -3990,6 +4213,62 @@ void Editor::draw_weight_paint_controls(GameObject *g, MeshFilter *mf, ui::Layou
   if (u.record_buttons) u.button_rects["wp:Clean"] = cb;
   if (u.button(cb, "Clean")) weight_paint_command({"wpclean", strprintf("%g", wp_clean_below_)});
   u.tooltip(strprintf("Weights at or under %g (Clean Below) become 0 (Blender: Clean).", wp_clean_below_));
+}
+
+/* Vertex Paint's toggle and, while painting `g`, the layer and the brush (task 0525, ADR 0152; in the Inspector's
+ * MeshFilter, under the Rigging row). */
+void Editor::draw_vertex_paint_controls(GameObject *g, MeshFilter *mf, ui::Layout &lay, Recti toggle) {
+  auto &u = ui_;
+  if (!g || !mf || !mf->mesh) return;
+  const bool painting = vertex_paint_ && vp_obj_ == g->id;
+  if (u.record_buttons) u.button_rects["vp:Toggle"] = toggle;
+  if (u.button(toggle, painting ? "Exit Vertex Paint" : "Vertex Paint", painting, Icon::Vertex)) set_vertex_paint(!painting);
+  u.tooltip("Paint the mesh's color attribute with a brush (Blender: Vertex Paint mode). Games read it as the vertex colors.");
+  if (!colors_dropped_note_.empty() && colors_dropped_obj_ == g->id) {  // (ADR 0152: paint is never lost silently)
+    Recti note = lay.row(u.row_h() + u.px(2));
+    const int okw = u.px(40);
+    u.label({note.x + u.px(4), note.y, note.w - okw - u.px(12), note.h}, "A color layer was dropped by the last edit (Undo brings it back)", u.theme.warning);
+    u.tooltip(colors_dropped_note_);
+    if (u.record_buttons) u.button_rects["vp:DroppedOK"] = {note.x + note.w - okw - u.px(4), note.y, okw, note.h};
+    if (u.button({note.x + note.w - okw - u.px(4), note.y, okw, note.h}, "OK")) colors_dropped_note_.clear();
+  }
+  if (!painting) return;
+  const Mesh &m = *mf->mesh;
+  std::vector<const char *> names;
+  for (const ColorAttribute &c : m.color_attributes) names.push_back(c.name.c_str());
+  InspectorReflector br(*this, u, lay);
+  if (!names.empty()) {
+    int active = std::max(0, std::min(m.active_color, (int)names.size() - 1));
+    const int was = active;
+    br.enumeration("Layer", active, names.data(), (int)names.size());
+    const bool point = m.color_attributes[(size_t)was].domain == ColorAttribute::Domain::Point;
+    br.help(point ? "One color per vertex (Blender: Point)." : "One color per face corner, so a seam can change color (Blender: Face Corner).");
+    if (active != was) {
+      /* The name directly (it may hold spaces); the command copies the mesh, so `m` is not read after it. */
+      const std::string name = m.color_attributes[(size_t)active].name;
+      color_attribute_command({"colorattr", "active", name});
+      return;
+    }
+  }
+  br.enumeration("Brush", vp_brush_.tool, kVertexPaintTools, 4);
+  br.help("Draw paints the color (Ctrl: the inverse, or Add and Subtract swapped), Blur evens out with the neighbours, Average with the whole brush, Smear drags color along the stroke.");
+  if (vp_brush_.tool == 0) br.enumeration("Blend", vp_brush_.blend, kVertexPaintBlends, 6);
+  br.color("Color", vp_brush_.color);
+  br.field("Alpha", vp_brush_.alpha, 0.01f, 0.0f, 1.0f);
+  br.field("Radius", vp_brush_.radius, 1.0f, 1.0f, 500.0f);
+  br.field("Strength", vp_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.enumeration("Falloff", vp_brush_.falloff, kWeightFalloffs, 6);
+  br.field("Mirror X", vp_brush_.mirror_x);
+  br.field("Front Faces Only", vp_brush_.front_only);
+  reflect_automask(br, vp_brush_);
+  /* Round 559: two buttons side by side, or one under the other when a row cannot hold both words (1024 x 1.5). */
+  const std::vector<Recti> cells = u.button_cells(lay, {"New Point Layer", "New Corner Layer"}, u.row_h() + u.px(2), 2);
+  int k = 1;
+  while (m.find_color(strprintf("Color.%03d", k)) >= 0) k++;
+  if (u.button(cells[0], "New Point Layer")) command(strprintf("colorattr add Color.%03d point", k));
+  u.tooltip("A new white layer, one color per vertex.");
+  if (u.button(cells[1], "New Corner Layer")) command(strprintf("colorattr add Color.%03d corner", k));
+  u.tooltip("A new white layer, one color per face corner (sharp color changes across edges).");
 }
 
 }  // namespace bl
@@ -4510,6 +4789,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   if (paint_brush_.tip == 2) br.field("Bristles", paint_brush_.bristles, 1, 64);
   static const char *modes[] = {"Paint", "Smudge", "Blend"};
   br.enumeration("Mode", paint_brush_.mode, modes, 3);
+  brush_banks_sync();  // (round 540: Size, Opacity and the colour are this mode's)
   br.field("Wet", paint_brush_.wet, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Hue", paint_brush_.jitter_h, 0.01f, 0.0f, 1.0f);
   br.field("Jitter Saturation", paint_brush_.jitter_s, 0.01f, 0.0f, 1.0f);
@@ -4559,9 +4839,20 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Size", paint_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Hardness", paint_brush_.hardness, 0.01f, 0.0f, 1.0f);
   br.field("Opacity", paint_brush_.opacity, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", paint_bank_.unified_size);
+  br.field("Unified Opacity", paint_bank_.unified_strength);
+  br.field("Unified Color", paint_bank_.unified_color);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size, Opacity and the color are kept for each of Paint, Smudge and Blend; Unified shares one value between them.");
   br.field("Flow", paint_brush_.flow, 0.01f, 0.0f, 1.0f);
   br.field("Spacing", paint_brush_.spacing, 0.01f, 0.05f, 2.0f);
   br.help("Dabs this many radii apart along the stroke.");
+  br.field("Hardness Pressure", paint_brush_.hardness_pressure);
+  if (paint_brush_.hardness_pressure) br.curve("Hardness Curve", paint_brush_.hardness_curve);
+  br.field("Spacing Pressure", paint_brush_.spacing_pressure);
+  if (paint_brush_.spacing_pressure) br.curve("Spacing Curve", paint_brush_.spacing_curve);
+  br.help("A pen's pressure (through the Pressure Curve below) scales the hardness by Hardness Curve and the spacing by 1.5 minus Spacing Curve: "
+          "a firm press packs the dabs closer.");
   br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
   static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
   br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
@@ -4656,11 +4947,16 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   if (!sculpt_) return;
   InspectorReflector br(*this, u, lay);
   br.enumeration("Brush", sculpt_brush_.kind, kSculptBrushes, 11);
+  brush_banks_sync();  // (round 540: the Size and Strength below are this brush's)
   br.help("Draw raises along the normal (Alt carves), Smooth evens the surface, Grab pulls what is under the first dab with the drag; Clay Buildup lays flat layers, Inflate swells along each vertex's normal, "
           "Flatten and Scrape bring the area to its plane, Pinch and Crease draw it to the centre (Crease cuts in), Snake Hook pulls a strand along the drag; "
           "Mask paints a mask no brush gets through (Ctrl with any brush does the same; Ctrl+Alt takes it away).");
   br.field("Size", sculpt_brush_.radius, 1.0f, 1.0f, 500.0f);
   br.field("Strength", sculpt_brush_.strength, 0.01f, 0.0f, 1.0f);
+  br.field("Unified Size", sculpt_bank_.unified_size);
+  br.field("Unified Strength", sculpt_bank_.unified_strength);
+  brush_banks_sync();  // (a switch just ticked takes effect in this frame)
+  br.help("Size and Strength are kept for each brush; Unified shares one value between all of Sculpt's brushes.");
   br.enumeration("Falloff", sculpt_brush_.falloff, kWeightFalloffs, 6);
   br.field("Carve", sculpt_brush_.carve);
   br.field("Front Faces Only", sculpt_brush_.front_only);

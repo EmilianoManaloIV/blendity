@@ -99,7 +99,14 @@ int main(int argc, char **argv) {
    * 0080); `--probe` is that check, answered by the full build. */
   if (const int code = launch::hand_over(argc, argv); code >= 0) return code;
   for (int i = 1; i < argc; i++)
-    if (std::strcmp(argv[i], "--headless-screenshot") == 0) return headless(argc, argv);
+    if (std::strcmp(argv[i], "--headless-screenshot") == 0) {
+      const int code = headless(argc, argv);
+      if (gpu::renderers_opening()) {  // (as below: a GPU or OptiX's kernel compile still inside the driver - round 558)
+        std::fflush(nullptr);
+        std::_Exit(code);
+      }
+      return code;
+    }
   /* Task 0211: --warm-shaders <dir> - the build compiles the GPU shaders into dist's shaders folder (build.bat app). */
   for (int i = 1; i + 1 < argc; i++) {
     if (std::strcmp(argv[i], "--warm-shaders") != 0) continue;

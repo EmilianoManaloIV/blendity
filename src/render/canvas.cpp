@@ -3,6 +3,7 @@
 
 #include "../core/core.h"
 #include "../core/jobs.h"
+#include "../image/icc_profile.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -1046,6 +1047,10 @@ std::string encode_png(const uint32_t *pixels, int width, int height, int stride
   ihdr += (char)0;
   ihdr += (char)0;
   chunk(png, "IHDR", ihdr);
+  /* Round 542 (task 0522, Blender 5.3): the sRGB ICC profile - its name, compression method 0, the zlib stream - before
+   * the pixels, as the PNG specification places iCCP. Compressed once. */
+  static const std::string iccp = std::string(kSrgbIccName) + '\0' + '\0' + png_deflate(srgb_icc_profile());
+  chunk(png, "iCCP", iccp);
   chunk(png, "IDAT", png_deflate(raw));
   chunk(png, "IEND", "");
   return png;
