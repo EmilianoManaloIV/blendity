@@ -3,7 +3,7 @@
 Every follow-up that was named and not taken, as of 2026-11-18 (the tree of PR #472 plus Pass 28's write-up).
 Each item gives what is wrong or missing, the evidence, the files, and what "done" would look like, so it can
 become a task spec (`docs/tasks/TEMPLATE.md`) with little more reading. Line numbers are those of this tree and
-will drift; the function names will not. Nothing here blocks 1.0.0; whether item 19 (a crash seen once on CI, not reproduced) holds it was the owner's call.
+will drift; the function names will not. Nothing here blocks 1.0.0; item 19 (programs built by MSVC 14.52 crash; CI and the release build with 14.44) was the one that could have held it.
 
 Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 
@@ -126,28 +126,35 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Done:** the `gpu` group is clean in the libraries build on a card, or each remaining difference has a
   justified tolerance written in the test.
 
-### 19. A crash seen once on CI in the dependency-free Windows test program (M; not reproduced)
-- **What happened:** GitHub Actions run 44354841677 (`windows-unit`, the dependency-free Windows build, on PR #472's
-  tree `36dd42af`): `blendity_tests.exe`, run as CI runs it - the whole suite in one process - ended with a
-  segmentation fault after 644 tests. The last test that finished was "a Paint layer (ADR 0081)"; the next is "smart
-  materials (ADR 0082): Worn Steel on a subdivided cube's baked maps ...", whose mesh-map bake (`bake_mesh_maps`) is
-  where it is suspected to have died. No `[FAIL]` line, no stack. The same job passed on #460 to #470.
-- **Not reproduced:** about 40 local runs by three sessions (round 565's 27, round 563 / 564's 12, the write-up's).
-  The write-up's: the dependency-free Windows build of the same commit ran its 25 groups one a process (100,021
-  checks, 0 failed), the tests naming ADR 008x five times, and the whole suite once in one process as CI does - that
-  run passed the crash point and was past 3,300 of its 3,801 tests with no failure when the release was published.
-- **Ruled out, by reading the changes between the passing and the crashing trees:** no `Editor` exists yet at that
-  test (rounds 563 / 564's session); that binary holds no graphics-card code (round 565's); round 572's depth writes
-  are not on the path, and nothing reached before test 645 differs between #468 and #472 (round 562 / 572's); every
-  branch Pass 26 added runs only for a skinned mesh. So it is taken for a rare fault older than Pass 28.
-- **Suspect:** the built-in job pool (`src/core/jobs.cpp`, the build without oneTBB): a `parallel_for` started from
-  inside a worker of another `parallel_for`, as `bake_mesh_maps` may do.
-- **Next step:** catch it under a debugger - `cdb -g -G -o dist\windows\blendity_tests.exe` on the dependency-free
-  exe, looping the modeling and render groups in one process, with `.dump /ma` at the fault (do not turn on Windows
-  Error Reporting's LocalDumps: that is a system setting); and read `jobs.cpp`'s built-in pool for what a nested
-  `parallel_for` from a worker does with the pool's shared state.
-- **Done:** the fault caught and explained, a test that forces the nesting, and the dependency-free Windows suite in
-  one process 200 times clean.
+### 19. Programs built by MSVC 14.52 crash in mesh code (M; CI pins 14.44 meanwhile)
+- **What happened:** GitHub Actions run 44354841677 (PR #472's tree `36dd42af`, the dependency-free Windows build) crashed
+  in two programs built by one `windows-build`: `blendity_tests.exe`, run as CI runs it - the whole suite in one process
+  - with a segmentation fault as test 645 ran ("smart materials (ADR 0082): Worn Steel on a subdivided cube's baked maps
+  ...", 36 ms after test 644 "a Paint layer (ADR 0081)" finished), and `blendity_stress.exe --quick` with exception
+  0xc0000005 in the section `modifiers_ngon`, right after its table of 26 meshes (its crash report: 12 frames on the main
+  thread, every one printed as `?` - no symbols).
+- **What differs is the compiler (round 579):** that build was the first on runner image `windows-2025-vs2026`
+  20261116.315.1, whose default toolset is MSVC 14.52.37025. Every green Windows build before it (#468 to #471) was on
+  image 20261103.298.1 with MSVC 14.51.36231 - the development machine's compiler too, so no local run could show it.
+- **Not reproduced with 14.51:** the same commit built here: that test alone 50 of 50 under CPU load, the suite's tests
+  1-650 in one process on four cores 27 of 27 (25 under load), and the other sessions' runs (about 40 more).
+- **Ruled out, by reading the changes between the passing and the crashing trees:** no `Editor` exists yet at that test
+  (rounds 563 / 564's session); that binary holds no graphics-card code (round 565's); round 572's depth writes are not
+  on either crash site's path, and nothing reached before test 645 differs between #468 and #472 (round 562 / 572's);
+  every branch Pass 26 added runs only for a skinned mesh. The built-in job pool was suspected before the compiler was
+  noticed; the stress crash is on the main thread in a section that runs no bake.
+- **What is in place:** `build.bat` prints its compiler in every build and takes `BLENDITY_VCVARS_VER`; CI's
+  `windows-build` and the release's Windows job pin `14.44`, the one toolset both runner images carry beside their
+  default (task 0561). So CI and the installer don't use 14.52 - the fault is still there for anyone who builds with it.
+- **Next step:** build with MSVC 14.52 (Visual Studio 2026 18.12 or newer, or a CI run with the pin taken off) and
+  `BLENDITY_PDB=1`, which keeps the symbols beside the programs: `blendity_stress.exe --quick --only modifiers_ngon` then
+  names its crash's frames, and `cdb -g -G -o dist\windows\blendity_tests.exe` with `BLENDITY_TEST_RANGE=1-650` catches
+  the other (`kb`, `.dump /ma` at the fault; don't turn on Windows Error Reporting's LocalDumps: that is a system
+  setting). Then decide which it is: the compiler's fault (a small repro for Microsoft, the pin stays), or undefined
+  behaviour of ours that 14.51 tolerated (fix it, take the pin off). `/fp:fast` and `/GL` are the first switches to try
+  without (`BLENDITY_NO_LTCG=1`).
+- **Done:** the fault explained and fixed or reported, the Windows suite and the stress sections green on a 14.52 build,
+  and the pin in `build.yml` / `release.yml` either taken off or kept with the reason written beside it.
 
 ## Product follow-ups
 
