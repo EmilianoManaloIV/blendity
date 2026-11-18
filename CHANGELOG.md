@@ -2,6 +2,1221 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-17 (round 561): The splat lesson walks through the renderers
+
+**Asked:** the hub, from M3's Learn walk. The "Point clouds and Gaussian splats" section stopped after making test
+splats.
+
+**Changed (task 0543)**
+- The Learn section now takes you through rounds 532-534:
+  - orbit the splats;
+  - put a Points cloud beside them;
+  - look through the Main Camera in the Game view;
+  - render with F12 on the CPU path tracer;
+  - switch the Device to GPU Compute to render on the graphics card.
+- Four new questions: Points against splats, why Points are missing from F12, why a splat lights the floor only in F12,
+  and why the card's picture and the CPU's differ slightly.
+
+**Checked:** the section's walk in a fresh editor: 6 Try-it steps, none warned, 6 questions. `splats` 387 checks, 0 failed, on Windows with Blender's libraries; console audit at the baseline.
+
+**Review:** both camera steps looked up from under the floor (a negative pitch); the card step used Device Auto, which mixes the CPU in, and is now GPU Compute; F12 leaves Points out, which the text now says.
+
+## 2026-11-17 (round 560): panels and dialogs taller than their room scroll; bigger tick boxes (task 0542)
+
+**Asked** (the hub, from M3's screenshot sweep at 1024 x 768, ui scale 1.5): an Adjust Last panel taller than the Scene view
+covered the view's toolbar and slid under the tab strip, and could not scroll; Preferences taller than the window scrolled
+by the wheel alone, with no scrollbar; the hci Tab-walk test had been cut short at the first row the dialog cut off; tick boxes were 12-13 px; the Rigging window's disabled "Add Spring Bones" lost its first letters.
+
+**Fixed**
+- **Adjust Last panels** (Edit Mode's F9 and Object Mode's) stay inside the Scene view: never above its top. When their
+  rows do not fit, the header stays and the rows scroll, by the wheel or a scrollbar (`adjust_panel_place`).
+- **A popup that scrolls draws a scrollbar** on its right, like the panels' scroll areas: the thumb drags, a press on the
+  track takes the thumb there, and the rows leave the bar its strip. Preferences on a small window shows there is more.
+- **The hci Tab walk is whole again.** Tab onto a stop the dialog cuts off already scrolled it into sight (the focus reveal,
+  round 509); round 543's Linux failure was the test comparing screen rectangles after the dialog had scrolled, and its
+  fix ended the list at the first cut-off stop. The test now reads stops in the dialog's content and walks every stop of
+  Preferences (111) at 1366 x 1000 and at 1024 x 768 x1.5, and pins that every focused stop is in sight.
+- **A scrollbar drag let go over a list's row only scrolls** (no row lights, opens or is picked while the bar is dragged).
+- **Tick boxes** are drawn at least 16 px (scaled) where their row allows, not the font's line less a pixel.
+- **A centred or right-aligned label wider than its room** is drawn from its left edge and ends in "...", as a button's
+  does; it lost its first letters (the Rigging window's disabled "Add Spring Bones").
+
+**Checked:** Windows, every group without the card on round 560 over #443 (105,695 checks, 0 failed), then on the merged
+Pass 27 top (#447): `hci` 1892, `editor` 3496, `modeling` 5653, `runner`, `splats_raster` all passing; `gpu` 1155 checks,
+1 failed - only the cold OptiX cache's "Camera Preview to Rendered" (round 558's), `splats_gpu` 3904, 0 failed. Linux:
+the whole suite (102,041 checks) failed only two Live Link timing tests while the machine was loaded - its group passes
+alone (365, 0 failed) - and `hci` (1890), `editor`, `runner` pass on the merged tree; round 509's Preferences Tab-wrap test
+failed once in a loaded group run (5 steps outside the dialog) and passed in three runs alone and in the group again. The
+Tab walk reaches all 111 (Windows) / 112 (Linux) Preferences stops at 1366 x 1000 and 1024 x 768 x1.5, none out of sight.
+
+## 2026-11-17 (round 559): Pass 27's UI wording - "color", and shortcuts read from the keymap
+
+**Asked:** the hub, from M3's HCI sweep over Pass 27 (verify-544). Two static audits rose against main: consistency
+0 -> 11 and labels 1 -> 4. Put them back, and run them in CI.
+
+**Fixed (task 0541)**
+- **"color":** the interface's text says "color" where Pass 27 wrote "colour". This covers the point cloud's tooltips and help,
+  Vertex Paint's tooltips and help, Paint's brush help and its "Unified Color" switch (was "Unified Colour"), and the material's
+  vertex-color help. The console still accepts `colour` as a word.
+- **Shortcuts from the keymap:** the Animation window's Key menu names the chords the keymap gives. Convert to Quaternion's tooltip
+  names `pose.rotation_convert`'s chord. Paste Pose's names Adjust Last's: F9 in most presets, Ctrl+F9 in Maya's, whose F9 is
+  Vertex mode (the old hard-coded "F9" was wrong there).
+- **Clipped labels (part 2):** at 1024 x 768 / x1.5 words were cut with "..." on Pass 27's panels. The layout gives way, not the
+  words:
+  - a dropdown whose longest word does not fit the field column starts right after its label's word, as three-number rows do;
+    only when even that is too narrow does it go on a row of its own under the label (the Inspector's enumerations: point cloud
+    Type "Gaussian Splats", camera Panorama Type "Equirectangular", Weight Paint's Brush "Add Weight" and Falloff "Smooth").
+    The first version went straight to a row of its own; with Linux's and macOS's wider fonts a narrow Inspector then stacked
+    a door's Style and Opening, the textures window's blend modes and the spring list's falloff each on a row, and the fields
+    under them ran off the window (#454's CI: the textures window, spring bones and door tests);
+  - a switch whose name is longer than the label column ("Front Faces Only", "Unified Strength") takes the room it needs and its
+    box moves after it;
+  - Vertex Paint's toggle ("Exit Vertex Paint") and the Rigging button ("Vertex Groups, Weight Paint: Rigging...") are sized to
+    their words and take a row each when one row cannot hold both; New Point / New Corner Layer wrap one under the other;
+  - the Animation window's physics tools (Center of Mass ... AutoPosing, Ragdoll, Apply) wrap button by button, so AutoPosing is
+    whole and Ragdoll no longer runs off the window.
+
+**Changed**
+- `tools/hci_label_audit.py` skips comment lines: a comment quoting a test's name is not a label anyone sees.
+- CI's `linux-unit` runs `hci_consistency_audit.py --check` and `hci_label_audit.py --check`, so a round that writes
+  "colour" in a tooltip or a chord by hand fails its own PR.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux);
+both audits at 0.
+
+## 2026-11-17 (round 558): OptiX's first render after an update no longer waits for its kernel compile
+
+**Asked:** the hub's assignment from round 544's timed window. The RTX 3060 Ti's first OptiX build of a splat scene
+took 29.9 s, the next one 0.32 s. Find the cold cost, then cache it, warm it off the main thread, or say so
+(the responsiveness rule).
+
+**Found (task 0540):** the 30 s is `optixModuleCreate` compiling the committed 3.7 MB PTX to the card's machine
+code. OptiX caches that on disk by PTX, options, card and driver, so it is paid once per card after every kernel
+change (round 534 changed it). The 4070 SUPER had compiled this PTX in round 534's tests; the 3060 Ti never had.
+- The editor's prewarm never compiled it: it lists CUDA's devices on a thread and opens renderers at once, and the
+  pool picks OptiX only once that listing is in, so at startup it opens GPU Compute.
+- So the first OptiX render of the session paid the compile: the UI didn't stall (the pool opens on a thread and
+  views trace on the CPU meanwhile), but F12 and bakes got no card samples for 20-30 s.
+
+**Changed**
+- `gpu::optix_prewarm()` compiles OptiX's kernel for every OptiX card on a background thread at below-normal
+  priority, once a run, which fills OptiX's cache. The editor's prewarm starts it when OptiX is the backend, and
+  choosing OptiX in Render Settings starts it at once.
+- An OptiX open during it waits for that card's compile, then finds the kernel in the cache (one compile, not
+  two). A compile over 2 s is said once in the log, with why.
+- `blendity_stress --only splats_gpu` measures OptiX's kernel compile per card, cold (cache off) and warm.
+- The tests and the stress run keep OptiX's cache in a folder of their own (`OPTIX_CACHE_PATH` under the temp folder,
+  unless set), never the user's, kept between runs. "GPU opening: turning the Camera Preview to Rendered" waits
+  while a card is still opening, instead of 20 s: a kernel's new SPIR-V compiles cold in the driver when the test's
+  pipeline cache is empty, past 20 s under load, and the process used to end mid-compile, so nothing was cached
+  and every run stayed cold (P1's find, round 545b2).
+- Quitting, or a headless run ending, while it compiles leaves at once (as with a GPU still opening): the statics
+  the thread reads are never freed.
+
+**Checked:** `--group splats_gpu` on Windows (RTX 4070 SUPER), 3917 checks, 0 failed, with OptiX's cache in a
+scratch folder: a cold kernel compile 62 s (a busy machine), the warm module 33-51 ms; an open during a cold compile
+waited for it and then loaded the module in 51 ms (one compile, not two); `set_backend(2)` returned in 0.1 ms. Linux
+`splats_gpu` and `render`; the full suite on CI.
+
+**Measured (the hub's timed window, `blendity_stress --only splats_gpu`, empty caches):** OptiX's kernel compile cold
+19.3 s (RTX 4070 SUPER) / 19.1 s (RTX 3060 Ti), warm 6.6 / 6.8 ms. The first OptiX splat build at 100k splats
+**148.5 ms** (4070 SUPER) and **132.7 ms** (3060 Ti), from 29.9 s.
+
+**A cold first-use cost the same table shows, already warmed in the editor:** the Vulkan devices' first 100k build is
+16.6 s (4070 SUPER ray queries), 16.9 s (4070 SUPER BVH walk), 13.3 s (3060 Ti BVH walk), the 1M builds after them
+0.29-0.37 s - the path tracer's pipeline compiling cold in the driver for new SPIR-V with no pipeline cache. The
+stress run opens its cards itself with empty caches, so it pays it. The editor does not: every frame it calls
+`gpu::prewarm` (once a run) as soon as the scene renders on a card - at startup, or the frame the GPU is picked -
+which compiles the kernel and opens a renderer per card off the UI thread (the pipeline cache written to disk, task
+0037), and a view traces on the CPU meanwhile. So no follow-up round: the write-up names it as the stress run's cold
+cost, which the editor hides.
+
+## 2026-11-17 (round 557): A million splats nearer the frame budget, and the card's first open from a cache
+
+**Asked:** from Pass 27's timed window (round 544): orbiting a 1M-splat cloud took 93.7 ms a frame on the card and
+108 ms on the CPU against ADR 0105's 50 ms, the card barely faster; and the card's views took 92.5 s to open the first
+time (162 ms the second). Find where the time goes, and fix it or name the cause.
+
+**Found**
+- The card was fed by the CPU: round 532 projected every splat on the CPU (EWA, SH and the view transform, 40 ms at 1M),
+  converted the result and sent 32 MB to the card every frame. The card only blended.
+- On the CPU, half of the projection's time was memory: a new 76 MB array, zeroed, every frame, then copied on one
+  thread. The compositing evaluated every splat behind a pixel that was already covered.
+- The 92.5 s first open was the card's graphics pipelines. The SPIR-V ships with the build, but the rasterizer made its
+  pipelines with no pipeline cache, so a new build (a new program to the driver, whose own cache then starts cold) built
+  every one from scratch. Not splats': every card view of a new build paid it. In the editor it already opens on a worker
+  (the views draw on the CPU meanwhile); headless runs open it in the frame.
+
+**Changed (task 0539)**
+- The card projects the splats itself. Each frame's clouds go to the card once (until one is edited, added or removed);
+  each frame sends only their back-to-front order (4 bytes a splat, still sorted on a worker for big clouds) and their
+  matrices, and the vertex shader does round 532's EWA projection, the SH colour (`gsplat_math.h`'s) and the view
+  transform. Clouds are drawn one after another, the farthest first (the CPU still merges them splat by splat).
+- The CPU keeps its projection buffers between frames and compacts them in parallel, and composites each tile front to
+  back, stopping at a pixel once less than 1/1024 of what is behind shows through (as the 3D Gaussian Splatting
+  reference does).
+- The rasterizer's pipelines go through a pipeline cache kept in the user's cache folder (as the path tracer's, task
+  0037): a new build's first open takes them as a second open does. A cache from another card or driver, or a damaged
+  file, is ignored.
+- The `splat_raster` stress section prints each orbit's parts (`splat stats`) and the card's open with an empty and a
+  written pipeline cache.
+- Tests and stress keep the cards' caches (the compiled kernels, both pipeline caches) in a folder of their own under
+  the system's temporary folder, never the user's `~/.blendity/cache` (557b: one folder per build, named by where the program runs from, so two
+  sessions' test runs never share it).
+
+**Review:** the card keeps a budget too: a cloud the camera is inside or right next to (most splats at the 1024 px cap:
+about a million screens of pixels) is drawn by the CPU that frame, within its budget, instead of risking the card's
+timeout; a set of clouds over the card's storage-buffer limit, or one whose upload failed, is drawn by the CPU with a
+reason instead of turning the GPU views off; a cache from another card is ignored (tested with a valid file of another
+device); the CPU's projection room goes back when the scene's clouds are gone.
+
+**Not done (named):** the pipelines are made one after another, not in parallel (with the cache, a new build's first
+open no longer pays for that; a machine's very first open still does - on a worker in the editor). The card's vertex
+shader evaluates a splat six times (once per corner) and converts its colour per pixel; a projecting compute pass (once a
+splat) is the next step if the timed rows show it. An edit that changes a cloud every frame (a slider drag) sends the
+whole cloud again every frame.
+
+**Round 557b (after P1's card run):** the test that the cards' caches stay out of the user's folder compares the
+folders as paths, not as text (a folder given with backslashes, or in another case, is the same folder). The round-508
+"Generate Lighting with the views on the card" failure P1 saw (4,586 / 4,800 pixels) did not come back on the card here:
+the test alone with the pipeline cache as it is, with none and with a fresh one, the whole `gpu` group (1,153 checks), and
+the round-557 exe before the merge - 0 pixels differ in each. Seen on P1's merged run under heavy CPU load (3 of 3), not reproduced here (alone, in the group, and under a lighter load on
+the pre-557 exe and on 557b, 0 pixels each); the likely cause is round 508's recorded starvation follow-up (HCI, round 555). The tests'
+card cache is now per build (the one folder every session's test run had shared).
+
+**Round 557b, M3's run:** the cache test no longer asks for the runner's own folder name - a run that sets
+BLENDITY_CACHE_DIR itself passes; it checks that the cache lands inside the folder in effect and never in the user's.
+
+**Checked:** on #443's head (27a16b4a) with the review's fixes: Windows with Blender's libraries, `splats_raster`, `splats`,
+`splats_trace`, `gpu` and `editor`, 9,197 checks, none failed; Linux (WSL, with the libraries) `splats_raster` and `editor`,
+3,585 checks, none failed; the full suite on CI. The card against the CPU on the small splat scene through Standard, Filmic and ACES:
+whole-picture means 0.27 / 255, a Points cloud 0.000. The timed rows (1M orbit, the card's open) wait for the hub's timed
+batch.
+
+## 2026-11-17 (round 556): A test run's preferences folder is its own; the rasterizer's span guarded; the contact-shadow edge measured
+
+**Asked:** round 553 left a follow-up - the card's contact shadow at 20 m looked darker and harder than the CPU's (task
+0538). The hub added two: a test run must not touch the user's preferences folder (raised while bisecting a card test that
+read 2.281 / 255 in some runs, 0.203 in others), and round 554's span must be guarded against taking pixels past a triangle.
+
+**Changed (task 0538)**
+- The test runner (`tests/test_main.cpp`) points `BLENDITY_PREFS_DIR` at the run's own folder (round 550's, #433) unless a
+  caller set one, and `set_env("BLENDITY_PREFS_DIR", "")` means that folder, as `""` already did for the project and the
+  trash. A headless editor reads no preferences, but it made the folder and put its livelink.json and brushes.txt there:
+  the user's `~/.blendity` on Windows with the variable unset, a relative folder on Linux once a test had emptied it. A new
+  `clear_env` removes a variable outright; round 540's brushes test uses it for its "no folder at all" case.
+  (The 2.281 is not isolated: the runs that read it had both the user's preferences folder and the shared test folder;
+  scratch versions of both read 0.203. Test editors don't read prefs.txt, so this round's change alone isn't shown to fix it.)
+
+**Found**
+- The card's shadow edge at 20 m is not harder than the CPU's: round 553's view was level, seeing the floor edge-on, so
+  the sphere's whole shadow was one or two rows and a pixel at their end (CPU 15, card 13) read as a harder edge. Looking
+  down 30 degrees, the shadow darkens 172 pixels on the CPU and 171 on the card (RTX 4070 SUPER), core 43 grey levels on
+  both; the pictures differ in 3 pixels - two lone floor pixels that flip either way when the ball starts casting and the
+  sun's shadow map is refitted, and one on the shadow's edge. No shadow code changes.
+- Known: when a caster appears, the sun's shadow map is refitted around it and a few lone floor texels change their depth
+  bias, so a pixel or two well outside the shadow flips lit / shadowed, either way, on both renderers. The test allows 4,
+  each alone.
+- Round 554's span: the new checks below pass with the review's wide margin as with the shipped 1e-4 one, so they don't show
+  what #448's sculpt strokes tripped on with the wide margin (one orthographic sphere; the strokes' perspective pick path
+  and rim pixels aren't covered). Noted in `raster_tile`.
+- Round 554's cost, measured on its own: about 0.1 ms on the Scene view's orbit, within the noise. The same tree (#455,
+  main merged) without and with round 554's raster.cpp (this round's speed-up in), the editor rows alternating twice on a
+  quiet machine: orbiting 6.99 / 6.99 ms before, 7.13 / 7.04 after (its 3D 5.09 / 5.10 against 5.15 / 5.17); moving an
+  object 14.58 / 14.40 against 14.39 / 14.40; idle the same. The hub's first rows (orbit ~0.4-0.5 ms, 6-7 %, slower, and
+  two card rows slower) compared a "before" exe that predated main's merge (c842763d, round 549's GI and ray changes) - not
+  round 554.
+
+**Changed (round 554's pixel test)**
+- `tri_covers` tests a pixel inside first, the three edges without a branch between them, and the row's span uses one double
+  reciprocal a triangle instead of a double division a row (its rounding, 1e-16 of the crossing, is far inside the 1e-4
+  pixel margin). Coverage unchanged: the rasterizer tests and the sculpt group pass on Windows and Linux.
+
+**Added (tests)**
+- A test editor's preferences path is in the run's own folder (the runner's default, and `""`), never the user's.
+- The CPU rasterizer: round 554's shape tests count pixels covered outside the triangles' union (none); a dense sphere (20 px,
+  48 x 24) covers no pixel off its disc, and within 0.8 of its radius every depth is the sphere's within its facets' sag
+  (worst 0.124 of 0.3; a plane carried past its edge would come in front, which a -0.02 bound catches).
+- Shadows at a distance (`tests_round556`, render): looking down 30 degrees at 20 m, a window fixed from the scene (the
+  sphere's centre carried along the sun's direction to the floor, +-1.5 m, projected through the Scene view's camera),
+  the sphere's own pixels left out: the darkening the sphere casts (casting against not casting) at least 100 pixels with a
+  core of 20, at most 4 lone pixels brightened, and on the card the same pixels as on the CPU, at most 4 differing (a shadow
+  a pixel off differs in ~20). Reviewed: counts alone and a region found in the picture were too weak or fooled by the
+  refit's lone pixels.
+
+**Checked:** Windows (libraries) render 40,361 / sculpt 466 / editor 3,506 checks; Linux (no libraries) render 40,275 /
+sculpt 446 / editor 3,480; 0 failed, with `BLENDITY_PREFS_DIR` unset. After round 554's speed-up and the shadow test's
+rework: the rasterizer tests (363 Windows, 336 Linux), the sculpt group (466 / 446) and "dynamic subdivision" run alone, 0
+failed. The card (RTX 4070 SUPER): the shadow test, 172 / 171 pixels darkened, core 43, 3 differing, twice; Linux CPU 172.
+Coverage map, command sweep and changelog checks clean. Round 554's cost: the clean A/B (above), the hub's timed window.
+
+## 2026-11-17 (round 555): card tests that failed only in a slow run wait for the card (task 0536)
+
+**Asked** (the hub): three `gpu` tests passed alone and failed in a full group run on three workers' trees - find what an
+earlier test leaves behind.
+
+**Fixed (tests)**
+- Nothing was left behind: on main the full group passes them, with other groups drawing on the card at once too. The
+  failing runs were slow (quick tests at 30 times their time): "gpu views: the editor's own lighting ... and a mirrored
+  object", round 508's "Generate Lighting with the views on the card" and "gpu views: ... a click picks what is there now"
+  took a picture or clicked after a fixed number of frames, while meshes still went up to the card a few a frame. A run at
+  low priority reproduced round 508's failure. They now wait for the card to catch up (`r555_card_settle`: no mesh waiting,
+  no texture streaming, the Scene and Game views the same two frames running, 20 s at most). The click test also clicked one pixel several times in
+  quick succession - a double click, which frames the selection: the camera flew to the moved Cube and the next click
+  rightly picked it. Its clicks are single clicks now (they wait the double-click time out); the pick itself was right.
+- **The runner:** `BLENDITY_TEST_RANGE=lo-hi` runs the tests numbered lo to hi in their order (each printed with its number)
+  and `BLENDITY_TEST_ALSO=text` adds the tests whose name holds it - a slice of a group, then the test that fails after it.
+
+**Checked:** the `gpu` group (a scratch test folder and preferences each run) at low priority (it failed round 508's test
+before) and at normal priority: 1050 checks, the three tests pass at both (the editor's own lighting: 0.210 / 255 apart,
+99.97 % within 3); the 4 failures are round 551's three card-against-CPU tests, as on main. `runner` on Windows and Linux,
+59 checks. Two findings from earlier low-priority runs, for their owners and not changed here: round 508's "no frame
+mixes the old and new lighting" failed once with the view settled (a possible ADR 0140 breach when starved), and round
+412's "F12 on a slow card ... twenty frames" failed once at low priority only. Neither failed in the final runs.
+The editor's own lighting's 2.27 / 255 in other workers' group runs came from tests reading the user's real preferences
+(no `BLENDITY_PREFS_DIR`; the hub found it); the settle now waits for the Game view too, which that test compares.
+
+## 2026-11-17 (round 554): The CPU rasterizer covers a shared edge exactly once, on every compiler
+
+**Asked:** round 538 found the Linux build (GCC) leaving a pixel on a quad's diagonal uncovered - the background showing
+through - where its diagonal ran exactly through pixel centres; the Windows build (MSVC) covered it (task 0535).
+
+**Fixed (task 0535)**
+- The CPU rasterizer took a pixel when its three edge functions were >= 0, the functions stepped along the row in float
+  from a span solved with a 1e-4 tolerance. On an edge through pixel centres the true value is 0 on both triangles, and
+  float stepping rounded it either way - on GCC both sides slightly outside. Now a pixel whose float values are within
+  their rounding band of an edge is decided exactly: the edge function from the triangle's own vertices in double (each
+  difference and product exact for a picture's coordinates, the one rounding can't change a sign), so the triangle on
+  the other side of a shared edge gets exactly the negation; a centre exactly on the edge goes to the side whose (A, B)
+  meets A > 0 or A == 0 and B > 0, which exactly one of the two meets. The solved span is one pixel wider each side so
+  such pixels reach the test. Pixels clearly inside or outside keep the float path. Both coverage loops: the view's
+  triangle pass and the see-through pass.
+- Round 538's six-wall test is back on the view axis (its quads' diagonals through pixel centres).
+
+**Checked:** new tests - a quad's two triangles at 5 angles x 4 sub-pixel offsets (20 squares; their diagonals and edges
+through pixel centres at 0 and 45 degrees) and a fan of 8 triangles about a pixel centre and about a pixel corner: no
+pixel missed, none covered twice (each triangle's pixels alone add up to their union's); after review, a quad split along a horizontal line through pixel centres with uneven ends, flat and tilted by 1e-5 pixel, and a see-through quad whose diagonal blends once. Windows (Blender's libraries): the round's tests 116 checks and the panoramic tests 37,681, 0 failed; Linux (dependency-free): render 40,272 checks, 0 failed - with round 538's walls back on the axis, where GCC left the crack. The editor raster rows (stress) are in the hub's timed batch.
+
+**Review (code-reviewer):** changes needed, all made - the row span solved in float now widened by each edge's rounding band in x (a nearly horizontal shared edge cracked where the float crossing was far from the true one), a horizontal edge's row skipped only when clearly outside (its two triangles' rounded row values both left it), the two products compared instead of subtracted (nothing for Apple clang to fuse), a band ~40x tighter (a rounding a setup step and a row step, twice over), the see-through band scaled to a sliver's rounding.
+
+**After #448's CI:** two sculpt tests failed ("Dyntopo: a loose vertex and a shape key ...", "sculpt mask gestures ...") and
+AddressSanitizer reported a stack-use-after-return. The sculpt ones: the review's span margin (the float band over |A|, tens
+of pixels for a nearly horizontal edge - and, it turned out, even a single pixel) made their strokes find no surface under the
+mouse, though every pixel there kept the sphere's id; why a wider margin matters there is not yet understood (round 556 looks
+at it). The span is now solved in double from the vertices (A, B and C), its crossing a hair from the true one, with the old
+1e-4 pixel margin - the review's horizontal and near-horizontal cases still pass. The ASan one was this round's test: a kept
+Renderer3D's RenderTarget was a local of the helper that drew into it, and project() read it afterwards. Windows: both sculpt
+tests, the round's 116 checks, the panoramic 37,681; Linux: render and sculpt 40,718 checks, 0 failed.
+
+## 2026-11-17 (round 553): Toon at a distance counts the sphere, not its shadow
+
+**Asked:** round 551 held "toon at a distance"'s card half to a 40th: the card's cel edge at 20 m looked narrower than
+the CPU's (9 antialiased pixels against 17). Make the card's edge the CPU's and put the 20th back (task 0534).
+
+**Found (task 0534)**
+- The card's edge was never narrower. The 20 m pictures, dumped from both renderers, show the sphere's cel edge in the
+  same places on both: 8 mid-tone pixels on the CPU, 6-7 on the card. The test's mask is every pixel that changes when the sphere moves away, and
+  that includes its shadow on the floor at the view's bottom: most of the CPU's 17 "between" pixels were its shadow's edge (the counts
+  don't simply add: the shadow's pixels also move the deciles the tones are cut at),
+  mid-grey on the CPU where the card's is dark. The 20th never held for the sphere on either renderer (8 of 243 on the
+  CPU, 7 of 242 on the card - a 30th); the CPU met it only through its shadow.
+
+**Changed**
+- The test counts the sphere's own pixels (the largest 4-connected part of the mask) and measures the edge against
+  the sphere's height in rows, not its area (an edge's length goes with the diameter; the sphere is 17 rows at 20 m): at least a fifth of the
+  rows (4; measured 6-8), and the card's edge within 3 pixels of the CPU's. No product change: a card-side change
+  tried first (the neighbour before where the next pixel is off the object) moved nothing and was reverted.
+- `BLENDITY_GPU_DIFF_DIR` also writes this test's 20 m pictures and masks.
+
+**Follow-up:** round 556 (task 0538), the card's contact-shadow edge on the floor at 20 m, darker and harder than the CPU's.
+
+**Checked:** on the card (RTX 4070 SUPER), on #442's head: toon at a distance passes on both renderers (the sphere 17 rows at 20 m, its edge 8 pixels on the CPU, 6 on the card); the `gpu` group 1,155 checks with only round 508's Generate Lighting failing (a slow-machine flake round 555 fixes; it passes alone). Linux (dependency-free): render and gpu, 40,285 checks, 0 failed.
+
+## 2026-11-16 (round 552): A reopened door kept its Leaf - the leaf sync tells scenes apart by serial, not address (task 0532)
+
+**Asked** (the hub, 2026-11-16): round 515's test "a scene with a styled door and no leaf objects ... opens with the leaf
+objects made" reddened unrelated PRs now and then (#425 windows-unit, #426 and #431 macos-unit); find the cause, a small
+PR on `main`, without loosening the check.
+
+**Fixed (task 0532)**
+- **The cause:** the leaf sync remembers, per door id, the leaves it saw at its last walk; one gone with its door still
+  there was deleted by hand, so the door's Leaf goes off (ADR 0136 decision 5). It told one scene from the next by the
+  `Scene` object's address, and an open after `newscene` can be handed back the closed scene's block - when, the
+  allocator decides (Windows' and macOS' heaps vary from run to run). Then the closed scene's leaf ids were kept, and
+  the reopened door (the same saved id) lacked a remembered leaf: Leaf off, no leaf. Ids start again in every scene, so
+  a user opening another scene could meet it too - a door of a repeated id lost its Leaf, or an object of the closed
+  leaf's id lost its leaf mark and the door made a second leaf.
+- **The fix:** the sync keys on `Scene::serial` (different for every scene made in the process; the render caches
+  already do). Exit Play puts back the clone made at Play's start (a new serial), so the ids start again there, as
+  before the change.
+- **Two more places told scenes apart by address** (the review found them; the hub asked for them here), now by serial
+  too: the Render view's texture stream - a batch the closed scene started landed for the scene opened where it had been
+  (its files counted, its failures published) - and the Blockout snaps' kept corners, which in the frames of a drag kept
+  the closed scene's corners for a scene opened at its address with as many objects.
+
+**Added:** tests that put another scene at the very address the editor's scene had - the same address on purpose - so
+each case runs on every run: the door's leaf (fails before the fix on Linux, at the CI's checks), the texture batch
+dropped, the snaps' corners collected again. Round 515's test is unchanged.
+
+**Checked:** the leaf test fails without the fix (Linux: Leaf off, no leaf - the CI's checks), and the stream test
+failed on a Linux build that still had the old stream check; all pass with the fixes. The round's groups, 0 failed on
+each: with Blender's libraries (Windows) blockout 30,107 checks, blockout_join 512, editor 3,231, physics 208;
+dependency-free Windows 22,857 / 511 / 3,205 / 190 and Linux 22,860 / 511 / 3,205 / 190. The coverage map is clean; no
+stress (no geometry changes).
+
+## 2026-11-17 (round 551): The card's pictures against the CPU's - the albedo plane in half floats, three tests measured
+
+**Asked:** three `gpu` tests failed on this machine's card (RTX 4070 SUPER) and never on CI, which has no card: the
+textured materials (grazing-angle mips, a normal map), the Scene view's overlays, and the probe-lit ball under
+Lanczos. For each: fix the card where it is wrong, or bound the test from a measurement with the reason written.
+
+**Fixed (task 0531)**
+- The card's g-buffer kept each pixel's albedo as 8-bit *linear* light (`R8G8B8A8_UNORM`): one step is 0.0039 of light,
+  a large share of a dark colour, where the CPU keeps the albedo in float. Diagnostic dumps showed the card the darker
+  side in about 8 of 9 differing channels. The plane is now `R16G16B16A16_SFLOAT`, as the normal, geometry and emission
+  planes beside it: within 0.05 % of the CPU's float over 0..1. (sRGB 8-bit, tried first, fixed the dark textures but is
+  coarser in the brights - a step of 0.0078 at 0.8 - and moved flat greys a level.) Measured on the card: the
+  grazing-angle plane 1.025 -> 0.133 / 255 (with the grid turned off for that test too, below: the format alone took it
+  to 0.380), the Lanczos ball 0.1005 -> 0.063 (its test passes with its bound unchanged), the camera filters 1.306 ->
+  1.398 (within their bound of 1.5). The card's pictures change slightly: textured and dark surfaces nearer the CPU's.
+  The albedo is no longer clamped to 0..1 on the card (8-bit storage did that silently): an over-bright base colour or
+  vertex colour now lights as the CPU lights it, which never clamped it.
+- Its cost: the albedo plane is 8 bytes a pixel instead of 4 - about 33 MB more at 4K for each view, written and read every frame. A
+  timed row (SideRail's Scene view frame, a 4K raster) is in the hub's batched window.
+
+**Changed (tests, each bound from a measurement, the reason in the test)**
+- Textured materials: compared with the grid off, as round 179's spheres are - the horizon's lines beside a sphere were
+  counted as its pixels (1,760 of the normal map's 3,296 pixels more than 3 apart). The normal map's sphere is held to
+  97.5 % within 3 (measured 97.98 %): most of the rest lie in one patch of its underside where the CPU's picture has a streaky
+  stipple the card's has not.
+- Overlays: the lines measured apart from the horizon. The grid lies on the floor and is depth-tested against it with a
+  1e-5 bias; at the floor's far edge, near the horizon, its depth changes more than that per pixel, so each line pixel
+  passes or fails at the knife's edge on both renderers (245 of the 292 line pixels more than 3 apart were there). Outside a 13-row band at the horizon (the row with the most grid pixels) the
+  original bound holds (measured mean 0.78, 99.7 % within 3); inside it the bound is mean < 2.5, 80 % (measured 1.97,
+  86.9 %).
+- Toon at a distance, the card's half: held to a 40th of the sphere (holds down to 7 edge pixels; measured 9) for its cel edge until round 553. It passed before
+  only through the 8-bit albedo's rounding (16 edge pixels of 285); with the albedo exact the card's tones match the
+  CPU's (23 apart at 2 m, 26 at 20 m) and its edge has 9 of 285 against the CPU's 17 of 296 - the card's cel-edge antialiasing is narrower than the
+  CPU's, as it always was.
+- `BLENDITY_GPU_DIFF_DIR`: these checks write their CPU picture, card picture and difference there when it is set.
+
+**Follow-ups:** round 553 (task 0534), the card's toon cel-edge antialiasing as the CPU's and the 20th back; the CPU's
+stipple on the normal-mapped sphere's underside; a depth test for the grid that does not z-fight with the floor at the
+horizon (both renderers).
+
+**Checked:** on the card (RTX 4070 SUPER), on #435's head, the `gpu` group 1,052 checks, 0 failed (a first run under
+other sessions' load had two one-off failures that pass alone and in the re-run), toon at a distance passing; the suite
+without `gpu` (Windows, Blender's libraries) 70,599 checks with only the known "assets: Ctrl and Shift click select
+several materials" failing (and toon at a distance's card half before its bound). Linux (dependency-free): render, gpu
+(skipped without a card) and editor, 5,868 checks, 0 failed.
+
+## 2026-11-16 (round 550): a test run gets a scratch folder of its own (task 0530)
+
+**Asked** (the hub): why "assets: Ctrl and Shift click select several materials, Delete asks once..." fails on the
+development machine and passes on CI.
+
+**Fixed (tests)**
+- A run of `blendity_tests` without `BLENDITY_TEST_DIR` worked in `%TEMP%\blendity_tests` for good, shared by every run and
+  every session running tests at once: its scratch project held 2,054 materials from earlier runs, and the test's material
+  row was far below the Materials window - so the click found no row (21 of 25 checks failed). CI and runs with their own
+  folder start empty and passed. Such a run now works in `blendity_tests/run-<stamp>-<n>`, and run folders begun more than a day
+  ago (read from the stamp in the name) are removed when the next run starts. A run without `BLENDITY_TEST_DIR` leaves its
+  scratch folder for a day; `tools/run_suites.py` and the round chain set their own folder, as before.
+- **gpu views: a frame the card presents** compared the whole frame back on the system with the first one, and the status
+  bar's and the Profiler's numbers - which change with the machine's load - are part of the whole frame: 0.045 alone, 0.057
+  in a group run, against a bound of 0.05. It compares the Scene and Game views' own pixels now, at the same strength (the
+  whole-frame 0.05 was the views' small differences averaged over a frame half panels: views mean under 0.15, 99 % within
+  2 levels). The other three card tests that fail only on a machine with a card are card-against-CPU differences, round 551.
+
+**Checked:** the materials test with `BLENDITY_TEST_DIR` unset and the old shared folder still full: the old build 21 of 25
+failed, the new 0; a new `runner` test pins the pruning and the folder's name; Windows with Blender's libraries: `runner` 61,
+`animation` 2,230, 0 failed; Linux: `runner` 61, `animation` 2,229, 0 failed, and the new test run without
+`BLENDITY_TEST_DIR` (its own run- folder) passing. On the card (the hub's slot): "a frame the card presents" passes alone twice and after the editor group - the views 0.095, 99.52 % within 2, each time.
+
+## 2026-11-16 (round 549): main green on Linux again - three faults the new CI image showed
+
+**Asked** (the hub, for the owner's main): main went red on Linux at #419's merge (068207d9) - `blendity_stress --quick`
+crashed in `curved`, and "voxel GI: turning Realtime GI or its settings on redraws the views" and round 513's "draw piece
+window: a 1 x 1.5 m drag ..." failed - though #419's own run was green on the same tree; every PR's `linux` check was
+blocked. Find the cause and fix it in the code.
+
+**Found (task 0529):** GitHub's `ubuntu-latest` moved from ubuntu-24.04 (g++ 13.2) to ubuntu-26.04 (g++ 15.2) between the two
+runs. Three diagnostic runs there (a branch of their own, no PR; Intel Xeon 6 and AMD EPYC runners) failed the same way every
+time, alone and on one worker thread; a WSL machine with the same g++ 15.2 passed every time, and valgrind found no read of
+memory never written. Each failure was code that a difference of a unit in the last place tips over:
+
+**Fixed**
+- **A crash drawing a shape on a curved face (undefined behaviour).** The ring around a shape drawn on a face (its two bridges,
+  `bridged_ring`) sorted the outer loop by lengths worked out again at every comparison - no consistent ordering when the
+  compiler rounds its two inlined copies apart or a value is NaN, and `std::sort` then read before its array (valgrind).
+  Its keys are now worked out once, NaN last, equal keys in index order.
+- **Realtime GI with Sky Occlusion and Bounce both off changed a pixel.** It still traced: the blur's and the upsampling's means
+  of a sky of 1 came out a rounding off 1, and a traced pass shades pixel by pixel instead of eight at a time. Nothing is traced
+  now when GI adds nothing - the same picture as GI off, and the gather's time saved. And the views no longer hand the objects
+  the realtime lightmaps a pass published while Sky Occlusion or Bounce was still on: until the next pass landed they shaded
+  the picture (a slow machine took it before then - #431's first CI run). A new test waits for a published pass, turns both
+  off and compares at once: 0 pixels differ, 43,839 with the second fix taken out.
+- **A click or ray exactly on the edge two triangles share fell through.** `scene_raycast` and `ground_at` use the tolerant
+  ray-triangle test task 0437 made for this (the window test's ray met the far wall's face exactly on its diagonal).
+- Round 513's window test waits for the Blockout's build after a drag instead of four frames.
+
+**Checked:** the round's groups (`editor`, `modeling`, `lighting`, `hci`, `blockout`), not the full suite: Windows with Blender's
+libraries 49,681 checks, dependency-free Windows 42,288 and Linux (WSL, g++ 15.2) 42,294, 0 failed - the two tests that were red
+among them. New: a ray through a quad's diagonal at 1,080 turns and offsets hits it every time (the plain ray-triangle test lets
+1 of the 2,160 through on Windows, none in WSL); the curved section's octagons drawn on a 48-sided cylinder, turned and the rings
+repaired, all valid; rings repaired around a NaN or infinite corner, every index in range. Stress on Windows (full),
+`curved` 5,032 operations / 6 problems / 67 with faces newly on top of each other, `pushpull` 26,620 / 0 / 394,
+`modifiers_ngon` 11,514 / 0 - each the same as main 068207d9 on the same machine; `curved --quick` in WSL 1,934 / 1 / 24, as
+main. The proof of the crash fixed is CI's `linux-stress` on ubuntu-26.04. Code review: approve, its five minors fixed (a
+realtime lightmap's bounce is still added while GI adds nothing; the test mirrors the stress's steps).
+
+## 2026-11-16 (round 548): Shift+R and every chord read as its key went down (task 0528)
+
+**Asked** (the owner, through the hub): "Shift R doesn't work."
+
+**Fixed**
+- **A chord is read with the modifiers held when its key went down.** The editor read a frame's modifiers from the frame's
+  last event: when Shift and R were let go within one frame - a quick tap, or any tap while a frame is slow - the last event
+  was Shift's release, the chord read as a bare R, and R is the Scale tool, so Draw Piece's Shift+R did nothing visible.
+  Each key now keeps the modifiers it was pressed with (`Input::key_mods`, `chord_mods`, `chord`; held modifier keys are
+  added where a platform leaves them off a key event), and every reader of a pressed key's chord uses them: the keymap's
+  shortcuts and `action_pressed`, the actions that read Shift themselves (Shift+F6 back a window, the Wheel's Shift+Space on
+  the Draw pad - `action_mods_`), Preferences' key capture, the focus walk's Tab / Shift+Tab and Space / Enter / Esc, a popup's
+  first Tab, text fields' Ctrl+A / C / X / V and Ctrl+Enter, the Wheel's Shift on a number or letter, Draw Piece's R (a quick
+  Shift+R turned the piece being drawn), the Draw tool's X / Y / Z guides (a quick Ctrl+Z laid a Z guide), a transform's
+  Shift+axis plane, the Animation window's K / , / . and Ctrl+C / V, the Inspector's I, the Sequencer's Shift+Delete, the
+  Sketch Pad's and the Project window's Ctrl keys and the UV editor's. Mouse modifiers (Shift-click, Ctrl-drag) still read the
+  state of the moment, as they should.
+- While Draw Piece is mid-drag, Shift+R does not switch it off (a running tool keeps its keys, as before); it no longer turns
+  the piece either.
+
+**Checked:** first reproduced with real events: one event a frame, Shift+R turned Draw Piece on in every state the hub
+listed; pressed and let go within one frame, in none. Tests (`tests_round548`, the `input` group, real events, each case one
+frame and one event a frame): Shift+R in seven states; the Game tab the same both ways; key then Shift gives a bare R; Draw
+Piece at stage 1 (a quick Shift+R does not turn the piece); the Draw tool's Ctrl+Z (no Z guide, the undo runs); Ctrl+V in a
+text field; Shift+Tab; the key capture of Shift+R; Adobe's Shift+Space Wheel and Shift+1 keeping it open; the Project,
+Materials and Textures windows selecting nothing on hover and Ctrl+A only over them; the sketch's Alt+Backspace and Ctrl+D
+(review 388); a sample of modifier chords in six presets (19 of 24 that change something, one frame as one event a frame).
+Windows with Blender's libraries: input 283, editor 3,227, hci 1,849, blockout 30,096, 0 failed; Linux: input 283, editor
+3,205, hci 1,847, blockout 22,848, 0 failed. Three code reviews (changes needed twice - the Wheel test's preset, Draw Piece's
+R, the other readers of a pressed key's chord, then two returns a same-line comment had swallowed; all made) and an approval.
+
+## 2026-11-17 (round 547): A door's and a window's parts take modifiers - the leaf, the frame, the glass (task 0527, ADR 0149)
+
+**Asked** (the owner, through the hub): "Why can't I add modifiers to windows and doors?", then "Lets do both" - the
+opening's own stack (round 546) and its parts' (this round) - and "Yes, just option A. for the modifiers": a stack on
+each part object. B, C and D are the spec's recommended defaults, not weighed by the owner: the bars and the sill board
+are part of the Frame, the Frame has no collider, a click on a Frame or Glass selects its opening and a second click the
+part.
+
+**Changed (task 0527, ADR 0149; amends ADR 0129 and ADR 0136)**
+- **A styled opening's Frame and Glass are objects**, as round 515's leaf is: children of the opening's piece, marked
+  with the part mark (`BlockoutLeaf`, now with a kind - Leaf, Frame, Glass - a copy index and the material it was given;
+  a scene of round 515 reads its leaves as Leaf). A window's Frame holds its frame, bars and sill board; a door's its
+  jambs and head (the arch of an Arched door). A window's Glass holds its panes, one slab a light. Frame and Glass have
+  their pivot at the opening's origin, the middle of the hole's bottom in the wall's plane.
+- **The kernel makes only the clear hole** of a styled opening - one Subtract piece, a box or the arched / round outline
+  pulled through the wall, down by the sill board's thickness when there is one (so the wall's strip below the hole is
+  not coplanar with the board's top). A Revolving door keeps its ring and drum (the blocked-out space, not a part). The
+  Solid and Glass faces of an opening leave the Blockout's mesh; the grid path meshes no frame, so a styled opening adds
+  no "finer than Field Cell" note.
+- **A part keeps its modifier stack** - its mesh is replaced, the object kept - through Width, Head, Sill, Frame Width,
+  Style within the kind, Open Amount and a hand swing, duplicate, delete and undo, Bake and Unbake, save and open, and
+  export (each part its own node with its evaluated mesh). A second leaf made by a style change (Single -> Double) takes
+  a copy of the first leaf's stack. A part's own numbers (Frame Width and Depth, Bar Width, Glass Thickness, Leaf
+  Thickness) are out of the Blockout's snapshot hash: changing them makes the part again and asks for no build. Enabled
+  off, or numbers that make no plan, hide the Frame and Glass (inactive) instead of destroying them, so they come back
+  with their stacks. A deleted Frame or Glass is made again (a Frame cannot be turned off: Frame Width is held at 1 mm
+  at least).
+- **Materials:** Frame takes the Solid class's material, Glass the Glass class's, a leaf the Leaf class's - the
+  opening's override first, then the Blockout's; a material dropped on a part by hand is kept (compared by asset path).
+- **Light and collision:** Frame static (Contribute GI on), no collider; Glass static, Contribute GI off; the leaf as in
+  round 515.
+- **Picking:** a click on a Frame or Glass selects its opening; a second click on it, with the opening the only
+  selection, selects the part; a leaf selects itself. Box select maps a Frame or Glass to its opening. The Draw Piece
+  and Room tools treat a part's face as its Blockout's surface. The part's Inspector line says it is made by its
+  opening and that its modifiers are the user's.
+- **Console:** `blockout part select [frame|glass|leaf]` selects the selected openings' parts, `blockout part opening`
+  their openings.
+- **The bench interior** (`benchscene blockout`) styles all its openings again in the 100-piece interior; the 400-piece
+  one keeps six styled doors and six styled windows, because an arched or round hole still leaves unresolved places on
+  the grid path.
+- **Learn:** "Windows with a style" and "Doors with a style" gain a Try-it: Bevel the frame, Wireframe the glass,
+  Solidify the leaf, change the Width - the modifiers stay.
+- Round 552 (#437) is merged in: the leaf sync, and the Frame / Glass ids this round adds to it, tell scenes apart by
+  serial.
+
+**Checked:** the round's groups in three builds, round 552 merged in, 0 failed except one timing check noted below.
+Windows without libraries: blockout 16,015, editor 3,200, lighting 9,825 (1 failed), physics 190, hci 1,849,
+blockout_modifiers 1,023, blockout_join 511. Windows with libraries: 20,809 / 3,231 / 9,881 / 208 / 1,849 / 1,029 / 512.
+Linux: 16,018 / 3,205 / 9,827 / 190 / 1,847 / 1,023 / 511. The one failure was round 507's "opening the baked scene
+again the moment the bake lands brings in every page it baked" (test_lighting.cpp:12135) in the build without
+libraries. It passed three reruns, the build with libraries and Linux; this round doesn't touch the bake's pages, so it
+is timing, not this change. The blockout group has more tests (751 -> 794) but fewer checks (22,860 -> 16,018 on Linux):
+- The window and door sweeps check one hole per opening, not the frame's and glass's kernel pieces.
+- The hostile-numbers sweep was trimmed (17.8 s -> 3.1 s).
+- Four tests of round 498's grid frame ("a frame a cell wide on the grid", the "finer than Field Cell" note and its
+  advised cell) are gone, because the grid path meshes no frame now (spec criterion 7).
+
+**Stress** (`--only blockout`, against round 503's reports, both builds): problems are 0 everywhere, as before. "Faces
+newly on top of each other" lines are the same as round 503's: the wedge + Solidify 2 without libraries; the sphere +
+Bevel, outline + Wireframe and cylinder + Decimate 2 each with libraries.
+- **Fewer faces on top of others, because the frame left the wall's mesh.**
+  - Styled windows on the exact path: 65 -> 0, faces of no area 4 -> 1, unresolved places 123 -> 0.
+  - Styled doors on the exact path: 70 -> 0, faces of no area 1 -> 0, unresolved 85 -> 0.
+  - Styled windows on the grid (cell 0.08): 3 -> 0, faces of no area 15 -> 5, unresolved 8,289 -> 2,477.
+  - Styled windows on the grid (cell 0.1): 120 of 210 built clean, was 113.
+- **One count rose:** styled doors on the grid (cell 0.08), unresolved places 49,423 -> 50,008 (+1.2%). A door
+  now cuts one clear hole through the wall instead of carrying the jamb and head pieces. That hole's outline (arched
+  ones included) crosses the grid's cells in a few more places. These are cells the grid path leaves unresolved, not
+  problems.
+  Faces of no area there fell 18 -> 17.
+- **Field cell 0.08:** any pieces, and hostile meshes, have one fewer face of no area each (59 -> 58, 31 -> 30).
+- **The 109-piece interior:** 17,254 faces, was 17,590 (libraries).
+- Times moved both ways within the run-to-run spread of a shared machine. The live drag rows stay OVER, as in round 503.
+
+## 2026-11-17 (round 546): modifiers on a door or window (task 0526, ADR 0150)
+
+**Asked** (the owner, 2026-11-15, through the hub): "Why can't I add modifiers to windows and doors?", then "Lets do both" - the
+opening itself (this round) and its parts (round 547). Approved: "Array and mirror repeat the whole opening".
+
+**Added**
+- **A door or window takes a modifier stack.** Its Array and Mirror repeat the whole opening: each copy is the opening as its
+  numbers make it - its hole and round 547's frame, glass and a door's leaf, each copy's own objects - placed in the opening's own
+  axes (an Array steps in multiples of its size, a Mirror mirrors across its middle; a mirrored copy is made as a turn, never a
+  negative scale). The copies are exact, from the numbers - a row of ten windows from one costs what ten placed by hand cost.
+  The other modifiers a piece takes (Bevel, Subdivision ...) reshape the hole, as round 514 runs a piece's stack.
+- **Width, Head and Sill stay one opening's size,** before its modifiers: the handles, F9, the console and the leaf read them
+  unchanged and the copies follow. Repeats run after the reshaping modifiers whatever their order in the stack.
+- **The Inspector** says what an opening's modifiers do, warns when a repeat sits above a reshaping one, and says why the
+  copies were refused; **the status** (and `blockout info`) says how many copies an opening makes, or why it is built once
+  (more than 256 copies, a number that is not finite).
+- A copy's faces belong to the opening: a click on one selects it, and the Scene view draws the cut outline of every copy.
+  Copies share one evaluation of the hole's stack.
+- **Each copy's parts** (round 547's objects): a turned copy's stand turned with it; a mirrored copy's leaf hinges on the other
+  jamb; a copy's part takes the modifiers of the first copy's part of its kind - edit those, the copies follow (the Inspector says
+  so on a copy's part). Deleting a leaf turns Leaf off for every copy, as for one.
+- A Learn section "Modifiers on a door or window".
+
+**Changed:** round 514's "no stacks on doors and windows" (ADR 0138) - a modifier already saved on an opening (inert until now)
+works when the scene opens. Rooms, presets and Intersect pieces still take none.
+
+**Limits:** a styled door's or window's copy that would not stand upright (a Mirror Y, a turn about X or Z) is left out - its
+frame and leaf cannot - and the status says so; a plain opening's is made. A copy that falls outside every wall cuts nothing
+(its parts still stand there) and the status does not name it yet. Join's overlap test and the size handles see the first copy.
+
+**Checked:** the round's groups (`blockout_opening_modifiers`, `blockout_piece_modifiers`, `blockout_modifiers`, `blockout_join`,
+`blockout`, `modeling`, `editor`, `hci`), not the full suite: Windows with Blender's libraries 32,900 checks, 0 failed; on round 547's
+head with main merged, Windows without them (as CI) 27,975 and Linux (with `lighting`) 37,815, 0 failed. Stress: the new section
+`blockout_opening_modifiers` - a 40 m wall, ten windows by hand against one with an Array of 10: 70 / 70 faces plain and Grid, a
+drag of the arrayed, bevelled window 0 stack evaluations and 0 main-thread builds, the sweep 30 cases with 0 problems and 0 faces
+newly on top of each other. `--only blockout`: no problem count rose against round 514's run.
+
+## 2026-11-17 (round 545): Vertex colours on the card and in the bakes (545b2)
+
+**Asked:** Pass 27, worker P1: the rest of the Vertex Paint round - a material's Vertex Color on the graphics card and in
+the bakes (the hub, 2026-11-17: "A baked lightmap or probe should see the same albedo as the render").
+
+**Added (task 0537, ADR 0152)**
+- The card's raster (the Shaded and Game views, F12 on the card): the g-buffer, toon, baked and see-through passes
+  multiply a Vertex Color material's colours into Base Color and Alpha, as the CPU does - no new binding (the colour
+  buffer Weight Paint's Solid view uses; a see-through corner packs its colour as halves in spare room).
+- The card path tracer (Vulkan and OptiX): the colours in the vertices' spare lanes, multiplied in for a Vertex Color
+  material. OptiX's kernel header regenerated.
+- The lightmapper, the light probes, the light volumes and the reflection probes bake with the colours, so a baked
+  room sees the albedo the render does.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux);
+the card's tests in a graphics-card window.
+
+## 2026-11-16 (round 545): Colour attributes and Vertex Paint (Blender 5.3)
+
+**Asked:** Pass 27, worker P1, after round 539: the user said yes to a Vertex Paint mode ("Yes, add it") - colour
+attributes on meshes, saved, shown and exported, painted with Blender's brushes and the automasking of round 539. The
+material input and the importers are round 545b.
+
+**Added (task 0525, ADR 0152)**
+- **Colour attributes** on `Mesh`: named layers of linear RGBA, one per vertex (Point, the default) or per face corner
+  (Corner), with an active (painted) and a render (shown and exported) layer. Saved with the scene; old files load
+  with none. `colorattr add|remove|active|render|rename|fill` in the console.
+- **Vertex Paint** (the Inspector's MeshFilter, under the Rigging row; Blender's `paint_vertex.cc`): Draw with Mix, Add,
+  Subtract, Multiply, Lighten or Darken (Ctrl: the inverse colour, or the opposite blend - Blendity's own reading, as
+  Weight Paint's; Blender paints its secondary colour), Blur, Average and Smear; a layer keeps HDR colours (not clamped
+  to 1);
+  colour, alpha, radius, strength, falloff, Mirror X, Front Faces Only and round 539's automasking. One stroke, one
+  undo step; a stroke gives an element at most one dab's worth, as Weight Paint does. Console `vpaint`, `vpbrush`,
+  `vpblend`, `vpcolor`, `vpset`, `vpautomask`, `vpstroke`; a quick-menu set; a Learn lesson section with a Try-it and a
+  question.
+- **Export:** glTF writes the render layer as `COLOR_0` (linear float RGBA; a Corner layer splits the vertices where the
+  colour changes); PLY as red, green, blue and alpha bytes (sRGB, as Blender's exporter writes them).
+- **What edits do to a layer** (ADR 0152's table; never misplaced, never a crash):
+  - Point layers go where vertex groups go: exact through copy-on-write, Mirror, Array, Delete, Dissolve, Merge, Join
+    (by name) and Separate; interpolated by position through the Subdivision, Boolean, Bevel, Screw and Wireframe
+    modifiers and through Extrude, Loop Cut, Inset and Subdivide.
+  - Corner layers stay through Flip Normals, renumbering, save / load and export (the export's Triangulate option
+    averages them per vertex first, softened rather than dropped), and are dropped whole by edits that rebuild the
+    corners. The Inspector says so ("Undo brings it back") and the log names the layer.
+  - Known gaps: Boolean *apply* and object-mode Subdivide build a new mesh and drop the layers, as they drop vertex
+    groups today; Corner layers through Edit Mode tools and modifiers.
+
+**Changed**
+- Weight Paint and Vertex Paint share one stroke engine (`src/editor/paint_automask.cpp`, renamed from
+  `weight_paint_automask.cpp`): the brush disc, falloff, Front Faces Only, Mirror X and the automask.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux).
+
+## 2026-11-16 (round 545): Vertex colours in the pictures, and from files (545b)
+
+**Asked:** Pass 27, worker P1: the second half of the Vertex Paint round (the user's "Yes, add it") - a material that
+shows the mesh's vertex colours, and importers that read them. This round covers the CPU renderers and the importers;
+the card's raster and path tracer follow (545b2).
+
+**Added (task 0533, ADR 0152)**
+- **Material > Vertex Color**: the mesh's render colour layer multiplied into Base Color and Alpha (Blender: a Color
+  Attribute node into Base Color; Unity's vertex-colour shaders), before the cutout test. Shown by the CPU rasterizer
+  (Shaded and Game views, see-through materials), the CPU path tracer (F12, the Camera Preview) and the texture
+  bake. Off by default: existing scenes render as before. The colour factor is capped at 1 for the albedo (an HDR layer
+  must not add light).
+- The colours reach the renderers per render vertex from a cache on the mesh (kept per render-mesh build, mesh version
+  and layer), so a paint stroke never rebuilds the render mesh. A Corner layer's corners sharing a render vertex give it
+  their mean.
+- **Import:** PLY `red` / `green` / `blue` / `alpha` (bytes as sRGB with linear alpha, floats as linear) become a Point
+  layer "Col"; glTF `COLOR_0` (VEC3 / VEC4, float or normalized) a Point layer "Color"; FBX's first colour set a Corner
+  layer "Col" (sRGB decoded, as Blender reads it). The weld after a PLY / glTF import keeps the layer and no longer joins
+  two vertices of different colours.
+
+**Not yet:** the card (the Vulkan raster's g-buffer, toon, baked and see-through shaders; the card path tracer and
+OptiX) - round 545b2; the bakes with their own object lists - the lightmapper, the light probes, the reflection
+probes - whose bounce takes the base colour.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux).
+
+## 2026-11-17 (round 544): Pass 27's write-up - Blender 5.3's features on one tree, timed, swept and walked (task 0524)
+
+**Asked** (the hub, 2026-11-16, for Pass 27): the pass's write-up - a tree joining every Pass 27 stack's top as they
+publish, the timed rows in one batched window, the HCI sweep over the new panels, the Learn check list, the fragments
+folded, published as the single top of every Pass 27 stack (CLAUDE.md item 7: nothing waits on a merge).
+
+**What Pass 27 built** (each round's own entry below has its detail):
+- **530 / 531** a point cloud object, drawn as Points or Gaussian Splats (ADR 0147); splat import from PLY, SPZ v1-v4
+  and glTF's Gaussian-splat extension (#420, #423).
+- **532 / 533 / 534** splats drawn in the Scene view (CPU and card), traced by the CPU path tracer and by the card -
+  Vulkan ray queries, a BVH walk and OptiX (#427, #424, #428).
+- **535** a Quad Sphere primitive and snapping to object origins (#430). **536** Edit Mode shows the selection's size,
+  and typing one scales it (#429). **537** LoopTools built in: Relax, Space, To Circle, Flatten, Curve (#422).
+- **538** panoramic cameras - equirectangular, fisheye equidistant / equisolid, central cylindrical, mirror ball - in
+  the rasterizer and the CPU path tracer (#439).
+- **539** Weight Paint automasking and Add / Set Weight (#421); **540** size, strength and colour kept per brush,
+  pressure curves for Paint's Hardness and Spacing (#432); **545** colour attributes and Vertex Paint (ADR 0152; #435),
+  shown through a material's Vertex Color and read from files (#440).
+- **541** Blender 5.3's animation tools: Convert Rotation, world-space copy / paste, Paste Pose with influence, Align,
+  scrubbing, Wrap Playhead (ADR 0148; #438).
+- **542** the sky's sun lights the scene; saved sRGB images carry an ICC profile (#425). **543** shadows traced by the
+  card in the Scene view (ADR 0151; #442).
+- With them: **547** a door's and a window's parts take modifiers (ADR 0149; #441), **548** Shift+R and every chord
+  read as its key went down (#426), **550** a test run's own scratch folder (#433), **551** the card's albedo plane in
+  half floats (#436), **552** a reopened door keeps its Leaf (#437), **553** toon at a distance (#443), **555** card
+  tests that failed only in a slow group run (#444); **549** (#431, merged) made `main` green on Linux again.
+
+**Changed in this round:**
+- **The joined tree** (`C:/blwt544`, local): every Pass 27 top merged as it published, `stress/sweep_commands.inc`
+  regenerated after each (it is generated per branch), the audits and the touched groups run after each join - each join
+  and its checks in `docs/perf/verify-544.md`. A join that broke a test was taken back out until its round's fix (#426's
+  Shift+Tab test), and one that dropped a test block's closing was found because the runs now print the exe's time.
+- **A Learn walk** (`tests/test_editor.cpp`, "learn (Pass 27's write-up): ..."): each feature's lesson section's Try-it
+  lines in order in a fresh editor, no warning, at least one question - every Pass 27 feature passes (542's section came
+  with #425's `7bb5ca0d`); 532 - 534's drawing and tracing have no step of their own (round 561, S1).
+- **`docs/perf/verify-544.md`**: the tree, the timed rows, the HCI sweep, the Learn check list.
+- **Two tooltips name Adjust Last's chord from the keymap** (the label audit after round 559): the Inspector's Dimensions
+  (round 536) and a repeated door's or window's rows (round 546) wrote "F9" by hand - Ctrl+F9 in Maya's preset. The
+  label audit (tooltips and labels) is at 0; one test reads both tooltips in Unity's and Maya's presets and with the
+  action unbound. Still written by hand, in messages the label audit does not read: two Scene view toasts
+  (`scene_view.cpp` 3470, 3838) and three in Sketch's build (`sketch_build.cpp` 198, 258, 489) - a follow-up.
+
+**Numbers** (the hub's batched timed window, 2026-11-17 06:31 - 06:43, normal priority, a quiet machine; logs in the
+notes folder's `pass27-timed/`; printed, never asserted - ADR 0056):
+
+| Row | Result | Budget |
+|---|---|---|
+| splat import (531), 100k splats | PLY binary 38.8 ms (2.58 M / s), SPZ v3 36.2 ms, PLY ASCII 729 ms; 1M not measured (~0.4 s estimated) | 1M under 2 s |
+| splat draw (532), 1280 x 720, orbiting | 100k: 15.7 ms CPU, 16.0 ms card; 1M: 108 ms CPU, 94 ms card - after round 557: 1M 6.2 ms card, 86.8 ms CPU | the card met; the CPU over 50 ms at 1M |
+| splat trace (533 / 534), 256 x 256 | CPU 149 / 107 samples / s (100k / 1M); RTX 4070 SUPER ray queries 1,752 / 1,320 | card faster - met |
+| cold first uses | the card's views 92.5 s to open first -> 537 ms (557, a pipeline cache); OptiX's kernel compile 19 s cold, 6.6 ms warm - its own row since 558 | met; the Vulkan devices' first 100k build in the stress run (13.3 - 16.9 s) is a stress-only cold cost - the editor prewarms each card off the UI thread |
+| editor frames (554, the CPU rasterizer's shared edges) | a clean A/B: orbiting 6.99 -> 7.13 / 7.04 ms, moving an object 14.58 / 14.40 -> 14.39 / 14.40 ms, idle the same | within noise (about 0.1 ms on an orbit); an earlier +6 % was main's merge |
+| LoopTools (537), 10k-vertex loops | 1.4 - 9.2 ms an operator, 0 problems | under 100 ms - met |
+| panoramic F12 (538), 2048 x 1024 | every projection 197 - 221 ms; perspective 202 - 207 ms | met |
+| sky sun (542) | 2.80 ms a frame on, 2.92 off | met |
+| RT shadows (543), SideRail | 4.3 - 9.4 ms a frame, traced against mapped | met |
+| half-float albedo (551) | 4K 2.29 ms a frame after, 2.37 before; SideRail's views after no slower | met |
+
+**HCI** (the joined tree, every Pass 27 round): the live sweep at its baseline (elided 7, small-handle 3); the console
+audit at 6. Against `main`: the consistency audit 0 -> 11 ("colour" in UI text: 530, 540, 545, 545b1) and the label
+audit 1 -> 4 (541, 536) - round 559. The new panels at 1024 / 1366 x 768, scale 1 / 1.5: To Circle's F9 taller than the
+view (every F9 panel's placement - round 560), Preferences' rows out of reach at 1024 x 1.5 (no scroll bar - 560),
+elided labels on the point cloud Type, Vertex Paint, Weight Paint's brush rows and the Panorama Type (559).
+
+**Known flakes** (each once in a group run, passing alone; `docs/perf/verify-544.md`): round 355's "Decimate to Good"
+(assets) and round 507's "Save As ... the moment a bake lands" (lighting).
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux),
+0 failed, on the tree joining every Pass 27 round (the card groups in the hub's card slot); the audits (console 6, label
+0, consistency 0, the coverage map 398 entries, none empty; the live sweep at its baseline); untimed stress on that tree -
+`pushpull` 26,620 / 0 problems / 394 newly on top of each other (unchanged), `modifiers_ngon` 11,514 / 0, `curved`
+5,032 / 6 / 67 (main's since round 549: no rise), `looptools`, `splats` and `blockout_opening_modifiers` 0 problems.
+
+## 2026-11-16 (round 543): Shadows traced by the graphics card in the Scene view
+
+**Asked:** Port Blender 5.3's Workbench ray-traced shadows to the Scene view, using Vulkan ray queries, as a Preferences quality option that is off and greyed out with a tooltip on cards without ray queries (Pass 27, worker M2).
+
+**Added (task 0523, ADR 0151)**
+- **Preferences > Ray-Traced Shadows** (off by default, saved; `views rtshadows on|off`). With it on, the views drawn on the card trace each pixel's shadows instead of looking them up in the sun's shadow map.
+  - Every light with Shadows on casts them, including point and spot lights; the map has the sun alone. The first 32 lights take part.
+  - The shadows are exact at any distance, with hard edges.
+  - Area lights cast no realtime shadow, as with the map.
+  - See-through, baked and Solid views keep the map.
+- **Greyed out where it can't run:** on a card without ray queries, or with the views on the CPU, the option is greyed out and its tooltip says why. If a build fails (for example, out of card memory), it says so once and the views use the map, still on the card.
+- **On the card:**
+  - The rasterizer's device opens with ray queries when the card has them.
+  - Its own structures (`src/render/gpu_raster_rt.*`) are built in the frame's own command buffer: one bottom level per drawn part of a casting mesh, rebuilt when its vertices change, and a top level of the casting instances, rebuilt only when one moves or the list changes.
+  - The lighting passes' shadow lookups go through one `shadow_vis()`: the map's lookup as before with the option off, a first-hit ray with it on.
+  - The traced variants are compiled with the other shaders at start.
+- **Skinned characters** cast from their rest pose until Pass 26 poses them on the card.
+- **The windowed check** prints a "traced shadows" line: the builds so far, and the host's time to record the last frame's. `tools/dev/rt_shadows_row.py` runs the SideRail row with the option off and on.
+- **Learn:** a "Shadows traced by the card" step.
+
+**Checked:**
+- Both suites: with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux). Linux (dependency-free): `gpu` 129, `editor` 3205, `render` 2550, 0 failed (no card in WSL: the card tests skip).
+- The round's tests are the `round 543:` rows at the end of `tests/test_gpu.cpp`, run on an RTX 4070 SUPER: with the option off the picture is bit for bit what it was.
+- `gpu` group locally: 4 checks fail, the same 4 as on main locally (test_gpu.cpp:889 x2, :2228, :4888; queued as round 550), so they are not this round's.
+- Timed row (SideRail, `tools/dev/rt_shadows_row.py`): TIMED_ROW - it runs in the hub's batched timed window and is filled in then.
+
+## 2026-11-15 (round 542): The sky's sun lights the scene; saved sRGB images carry an ICC profile
+
+**Asked:** Pass 27 (Blender 5.3's new features), worker R1: the Sky texture's sun disc lighting the scene, as 5.3's
+EEVEE now does, with a switch for the old look; an ICC profile in saved sRGB PNG and JPEG files, as 5.3 writes.
+
+**Changed (task 0522)**
+- The Sky world (Hosek-Wilkie) lights the scene with its sun when no Directional Light drives it: one directional
+  light toward the sky's sun, in the light list the Scene view's rasterizers and the path tracer both take, so they
+  agree. Its colour and strength are the sun's light through the atmosphere at its elevation - Blender's Nishita
+  transmittance, the code 5.3's sun disc uses (`extern/sky/source/sky_multiple_scattering.cpp`, now compiled) -
+  scaled so the noon sun is intensity 1, the sun the Sky world's ambient was calibrated to; it dims and reddens
+  toward the horizon and is gone below it. Turbidity sets the haze (3, a clear day, is Blender's aerosol density 1).
+  The disc made one light is EEVEE's world sun extraction (`sun_extraction`), ported in `src/render/sky_sun.cpp`.
+- Learn > Light, Sky and Tone Mapping: a section on the sky's sun, with three questions and three Try-its (the
+  Directional Light deleted under a Sky world, Sun Lights Scene off, back on at Sun Intensity 2).
+- World > Sky: **Sun Lights Scene** (on; off is the look before 5.3) and **Sun Intensity** (Blender's). A scene with
+  a Directional Light is unchanged: that light is the sun, and the sky's sun is not added on top of it.
+- Every 8-bit PNG Blendity writes carries an `iCCP` chunk and every JPEG an `APP2 ICC_PROFILE` marker holding the
+  standard sRGB profile (ICC v4, D50 colourants, Bradford `chad`, the sRGB parametric curve), built in code in
+  `src/image/icc_profile.cpp` - Blender ships the Compact ICC Profiles project's file (CC0); none is downloaded or
+  bundled. HDR and EXR files are unchanged.
+
+**Not in this round:** Sun Elevation / Sun Rotation on the Sky world, as Blender's Sky node has them - without a
+Directional Light the sky's sun stands where it always did (about 49 degrees up), so the low reddened sun shows only
+through a light's angle (a follow-up); a visible disc in the Sky world's background (the path tracer would light twice, through the
+world and the light); the sky's sun in lightmap bakes (they gather lights on their own); Solid shading (it never draws
+the world). Non-colour 8-bit maps (normal, roughness) carry the same tag as every PNG: untagged 8-bit images are read
+as sRGB everywhere already, so no reader changes its reading.
+
+**Checked:** the full Windows suite (dependency-free build), 54,365 checks: 2 tests fail, neither this round's - the
+Live Link paint-dab timing (60 ms worst tick under 13 sessions' load; 3.7 ms run alone, passes) and "assets: Ctrl and
+Shift click select several materials", which fails the same 21 of 25 checks on `main` (068207d9) and on rounds 536,
+537 and 540's builds. Linux (dependency-free build) render, lighting and editor groups: 15,713 checks, 0 failed. The
+round's own: 24 checks in `render` (the sun by elevation and haze, refusals, the key, the ICC profile, the PNG iCCP
+chunk, the JPEG APP2 marker, both decoders), `lighting` (the light list with the switch on, off and toggled, one sun
+with a Directional Light, the plane lit 238 against 146 grey unlit, rasterizer and CPU path tracer 195.5 against
+195.5) and `editor` (the switch, Sun Intensity, Turbidity and the world changed with no edit: the kept views equal the
+uncached ones, no stale lighting in verify mode).
+
+## 2026-11-16 (round 541): Blender 5.3's animation tools - Convert Rotation, world-space copy / paste, Paste Pose with influence, Align, scrubbing, Wrap Playhead
+
+**Asked:** an animator can carry motion across rigs and parents in world space, convert a bone's rotation keys between Euler and
+Quaternion, paste a pose at a fraction of its strength, square bones up to the transform orientation, and scrub without
+fighting playback, as in Blender 5.3.
+
+**Added (task 0521, ADR 0148)**
+- A clip may key rotation as a quaternion: property "RotationQ" (x, y, z, w = axes 0..3), sampled and normalized by
+  `apply_clip`; the dopesheet calls it "Rotation (Quaternion)". Record keys "RotationQ" for a path that has it (in the
+  curve's hemisphere), `anim key <object> RotationQ <0-3> <frame> [value]` too. Clips save and load as text as before.
+- Convert Rotation: Ctrl+R in the Scene view with only bones selected (keymap action `pose.rotation_convert`; elsewhere the
+  chord is passed on: Ctrl+R still refreshes the assets), Animation window > Key, console `anim rotation quaternion|euler
+  [bake]`. Each selected path's rotation tracks are rewritten in the other form on the union of their key frames (Bake: every
+  frame), quaternions kept in one hemisphere, Euler keys continuous (no 360 degree jump), one undo step.
+- Unity export writes "RotationQ" tracks as `m_RotationCurves`, so a converted clip exports and reads back (as Euler keys:
+  the import is unchanged).
+- Copy / Paste World-Space Animation (Animation window > Key; `anim worldcopy [start end]`, `anim worldpaste [start]`): the
+  selected objects' world matrices sampled on every frame of the clip (or a range), pasted as keys on every frame onto the
+  selection - one source on every target, else by name; parents before children; keys in the range replaced, those outside
+  kept; a curve the paste made and left flat keeps one key (a track the target already had is never touched, and the value
+  survives Preview going off). "start" pastes from the playhead. An empty selection, a one-frame range, NaN frames, a
+  clip with no keys, nothing copied, or a target outside the animated root are refused with a message.
+- Copy Pose / Paste Pose / Paste Pose Flipped (Ctrl+C, Ctrl+V, Ctrl+Shift+V with only bones selected; `pose copy`,
+  `pose paste [influence] [flipped] [selected]`): by bone name (the mirrored name for Flipped: .L / .R, Left / Right),
+  location and scale blended by the influence, rotation on the slerp, then mirrored (Position X and Euler Y / Z negated) as
+  Blender does. One undo step; keyed when Record is on. Only the active bone's rig is pasted onto (not a second rig under
+  the same group). F9 shows Influence and Flipped and runs the paste again from before, either way round, with the pose it
+  pasted (a later Copy Pose changes nothing). `pose paste` with a word that is no number, `flipped` or `selected` is refused.
+- Align to Transform Orientation (`pose align [global|local]` - the argument is for that run only, the transform orientation is
+  not changed; Animation window > Key; the Scene view has no Object / Pose menu to put it in): each selected bone's or object's
+  rotation becomes the orientation's axes (Global: the world's; Local: the active one's), position and scale stay, children
+  follow. The keymap actions are `pose.copy`, `pose.paste`, `pose.paste_flipped`, `pose.align` (the palette and the Wheel too).
+- The pose chords act with the pointer over the Scene view and only bones selected; over the Animation window or any other
+  window Ctrl+C / Ctrl+V / Ctrl+R keep their meaning there.
+- Insert Keyframe, Add Property, Set Key and `anim key <object> Rotation|RotationQ <axis> <frame>` without a value key
+  "RotationQ" on a path that has it, in the hemisphere of its curve, as Record does.
+- The Unity export also writes `m_LocalRotation.x/y/z/w` editor curves for a quaternion path, and only the quaternion for a
+  path keyed both ways. `anim worldcopy` with one number is refused; `anim stop` while the ruler is held ends playback for
+  good; a partial world-space paste logs "pasted n of m".
+- Pressing the Animation window's ruler while the clip plays pauses it (the playhead follows the mouse) and release (or Esc)
+  plays on from the scrubbed frame; a clip that was not playing stays stopped.
+- Wrap Playhead: the "Wrap" button (or `anim wrap on|off`; a session setting, off at first). On, frame steps (Left / Right
+  over the Animation window, `anim step <n>`) and the key jumps (`,` and `.`) go round 0..the clip's end frame.
+- Learn: a section with two Try-it buttons and four questions.
+
+**Changed:** the Animation window's `anim key` takes axis 3 for "RotationQ"; the dopesheet's group rows say "Rotation
+(Quaternion)". The Animation window has a Key menu and a Wrap button.
+
+**Not yet (follow-ups, ADR 0148):**
+- Retargeting doesn't carry "RotationQ" tracks.
+- Live Link's clip bake ignores them.
+- The Curves view draws w in z's colour.
+- Unity's quaternion curves still import as Euler keys.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux);
+`blendity_stress --only editor` (no geometry changed).
+
+## 2026-11-15 (round 540): Size, strength and colour kept per brush; pressure curves for Paint's Hardness and Spacing
+
+**Asked:** Blender 5.3's brushes: each keeps its own size, strength and colour, with a Unified switch to share one value,
+and Paint's Hardness and Spacing follow the pen's pressure through a curve.
+
+**Added (task 0520)**
+- Sculpt, Weight Paint and Paint (Paint / Smudge / Blend) keep size, strength (Paint: opacity) and colour (Paint) for each
+  brush: Draw, then Smooth with another size, then Draw again gives Draw its own size back. A brush used for the first time
+  starts with the size you had. "Unified Size", "Unified Strength" (Paint: "Unified Opacity") and, in Paint, "Unified Colour"
+  in each Inspector section share one value again, as Blender's: while it is on, the value you set is the shared one and
+  no brush's own is touched; turning it off gives the active brush its own value back at once.
+- Paint: "Hardness Pressure" and "Spacing Pressure" with a curve each. On, a dab's hardness is `hardness * curve(pressure)`
+  and the step between dabs `spacing * (1.5 - curve(pressure))` (at least 0.05 of the radius). Off at first.
+- Saved: `brushes.txt` beside `prefs.txt` (slots, active brush, switches and shared values, curves); malformed lines are
+  skipped and NaN / out-of-range numbers clamped. A headless run with no scratch preferences folder refuses `brush save` /
+  `brush load`.
+- Console `brush unified sculpt|weight|paint size|strength|colour on|off`, `brush curve hardness|spacing on|off [x y ...]`,
+  `brush save|load|list`.
+- New `src/editor/brush_slots.h/.cpp` (a bank per mode keyed by the brush's index; a brush added later needs no change).
+
+**Changed:** a brush no longer inherits the size of the one before it once it has been used, so one old Sculpt test (the Drag
+Dot mask stroke) needed its size and strength set again after it switched to Draw.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux).
+
+## 2026-11-15 (round 539): Weight Paint automasking, Add / Set Weight (Blender 5.3)
+
+**Asked:** Pass 27 (Blender 5.3's new features), worker P1: weight and vertex paint as 5.3 has them - automasking
+(Topology, Mesh Boundary, Cavity, Inverted Cavity, View Normal, Area Normal), Add Weight as the default weight brush
+with Set Weight beside it, and a Blur that accumulates at low strength.
+
+**Added (task 0519)**
+- Weight Paint > Automasking (Rigging window): Topology (only the connected piece the stroke starts on, and its
+  Mirror X twin's), Mesh Boundary with Propagation Steps, Cavity (Off / Cavity / Inverted, Factor, Blur), View Normal
+  and Area Normal with Limit and Falloff - Blender's options with Blender's defaults, ported from
+  `sculpt_automasking.cc` into `src/editor/weight_paint_automask.cpp`. The options multiply; the weight blend takes the
+  automask on the target too, as Blender's does, so Set Weight leaves a half-masked vertex at half the Weight.
+- Console: `wpautomask topology|boundary|cavity|inverted|view|area [on|off]`, `wpautomask none`, and its numbers
+  (`boundarysteps`, `cavityfactor`, `cavityblur`, `viewlimit`, `viewfalloff`, `arealimit`, `areafalloff`).
+- A Learn lesson section, "Automasking the weight brush", with a Try-it and a question.
+
+**Changed**
+- The weight brushes carry 5.3's names: Add Weight (already the brush Weight Paint starts with), Subtract, Set Weight
+  (was Draw; `wpbrush set`, `draw` still works) and Blur. Ctrl with Set Weight paints towards 1 - Weight, as Blender's
+  flip does.
+
+**Fixed**
+- The rasterizer's colour packing (`pack_rgb`, `src/render/raster.cpp`) cast a NaN or infinite shade to an int - a
+  mesh with NaN positions, lit through its NaN normals, in the Scene view (UBSan in CI's sanitizer shard, found by
+  this round's robustness test). It now clamps as a float first; NaN packs as 0.
+
+**Checked against 5.3**
+- Blur already read the weights as they are, dab after dab, so it accumulated at low strength before this round; a
+  test now pins it.
+- Blender 5.3 also turns Multi-Paint, Auto-Normalize and Mirror Vertex Groups on by default. Blendity has none of the
+  three (only Mirror X symmetry and the Normalize All button), so there were no defaults to match; they are not added.
+- Vertex Paint: Blendity has no Vertex Paint mode (no colour attribute on meshes). Its automasking waits for that mode,
+  which needs a data-model change and an ADR of its own.
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux).
+
+## 2026-11-16 (round 538): panoramic cameras in the rasterizer and the path tracer
+
+**Asked** (Pass 27, from Blender 5.3): EEVEE renders panoramic cameras (Cycles always did); a Blendity camera can be Panoramic -
+Equirectangular, Fisheye Equidistant, Fisheye Equisolid, Central Cylindrical or Mirror Ball.
+
+**Added (task 0518)**
+- **Camera > Projection** (Perspective / Orthographic / Panoramic) in the Inspector; Panoramic shows **Panorama Type** and only that type's
+  numbers with Blender's names and defaults (Latitude and Longitude Min / Max, Fisheye Field Of View 180, Fisheye Lens 10.5 mm with the
+  sensor width, Height Min / Max). `Camera::panoramic_type` and its fields are saved through reflect (a scene from before loads as
+  off; `Orthographic` stays Unity's bool and is ignored while panoramic). Unity export writes a panoramic camera as perspective, logged once.
+- **`src/render/panoramic.h` / `panoramic.cpp`:** the five projections both ways (direction from the picture point, picture point from
+  the direction), the cube-face mask, a per-size lookup table (each output pixel's face and place on it) and `panoramic_render`, ported
+  from EEVEE's `eevee_camera_lib.bsl.hh` / `eevee_camera.cc` (a "Ported, not copied" row in `licenses/README.md`). Blender's camera space
+  looks down -Z, Blendity's down +Z: converted once, in `blender_to_camera`. Bad numbers (NaN, a minimum above its maximum, a field of
+  view of 0 or 400 degrees) are clamped by `PanoramicParams::sanitize`.
+- **The rasterized views:** `Editor::render_panoramic` (new `src/editor/panoramic_view.cpp`, one guard at the top of `render_camera`) draws
+  the faces the type needs (90 degrees with 5% overscan; the face side is the picture's larger side / 2, 64 to 2048) through
+  `render_deferred` into one reused square target and resamples them bilinearly into the picture - the CPU rasterizer and the Vulkan
+  path alike, in the Game view, the Camera Preview and a piloted view. F12's rasterized render does the same on its worker.
+  Depth of field and the camera's filters are not applied to a panorama (logged once, as EEVEE skips depth of field for one).
+- **The CPU path tracer:** a panoramic camera's primary rays come from `panoramic_ray` (`PTLens::pano`); where the projection shows nothing
+  (a fisheye's corners) the pixel is black. The card path tracer is unchanged: a panoramic camera traces on the CPU and says why.
+- **Console:** `camera panoramic <equirectangular | fisheye equidistant | fisheye equisolid | central cylindrical | mirror ball | off>` on the
+  selected camera.
+- A Learn lesson, "Panoramic Cameras" (Try-it and questions).
+
+**Changed (ADR 0153):** a 90 degree fisheye needs the front face alone (Blender's mask adds the sides at exactly 45 degrees; this draws
+its faces with the overscan, which reaches 46.4 degrees), and the back face joins from 253 degrees (a side face reaches 126.6 degrees
+along a diagonal). MoonRay's F12 refuses a panoramic camera (the path tracer renders instead, logged); the traced paths take no camera
+filters for a panorama; the path tracer's fog measures the ray's distance from a panoramic camera; Equisolid's Inspector shows only the
+sensor; Projection writes the stored fields only when the user changes it; each view keeps its own face target.
+
+**Known cost (for round 544's timed row):** each face is a whole `render_deferred` (gather, shadow map and lighting repeated per face):
+an Equirectangular view is six of them, a 1920x960 one at 960-pixel faces.
+
+**Checked:** the round's groups with Blender's libraries on Windows: `render` 40,238, `editor` 3,488, `splats` 378,
+`splats_raster` 109, `splats_trace` 3,996 checks, none failed; Linux (dependency-free, before the last two merges) `render` 40,156, `editor` 3,468, `modeling` 5,486, none failed; the whole suite is CI's
+(ADR 0134). No geometry changes, so no stress section. `tools/test_coverage_map.py --check` clean.
+
+## 2026-11-15 (round 537): LoopTools built in
+
+**Asked:** Pass 27 (Blender 5.3's new features): LoopTools, which Blender 5.3 made native - Relax Edge Loops, Space,
+Circle, Flatten, Curve Edge Loops Between Selected and Bridge - as Edit Mode operators with F9 numbers, a menu entry,
+a console `editop` and a Learn lesson step each, robust on degenerate input.
+
+**Added (task 0517)**
+- Five Edit Mode operators in the Mesh menu's Deform group, ported from Blender 5.3's native LoopTools
+  (`src/scene/mesh_tools_loop.cpp`): Relax Edge Loops (`relax_loops`), Space Edge Loops Evenly (`space_loops`), To
+  Circle (`circularize`), Flatten (`flatten_loops`) and Curve Edge Loops Between Selected (`curve_loops`). A loop is
+  the edges whose two ends are selected; Adjust Last Operation (F9) holds their numbers (factor, iterations,
+  interpolation, fit, rotation, radius, flatten, plane, elevation clamp, extend, Space Evenly, Lock X Y Z). Keymap
+  actions `mesh.relax_loops` ... `mesh.curve_loops` (no default keys); `editop <name>` runs them.
+- Learn: the lesson "LoopTools: Loops to Circles, Curves and Planes".
+- Bridge is not a new operator: Blender 5.3 did not port LoopTools' Bridge, and its native Bridge Edge Loops is what
+  Blendity's Bridge already does.
+- Robust: zero-length edges, collinear loops, non-manifold edges, junctions, 1e7 / 1e-7 scales and NaN positions
+  leave a valid mesh - a loop that can't be solved is left as it was, and the toast says so when none could be.
+
+**Fixed after review (code-reviewer):** edge and face mode now use the real edge / face selection (two neighbouring
+rings in edge mode relax as two loops, a ring of faces rounds both borders); Relax and Space refuse selected faces, as
+Blender's; a refusal (-1) is told apart from "ran, moved nothing" (Factor 0, an already flat face); a loop closing on a
+junction no longer depends on edge order; Flatten's Best Fit is Blender's plane from the cloud's extreme points; To
+Circle's surface projection splits quads on Blender's diagonal; `redo axis|individual|lock|size` reach every F9 field
+from the console.
+
+**Checked:** on `main` 068207d9, the round's groups: Windows with Blender's libraries `modeling` 5,706 checks and
+`editor` 3,419 (four editor tests - reference images, the scatter / screenshot sweep rows, the Animation window scrub -
+failed in the group run in a reused scratch project and passed alone; none touches this round's files); Linux
+dependency-free `modeling` 5,648 and `editor` 3,394, 0 failed. The full suite is CI's. Stress: `looptools` (new: all
+five operators on a 10,000-vertex closed ring and open chain and Flatten on a 100 x 100 patch, 4.6 - 41.6 ms an
+operator) 0 problems; `pushpull` 26,620 operations, 0 problems, 394 results with faces newly on top of each other, no
+change; `modifiers_ngon` 11,514 operations, 0 problems; `curved` 236 projected draws, 0 problems, 0 new overlaps;
+`editor` ran clean.
+
+## 2026-11-15 (round 536): Edit Mode shows the selection's size, and typing one scales it
+
+**Asked:** As in Blender 5.3's Transform panel (N), show the X / Y / Z size of the selected elements in Edit Mode, and scale the selection to a size typed there.
+
+**Added (task 0516)**
+- The Inspector's Edit Mode section has a Dimensions block: X / Y / Z fields with a Global / Local switch (world axes in world units, or the object's own axes in object units). Nothing selected shows dashes.
+- Typing (or dragging) a field runs the new redoable Edit Mode operator `dimensions`: the selected vertices are scaled about their median (the pivot S uses) so the selection has that size; the other two axes keep theirs. One undo step, "Edit: dimensions"; a drag amends one step instead of making one a frame.
+- F9 shows "Dimensions" with X / Y / Z (Orientation Global / Local below): every change re-runs from the mesh before the operator, so 5 then 3 is 3, not 5 times 3 / 2.
+- Console: `editop dimensions <x> <y> <z> [global|local]`, `-` keeps an axis (`editop dimensions 4 - -`).
+- A flat selection (one face, zero size along its normal) or one vertex has no size to scale on that axis: a size typed there is refused with a message and the mesh and undo stack are untouched. 0 on a sized axis flattens it; a negative is 0; NaN / inf are refused, and a result that would not be finite is refused.
+- The Inspector keeps the bounds cached by the mesh's pointer and version, the object's matrix and a fingerprint of the selection, so a big mesh is not walked every frame.
+- A "Typing a size (Dimensions)" step in the Edit Mode lesson (Learn).
+
+**Checked:** both suites - with Blender's libraries 103,578; dependency-free 97,133 (Windows) and 97,166 (Linux); the round's tests are the `dimensions:` rows at the end of `tests/test_editor.cpp`. Stress `editor`: fuzz 6000 frames, no crash, 0 stale pictures, 0 missed changes. Windows (libraries): the `editor` group 3340 checks and `modeling` 4622, 0 failed; `dimensions:` 121 checks. Linux (dependency-free): `editor` 3326, `modeling` 4564, 0 failed.
+
+## 2026-11-15 (round 535): a Quad Sphere primitive and snapping to object origins
+
+**Asked** (Pass 27, from Blender 5.3): a Quad Sphere primitive and Snap to Object Origins.
+
+**Added (task 0515)**
+- **Quad Sphere:** `primitives::quad_sphere(radius, segments, method)` - a cube of `segments` quads along each edge pushed onto a
+  sphere, 6 s^2 quads and 6 s^2 + 2 vertices, closed, normals outward, smooth, with Blender's cube UV layout. Ported from Blender's
+  `bmo_create_quadsphere_exec` (a "Ported, not copied" row in `licenses/README.md`): the same vertex order and face layout, method 0
+  Even Area and 1 Even Angle. Segments clamp to 1-500, a radius that is NaN, infinite or not above 0 becomes 0.5. In the Create
+  menu, the command palette and `create "Quad Sphere"`; F9 shows Radius, Subdivisions (1-128) and Method (Even Area / Even Angle).
+- **Snap to Object Origins** (`snap_origins_`, off by default; Tools > Snapping or `snap origins [on|off]`, no argument toggles):
+  other objects' origins become snap targets. The Move gizmo with V held takes the nearer of the nearest vertex and the nearest origin
+  (and a selected object's origin may be the anchor); a modal G with Ctrl puts the pivot on an origin within 16 px of the mouse
+  (an axis lock keeps the part along the axis, a plane lock the part in the plane), else the grid as before; the drawing tools snap
+  to an origin within 10 px ("Object Origin", after guide intersections, before Face Center) that lies in the drawing plane and is in
+  sight (review 535: the edited cube's own origin, seen through the face being drawn on, no longer pulls the first point inside the
+  solid; another object's origin is judged with that object left out, as it sits inside its own solid). The search skips hidden
+  objects and the moving selection with its children (`Editor::nearest_origin_on_screen`, new `src/editor/origin_snap.cpp`).
+  `snap origins <typo>` warns and leaves the setting as it was.
+- A Learn step in "Move, Rotate, Scale" (The origin): add a Quad Sphere, switch the snap on and V-snap a cube onto it.
+
+**Checked:** the round's groups, dependency-free: `modeling` 4,599 and `editor` 3,297 checks on Windows, 4,599 and 3,299 on
+Linux, none failed; the whole suite is CI's (ADR 0134). Stress `editor` ran through (timings only, no
+problem counts in that section). `tools/test_coverage_map.py --check` clean.
+
+## 2026-11-16 (round 534): Gaussian splats in the card path tracer
+
+**Asked:** Pass 27 (Blender 5.3's features): Gaussian splats everywhere - here the graphics-card path tracer, GPU
+Compute (Vulkan, with and without ray queries) and OptiX, matching the CPU path tracer (round 533).
+
+**Added (task 0514)**
+- A splat cloud goes onto the card as an object after the meshes: its splats (80 bytes each - gsplat_math.h's
+  prepared centre, axes, opacity and bounding radius, with the base colour) and SH coefficients at the kernel's
+  bindings 17 and 18, a linear (Morton) BVH over the splats for cards without ray queries, a BLAS of boxes for
+  Vulkan's ray queries and a GAS of custom primitives for OptiX (`src/render/gsplat_gpu.{h,cpp}`). The flattened
+  clouds are kept by uid and version, so a rebuild for a moved object or a bake copies them (1M splats of SH degree
+  3: 0.45 s the first time, 287 MB).
+- The kernel (`src/render/gsplat_gpu_glsl.h`, one GLSL piece both devices run) tests a splat as Cycles 5.3 does:
+  the bounding sphere, the density's peak along the ray, the stochastic opacity test (hashed per sample), and
+  shades a kept splat as emission of its view-dependent SH colour, ending the path. A shadow ray takes the
+  product of (1 - alpha) of the splats it crosses, as the CPU's (no noise, so bakes converge): ray queries and
+  OptiX visit the splat instances alone for it (instance mask 2; the meshes are mask 1), each splat once
+  (Vulkan's no-duplicate AABBs; OptiX's any-hit with a single call).
+- OptiX: `__intersection__splat` and `__anyhit__splat` in the one hit group; the committed PTX regenerated.
+- Round 533's "traced on the CPU (the GPU kernel has no splats yet)" fallbacks are gone: F12, the previews and the
+  bakes put splat scenes on the card. A scene whose splats don't fit the card's memory, or a buffer over its
+  storage-buffer limit, renders on the CPU, said once (the splats are never left off the card alone: its samples
+  are averaged with the CPU's).
+- `blendity_stress --only splats_gpu`: 100k and 1M splats, flatten / build / samples a second on each card device
+  and the CPU (named only: it uses the card).
+
+**Checked:** the CPU and the card agree on a 2 000-splat cloud over a sunlit plane, 256 samples at 64 x 64: image
+means within 0.1 %, the pixels the splats change within 1 %, the worst 4 x 4 block 0.039 - with ray queries, the BVH
+walk and OptiX (RTX 4070 SUPER), for a moved, turned, stretched and mirrored cloud too. `--group splats_gpu`,
+`splats_trace`, `splats`, `render` on Windows and Linux, `editor` on Windows; the OptiX PTX hash test.
+
+## 2026-11-16 (round 533): Gaussian splats in the CPU path tracer
+
+**Asked:** Pass 27 (Blender 5.3's features): Gaussian splats everywhere, the CPU path tracer included - in F12, bakes
+and reflections, as Cycles 5.3 traces them.
+
+**Added (task 0513)**
+- `src/render/gsplat_math.h`: the splat maths every renderer shares (the CPU tracer here, the card in round 534, the
+  rasterizer's colour in round 532), ported from Cycles 5.3 - each splat's bounding sphere where it fades under 1%,
+  the peak of its Gaussian along a ray ([3dgrt2024]), the stochastic alpha test ([sun2025]), the SH colour up to
+  degree 3 taken from sRGB to linear light (as Cycles' `gsplat_radiance`), the flattest-axis normal. Plain C++ that
+  CUDA includes as is. NaN, infinite, zero-sized and under-1% splats are refused, never traced; finiteness is read
+  from the bits, so fast-math builds can't fold the test away (round 534 caught it).
+- `src/render/gsplat_embree.{h,cpp}`: a render's splat clouds as Embree user geometry (one instanced scene a cloud),
+  or a sphere BVH of their own in the dependency-free build, in each cloud's own space (moved, turned, stretched or
+  mirrored with its object). A cloud on a flat transform (a zero scale) is skipped.
+- The path tracer asks the meshes, then the splats up to that hit: a kept splat shines its colour (Cycles' default
+  splat shader is Emission) and ends the path, so splats show in F12 and the traced previews, in mirrors and glass,
+  and light the meshes round them. Shadow rays take the expected value of the stochastic test - the product of
+  (1 - alpha) of the splats they cross - so a bake's shadow ray, the same every sample, converges.
+- The scene's Gaussian Splats objects (`scene_splat_views`) reach F12, the camera and live previews
+  (`PTSettings::splats`), Generate Lighting's lightmaps, probes, Light Volumes and Reflection Probes and its progressive
+  preview (`BakeSettings::splats`). Moving or editing a splat object re-renders the previews and marks the lighting
+  out of date (its transform and cloud are in the render hash).
+- Until round 534 puts them on the card, a scene with splats is traced on the CPU (said in the status line, as fog
+  is), and a bake's card gather falls back to the CPU.
+
+**Checked:** `splats_trace` (new group, CI's render shard) - the maths against Cycles' formulas, a cloud built in code
+against an independent front-to-back blend, Embree against the built-in tree (one and two moved clouds), occlusion,
+bounce light, mirrors, SH turning with the view, object transforms, NaN clouds, shadow transmittance, a lightmap
+under splats, the scene gather and copy-on-write, the editor's hand-off and render hash, a scene without splats
+unchanged; 103,578
+
+## 2026-11-16 (round 532): Gaussian splats drawn in the Scene view
+
+**Asked:** Pass 27 - Blender 5.3's Gaussian splats in Blendity, drawn everywhere. This round is the Scene view and the
+rasterizer (the CPU path tracer and the card's are rounds 533 and 534).
+
+**Added (task 0512)**
+- A Gaussian Splats point cloud (round 530) shows in the Scene view and the Game view as EEVEE draws it. Each splat is
+  a screen-space Gaussian ellipse, projected by EWA splatting as Blender 5.3 does: the 1.3 x field-of-view clamp,
+  axes capped at 1024 px, nothing under 1/255 opacity. It takes its view-dependent colour from its spherical
+  harmonics and is blended back to front over the meshes.
+- A mesh nearer than a splat's centre hides it. A click where a splat's alpha is at least 0.1 picks its object, and
+  a selected cloud gets the orange outline (Blender's outline threshold).
+- Points clouds draw as round dots of their Point Size.
+- The back-to-front order is a parallel radix sort. Above 200,000 splats it runs on a worker while the frame draws
+  with the last order, so moving the camera never waits for it. The view redraws when the worker's order lands.
+- On the card: the CPU's projected splats are drawn as instanced quads in the lighting pass, with an ids pass for
+  picking and the outline (lighting-layout bindings 40 and 41).
+- F12's rasterized render draws them too (sorted inside the frame), and their colour is the path tracers' (round 533's
+  `gsplat_math.h`: the SH colour taken as sRGB, then linear light).
+- A frame's splats are kept under a budget of pixels to blend (6e7, about 40 ms): a camera inside a cloud of huge splats leaves the
+  biggest out, keeping the nearest, instead of stalling the editor; `splat stats` counts what was left out.
+- `splat stats` prints the last frame's splats submitted, culled and drawn, with the project, sort and draw times.
+
+**Changed**
+- Splats write no depth, like Transparent surfaces: the card's lighting pass has none, and both devices must agree.
+  Overlays drawn after them (the grid, gizmos) are not hidden by them.
+
+**Review:** each view keeps its own sorted orders - the pass travels with the view's renderer, so two windows on one
+big cloud no longer re-sort each other's order forever; a worker's landing order is in the scene hash's tail, and the
+editor keeps drawing while one runs, so the view shows it without a missed change (ADR 0115); the bins count in
+`size_t`; the first axis of a nearly round splat no longer comes out turned 90 degrees; `material.h` and `retarget.h`
+declare `class Scene` as `scene.h` defines it (MSVC named functions by the keyword it met first); Wireframe draws no
+splats on the card either.
+
+**Checked:** the round's groups with `editor` - `splats_raster` (17 + 4 review tests), `splats`, `splats_trace` and `editor`: 7,709 checks on
+Windows with Blender's libraries, none failed (on #424's head); on Linux (WSL, with the libraries) `splats_raster`, `splats` and `editor`,
+3,431 checks, none failed (before #424 was merged in). The card against the CPU on a small splat scene: mean 0.435 / 255, the same ids.
+The full suite and the dependency-free builds on CI. The 1M-splat timed rows (`--only splat_raster`) wait for the hub's batched timed window.
+
+## 2026-11-16 (round 531): Importing Gaussian splats - PLY, SPZ and glTF
+
+**Asked:** Pass 27 - Blender 5.3's Gaussian splats in Blendity. This round reads them.
+
+**Added (task 0511, ADR 0147)**
+- PLY splats are recognised as Blender recognises them (`f_dc_*`, `opacity`, `scale_*`, `rot_*`, `f_rest_*` on a
+  face-less file) and become a Gaussian Splats object. A PLY of plain points becomes a Points cloud instead of the
+  old "no faces" refusal; its byte colours are read as sRGB.
+- SPZ files from version 1 to 4. Versions 1-3 are gzip, read with Blendity's own inflate. Version 4 uses zstd streams:
+  it is read with Blender's libraries, and the dependency-free build refuses it with a message.
+- glTF's `KHR_gaussian_splatting` primitives become Gaussian Splats objects; plain POINTS primitives become Points.
+- Decoding follows Blender 5.3 (sigmoid opacity, exp scale, SPZ's fixed-point positions, 8-bit colour, log scale and
+  rotations). A file's axes become Blendity's, and each SH band is carried through the axis change exactly. Degree 4
+  keeps bands 1-3 with a note.
+- Cut-short files, huge or zero counts, bad magic, bad versions and NaN values refuse cleanly or drop the bad points.
+
+**Checked:** the `splats` group passes 378 of 378 checks on Windows with Blender's libraries, on the tree joined with
+round 530's fixes. The comparison with Blender 5.3 is made against its decoding formulas and its own SH tables, not
+against files it imported: no Blender 5.3 executable is on this machine. Linux and the dependency-free build (SPZ v4
+refused there) are left to CI. The `splats` stress section fuzzes the three readers.
+
+**Review:** fixed three things before publishing:
+- an unnormalised PLY rotation turned wrongly when the axes changed;
+- an SPZ v4 header could ask for a huge allocation before decompressing;
+- a glTF accessor was read past its buffer view.
+
+Some glTF cases are now refused with a note: accessors with no buffer view (Draco, sparse), a point primitive's
+indices, and a second point primitive.
+
+## 2026-11-15 (round 530): Point clouds - Points or Gaussian Splats
+
+**Asked:** Pass 27 - Blender 5.3's Gaussian splats in Blendity. This round is the object and its data, which the
+importers and the three splat renderers build on.
+
+**Added (task 0510, ADR 0147)**
+- A Point Cloud object, Blender 5.3's: its Type is Points or Gaussian Splats. Create > Point Cloud > Points /
+  Gaussian Splats (main Create menu and the Hierarchy's), `create Gaussian Splats`, and `pointcloud new | random |
+  info | type | degree | size` in the console.
+- Its data beside the mesh, as arrays: position, base colour, opacity, scale, rotation and spherical harmonics up to
+  degree 3 (`src/scene/pointcloud.h`), with the colour along a view direction, the covariance and a seeded test
+  cloud shared by every renderer.
+- The Inspector shows Type, Count, SH Degree (splats) and Point Size (Points). Undo, duplicate and delete share the
+  arrays until an edit; scenes save the cloud as a binary datablock and refuse a cut or inconsistent one.
+- Create > Point Cloud > Test Splats makes a cloud already filled with 10,000 random splats, so there is something to
+  look at without a file. A Learn section, "Point clouds and Gaussian splats", has a Try-it and two questions.
+
+**Checked:** the `splats` group (112 checks) and `editor` (3,224 checks) on Windows with Blender's libraries. Two editor
+tests failed: the Scatter / Strokes dropdowns and the console's Fix buttons. Both read the shared scratch project, and
+another worker's files were in it. Linux and the dependency-free build are left to CI. Nothing is drawn yet (rounds
+532-534).
+
+**Review:** each cloud gets a uid for the renderers' caches. Splat scales are kept within 1e-8 to 1e15. The console's
+test clouds stop at 2^24 points.
+
 ## 2026-11-15 (round 517): four timing checks that failed under load, made behavioural (task 0500)
 
 **Asked** (the hub, from round 512's runs): the checks that failed only when the machine was busy - a different one each run -
