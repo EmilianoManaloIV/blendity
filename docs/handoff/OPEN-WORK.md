@@ -126,10 +126,10 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Done:** the `gpu` group is clean in the libraries build on a card, or each remaining difference has a
   justified tolerance written in the test.
 
-### 19. Programs built by MSVC 14.52 crash in mesh code (M; CI pins 14.44 meanwhile)
+### 19. Programs built by MSVC 14.52 crash in mesh code (M; CI builds with 14.51 or not at all meanwhile)
 - **What happened:** GitHub Actions run 44354841677 (PR #472's tree `36dd42af`, the dependency-free Windows build) crashed
-  in two programs built by one `windows-build`: `blendity_tests.exe`, run as CI runs it - the whole suite in one process
-  - with a segmentation fault as test 645 ran ("smart materials (ADR 0082): Worn Steel on a subdivided cube's baked maps
+  in two programs built by one `windows-build`: `blendity_tests.exe`, run as CI runs it - the whole suite in one process -
+  with a segmentation fault as test 645 ran ("smart materials (ADR 0082): Worn Steel on a subdivided cube's baked maps
   ...", 36 ms after test 644 "a Paint layer (ADR 0081)" finished), and `blendity_stress.exe --quick` with exception
   0xc0000005 in the section `modifiers_ngon`, right after its table of 26 meshes (its crash report: 12 frames on the main
   thread, every one printed as `?` - no symbols).
@@ -143,9 +143,13 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   on either crash site's path, and nothing reached before test 645 differs between #468 and #472 (round 562 / 572's);
   every branch Pass 26 added runs only for a skinned mesh. The built-in job pool was suspected before the compiler was
   noticed; the stress crash is on the main thread in a section that runs no bake.
-- **What is in place:** `build.bat` prints its compiler in every build and takes `BLENDITY_VCVARS_VER`; CI's
-  `windows-build` and the release's Windows job pin `14.44`, the one toolset both runner images carry beside their
-  default (task 0561). So CI and the installer don't use 14.52 - the fault is still there for anyone who builds with it.
+- **What is in place (task 0561):** `build.bat` prints its compiler in every build and takes `BLENDITY_VCVARS_VER`;
+  CI's `windows-build` and the release's Windows job ask for `14.51` with `BLENDITY_VCVARS_STRICT=1`: on a runner whose
+  image has no 14.51 (the new image) the build stops with a line saying so, and the job is run again until it lands on
+  one that has it. So CI and the installer are never built by 14.52 - at the price of red Windows jobs to re-run, more
+  of them as the new image rolls out, and none passing once the old image is gone. The image's other toolset, 14.44,
+  is no way out: it stops at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` (C2026, a string literal too long
+  for that compiler). The fault itself is still there for anyone who builds with 14.52.
 - **Next step:** build with MSVC 14.52 (Visual Studio 2026 18.12 or newer, or a CI run with the pin taken off) and
   `BLENDITY_PDB=1`, which keeps the symbols beside the programs: `blendity_stress.exe --quick --only modifiers_ngon` then
   names its crash's frames, and `cdb -g -G -o dist\windows\blendity_tests.exe` with `BLENDITY_TEST_RANGE=1-650` catches
@@ -154,7 +158,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   behaviour of ours that 14.51 tolerated (fix it, take the pin off). `/fp:fast` and `/GL` are the first switches to try
   without (`BLENDITY_NO_LTCG=1`).
 - **Done:** the fault explained and fixed or reported, the Windows suite and the stress sections green on a 14.52 build,
-  and the pin in `build.yml` / `release.yml` either taken off or kept with the reason written beside it.
+  and the pin in `build.yml` / `release.yml` taken off (it cannot stay: the old runner image will go).
 
 ## Product follow-ups
 

@@ -81,17 +81,19 @@ jobs:
         shell: bash
         run: |
           echo "image: ${ImageOS:-?} ${ImageVersion:-?}"
-          for d in "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/MSVC; do echo "$d:"; ls "$d"; done
+          for d in "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/MSVC; do echo "$d:"; ls "$d" || true; done
       - name: Build (MSVC, no CMake needed)
         shell: cmd
         # Task 0169 (ADR 0054): NVIDIA's OptiX host headers fetched at a pinned tag; the kernel's PTX is committed.
         # `all` compiles every source once and links the three programs from the same objects (round 492).
         env:
           BLENDITY_FETCH_OPTIX: "1"
-          # Round 579: the v143 toolset both runner images carry side by side (the old image's default, 14.51, is gone
-          # from the new one; its default, 14.52, is the one that crashed). build.bat prints the compiler it used.
-          BLENDITY_VCVARS_VER: "14.44"
-        run: build.bat release all
+          # Round 579: the compiler every green build used. Runner image 20261116.315's default, 14.52, built programs
+          # that crashed, and that image has no 14.51; its other toolset, 14.44, cannot compile the lessons' long
+          # strings (C2026). So on such a runner the build stops (STRICT) rather than use 14.52: run the job again.
+          BLENDITY_VCVARS_VER: "14.51"
+          BLENDITY_VCVARS_STRICT: "1"
+        run: call build.bat release all || exit /b 1
       - uses: actions/upload-artifact@v4
         with:
           name: blendity-windows
