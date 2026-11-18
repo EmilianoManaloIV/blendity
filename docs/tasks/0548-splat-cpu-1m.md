@@ -8,7 +8,7 @@
 - **Model:** main session (worker W4 of Pass 28); code-reviewer as usual
 - **Plan:** Pass 28 (approved 2026-11-18), the follow-up round 557 named: "the CPU at 1M still misses it (86.8 ms)".
   Stacked on the pass's current single top.
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/470
 
 ## What round 557's timed window found
 Orbiting the Scene view round a 1M-splat degree-3 cloud on the CPU rasterizer: median frame **86.8 ms** (ADR 0105:
