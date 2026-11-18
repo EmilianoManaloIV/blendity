@@ -1130,6 +1130,18 @@ void run_blockout_openings_tests() {
       CHECK(turn.find("Console") == std::string::npos);
       if (turn.find(want) == std::string::npos) std::printf("    %s: Turn 90's tooltip: %s\n", preset, turn.c_str());
     }
+    {  // (round 571, task 0553: with no key bound the tooltip names no key - it said F9 - and leaves no bracket)
+      ed.set_binding("edit.adjust_last", {});
+      ed.select_for_test(stairs->id, false);
+      oo_settle(ed, 3);
+      Recti seen;
+      r509_scroll_to(ed, WindowKind::Inspector, "Turn 90", seen);
+      const std::string turn = tip(ed, "Turn 90");
+      std::printf("    no key bound: ...%s\n", turn.size() > 70 ? turn.substr(turn.size() - 70).c_str() : turn.c_str());
+      CHECK(turn.find("Adjust Last Operation right after the piece is drawn.") != std::string::npos);
+      CHECK(turn.find("F9") == std::string::npos && turn.find("()") == std::string::npos);
+      ed.command("keymap Maya");  // (the binding back, as the loop left it)
+    }
     ed.select_for_test(bo->id, false);
     oo_settle(ed, 3);
     const std::string join = tip(ed, "Join Blockouts");

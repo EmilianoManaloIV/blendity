@@ -1547,9 +1547,145 @@ static void tests_round561() {
   });
 }
 
+/* ------------------------------------------------------------- round 567 (task 0549): a measured import */
+
+static void tests_round567() {
+  /* A sample of the stress section's sweep (ADR 0056): 20,000 splats where the sweep reads a million. The times are
+   * printed, never judged. */
+  test("splat import: a 20,000-splat PLY and SPZ read whole, and the reader says where its time went (printed, never judged)", [] {
+    const int n = 20000;
+    const R531Spz z = r531_spz(3, (uint32_t)n, 3);
+    struct Case {
+      const char *name;
+      std::string bytes;
+      bool spz;
+    } cases[] = {{"PLY binary", r531_ply(1, n, 15), false}, {"SPZ v3 gzip", gzip(r531_spz_raw(z, z.n)), true}};
+    for (const Case &c : cases) {
+      SplatReadReport rep;
+      ScopedTimer t;
+      PointCloudPtr pc = c.spz ? read_spz(c.bytes, rep) : read_ply_point_cloud(c.bytes, rep);
+      const double total = t.ms();
+      CHECK(pc && pc->count() == (size_t)n && pc->sh_degree == 3 && pc->consistent());
+      const SplatReadTimes &s = rep.times;
+      std::printf("    %s, %d splats (%.1f MB): unpack %.2f, setup %.2f, decode %.2f, axes %.2f, validate %.2f ms; whole read %.2f ms\n", c.name, n,
+                  (double)c.bytes.size() / 1048576.0, s.unpack_ms, s.setup_ms, s.decode_ms, s.axes_ms, s.validate_ms, total);
+      /* The stages are each a part of the read, none negative; only an SPZ has anything to unpack. */
+      CHECK(s.unpack_ms >= 0.0 && s.setup_ms >= 0.0 && s.decode_ms >= 0.0 && s.axes_ms >= 0.0 && s.validate_ms >= 0.0);
+      CHECK(s.unpack_ms + s.setup_ms + s.decode_ms + s.axes_ms + s.validate_ms <= total + 1.0);
+      if (!c.spz) CHECK(s.unpack_ms == 0.0);
+    }
+  });
+
+  /* Round 567 reads an all-float little-endian PLY straight from its bytes and decodes on every core. The same splats
+   * in the other two encodings still go through the general reader: the three clouds are equal to the float. */
+  test("splat import: a PLY gives the same cloud, value for value, written little endian, big endian or as text", [] {
+    for (int per_channel : {0, 3, 15}) {
+      const int n = 9000;  // (several of the reader's chunks, the last one short)
+      SplatReadReport rl, rb, ra;
+      PointCloudPtr le = read_ply_point_cloud(r531_ply(1, n, per_channel), rl), be = read_ply_point_cloud(r531_ply(2, n, per_channel), rb),
+                    as = read_ply_point_cloud(r531_ply(0, n, per_channel), ra);
+      CHECK(le && be && as);
+      if (!le || !be || !as) continue;
+      CHECK(le->count() == (size_t)n);
+      CHECK(r530_same(*le, *be));
+      CHECK(r530_same(*le, *as));
+    }
+  });
+
+  test("splat import: each splat is decoded by itself - a file's first points read the same alone as inside a larger file", [] {
+    const int n = 9000;
+    for (int cut : {1, 4095, 4097}) {
+      SplatReadReport r1, r2, r3, r4;
+      PointCloudPtr whole = read_ply_point_cloud(r531_ply(1, n, 15), r1), part = read_ply_point_cloud(r531_ply(1, cut, 15), r2);
+      const R531Spz z = r531_spz(3, (uint32_t)n, 3), zc = r531_spz(3, (uint32_t)cut, 3);
+      PointCloudPtr swhole = read_spz(gzip(r531_spz_raw(z, z.n)), r3), spart = read_spz(gzip(r531_spz_raw(zc, zc.n)), r4);
+      CHECK(whole && part && swhole && spart);
+      if (!whole || !part || !swhole || !spart) continue;
+      for (PointCloudPtr *big : {&whole, &swhole}) {  // (the larger cloud cut to the smaller one's count)
+        PointCloud &b = **big;
+        const size_t rest = (size_t)b.sh_rest_per_point();
+        b.position.resize((size_t)cut), b.color.resize((size_t)cut), b.opacity.resize((size_t)cut), b.scale.resize((size_t)cut), b.rotation.resize((size_t)cut);
+        b.sh_rest.resize((size_t)cut * rest);
+      }
+      CHECK(r530_same(*whole, *part));
+      CHECK(r530_same(*swhole, *spart));
+    }
+  });
+
+  /* Review 567: the SPZ reader has no second encoding to compare with, so its values are pinned to the float against
+   * the format's own formulas, a call a value (the reader must not round a scale differently when it decodes a
+   * million at once): every byte a log scale and an opacity can be. */
+  test("splat import: an SPZ's 256 scale and opacity bytes decode to exactly the format's values", [] {
+    R531Spz z = r531_spz(3, 256, 0);
+    for (int i = 0; i < 256; i++) {
+      z.alpha[(size_t)i] = (char)i;
+      for (int k = 0; k < 3; k++) z.scale[(size_t)(3 * i + k)] = (char)((i + 85 * k) & 0xFF);
+    }
+    SplatReadReport rep;
+    PointCloudPtr pc = read_spz(gzip(r531_spz_raw(z, z.n)), rep);
+    CHECK(pc && pc->count() == 256);
+    if (!pc || pc->count() != 256) return;
+    int scale_differs = 0, opacity_differs = 0;
+    for (int i = 0; i < 256; i++) {
+      float got[3] = {pc->scale[(size_t)i].x, pc->scale[(size_t)i].y, pc->scale[(size_t)i].z};
+      for (int k = 0; k < 3; k++) {
+        volatile float x = (float)((i + 85 * k) & 0xFF) / 16.0f - 10.0f;  // (volatile: one exp call, never a table or a vector of them)
+        const float want = std::exp((float)x);
+        scale_differs += got[k] != want;
+      }
+      opacity_differs += pc->opacity[(size_t)i] != (float)i / 255.0f;
+    }
+    CHECK(scale_differs == 0);
+    CHECK(opacity_differs == 0);
+  });
+
+  /* A file with a NaN in it, and a rotation of no length, in the middle of a chunk: what the reader keeps is what it
+   * kept before the round - the NaN point dropped, its neighbours untouched. */
+  test("splat import: a point with no position is left out of a large PLY and the points round it are untouched", [] {
+    const int n = 9000, bad = 5000;
+    std::string ply = r531_ply(1, n, 3);
+    SplatReadReport r0;
+    PointCloudPtr good = read_ply_point_cloud(ply, r0);
+    CHECK(good != nullptr);
+    if (!good) return;
+    const size_t body = ply.find("end_header\n") + 11, stride = (ply.size() - body) / (size_t)n;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(&ply[body + (size_t)bad * stride], &nan, 4);  // (x of point 5000)
+    SplatReadReport r1;
+    PointCloudPtr pc = read_ply_point_cloud(ply, r1);
+    CHECK(pc && pc->count() == (size_t)n - 1 && pc->consistent());
+    if (!pc) return;
+    bool note = false;
+    for (const std::string &s : r1.notes) note = note || s.find("left out") != std::string::npos;
+    CHECK(note);
+    const Vec3 a = pc->position[(size_t)bad - 1], b = good->position[(size_t)bad - 1], c = pc->position[(size_t)bad], d = good->position[(size_t)bad + 1];
+    CHECK(a.x == b.x && a.y == b.y && a.z == b.z);
+    CHECK(c.x == d.x && c.y == d.y && c.z == d.z);
+  });
+
+  test("splat import: a splat file dropped while jobs run on workers is read off the main thread and lands as one object", [] {
+    const R531Spz z = r531_spz(3, 20000, 3);
+    const std::string path = r531_write("orchard.spz", gzip(r531_spz_raw(z, z.n)));
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.set_async_jobs_for_test(true);
+    ed.step_frame_headless();
+    ed.command("import " + path);
+    CHECK(r530_count_clouds(ed) == 0);  // (the command returns before the file is read)
+    int frames = 0;
+    for (; frames < 20000 && (ed.import_job_running_for_test() || r530_count_clouds(ed) == 0); frames++) ed.step_frame_headless();
+    std::printf("    %d frames stepped while the file was read\n", frames);
+    GameObject *g = r530_find_cloud(ed);
+    CHECK(g && g->name == "orchard");
+    CHECK(g && g->get<PointCloudObject>()->data && g->get<PointCloudObject>()->data->count() == 20000);
+    CHECK(r530_count_clouds(ed) == 1);
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
   tests_round531_engineer();
   tests_round561();
+  tests_round567();
 }

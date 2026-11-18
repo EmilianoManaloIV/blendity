@@ -451,6 +451,25 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   return kept;
 }
 
+/* Round 563 (task 0545): the stand-ins a list just gathered points at, noted with the list when it is kept ... */
+void Editor::skin_list_stands(ItemsCache &c) {
+  c.stands.clear();
+  if (!c.valid) return;
+  for (const DrawItem &it : c.items) {
+    if (!it.skin) continue;
+    if (SkinStand *st = skin_stand_of(it)) c.stands.push_back(st);
+  }
+}
+
+/* ... and stamped as seen each time the kept list is used in place of a gather: a view that keeps its list draws its stand-ins
+ * as much as one that gathers them, so skin_prune_stands never lets go of one a kept list in use points at (before, another
+ * view gathering every frame aged it out in 600 gathers - the kept list was dropped and the skin sent to the card again, a
+ * hitch about every ten seconds: review 520's follow-up). The pointers are read only while the list is valid, and every
+ * stand-in let go or replaced clears that first (skin_forget_kept_lists). */
+void Editor::skin_stamp_kept(const ItemsCache &c) {
+  for (SkinStand *st : c.stands) st->seen = skin_builds_;
+}
+
 /* The list itself, a reference into items_cache_: it holds until the next gather of the same [game][tangents] replaces it, so a
  * caller that keeps the reference (render_deferred) must not run another collect_items of that variant meanwhile. `gen` is the
  * list's generation, 0 for a list that isn't kept (it is still the cache's vector - cleared by the next gather). */
@@ -471,6 +490,7 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
     flatten_pivots_.clear(), view_refs_.clear();  // (as the gather leaves them for a scene without either)
     flatten_any_ = view_shapes_any_ = false;
     *gen = keeps_.items_gen[variant][want_tangents];
+    skin_stamp_kept(c);
     return c.items;
   }
   view_perf::counters.item_gathers++;
@@ -482,6 +502,7 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
   c.lod = lod;
   c.valid = !c.flattening && !c.lod && !skin_settling_;  // (round 519: a rest settling after shape keys counts gathers until it is back on the card)
   if (!same) c.items = std::move(items);
+  skin_list_stands(c);
   if (c.valid && !same) keeps_.items_gen[variant][want_tangents] = view_keeps::next_items_gen();  // (a new list: what was kept of the old one is stale)
   *gen = c.valid ? keeps_.items_gen[variant][want_tangents] : 0;
   return c.items;
@@ -503,6 +524,7 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
     if (hit && !cache_verify_) {
       *gen = keeps_.solid_gen[game];
       view_perf::hit(view_perf::SolidItems);
+      skin_stamp_kept(c);
       return c.items;
     }
   }
@@ -513,6 +535,7 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
   if (hit && !same) note_render_cache_mismatch();
   c.valid = kept_kind && !skin_settling_, c.base = base;  // (a rest settling after shape keys: gathered again until it is back on the card)
   if (!same) c.items = std::move(items);
+  skin_list_stands(c);
   if (kept_kind && !same) keeps_.solid_gen[game] = view_keeps::next_items_gen();
   *gen = kept_kind ? keeps_.solid_gen[game] : 0;
   return c.items;

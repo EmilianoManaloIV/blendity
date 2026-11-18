@@ -8327,6 +8327,125 @@ static void tests_round521_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 563 (task 0545): a kept draw list stamps the card
+ * stand-ins its items point at as seen, so a view that keeps its list holds them as one that gathers does (review 520's follow-up). */
+namespace r563 {
+
+/* Solid shading of the small avatar, its list kept and its stand-ins made (without a card when `card` is false). */
+static bool open(Editor &ed, bool card) {
+  r34_open(ed, false);
+  ed.command("benchscene avatarlikequick");
+  ed.command("camera 0 1.0 4.5 0 0.9 0");
+  if (card) ed.viewport_device_for_test(2);
+  else ed.skin_items_for_test(true);  // (Solid makes card-skin items without a card, then turns them back for the CPU raster)
+  ed.command("shading solid");
+  ed.mark_changed_for_test("R563 solid");
+  r34_steps(ed, 6);
+  if (!card) return true;
+  gpu::Raster *g = ed.gpu_raster_for_test();
+  if (g && g->can_skin() && ed.scene_on_gpu_for_test()) return true;
+  std::printf("    skipped: the view isn't on a card that skins (%s)\n", ed.gpu_view_reason().c_str());
+  return false;
+}
+
+/* One frame that draws the Scene view again with the scene as it is (the camera turned a little: the scene's hash holds). */
+static void draw_again(Editor &ed, int i) {
+  ed.command(strprintf("camera %.4f 1.0 4.5 0 0.9 0", 0.5f * (float)(i % 50 + 1)));
+  r34_steps(ed, 1);
+}
+
+}  // namespace r563
+
+static void tests_round563_gpu() {
+  test("a kept Solid list keeps its stand-ins through 700 gathers of another view (round 563): the list is never made again and no stand-in is let go; before, they aged out after 600", [] {
+    Editor ed;
+    r563::open(ed, false);
+    const size_t stands = ed.skin_stands_for_test(), held = ed.solid_kept_stands_for_test();
+    CHECK(stands > 0 && held > 0);
+    r563::draw_again(ed, 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds, h0 = view_perf::counters.hit[view_perf::SolidItems];
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);  // (the other view's gathers: each counts, none finds these stand-ins)
+    }
+    const uint64_t b1 = view_perf::counters.solid_item_builds, h1 = view_perf::counters.hit[view_perf::SolidItems];
+    std::printf("    70 frames with 700 gathers elsewhere: Solid's list made %llu times, used kept %llu times; stand-ins %zu -> %zu (%zu in the kept list)\n", (unsigned long long)(b1 - b0),
+                (unsigned long long)(h1 - h0), stands, ed.skin_stands_for_test(), ed.solid_kept_stands_for_test());
+    CHECK(h1 - h0 >= 60);  // (the frames drew from the kept list)
+    CHECK(b1 == b0);
+    CHECK(ed.skin_stands_for_test() == stands && ed.solid_kept_stands_for_test() == held);
+    ed.skin_items_for_test(false);
+  });
+
+  test("a kept list that is not drawn still lets its stand-ins go, and is made again before it is read (round 563, a guard: the stamp must not hold them for a view that does not draw): 700 gathers elsewhere with the view still, then a frame", [] {
+    Editor ed;
+    r563::open(ed, false);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    ed.skin_gathers_elsewhere_for_test(700);  // (nothing drew the kept list meanwhile: a closed or still view holds no stand-in)
+    CHECK(ed.skin_stands_for_test() == 0);
+    CHECK(ed.solid_kept_stands_for_test() == 0);  // (the list went with them)
+    r563::draw_again(ed, 0);
+    r34_steps(ed, 2);
+    CHECK(view_perf::counters.solid_item_builds > b0);
+    CHECK(ed.skin_stands_for_test() > 0 && ed.solid_kept_stands_for_test() > 0);
+    ed.skin_items_for_test(false);
+  });
+
+  test("on the card a kept Solid list's skins are not sent again while another view gathers (round 563), and a stand-in dropped between two frames is drawn from a new one: the same picture (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    if (!r563::open(ed, true)) return;
+    const GameObject *body = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!body && ed.skin_card_mesh_for_test(&g) >= 0) body = &g;
+    });
+    CHECK(body != nullptr);
+    if (!body) return;
+    r563::draw_again(ed, 0);
+    const size_t stands = ed.skin_stands_for_test();
+    const FrameProfile s0 = ed.frame_profile_totals();
+    const uint64_t b0 = view_perf::counters.solid_item_builds;
+    for (int i = 0; i < 70; i++) {
+      r563::draw_again(ed, i + 1);
+      ed.skin_gathers_elsewhere_for_test(10);
+    }
+    const FrameProfile s1 = ed.frame_profile_totals();
+    std::printf("    70 frames with 700 gathers elsewhere: %llu skins sent, Solid's list made %llu times, stand-ins %zu -> %zu\n", (unsigned long long)(s1.skin_uploads - s0.skin_uploads),
+                (unsigned long long)(view_perf::counters.solid_item_builds - b0), stands, ed.skin_stands_for_test());
+    CHECK(s1.skin_uploads == s0.skin_uploads);
+    CHECK(view_perf::counters.solid_item_builds == b0);
+    CHECK(ed.skin_stands_for_test() == stands);
+    CHECK(ed.scene_on_gpu_for_test());
+    /* A stand-in dropped between two frames (every one, as age does): the next frame gathers, sends the skins again and shows the same picture. */
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const Recti view = ed.window_rect_for_test(WindowKind::Scene);
+    const std::vector<uint32_t> before = r34_crop(ed, view);
+    ed.skin_age_stands_for_test();
+    CHECK(ed.skin_stands_for_test() == 0 && ed.solid_kept_stands_for_test() == 0);
+    CHECK(ed.skin_card_mesh_for_test(body) < 0);
+    ed.command("camera 3 1.0 4.5 0 0.9 0");
+    r34_steps(ed, 2);
+    ed.command("camera 0 1.0 4.5 0 0.9 0");
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) r34_steps(ed, 1);
+    r34_steps(ed, 3);
+    const FrameProfile s2 = ed.frame_profile_totals();
+    const std::vector<uint32_t> after = r34_crop(ed, view);
+    size_t differ = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); i++) differ += before[i] != after[i];
+    std::printf("    after the drop: %llu skins sent, stand-ins %zu, %zu of %zu pixels differ\n", (unsigned long long)(s2.skin_uploads - s1.skin_uploads), ed.skin_stands_for_test(), differ, before.size());
+    CHECK(s2.skin_uploads > s1.skin_uploads);
+    CHECK(ed.skin_stands_for_test() == stands && ed.skin_card_mesh_for_test(body) >= 0);
+    CHECK(before.size() == after.size() && differ == 0);
+    CHECK(ed.scene_on_gpu_for_test());
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -8375,4 +8494,5 @@ void run_gpu_tests() {
   tests_round519_more_gpu();
   tests_round520_gpu();
   tests_round521_gpu();
+  tests_round563_gpu();
 }

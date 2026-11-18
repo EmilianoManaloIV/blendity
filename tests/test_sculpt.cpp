@@ -2295,7 +2295,12 @@ static void tests_round508() {
     step(ed);
     CHECK(changed_count(after, mesh->positions) == 0);
     CHECK(render_is_rebuild(*mesh, 1e-5f, why));
-    /* Mirror X: both sides move, and the render mesh follows both. */
+    /* Mirror X: both sides move, and the render mesh follows both. (Round 562: on the sphere at rest - the stroke taken
+     * back. Each of its twelve full-strength dabs now lands on the surface the dabs before it raised, not on the sphere
+     * as last drawn, so it leaves a spike off the mirror plane; a dab on the spike's tip has no surface at its mirror
+     * image, and this check is about the render mesh following a mirrored dab.) */
+    ed.command("undo");
+    step(ed);
     const std::vector<Vec3> mid = mesh->positions;
     ed.command("sculpt front off");
     ed.command("sculpt symmetry x");
@@ -3445,6 +3450,706 @@ static void tests_round540_te() {
   });
 }
 
+/* ---------------------------------------------------------------- round 562: a stroke doesn't depend on how the view was drawn (task 0544) */
+
+namespace {
+
+/* The vertices' nearest and farthest distance from the object's origin (object space). */
+std::pair<float, float> r562_radii(const Mesh &m) {
+  float lo = 1e30f, hi = 0.0f;
+  for (const Vec3 &p : m.positions) lo = std::min(lo, length(p)), hi = std::max(hi, length(p));
+  return {lo, hi};
+}
+
+bool r562_same(const std::vector<Vec3> &a, const std::vector<Vec3> &b) { return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(Vec3)) == 0); }
+
+}  // namespace
+
+static void tests_round562() {
+  test("sculpt (round 562): on a small dense sphere the brush lands on the mesh at every pixel across it - not up to a third of the radius off, as the depth plane's rounding put it - and every dab of a drag across it gathers vertices", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const Mesh &m = *g->mesh_filter()->mesh;
+    const Vec3 centre = g->world_position();
+    const Vec2 px = pixel_of(ed, centre);
+    const float R = length(pixel_of(ed, centre + Vec3(0.0f, 0.5f, 0.0f)) - px);
+    const std::pair<float, float> radii = r562_radii(m);
+    int hits = 0, off = 0;
+    float worst = 0.0f;
+    for (int dx = -(int)(R * 0.85f); dx <= (int)(R * 0.85f); dx++)
+      for (int dy = -2; dy <= 2; dy += 2) {
+        Vec3 w;
+        float d;
+        if (!ed.sculpt_hit_for_test((float)((int)px.x + dx), (float)((int)px.y + dy), w, d)) continue;
+        hits++;
+        const float r = length(w - centre);
+        worst = std::max(worst, std::max(radii.first - r, r - radii.second));
+        off += r < radii.first * 0.98f || r > radii.second * 1.001f ? 1 : 0;  // (a facet's middle is a little inside its corners)
+      }
+    std::printf("    the sphere is %.0f px across, %zu faces, its vertices %.4f to %.4f from the centre; %d pixels hit, %d off the surface (the farthest %.5f outside that band)\n", 2.0f * R, m.face_count(),
+                radii.first, radii.second, hits, off, worst);
+    CHECK(hits > (int)R && off == 0);
+    /* A drag across it with real events, a small brush: every dab finds vertices. */
+    ed.command("sculpt brush draw");
+    ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.25f)));
+    ed.command("sculpt strength 0.5");
+    ed.command("sculpt stroke freehand");
+    const Recti sr = ed.scene_rect_for_test();
+    const int wx = sr.x + (int)px.x, wy = sr.y + (int)px.y, half = (int)(R * 0.6f);
+    int dabs = 0, empty = 0;
+    step(ed, {mouse_event(platform::EventType::MouseMove, wx - half, wy)});
+    step(ed, {mouse_event(platform::EventType::MouseDown, wx - half, wy)});
+    Vec3 last = ed.sculpt_last_hit_for_test();
+    for (int x = wx - half + 2; x <= wx + half; x += 2) {
+      const size_t before = ed.sculpt_dabs_for_test();
+      step(ed, {mouse_event(platform::EventType::MouseMove, x, wy)});
+      if (ed.sculpt_dabs_for_test() == before) continue;
+      /* (A dab that found no surface leaves the last dab's point and count in place: the point must have moved.) */
+      const Vec3 now = ed.sculpt_last_hit_for_test();
+      dabs++, empty += ed.sculpt_last_gathered_for_test() == 0 || now == last ? 1 : 0;
+      last = now;
+    }
+    step(ed, {mouse_event(platform::EventType::MouseUp, wx + half, wy)});
+    step(ed);
+    std::printf("    a drag of %d px across it: %d dabs, %d of them over no vertex\n", 2 * half, dabs, empty);
+    CHECK(dabs >= half / 2 && empty == 0);
+    ed.command("sculpt stroke dots");
+  });
+
+  test("sculpt (round 562): a dab, a stroke and a Dyntopo dab come out the same to the bit when the Scene view's depth plane is rounded differently (each depth up to 1e-4 off: what a wider span margin in the rasterizer did)", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    auto M = [&] { return ed.scene().find(gid)->mesh_filter()->mesh; };
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = length(pixel_of(ed, g->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);
+    ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.3f)));
+    ed.command("sculpt strength 1");
+    const std::vector<Vec3> rest = M()->positions;
+    auto work = [&] {
+      ed.command(strprintf("sculpt dab %g %g", px.x - R * 0.3f, px.y));
+      ed.command(strprintf("sculpt stroke %g %g %g %g 8", px.x - R * 0.4f, px.y + 2.0f, px.x + R * 0.4f, px.y - 3.0f));
+    };
+    work();
+    const std::vector<Vec3> plain = M()->positions;
+    const Vec3 plain_hit = ed.sculpt_last_hit_for_test();
+    ed.command("undo");
+    ed.command("undo");
+    CHECK(r562_same(M()->positions, rest));
+    CHECK(!r562_same(plain, rest));
+    size_t differ = 0;
+    for (uint32_t seed = 1; seed <= 3; seed++) {
+      ed.noise_scene_depth_for_test(1e-4f, seed);  // (no frame from here to the strokes: they read the plane as it now is)
+      work();
+      differ += r562_same(M()->positions, plain) && ed.sculpt_last_hit_for_test() == plain_hit ? 0 : 1;
+      ed.command("undo");
+      ed.command("undo");
+    }
+    std::printf("    a dab and an 8-dab stroke on the 44 px sphere, the depth plane noised three ways: %zu of 3 differ from the plain run\n", differ);
+    CHECK(differ == 0);
+    /* Dyntopo: the tessellation follows the brush's point, so its counts would differ too. */
+    for (int i = 0; i < 3; i++) step(ed);
+    ed.command("sculpt dyntopo 0.5");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const std::vector<Vec3> dyn = M()->positions;
+    const size_t dyn_faces = M()->face_count();
+    ed.command("undo");
+    ed.noise_scene_depth_for_test(1e-4f, 9);
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    std::printf("    a Dyntopo dab: %zu faces plain, %zu with the plane noised; the positions %s\n", dyn_faces, M()->face_count(), r562_same(M()->positions, dyn) ? "the same" : "differ");
+    CHECK(M()->face_count() == dyn_faces && r562_same(M()->positions, dyn));
+    ed.command("sculpt dyntopo off");
+  });
+
+  test("sculpt (round 562): the ray through the face grid finds what testing every face finds, to the bit - on and off the mesh, after a stroke and a Grab moved the faces (filed again, no rebuild), after an undo, with a face hidden, and on a cube whose faces are larger than the cells", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);  // (24k faces: over the grid's threshold)
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = length(pixel_of(ed, g->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);
+    auto sweep = [&](const char *what) {
+      int hit = 0, miss = 0, differ = 0;
+      for (float y = px.y - R * 1.3f; y <= px.y + R * 1.3f; y += 2.5f)
+        for (float x = px.x - R * 1.3f; x <= px.x + R * 1.3f; x += 2.5f) {
+          const float a = ed.sculpt_ray_for_test(x, y, false), b = ed.sculpt_ray_for_test(x, y, true);
+          differ += std::memcmp(&a, &b, sizeof(float)) != 0 ? 1 : 0;
+          (b > 0.0f ? hit : miss)++;
+        }
+      std::printf("    %s: %d rays hit, %d miss, %d differ between the grid and every face (grid builds so far %zu, %zu entries)\n", what, hit, miss, differ, ed.sculpt_ray_builds_for_test(),
+                  ed.sculpt_ray_entries_for_test());
+      CHECK(hit > 50 && miss > 50 && differ == 0);
+    };
+    CHECK(g->mesh_filter()->mesh->face_count() >= 4096);
+    sweep("the sphere at rest");
+    const size_t builds0 = ed.sculpt_ray_builds_for_test();
+    CHECK(builds0 == 1);
+    ed.command(strprintf("sculpt size %g", R * 0.4f));
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt stroke %g %g %g %g 10", px.x - R * 0.5f, px.y, px.x + R * 0.5f, px.y));
+    sweep("after a 10-dab Draw stroke");
+    ed.command("sculpt brush grab");
+    const Recti sr = ed.scene_rect_for_test();
+    const int wx = sr.x + (int)px.x, wy = sr.y + (int)px.y;
+    step(ed, {mouse_event(platform::EventType::MouseMove, wx, wy)});
+    step(ed, {mouse_event(platform::EventType::MouseDown, wx, wy)});
+    for (int i = 1; i <= 6; i++) step(ed, {mouse_event(platform::EventType::MouseMove, wx + (int)(R * 0.1f * i), wy - i)});
+    step(ed, {mouse_event(platform::EventType::MouseUp, wx + (int)(R * 0.6f), wy - 6)});
+    step(ed);
+    sweep("after a Grab drag");
+    std::printf("    the strokes filed their faces again: %zu grid build(s) since the first\n", ed.sculpt_ray_builds_for_test() - builds0);
+    CHECK(ed.sculpt_ray_builds_for_test() == builds0);  // (the moved faces were filed again; nothing was rebuilt)
+    ed.command("undo");
+    sweep("after an undo");
+    ed.command("sculpt brush draw");
+    /* A hidden face lets the ray through, both ways. */
+    {
+      MeshPtr &mp = ed.scene().find(g->id)->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      const float before = ed.sculpt_ray_for_test(px.x, px.y, true);
+      Vec3 w;
+      float d;
+      CHECK(ed.sculpt_hit_for_test(px.x, px.y, w, d));
+      const Vec3 local = ed.scene().find(g->id)->world_matrix().inverse().point(w);
+      size_t hidden = 0;
+      for (size_t f = 0; f < mp->face_count(); f++) {
+        Vec3 c(0.0f);
+        for (uint32_t k = 0; k < mp->face_size(f); k++) c += mp->positions[mp->face_verts(f)[k]];
+        if (length(c / (float)mp->face_size(f) - local) < 0.08f) mp->set_face_hidden(f, true), hidden++;
+      }
+      mp->touch();
+      const float through = ed.sculpt_ray_for_test(px.x, px.y, true);
+      std::printf("    %zu faces hidden under the pixel: the ray's first face at %.4f, was %.4f\n", hidden, through, before);
+      CHECK(hidden > 0 && through == -1.0f);  // (the far side through the hole looks away: culled, as the view draws it - a miss)
+      sweep("with faces hidden");
+    }
+    /* The default cube: twelve triangles far larger than any cell - the list every ray tests. */
+    Editor ed2;
+    ed2.init_headless(1400, 900);
+    ed2.set_clock_for_test(100.0);
+    ed2.command("select Cube");
+    step(ed2);
+    for (int i = 0; i < 400 && ed2.scene_camera_for_test().animating; i++) step(ed2);
+    ed2.command("sculpt on");
+    for (int i = 0; i < 20; i++) step(ed2);
+    GameObject *cube = ed2.active_object_for_test();
+    CHECK(cube);
+    if (!cube) return;
+    ed2.sculpt_ray_grid_from_for_test(0);
+    const Vec2 cp = pixel_of(ed2, cube->world_position());
+    int hit = 0, differ = 0;
+    for (float y = cp.y - 200.0f; y <= cp.y + 200.0f; y += 7.0f)
+      for (float x = cp.x - 200.0f; x <= cp.x + 200.0f; x += 7.0f) {
+        const float a = ed2.sculpt_ray_for_test(x, y, false), b = ed2.sculpt_ray_for_test(x, y, true);
+        differ += std::memcmp(&a, &b, sizeof(float)) != 0 ? 1 : 0;
+        hit += b > 0.0f ? 1 : 0;
+      }
+    std::printf("    the cube through the grid: %d rays hit, %d differ\n", hit, differ);
+    CHECK(hit > 20 && differ == 0);
+  });
+
+  test("sculpt (round 562, review): one vertex pulled a thousand sizes away leaves the grid a grid (its box is where the faces are, the stray ones tested by every ray); a long Grab files nothing until the next ray; with an Array modifier the planes' depth places the brush as before", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = length(pixel_of(ed, g->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);
+    auto sweep = [&](const char *what) {
+      int hit = 0, miss = 0, differ = 0;
+      for (float y = px.y - R * 1.3f; y <= px.y + R * 1.3f; y += 3.5f)
+        for (float x = px.x - R * 1.3f; x <= px.x + R * 1.3f; x += 3.5f) {
+          const float a = ed.sculpt_ray_for_test(x, y, false), b = ed.sculpt_ray_for_test(x, y, true);
+          differ += std::memcmp(&a, &b, sizeof(float)) != 0 ? 1 : 0;
+          (b > 0.0f ? hit : miss)++;
+        }
+      std::printf("    %s: %d rays hit, %d miss, %d differ (grid builds %zu, %zu entries)\n", what, hit, miss, differ, ed.sculpt_ray_builds_for_test(), ed.sculpt_ray_entries_for_test());
+      CHECK(hit > 20 && miss > 20 && differ == 0);
+    };
+    sweep("the sphere");
+    const size_t plain = ed.sculpt_ray_entries_for_test();
+    {
+      /* The vertex farthest from the point under the pointer (on the far side), a thousand sphere sizes off. */
+      MeshPtr &mp = ed.scene().find(gid)->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      Vec3 w;
+      float d;
+      CHECK(ed.sculpt_hit_for_test(px.x, px.y, w, d));
+      const Vec3 local = ed.scene().find(gid)->world_matrix().inverse().point(w);
+      uint32_t far_v = 0;
+      for (uint32_t v = 0; v < (uint32_t)mp->vert_count(); v++)
+        if (length_sq(mp->positions[v] - local) > length_sq(mp->positions[far_v] - local)) far_v = v;
+      mp->positions[far_v] = mp->positions[far_v] * 2000.0f;
+      mp->touch();
+    }
+    sweep("with one vertex 1,000 sizes away");
+    const size_t stray = ed.sculpt_ray_entries_for_test();
+    std::printf("    the grid's entries: %zu on the plain sphere, %zu with the stray vertex\n", plain, stray);
+    CHECK(stray > plain / 2 && stray < plain * 2);  // (the cells are still the sphere's: not one cell holding every face)
+    /* A long Grab: thirty moves of the pointer, no ray between them - the faces are filed once, at the next ray. */
+    ed.command("sculpt brush grab");
+    ed.command(strprintf("sculpt size %g", R * 0.5f));
+    const Recti sr = ed.scene_rect_for_test();
+    const int wx = sr.x + (int)px.x, wy = sr.y + (int)px.y;
+    step(ed, {mouse_event(platform::EventType::MouseMove, wx, wy)});
+    step(ed, {mouse_event(platform::EventType::MouseDown, wx, wy)});
+    const size_t held = ed.sculpt_ray_entries_for_test();
+    for (int i = 1; i <= 30; i++) step(ed, {mouse_event(platform::EventType::MouseMove, wx + 8 * i, wy)});
+    const size_t dragged = ed.sculpt_ray_entries_for_test();
+    step(ed, {mouse_event(platform::EventType::MouseUp, wx + 240, wy)});
+    step(ed);
+    std::printf("    a 240 px Grab: %zu entries at the press, %zu after thirty moves\n", held, dragged);
+    CHECK(dragged == held);
+    sweep("after the Grab");
+    ed.command("sculpt brush draw");
+    ed.command("undo");
+    /* An Array's copy can stand in front of the mesh: the ray against the mesh is not the brush's point there. */
+    for (int i = 0; i < 3; i++) step(ed);
+    GameObject *obj = ed.scene().find(gid);
+    Vec3 a0, a1, b0, b1;
+    float d;
+    const bool plain0 = ed.sculpt_hit_for_test(px.x, px.y, a0, d);
+    ed.noise_scene_depth_for_test(1e-3f, 5);
+    const bool plain1 = ed.sculpt_hit_for_test(px.x, px.y, a1, d);
+    ArrayModifier *arr = obj->add<ArrayModifier>();
+    arr->count = 2;
+    ed.mark_changed_for_test("Array");
+    for (int i = 0; i < 3; i++) step(ed);
+    const bool array0 = ed.sculpt_hit_for_test(px.x, px.y, b0, d);
+    ed.noise_scene_depth_for_test(1e-3f, 5);
+    const bool array1 = ed.sculpt_hit_for_test(px.x, px.y, b1, d);
+    std::printf("    the point under the pointer with the depth plane noised: moved %.5f without a modifier, %.5f with an Array\n", length(a1 - a0), length(b1 - b0));
+    CHECK(plain0 && plain1 && a0 == a1);
+    CHECK(array0 && array1 && !(b0 == b1));
+  });
+}
+
+/* ---------------------------------------------------------------- round 562, test engineer: degenerate input, strokes keeping the grid right, depth-noise independence */
+
+namespace {
+
+struct R562Sweep {
+  int hit = 0, miss = 0, differ = 0, bad = 0;
+};
+
+/* The grid's ray against the every-face ray over a square of pixels round `c` (span in radii R, step in pixels): how many hit, miss,
+ * differ in a single bit, and are neither -1 nor a finite distance. */
+R562Sweep r562_sweep(Editor &ed, Vec2 c, float R, float span, float step_px) {
+  R562Sweep s;
+  for (float y = c.y - R * span; y <= c.y + R * span; y += step_px)
+    for (float x = c.x - R * span; x <= c.x + R * span; x += step_px) {
+      const float a = ed.sculpt_ray_for_test(x, y, false), b = ed.sculpt_ray_for_test(x, y, true);
+      s.differ += std::memcmp(&a, &b, sizeof(float)) != 0 ? 1 : 0;
+      s.bad += (!std::isfinite(a) || !std::isfinite(b) || (a <= 0.0f && a != -1.0f) || (b <= 0.0f && b != -1.0f)) ? 1 : 0;
+      (b > 0.0f ? s.hit : s.miss)++;
+    }
+  return s;
+}
+
+/* A sphere's pixel radius at its centre. */
+float r562_pixel_radius(Editor &ed, GameObject *g) {
+  const Vec2 px = pixel_of(ed, g->world_position());
+  return length(pixel_of(ed, g->world_position() + Vec3(0.0f, 0.5f, 0.0f)) - px);
+}
+
+using R562State = std::pair<std::vector<Vec3>, std::vector<float>>;
+
+/* One dab and one 8-dab stroke with `brush` on the 44 px sphere, then the same with the depth plane noised three ways and no frame between:
+ * how many of the three differ bitwise (positions and mask) from the plain run; -1 when the scene did not come up. */
+int r562_noise_case(const char *brush) {
+  Editor ed;
+  GameObject *g = sphere_scene(ed, 2);
+  CHECK(g);
+  if (!g) return -1;
+  const uint64_t gid = g->id;
+  auto M = [&] { return ed.scene().find(gid)->mesh_filter()->mesh; };
+  auto take = [&] { return R562State(M()->positions, M()->sculpt_mask); };
+  auto same = [&](const R562State &a, const R562State &b) { return r562_same(a.first, b.first) && a.second == b.second; };
+  const Vec2 px = pixel_of(ed, g->world_position());
+  const float R = r562_pixel_radius(ed, g);
+  ed.command(strprintf("sculpt brush %s", brush));
+  ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.3f)));
+  ed.command("sculpt strength 1");
+  const R562State rest = take();
+  auto work = [&] {
+    ed.command(strprintf("sculpt dab %g %g", px.x - R * 0.3f, px.y));
+    ed.command(strprintf("sculpt stroke %g %g %g %g 8", px.x - R * 0.4f, px.y + 2.0f, px.x + R * 0.4f, px.y - 3.0f));
+  };
+  work();
+  const R562State plain = take();
+  CHECK(!same(plain, rest));  // (the stroke did something, or the comparison below means nothing)
+  ed.command("undo");
+  ed.command("undo");
+  int differ = 0;
+  for (uint32_t seed = 1; seed <= 3; seed++) {
+    ed.noise_scene_depth_for_test(1e-4f, seed);
+    work();
+    differ += same(take(), plain) ? 0 : 1;
+    ed.command("undo");
+    ed.command("undo");
+  }
+  std::printf("    %s: a dab and an 8-dab stroke, the depth plane noised three ways: %d of 3 differ from the plain run\n", brush, differ);
+  return differ;
+}
+
+}  // namespace
+
+static void tests_round562_te() {
+  test("sculpt (round 562, te): a vertex pulled to NaN leaves the ray the same through the grid and through every face, never a NaN distance, and a dab still runs without losing a vertex or a face", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = r562_pixel_radius(ed, g);
+    Vec3 w;
+    float d;
+    CHECK(ed.sculpt_hit_for_test(px.x, px.y, w, d));
+    const Vec3 local = ed.scene().find(gid)->world_matrix().inverse().point(w);
+    size_t vc = 0, fc = 0;
+    {
+      MeshPtr &mp = ed.scene().find(gid)->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      uint32_t best = 0;
+      float bd = 1e30f;
+      for (uint32_t v = 0; v < (uint32_t)mp->vert_count(); v++) {
+        const float l = length(mp->positions[v] - local);
+        if (l < bd) bd = l, best = v;
+      }
+      const float nan = std::numeric_limits<float>::quiet_NaN();
+      mp->positions[best] = Vec3(nan, nan, nan);
+      mp->touch();
+      vc = mp->vert_count(), fc = mp->face_count();
+    }
+    ed.sculpt_ray_grid_from_for_test(0);  // (the grid on, whatever the face count)
+    const R562Sweep s = r562_sweep(ed, px, R, 1.2f, R * 0.4f);
+    std::printf("    NaN vertex, grid forced: %d rays hit, %d miss, %d differ between the grid and every face, %d neither finite nor -1\n", s.hit, s.miss, s.differ, s.bad);
+    CHECK(s.differ == 0 && s.bad == 0 && s.hit > 0);
+    ed.command("sculpt size 20");
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));  // (the face under the pixel is skipped: the ray goes through the hole or the brush finds nothing - it must not crash)
+    const MeshPtr &after = ed.scene().find(gid)->mesh_filter()->mesh;
+    CHECK(after->vert_count() == vc && after->face_count() == fc);
+    const R562Sweep s2 = r562_sweep(ed, px, R, 1.2f, R * 0.4f);
+    std::printf("    after a dab: %d differ, %d bad\n", s2.differ, s2.bad);
+    CHECK(s2.differ == 0 && s2.bad == 0);
+  });
+
+  test("sculpt (round 562, te): a vertex at infinity leaves the grid's ray the same as every face's, no hang while filing its faces, no distance but -1 or a finite one", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = r562_pixel_radius(ed, g);
+    {
+      MeshPtr &mp = ed.scene().find(gid)->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      mp->positions[mp->vert_count() / 3].x = std::numeric_limits<float>::infinity();
+      mp->positions[mp->vert_count() / 2].y = -std::numeric_limits<float>::infinity();
+      mp->touch();
+    }
+    ed.sculpt_ray_grid_from_for_test(0);
+    const R562Sweep s = r562_sweep(ed, px, R, 1.2f, R * 0.4f);
+    std::printf("    infinite vertices, grid forced: %d hit, %d miss, %d differ, %d bad\n", s.hit, s.miss, s.differ, s.bad);
+    CHECK(s.differ == 0 && s.bad == 0);
+  });
+
+  test("sculpt (round 562, te): faces collapsed to a point under the brush leave the grid's ray the same as every face's, and a dab beside them still moves the surface", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = r562_pixel_radius(ed, g);
+    Vec3 w;
+    float d;
+    CHECK(ed.sculpt_hit_for_test(px.x, px.y, w, d));
+    const Vec3 local = ed.scene().find(gid)->world_matrix().inverse().point(w);
+    {
+      MeshPtr &mp = ed.scene().find(gid)->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      for (int pass = 0; pass < 3; pass++) {  // (the nearest three faces, one after the other: a patch of zero-area faces and slivers round it)
+        size_t bf = 0;
+        float bd = 1e30f;
+        for (size_t f = 0; f < mp->face_count(); f++) {
+          const Vec3 c = mp->positions[mp->face_verts(f)[0]];
+          const float l = length(c - local);
+          bool flat = true;
+          for (uint32_t k = 1; k < mp->face_size(f); k++) flat = flat && mp->positions[mp->face_verts(f)[k]] == c;
+          if (!flat && l < bd) bd = l, bf = f;
+        }
+        const uint32_t n = mp->face_size(bf);
+        const Vec3 c = mp->positions[mp->face_verts(bf)[0]];
+        for (uint32_t k = 1; k < n; k++) mp->positions[mp->face_verts(bf)[k]] = c;
+      }
+      mp->touch();
+    }
+    ed.sculpt_ray_grid_from_for_test(0);
+    const R562Sweep s = r562_sweep(ed, px, R, 1.3f, 2.5f);
+    std::printf("    collapsed faces, grid forced: %d hit, %d miss, %d differ, %d bad\n", s.hit, s.miss, s.differ, s.bad);
+    CHECK(s.hit > 50 && s.differ == 0 && s.bad == 0);
+    ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.3f)));
+    ed.command("sculpt strength 1");
+    const std::vector<Vec3> before = ed.scene().find(gid)->mesh_filter()->mesh->positions;
+    ed.command(strprintf("sculpt dab %g %g", px.x + R * 0.6f, px.y));
+    const size_t moved = changed_count(before, ed.scene().find(gid)->mesh_filter()->mesh->positions);
+    std::printf("    a dab beside the collapsed faces moved %zu vertices\n", moved);
+    CHECK(moved > 0);
+    const R562Sweep s2 = r562_sweep(ed, px, R, 1.3f, 2.5f);
+    CHECK(s2.differ == 0 && s2.bad == 0);
+  });
+
+  test("sculpt (round 562, te): an object scaled by 1e4 (and one by 1e-4) with its mesh scaled the other way looks the same, and the brush lands on the mesh at every pixel across it, the grid's ray equal to every face's", [] {
+    for (const float k : {1e4f, 1e-4f}) {
+      Editor ed;
+      GameObject *g = sphere_scene(ed, 2);
+      CHECK(g);
+      if (!g) return;
+      const uint64_t gid = g->id;
+      {
+        MeshPtr &mp = ed.scene().find(gid)->mesh_filter()->mesh;
+        mesh_make_mutable(mp);
+        for (Vec3 &p : mp->positions) p = p * k;
+        mp->touch();
+      }
+      ed.scene().find(gid)->set_local_scale(Vec3(1.0f / k));
+      for (int i = 0; i < 20; i++) step(ed);  // (the render mesh and the id plane follow)
+      ed.sculpt_ray_grid_from_for_test(0);
+      const Vec2 px = pixel_of(ed, ed.scene().find(gid)->world_position());
+      const float R = r562_pixel_radius(ed, ed.scene().find(gid));
+      const std::pair<float, float> radii = r562_radii(*ed.scene().find(gid)->mesh_filter()->mesh);
+      const Mat4 inv = ed.scene().find(gid)->world_matrix().inverse();
+      int hits = 0, off = 0;
+      for (int i = -4; i <= 4; i++) {
+        Vec3 w;
+        float d;
+        if (!ed.sculpt_hit_for_test(px.x + R * 0.2f * (float)i, px.y, w, d)) continue;
+        hits++;
+        const float r = length(inv.point(w));
+        off += r < radii.first * 0.98f || r > radii.second * 1.001f ? 1 : 0;
+      }
+      const R562Sweep s = r562_sweep(ed, px, R, 1.3f, 2.5f);
+      std::printf("    mesh x %g: %d of 9 pixels hit, %d off the surface; grid vs every face: %d hit, %d miss, %d differ, %d bad\n", k, hits, off, s.hit, s.miss, s.differ, s.bad);
+      CHECK(hits >= 5 && off == 0);
+      CHECK(s.hit > 50 && s.differ == 0 && s.bad == 0);
+      ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.3f)));
+      ed.command("sculpt strength 1");
+      const std::vector<Vec3> before = ed.scene().find(gid)->mesh_filter()->mesh->positions;
+      ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+      const size_t moved = changed_count(before, ed.scene().find(gid)->mesh_filter()->mesh->positions);
+      std::printf("    a dab at the centre moved %zu vertices\n", moved);
+      CHECK(moved > 0);
+    }
+  });
+
+  test("sculpt (round 562, te): a fin and two copies of a face on one edge (a non-manifold edge) leave the grid's ray the same as every face's, and a dab keeps the counts", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 2);
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = r562_pixel_radius(ed, g);
+    Vec3 w;
+    float d;
+    CHECK(ed.sculpt_hit_for_test(px.x, px.y, w, d));
+    const Vec3 local = ed.scene().find(gid)->world_matrix().inverse().point(w);
+    size_t vc = 0, fc = 0;
+    {
+      MeshPtr &mp = ed.scene().find(gid)->mesh_filter()->mesh;
+      mesh_make_mutable(mp);
+      size_t bf = 0;
+      float bd = 1e30f;
+      for (size_t f = 0; f < mp->face_count(); f++) {
+        const float l = length(mp->face_center(f) - local);
+        if (l < bd) bd = l, bf = f;
+      }
+      const std::vector<uint32_t> fv(mp->face_verts(bf), mp->face_verts(bf) + mp->face_size(bf));
+      const uint32_t tip = mp->add_vert((mp->positions[fv[0]] + mp->positions[fv[1]]) * 0.5f * 1.4f);
+      const uint32_t fin[3] = {fv[0], fv[1], tip};
+      mp->add_face(fin, 3);  // (the edge fv[0]-fv[1] now has three faces)
+      mp->add_face(fv.data(), fv.size());  // (the same face twice)
+      std::vector<uint32_t> flipped(fv.rbegin(), fv.rend());
+      mp->add_face(flipped.data(), flipped.size());  // (and its back)
+      mp->sync_attributes();
+      mp->touch();
+      vc = mp->vert_count(), fc = mp->face_count();
+    }
+    ed.sculpt_ray_grid_from_for_test(0);
+    const R562Sweep s = r562_sweep(ed, px, R, 1.3f, 2.5f);
+    std::printf("    non-manifold edge and doubled faces, grid forced: %d hit, %d miss, %d differ, %d bad\n", s.hit, s.miss, s.differ, s.bad);
+    CHECK(s.hit > 50 && s.differ == 0 && s.bad == 0);
+    ed.command(strprintf("sculpt size %g", std::max(5.0f, R * 0.3f)));
+    ed.command("sculpt strength 1");
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const MeshPtr &after = ed.scene().find(gid)->mesh_filter()->mesh;
+    CHECK(after->vert_count() == vc && after->face_count() == fc);
+    const R562Sweep s2 = r562_sweep(ed, px, R, 1.3f, 2.5f);
+    CHECK(s2.differ == 0 && s2.bad == 0);
+  });
+
+  test("sculpt (round 562, te): on an open plane a ray past its edge misses (-1, through the grid and through every face) and the brush finds nothing there, while rays across it hit", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    ed.command("delete");
+    ed.command("create Plane");
+    ed.command("subdivide 3");
+    step(ed);
+    for (int i = 0; i < 400 && ed.scene_camera_for_test().animating; i++) step(ed);
+    ed.command("sculpt on");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    const uint64_t gid = g->id;
+    Vec3 w;
+    float d;
+    Vec2 c;
+    for (int i = 0; i < 100; i++) {
+      step(ed);
+      c = pixel_of(ed, g->world_position());
+      if (ed.sculpt_hit_for_test(c.x, c.y, w, d)) break;
+    }
+    CHECK(ed.sculpt_hit_for_test(c.x, c.y, w, d));
+    ed.sculpt_ray_grid_from_for_test(0);
+    /* The vertex farthest from the centre on screen: the plane's rim. */
+    const Mat4 W = g->world_matrix();
+    const MeshPtr &mp = g->mesh_filter()->mesh;
+    Vec2 rim = c;
+    float rim_px = 0.0f;  // (not "far": a macro in the Windows headers)
+    for (const Vec3 &p : mp->positions) {
+      const Vec2 q = pixel_of(ed, W.point(p));
+      const float l = length(q - c);
+      if (l > rim_px) rim_px = l, rim = q;
+    }
+    CHECK(rim_px > 20.0f);
+    const Vec2 v = rim - c;
+    int inside_hits = 0, outside_miss = 0, outside_total = 0, differ = 0, brush_hits = 0;
+    for (float f = 0.0f; f <= 1.8f; f += 0.1f) {
+      const float x = c.x + v.x * f, y = c.y + v.y * f;
+      const float a = ed.sculpt_ray_for_test(x, y, false), b = ed.sculpt_ray_for_test(x, y, true);
+      differ += std::memcmp(&a, &b, sizeof(float)) != 0 ? 1 : 0;
+      if (f < 0.95f) {
+        inside_hits += b > 0.0f ? 1 : 0;
+      } else if (f > 1.05f) {
+        outside_total++, outside_miss += b == -1.0f ? 1 : 0;
+        brush_hits += ed.sculpt_hit_for_test(x, y, w, d) ? 1 : 0;
+      }
+    }
+    std::printf("    rim %.0f px from the centre: %d rays hit across the plane, %d of %d past the rim miss, %d differ, the brush finds the plane past the rim at %d\n", rim_px,inside_hits, outside_miss, outside_total,
+                differ, brush_hits);
+    CHECK(inside_hits >= 8 && outside_total > 0 && outside_miss == outside_total && differ == 0 && brush_hits == 0);
+    CHECK(ed.sculpt_ray_for_test(c.x, c.y, false) > 0.0f);
+  });
+
+  test("sculpt (round 562, te): Draw, Clay, Inflate and Smooth strokes with an undo and a redo between keep the grid's ray equal to every face's, and none of them builds the grid again", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = r562_pixel_radius(ed, g);
+    CHECK(g->mesh_filter()->mesh->face_count() >= 4096);
+    auto sweep = [&](const char *what) {
+      const R562Sweep s = r562_sweep(ed, px, R, 0.9f, R * 0.35f);
+      std::printf("    %s: %d hit, %d miss, %d differ, %d bad (grid builds %zu, entries %zu)\n", what, s.hit, s.miss, s.differ, s.bad, ed.sculpt_ray_builds_for_test(), ed.sculpt_ray_entries_for_test());
+      CHECK(s.hit > 10 && s.differ == 0 && s.bad == 0);
+    };
+    sweep("at rest");
+    const size_t builds0 = ed.sculpt_ray_builds_for_test();
+    CHECK(builds0 == 1);
+    ed.command(strprintf("sculpt size %g", R * 0.4f));
+    ed.command("sculpt strength 1");
+    auto stroke = [&](const char *brush, float dy) {
+      ed.command(strprintf("sculpt brush %s", brush));
+      ed.command(strprintf("sculpt stroke %g %g %g %g 8", px.x - R * 0.5f, px.y + dy, px.x + R * 0.5f, px.y - dy));
+    };
+    const std::vector<Vec3> rest = g->mesh_filter()->mesh->positions;
+    stroke("draw", 3.0f);
+    sweep("after Draw");
+    stroke("clay", -4.0f);
+    sweep("after Clay");
+    ed.command("undo");
+    sweep("after undoing Clay");
+    ed.command("redo");
+    sweep("after redoing Clay");
+    stroke("inflate", 6.0f);
+    sweep("after Inflate");
+    stroke("smooth", 0.0f);
+    sweep("after Smooth");
+    ed.command("undo");
+    ed.command("undo");
+    sweep("after undoing Smooth and Inflate");
+    ed.command("redo");
+    sweep("after redoing Inflate");
+    CHECK(changed_count(rest, ed.scene().find(g->id)->mesh_filter()->mesh->positions) > 0);  // (the strokes moved the surface)
+    std::printf("    grid builds since the first: %zu\n", ed.sculpt_ray_builds_for_test() - builds0);
+    CHECK(ed.sculpt_ray_builds_for_test() == builds0);
+  });
+
+  test("sculpt (round 562, te): many strokes and Grab drags on one place grow the grid's entries by a bounded amount (past three times the built size it is built again), and its ray stays equal to every face's", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed, 3);
+    CHECK(g);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    const float R = r562_pixel_radius(ed, g);
+    const R562Sweep s0 = r562_sweep(ed, px, R, 0.9f, R * 0.35f);
+    CHECK(s0.differ == 0);
+    const size_t built = ed.sculpt_ray_entries_for_test();
+    const size_t builds0 = ed.sculpt_ray_builds_for_test();
+    CHECK(built > 0);
+    ed.command(strprintf("sculpt size %g", R * 0.6f));
+    ed.command("sculpt strength 1");
+    ed.command("sculpt brush draw");
+    size_t peak = built, grew = 0;
+    for (int s = 0; s < 12; s++)
+      for (int k = 0; k < 6; k++) {
+        const size_t before = ed.sculpt_ray_entries_for_test();
+        ed.command(strprintf("sculpt dab %g %g", px.x + R * 0.1f * (float)(k - 3), px.y));
+        const size_t after = ed.sculpt_ray_entries_for_test();
+        grew = std::max(grew, after > before ? after - before : (size_t)0);
+        peak = std::max(peak, after);
+      }
+    ed.command("sculpt brush grab");
+    const Recti sr = ed.scene_rect_for_test();
+    const int wx = sr.x + (int)px.x, wy = sr.y + (int)px.y;
+    for (int rep = 0; rep < 3; rep++) {
+      step(ed, {mouse_event(platform::EventType::MouseMove, wx, wy)});
+      step(ed, {mouse_event(platform::EventType::MouseDown, wx, wy)});
+      for (int i = 1; i <= 6; i++) step(ed, {mouse_event(platform::EventType::MouseMove, wx + (int)(R * 0.08f * (float)i), wy - i)});
+      step(ed, {mouse_event(platform::EventType::MouseUp, wx + (int)(R * 0.5f), wy - 6)});
+      step(ed);
+      peak = std::max(peak, ed.sculpt_ray_entries_for_test());
+    }
+    const size_t bound = 4 * built + 1024 + grew;  // (three times the built size is the rebuild's threshold; a rebuild after the surface grew counts a little more)
+    std::printf("    built with %zu entries; peak %zu over 72 dabs and 3 drags (one dab adds up to %zu); bound %zu; grid builds since: %zu\n", built, peak, grew, bound,
+                ed.sculpt_ray_builds_for_test() - builds0);
+    CHECK(peak <= bound);
+    const R562Sweep s1 = r562_sweep(ed, px, R, 0.9f, R * 0.35f);
+    std::printf("    after: %d hit, %d miss, %d differ\n", s1.hit, s1.miss, s1.differ);
+    CHECK(s1.differ == 0 && s1.bad == 0 && s1.hit > 10);
+  });
+
+  test("sculpt (round 562, te): a Smooth dab and stroke come out the same to the bit when the depth plane is noised", [] {
+    CHECK(r562_noise_case("smooth") == 0);
+  });
+
+  test("sculpt (round 562, te): a Mask dab and stroke paint the same mask to the bit when the depth plane is noised", [] {
+    CHECK(r562_noise_case("mask") == 0);
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -3459,4 +4164,6 @@ void run_sculpt_tests() {
   tests_round508_te();
   tests_round540();
   tests_round540_te();
+  tests_round562();
+  tests_round562_te();
 }
