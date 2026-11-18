@@ -1634,7 +1634,7 @@ static void tests_round181() {
     gpu::drop_ready_renderers_for_test();  // (a spare opened under the hook would sleep for the next test)
   });
 
-  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames short while the render goes on - under 10 ms but for the ones that merge and resolve the picture - and finishes (skipped without a GPU)", [] {
+  test("path tracer off the main thread: the editor's F12 on a slow card (the test hook) keeps twenty frames coming while the render goes on - Stop lands what it had, and a short render finishes (skipped without a GPU)", [] {
     if (!gpu::available()) {
       std::printf("    (no GPU here: skipped)\n");
       return;
@@ -1647,11 +1647,19 @@ static void tests_round181() {
       r34_open(ed);
       ed.command("engine path");
       ed.command("device gpu");
-      ed.command("samples 400");
+      /* Round 568: this counted the frames that fit before a 400-sample render ended and asked for twenty. How many fit
+       * is the machine's load, not the editor: at below-normal priority beside other sessions' builds the frames are
+       * slow, the card's worker is not, and the render was over after fewer (round 555 saw it fail so). Now the render
+       * cannot end by itself (100,000 samples, as round 412's Stop check renders), exactly twenty frames are stepped
+       * and each must come back with the render still going on the card - a render that held the main thread would
+       * not return from the first - then Stop lands what it had and a short render shows one finishes. What the check
+       * was written for is kept; only the race against the card's speed is gone. The frames' times are a stress row
+       * (round 411). */
+      ed.command("samples 100000");
       ed.command("render");
       ScopedTimer total;
       bool on_card = false;
-      while (!on_card && total.ms() < 20000.0) {  // (the device opens on a worker; the CPU traces meanwhile)
+      while (!on_card && total.ms() < 120000.0) {  // (the device opens on a worker; the CPU traces meanwhile. Round 568: 20 s was a budget a starved or cold card missed; the cap only ends a hang)
         ed.step_frame_headless();
         on_card = ed.render_status_for_test().find("GPU") != std::string::npos && ed.render_status_for_test().find("starting") == std::string::npos;
         if (!ed.rendering_for_test()) ed.command("render");
@@ -1659,28 +1667,39 @@ static void tests_round181() {
       CHECK(on_card);
       for (int i = 0; i < 5 && ed.rendering_for_test(); i++) ed.step_frame_headless();  // (the card settles: its upload and the first merge)
       double worst = 0.0;
-      int frames = 0;
+      int frames = 0, quick = 0;
       std::string times;
-      while (ed.rendering_for_test() && frames < 20 && total.ms() < 30000.0) {
+      for (int i = 0; i < 20; i++) {  // (a fixed count of frames, each with the render still going: no clock decides how many)
         ScopedTimer f;
         ed.step_frame_headless();
-        if (!ed.rendering_for_test()) break;  // (the finishing frame denoises and resolves: not a poll)
+        if (!ed.rendering_for_test()) break;
         worst = std::max(worst, f.ms());
+        quick += f.ms() < 10.0 ? 1 : 0;
         times += strprintf("%.1f ", f.ms());
         frames++;
       }
-      int quick = 0;
-      for (size_t at = 0; at < times.size();) {  // (the frames under 10 ms)
-        const size_t sp = times.find(' ', at);
-        quick += std::atof(times.substr(at, sp - at).c_str()) < 10.0 ? 1 : 0;
-        at = sp == std::string::npos ? times.size() : sp + 1;
-      }
       std::printf("    frames: %s(%d of them under 10 ms; a frame that merges new samples resolves the 1280x720 picture, about 12 ms more)\n", times.c_str(), quick);
-      while (ed.rendering_for_test() && total.ms() < 40000.0) ed.step_frame_headless();
-      std::printf("    %d frames measured, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
+      std::printf("    %d frames stepped with the render going, the slowest %.1f ms; %s\n", frames, worst, ed.render_status_for_test().c_str());
       CHECK(frames == 20);
+      CHECK(ed.rendering_for_test() && ed.render_status_for_test().find("GPU") != std::string::npos);  // (still the card's, twenty frames on)
       std::printf("    quick frames %d of 20, the worst %.1f ms (a stress row since round 411, not a check)\n", quick, worst);
+      /* Stop lands what the card had; then a render short enough to end is waited for, however long the machine takes
+       * (the cap is against a hang, not a budget). */
+      ed.stop_render_for_test();
       CHECK(!ed.rendering_for_test());
+      ScopedTimer stopping;  // (its own timer: the card's opening above may have taken a minute of `total`)
+      while (ed.render_job_running_for_test() && stopping.ms() < 120000.0) ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::printf("    stopped: %s\n", ed.render_status_for_test().c_str());
+      CHECK(!ed.render_job_running_for_test() && ed.render_status_for_test().find("(stopped)") != std::string::npos);
+      ed.command("samples 8");
+      ed.command("render");
+      CHECK(ed.rendering_for_test());
+      ScopedTimer last;
+      int last_frames = 0;
+      for (; ed.rendering_for_test() && last.ms() < 120000.0; last_frames++) ed.step_frame_headless();
+      std::printf("    8 samples: finished in %d frame(s); %s\n", last_frames, ed.render_status_for_test().c_str());
+      CHECK(!ed.rendering_for_test() && last_frames >= 1);
     }
     set_env("BLENDITY_GPU_FAKE_SLOW", "");
     for (int i = 0; i < 400 && gpu::renderers_opening(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -6751,12 +6770,28 @@ static void tests_round543_gpu() {
     /* The row found again before hovering it (the window-status lines above it may change between frames). */
     for (int i = 0; i < 3; i++) ed.step_frame_headless();
     CHECK(find(r));
-    const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
-    ed.set_clock_for_test(300.0);
-    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
-    ed.set_clock_for_test(300.8);
-    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
-    const std::string tip = ed.ui_for_test().tooltip_text_for_test();
+    /* Round 568: with the clock pinned (the two notes above) the tooltip still came back empty once in macOS's whole
+     * suite (#462) and not in the run before it. The clock is no longer in it: a hover's timer starts again when the
+     * row's rectangle changes, and the lines above this row are the window's status, which something still landing
+     * from an earlier test (a device opening, a job ending) can change between the two frames of one hover - that is
+     * the reading, not a proof: the failed run printed only the empty text. So the hover is made again from the row's
+     * rectangle of the moment until the row has held still for one (twenty tries at most), and a try that fails says
+     * where the row was before and after. The check is unchanged: hovering the row says why. */
+    std::string tip;
+    double at = 300.0;
+    for (int attempt = 0; attempt < 20 && tip.empty() && find(r); attempt++, at += 2.0) {
+      const int hx = r.x + r.w / 2, hy = r.y + r.h / 2;
+      ed.set_clock_for_test(at);
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+      ed.set_clock_for_test(at + 0.8);
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, hx, hy)});
+      tip = ed.ui_for_test().tooltip_text_for_test();
+      Recti after{};
+      const bool still_there = find(after);
+      if (tip.empty())
+        std::printf("    hover %d at %d %d: no tooltip; the row was at %d %d %dx%d, after the hover %s %d %d %dx%d\n", attempt, hx, hy, r.x, r.y, r.w, r.h, still_there ? "at" : "gone, last", after.x, after.y, after.w,
+                    after.h);
+    }
     std::printf("    the greyed row's tooltip: '%s'\n", tip.c_str());
     /* The spec's wording for a card without ray queries is "This graphics card has no ray tracing (Vulkan ray queries): the
      * views use the shadow map."; with the views on the CPU the code says the views draw on the CPU instead (same keywords). */
