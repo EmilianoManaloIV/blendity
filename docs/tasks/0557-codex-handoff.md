@@ -1,6 +1,6 @@
 # 0557: The handoff to a ChatGPT Codex project (round 575)
 
-- **Status:** in review (round 575; asked by the owner on 2026-11-18 with the 1.0.0 release)
+- **Status:** done (round 575; asked by the owner on 2026-11-18 with the 1.0.0 release)
 - **Requirements:** none of the program's (documentation only)
 - **Decisions:** none needed (no rule changes: `AGENTS.md` restates `CLAUDE.md`)
 - **Model:** main session

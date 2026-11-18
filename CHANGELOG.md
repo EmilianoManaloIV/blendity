@@ -2,6 +2,105 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-18 (round 578): Blendity 1.0.0
+
+**Asked:** an official 1.0.0 release, today, with everything on the open stack in it (the owner, 2026-11-18).
+
+**What Blendity is at 1.0.0.** A 3D editor in C++17 that works like Unity and is built on Blender's ideas: a
+Hierarchy, an Inspector, Scene and Game views and Play mode over Blender's mesh layout, Edit Mode operators, UV
+unwrapping, Principled materials, a rasterizer and a path tracer on the CPU and on a Vulkan graphics card, baked
+lighting, rigging, skinning and animation; with Blockouts, drawing and Push/Pull for buildings, sculpting and
+painting, Gaussian splats, imports of the common formats (OBJ, FBX, glTF, USD) and of Unity's packages and scenes
+(a .blend comes in only through an installed Blender), a Learn tab that teaches each part, and
+installers for Windows, macOS and Linux. It runs with Blender's prebuilt libraries or, dependency-free, on its own
+code. The 0.x versions were pre-releases; the entries below are the whole history.
+
+**Changed (task 0560)**
+- The version is 1.0.0: `VERSION`, the version a build without it reports, the installer script's example, the
+  manual, the release notes' link to the install guide, and the two books' title pages, colophon and install
+  chapter, which no longer call the program a pre-release. A `v1.0.0` tag publishes "Blendity 1.0.0" as a release, not a pre-release, with the installers under the
+  names the README links to (`release.yml` and `packaging/publish_release.sh` already did this for a 1.x tag: checked,
+  not changed).
+- The README's rewrite for a first-time visitor and its new pictures are round 577, in the same release; the Codex
+  handoff (`AGENTS.md`, `docs/handoff/`) is round 575.
+
+**Known issues at 1.0.0**
+- With an avatar posed inside a world on the graphics card, frames take 17 to 25 ms on the machine it was measured on
+  (an RTX 4070 SUPER), over the 16.7 ms of 60 fps: the card idles in its lowest power state while the editor gives it
+  little to do (round 565). Alone, posing meets 60 fps there.
+  The driver's own setting for the program (NVIDIA: "Power management mode: Prefer maximum performance" for
+  Blendity.exe) may help; it has not been tested.
+- A text or number field that Tab is editing can still be pushed out of view by rows that grow above it; other
+  focused controls are brought back (round 573).
+- The installers are not signed with a paid certificate: Windows and macOS ask once before opening them (`docs/INSTALL.md`
+  says what to click). Macs with an Intel processor are not supported.
+- The PDFs in `docs/` still carry 0.13.0 on their title pages; the release's own PDFs are built from the 1.0.0
+  sources.
+- The other open follow-ups are listed in round 574's entry, below.
+
+**Checked:** the full unit suite again on builds of this tree, which report 1.0.0 (no 0.13.0 string is left in the programs), every group in its own process with its own test and prefs folder: Windows with Blender's libraries 106,864 checks in 3,801 tests (the card groups on the card: gpu 1,655, splats_raster 276, splats_gpu 3,917, splats_trace 3,996), Linux dependency-free (WSL) 100,060 in 3,801; 25 groups each, 0 failed - the updater's and the manual's tests among them (assets, render, editor). The dependency-free Windows build ran on the tree before the version changed (round 574: 100,021, 0 failed); on this tree it is CI's. The 1.0.0 `Blendity.exe` starts headless in a scratch project and writes its picture. The suites ran before rounds 575 and 577 were merged in (new documents, pictures and the README: no code). `tools/sweep_commands.py --check`, `tools/test_coverage_map.py --check`, both HCI audits, the shard table, `make_books.py --check-cited` and `changelog.py check` pass. Code review: approve (rounds 574 and 578), its notes taken.
+
+**Not checked here:** CI's dependency-free Windows job crashed once on #472's tree (round 565's pull request), in the middle of the suite run as one process. The same program run the same way here did not crash, nor did the 25 groups one by one; it is being looked at as a rare fault older than this pass. The installers themselves are built and installed by `release.yml` when the tag is pushed, not before.
+
+## 2026-11-18 (round 577): A README for a first visit, with current pictures
+
+**Asked:** "Make sure README in the GitHub has updated graphics and keep it simple and ready for people who will see
+it" (the 1.0.0 release).
+
+**Changed (task 0559)**
+- `README.md` is a page read in a minute: what Blendity is, four pictures, the three download links, what you can do,
+  the first minute, where to learn more, building in two lines, the licence. It was 480 lines.
+- The long material moved, word for word, to `docs/`: the stage-by-stage feature list and the machines table to
+  `docs/FEATURES.md`, the install steps and help to `docs/INSTALL.md`, the build options to `docs/BUILDING.md`.
+  The paragraphs on the books, the AI disclosure and the licences are shortened to links to the documents that
+  already hold them (`docs/AI_DISCLOSURE.md`, `licenses/README.md`, `CREDITS.md`). The line "Not recreated:
+  sculpting, ... the sequencer ..." was dropped: Blendity has both now.
+- Left for a follow-up, outside this round's files: `packaging/install-notes.md` and comments in `packaging/`
+  still call README "the full guide" (it is `docs/INSTALL.md` now), `docs/MANUAL.md` names "the README's feature
+  list", a tooltip says "see README" for `blendity_stress`, `tools/make_books.py` reads README but not
+  `docs/FEATURES.md` for the books' index, and a changelog fragment cannot edit `docs/FEATURES.md`.
+- The pictures in `docs/images/` are from the current build, each scene made by console commands in a scratch
+  project (`--headless-screenshot`): the editor with a Blockout room (a double door, a grid window, an arched
+  window), 100,000 Gaussian splats imported from a generated PLY, a sphere sculpted with Dyntopo, and a path-traced
+  render saved with `saverender`. Nine older pictures the README no longer shows were removed.
+- No picture of a posed character: the only rigged character a command can build is the bench's stand-in, which is
+  not fit to show; one needs a model of the user's.
+- README keeps what tools and tests read: the link to `docs/MANUAL.md` (the editor group's docs test) and the one
+  line with the unit-check count that the write-up's fold updates.
+
+**Checked:** `tools/dev/docs_check.sh`, `tools/dev/changelog.py check`, `tools/sweep_commands.py --check`; every link
+of the four files resolves; no code changed, so no build.
+
+## 2026-11-18 (round 575): the handoff to a ChatGPT Codex project (task 0557)
+
+**Asked** (the owner, with the 1.0.0 release): the work continues in a ChatGPT Codex project; write down what a new
+agent needs so that nothing the sessions learned is lost.
+
+**Added (documentation and copies of scripts only; nothing compiled changes)**
+- `AGENTS.md` at the root, the file Codex reads: `CLAUDE.md`'s rules restated without the parts only Claude Code
+  understands - the project map, build and run, testing rules, code standards, documentation duties, the workflow and
+  its approval gates, git and publishing. The `implementer` / `test-engineer` / `code-reviewer` sub-agents become three
+  roles played in turn, with their boundaries quoted from `.claude/agents/`; the hub and worker sessions become one
+  coordinating task and parallel tasks with a file-ownership table. `CLAUDE.md` stays as it is.
+- `docs/handoff/README.md`: where to start, what 1.0.0 contains, what is open, where each kind of knowledge lives.
+- `docs/handoff/METHOD.md`: a round from spec to merged PR; rounds and passes; changelog fragments and the fold; one
+  stack with a single top; file ownership for parallel work; the build slots, the WSL lock, the card slot and the locked
+  timed window; the owner's exe rebuilt at every publish; the hourly check and the board.
+- `docs/handoff/PITFALLS.md`: the lessons that cost time - keep-both merges dropping a shared closing `});` and `}`,
+  tests reading the owner's preferences or a shared scratch folder, wall-clock tests under load,
+  `stress/sweep_commands.inc` going stale, stale and orphaned locks, HOLD messages arriving late, Python from standard
+  input, heredocs and backslashes, renaming a running exe aside, the release rules, GCC 15 on ubuntu-26.04, macOS runner
+  shortages.
+- `docs/handoff/OPEN-WORK.md`: every follow-up nobody has taken, with its evidence and files, and the decisions that are
+  the owner's.
+- `docs/handoff/MACHINE.md`: the development machine - toolchains, Blender's libraries, OptiX, WSL's limits, the
+  worktree and scratch folders - and `tools/dev/machine/`: copies of its four helper scripts (`win-lock.sh`,
+  `wsl-lock.sh`, `build-low.bat`, `timed-window.sh`), with a header saying their paths are that machine's.
+
+**Checked:** `py tools/dev/changelog.py check`, `python tools/sweep_commands.py --check` and
+`bash tools/dev/docs_check.sh` pass; `bash -n` on the three shell scripts; the diff adds files only; reviewed against
+`CLAUDE.md` rule by rule. No build and no test run: nothing compiled changed.
+
 ## 2026-11-18 (round 574): Pass 28's write-up - the follow-ups of Passes 26 and 27
 
 **Asked:** Pass 28's documentation as Pass 26's write-up did it (task 0556): rounds 562-573 folded into this file,
