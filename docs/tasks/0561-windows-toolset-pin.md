@@ -4,7 +4,7 @@
 - **Requirements:** the release plan of 2026-11-18 (1.0.0): what ships is what CI tested
 - **Decisions:** none needed (build scripts only; no source change)
 - **Model:** main session (W1 of Pass 28), code-reviewer
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/476 - base `main`, on the release's #475 (which merged this round's two commits and folded its fragment; this head is #475's plus this line)
 
 ## Goal
 GitHub Actions run 44354841677 (PR #472's tree `36dd42af`) crashed twice on Windows: `windows-unit` with a segmentation
