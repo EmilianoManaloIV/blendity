@@ -204,7 +204,7 @@ size_t flip_faces(Mesh &m, const std::vector<uint8_t> &face_sel) {
   for (size_t f = 0; f < m.face_count() && f < face_sel.size(); f++) {
     if (!face_sel[f]) continue;
     std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
-    if (m.has_uvs()) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+    m.reverse_corner_layers(f);  // the UVs, as before, and Corner colours (task 0525)
     n++;
   }
   m.touch();

@@ -77,6 +77,10 @@ struct RasterInstance {
   /* Task 0195: Weight Paint's colours - 1 + this mesh's first vertex's in RasterFrame::vertex_colors (0: none), lit per
    * vertex in place of the albedo with RasterFrame::gouraud. */
   uint32_t vertex_colors = 0;
+  /* Task 0537: the colours at `vertex_colors` reach the vertices for a Vertex Color material (its own, or an Axis part's)
+   * rather than replace the albedo (Solid shading's Weight Paint colours) - `vertex_color_src`; this instance's own
+   * material multiplies them - `vertex_color_mul` (packed as tex2.w = 2). */
+  bool vertex_color_src = false, vertex_color_mul = false;
   /* Task 0195: a see-through surface (MaterialSurface: 2 Transparent, 3 Glass; else 0), drawn by the see-through pass
    * from RasterFrame::see_through rather than the g-buffer's; Glass's index of refraction. */
   int32_t surface = 0;
@@ -177,6 +181,7 @@ struct RasterLight {
   float width = 1.0f, height = 1.0f;
   bool disk = false;
   int bake_mode = 0;  // task 0197: RenderLight's (2 Baked: in the lightmaps and baked probes, skipped where they light)
+  bool shadows = true;  // round 543: RenderLight's - whether it casts traced shadows (RasterFrame::rt_shadows)
 };
 
 /* Task 0195: a see-through triangle's corner: the mesh's vertex (local), its instance, whether its face is highlighted. */
@@ -190,6 +195,41 @@ struct SeeCorner {
 };
 static_assert(sizeof(SeeCorner) == 64, "SeeCorner: the shaders' layout");
 
+/* Round 543: the traced shadows' work so far (tests and the timed rows read it). */
+struct RtShadowStats {
+  uint64_t blas_builds = 0, tlas_builds = 0;
+  double last_build_ms = 0;  // the last frame's recording of its builds, on the host
+};
+
+/* Round 557 (task 0539): a Gaussian splat as the card keeps it, 64 bytes (std430: the shader's SplatSrc). The card projects
+ * it itself each frame (round 532's EWA, ported to GLSL), so this is the static part: the centre and opacity, the
+ * covariance's upper triangle (splat_covariance's xx, xy, xz, yy, yz, zz), the base colour (PointCloud::color) and the
+ * cloud's index in the frame's list (RasterFrame::splat_clouds / splat_ids). `flags` & 1: a Points cloud's dot. */
+struct RasterSplatSrc {
+  float pos[3], opacity;
+  float cov[6];
+  float color[3];
+  uint32_t cloud;
+  uint32_t flags;
+  uint32_t pad;
+};
+static_assert(sizeof(RasterSplatSrc) == 64, "RasterSplatSrc: the shaders' layout");
+
+/* One cloud's values for a frame (std430: the shader's SplatCloud), 112 bytes. mvp is proj x view x model in the CPU's
+ * convention (column-major, left-handed, y up, depth 0..1): the vertex shader projects as gsplat_project_one does and
+ * counts pixel rows from the top as the CPU's splats do, so it takes no y flip of its own (the meshes' view_proj has
+ * Vulkan's flip folded in; this is not that matrix). cam_local the camera in the cloud's space, dot_px a Points dot's radius
+ * in pixels times w (gsplat_draw_view), ortho_dir an orthographic view's direction (zero for perspective). `first` is the
+ * cloud's first splat in the static set, sh_count the SH coefficients past the base (0, 3, 8, 15), sh_first the cloud's
+ * first uint in the SH array (a splat takes (3 * sh_count + 1) / 2 uints, halves, coefficient-major rgb). */
+struct RasterSplatCloud {
+  float mvp[16];
+  float cam_local[3], dot_px;
+  float ortho_dir[3], pad;
+  uint32_t first, sh_count, sh_first, pick_id;
+};
+static_assert(sizeof(RasterSplatCloud) == 112, "RasterSplatCloud: the shaders' layout");
+
 struct RasterFrame {
   int slot = 0;               // which view (0-3): its own targets
   int width = 0, height = 0;
@@ -198,6 +238,9 @@ struct RasterFrame {
   float sun_view_proj[16];    // the shadow map's (ShadowMap::view_proj)
   int shadow_size = 2048;     // 0: no shadow map
   int shadow_light = 0;       // which light casts it
+  /* Round 543 (task 0523, ADR 0151): shadows traced through ray queries (Raster::can_trace_shadows) for every light with
+   * `shadows` among the first 32, in place of the map - the lighting pass and its linear-light copy. */
+  bool rt_shadows = false;
   float shadow_bias = 0.002f;
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
@@ -212,6 +255,19 @@ struct RasterFrame {
   /* Task 0195: the see-through surfaces' triangles back to front, three corners each (Renderer3D::draw_see_through's
    * order), drawn after the lighting. */
   std::vector<SeeCorner> see_through;
+  /* Round 532 (task 0512), round 557 (task 0539): Gaussian splats, blended over the lit picture before the see-through
+   * surfaces. The card keeps the static splats (and their SH) between frames while `splat_set_key` holds
+   * (Raster::splat_set_key_held); splat_src / splat_sh are filled only when it doesn't (null otherwise) and must live
+   * until the frame is written. Each frame sends the clouds' values and `splat_order`, global indices into the static
+   * set, back to front (the clouds one after another, the farthest first; each cloud in its own sorted order), drawn one
+   * instance each. splat_ids: cloud index (RasterSplatSrc::cloud) -> the object's pick id. At most 255 clouds. A key is
+   * never 0. */
+  uint64_t splat_set_key = 0;
+  const std::vector<RasterSplatSrc> *splat_src = nullptr;
+  const std::vector<uint32_t> *splat_sh = nullptr;
+  std::vector<RasterSplatCloud> splat_clouds;
+  std::vector<uint32_t> splat_order;
+  std::vector<uint32_t> splat_ids;
   /* Task 0197: the baked-lit triangles' corners, two vec4 each - (local position, lightmap u), (lightmap v, realtime
    * u, v, 0) - three a triangle, in the card's triangle order; the probe volume's settings; realtime GI's specular
    * occlusion. */
@@ -315,7 +371,15 @@ class Raster {
   /* Task 0192: whether RasterFrame's overlays are drawn (else the caller draws them itself). */
   virtual bool can_draw_overlays() const { return false; }
   virtual bool can_draw_see_through() const { return false; }  // task 0195: Transparent and Glass (dual-source blending)
-  virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
+  virtual bool can_draw_splats() const { return false; }        // round 532: RasterFrame::splat_order (Gaussian splats)
+  /* Round 557: the key of the static splat set on the card (0: none) and how many times a set was uploaded (tests). */
+  virtual uint64_t splat_set_key_held() const { return 0; }
+  virtual uint64_t splat_uploads() const { return 0; }
+  virtual uint64_t splat_set_key_failed() const { return 0; }       // the key of a set whose upload failed (the editor refuses it)
+  virtual uint64_t max_storage_buffer_bytes() const { return 0; }  // the card's largest storage buffer (0: unknown)
+  virtual void release_splats() {}  // frees the static set (the scene has no splats left); the key is 0 after
+  virtual bool pipelines_from_cache() const { return false; }   // round 557: the pipelines came from the disk cache
+  virtual bool can_draw_toon_maps() const { return false; }   // task 0196: toon materials' painted maps (the toon pass)
   virtual bool can_draw_baked() const { return false; }         // task 0197: lightmaps and probes (the baked pass)
   virtual bool can_draw_hdr() const { return false; }           // task 0197: the picture in linear light
   virtual bool can_draw_see_through_hdr() const { return false; }  // round 414: see-through surfaces over it (their pixels marked "none", as the CPU's)
@@ -398,6 +462,10 @@ class Raster {
   virtual bool compose_read(const uint32_t *ui, int width, int height, const std::vector<PresentView> &views, uint32_t *out,
                             std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
+  /* Round 543: the views' shadows can be traced on this device (ray queries opened, their structures ready). */
+  virtual bool can_trace_shadows() const { return false; }
+  virtual RtShadowStats rt_shadow_stats() const { return {}; }
+  virtual void fail_rt_shadows_for_test() {}  // (the next traced frame's build fails: the map from then on)
 };
 
 /* Round 450: BLENDITY_VIEW_OFF=sh,lv,mask (any of them, comma-separated) compiles the views' shaders without round

@@ -196,7 +196,9 @@ void tests_round514() {
     }
   });
 
-  test("blockout piece modifiers: a room, a door or window and an Intersect piece take no stack and say why; a Bevel put on one by the console stays on it, inert", [] {
+  /* (Round 546 changed this on purpose, ADR 0150: a door or window takes a stack now - its Array and Mirror repeat it, the rest reshape its
+   * hole - so the door and window rows went from both tests below; tests/test_blockout_opening_modifiers.cpp checks what it does.) */
+  test("blockout piece modifiers: a room and an Intersect piece take no stack and say why; a Bevel put on one by the console stays on it, inert", [] {
     Editor ed;
     ed.init_headless(1500, 1400);
     GameObject *box = r514_box(ed);
@@ -208,10 +210,7 @@ void tests_round514() {
       const char *what;
       std::function<void(BlockoutPiece &)> set;
     };
-    const std::vector<Kind> kinds = {{"room", [](BlockoutPiece &p) { p.room = true; }},
-                                     {"door", [](BlockoutPiece &p) { p.opening = 1; }},
-                                     {"window", [](BlockoutPiece &p) { p.opening = 2; }},
-                                     {"intersect", [](BlockoutPiece &p) { p.operation = 2; }}};
+    const std::vector<Kind> kinds = {{"room", [](BlockoutPiece &p) { p.room = true; }}, {"intersect", [](BlockoutPiece &p) { p.operation = 2; }}};
     ed.command("select " + box->name);
     ed.command("component BevelModifier");
     CHECK(r514_count(*box, "BevelModifier") == 1);
@@ -1029,7 +1028,7 @@ void tests_round514_engineer_b() {
     }
   });
 
-  test("blockout piece modifiers: a stack put by the console on a room, a door, a window or an Intersect piece does nothing, the mesh is the numbers' build, and `blockout info` names the piece and says why", [] {
+  test("blockout piece modifiers: a stack put by the console on a room or an Intersect piece does nothing, the mesh is the numbers' build, and `blockout info` names the piece and says why", [] {
     Editor ed;
     ed.init_headless(900, 600);
     GameObject *box = r514_box(ed);
@@ -1045,9 +1044,7 @@ void tests_round514_engineer_b() {
       std::function<void(BlockoutPiece &)> set;
     };
     const std::vector<Kind> kinds = {{"room", "a room's walls", [](BlockoutPiece &p) { p.room = true; }},
-                                     {"door", "a door or window", [](BlockoutPiece &p) { p.opening = 1, p.operation = 1; }},
-                                     {"window", "a door or window", [](BlockoutPiece &p) { p.opening = 2, p.operation = 1; }},
-                                     {"intersect", "Intersect piece", [](BlockoutPiece &p) { p.operation = 2; }}};
+                                     {"intersect", "Intersect piece", [](BlockoutPiece &p) { p.operation = 2; }}};  // (round 546: doors and windows take a stack)
     for (const Kind &k : kinds) {
       const BlockoutPiece keep = *bp;
       k.set(*bp);

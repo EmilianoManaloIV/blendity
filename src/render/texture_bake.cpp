@@ -108,6 +108,13 @@ TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::
   /* 2. The original surface (positions, normals, its UVs and tangents: what the materials are evaluated on) and the
    * same mesh on the baked UVs (the tangent frame the normal map is written in, as the renderers will read it). */
   const RenderMesh &rm = mesh.render_mesh_tangents();
+  /* Task 0533: the vertex colours a Vertex Color material multiplies in (without the mesh's cache: a bake job's thread). */
+  std::vector<Vec4> bake_colors;
+  for (const MaterialPtr &mp : materials)
+    if (mp && mp->vertex_color) {
+      render_vertex_colors_into(mesh, rm, bake_colors);
+      break;
+    }
   Mesh baked = mesh;
   baked.uvs = r.uvs;
   baked.touch();
@@ -229,6 +236,8 @@ TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::
           const Vec3 q0 = rm.positions[tri[0]];
           sp.geo_normal = normalize(nm.dir(cross(rm.positions[tri[1]] - q0, rm.positions[tri[2]] - q0)));
           if (!rm.uvs.empty()) sp.uv = rm.uvs[tri[0]] * b0 + rm.uvs[tri[1]] * b1 + rm.uvs[tri[2]] * b2;
+          if (bake_colors.size() == rm.positions.size())  // (task 0533)
+            sp.vertex_color = bake_colors[tri[0]] * b0 + bake_colors[tri[1]] * b1 + bake_colors[tri[2]] * b2;
           if (!rm.tangents.empty()) {
             const Vec4 tg = rm.tangents[tri[0]] * b0 + rm.tangents[tri[1]] * b1 + rm.tangents[tri[2]] * b2;
             sp.tangent = Vec4(normalize(nm.dir(tg.xyz())), rm.tangents[tri[0]].w);

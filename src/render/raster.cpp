@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raster.h"
+#include "gsplat_raster.h"
 #include "voxel_gi.h"
 #include "probe_volume.h"
 #include "light_volume_bake.h"
@@ -566,6 +567,11 @@ static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, c
   sp.has_probe = true;
 }
 
+SplatPass &Renderer3D::splat_pass() {
+  if (!own_splats_) own_splats_ = std::make_shared<SplatPass>();
+  return *own_splats_;
+}
+
 void Renderer3D::flush() {
   uses_++;  // (task 0421)
   ScopedTimer total;
@@ -574,7 +580,7 @@ void Renderer3D::flush() {
   if (!opt_.multithreaded) js.set_max_threads(1);
 
   const int W = rt_->width, H = rt_->height;
-  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; js.set_max_threads(saved_threads); return; }
+  if (W <= 0 || H <= 0) { items_.clear(); sky_.on = false; splats_ = nullptr; js.set_max_threads(saved_threads); return; }
   if (!(rt_->want_hdr && opt_.shade == ShadeMode::Deferred) || rt_->hdr.size() != (size_t)W * H) rt_->hdr.clear();  // begin() allocates it
   const int T = opt_.tile_size;
   tiles_x_ = (W + T - 1) / T;
@@ -944,6 +950,13 @@ void Renderer3D::flush() {
     shade_deferred();
     stats_.ms_shade = tsh.ms();
   }
+  if (splats_ && !depth_only && rt_->color) {
+    /* Round 532: Gaussian splats over the opaque surfaces, under the see-through ones (gsplat_raster.h). */
+    ScopedTimer tsp;
+    splats_->draw_cpu(*rt_);
+    stats_.ms_shade += tsp.ms();
+  }
+  splats_ = nullptr;
   if (any_see_through && !depth_only && rt_->color) {
     ScopedTimer tst;
     draw_see_through(see_through);
@@ -983,9 +996,12 @@ Vec3 Lightmap::sample(Vec2 uv) const {
 }
 
 static inline uint32_t pack_rgb(float r, float g, float b) {
+  /* Clamped as a float before the cast (round 539): a NaN or infinite shade - a mesh with NaN positions lit through
+   * its NaN normals - would overflow the int (UBSan: "nan is outside the range of representable values"). NaN is 0. */
   auto c = [](float v) {
-    int i = (int)(v * 255.0f + 0.5f);
-    return (uint32_t)(i < 0 ? 0 : (i > 255 ? 255 : i));
+    if (!(v == v)) v = 0.0f;
+    v = std::max(0.0f, std::min(v, 1.0f));
+    return (uint32_t)(int)(v * 255.0f + 0.5f);
   };
   return 0xFF000000u | (c(r) << 16) | (c(g) << 8) | c(b);
 }
@@ -997,6 +1013,38 @@ static inline int pixel_in(float v, int lo, int hi) {
   if (!(v > (float)lo)) return lo;
   if (!(v < (float)hi)) return hi;
   return (int)v;
+}
+
+/* Round 554 (task 0535): one pixel centre's side of one edge, settled the same way by the two triangles that share it,
+ * for the pixels the float edge function can't settle. The edge from (xa, ya) to (xb, yb), its function
+ * (xa - px)(yb - py) - (xb - px)(ya - py), as A x + B y + C with A = ya - yb, B = xb - xa. In double each difference of
+ * two floats is exact (and each product too while the coordinates stay within a few thousand pixels of the centre); the
+ * two products are compared, not subtracted - a comparison has nothing for a compiler to fuse (Apple clang contracts
+ * a*b - c*d into an FMA, which would round the two triangles' values differently) - and the triangle on the other side
+ * of the edge (its ends swapped) compares the same two products the other way round, so exactly one side wins. A centre
+ * exactly on the edge belongs to the side whose (A, B) points into it: A > 0, or A == 0 and B > 0, which exactly one of
+ * (A, B) and (-A, -B) meets (Vulkan's top-left rule, in y down). So a shared edge's pixels are covered once on every
+ * compiler: before, the float functions stepped along the row put a centre on a diagonal through pixel centres slightly
+ * outside both triangles on GCC (round 538: a crack on a quad's diagonal on Linux, the background showing through). */
+static inline bool edge_covers_exact(float xa, float ya, float xb, float yb, float px, float py) {
+  const double p = ((double)xa - px) * ((double)yb - py), q = ((double)xb - px) * ((double)ya - py);
+  if (p != q) return p > q;
+  const float A = ya - yb, B = xb - xa;
+  return A > 0.0f || (A == 0.0f && B > 0.0f);
+}
+/* Whether a triangle (counter-clockwise on screen: its area > 0) covers a pixel centre: the float edge values `w` first,
+ * each within `tol` of zero settled exactly (above). */
+static inline bool tri_covers(const float *x, const float *y, float px, float py, float w0, float w1, float w2, float tol0, float tol1,
+                              float tol2) {
+  /* (Inside first, and no branch between the three: a solved span's pixels are mostly well inside, and this runs for each.
+   * Round 556: round 554's two short-circuit chains here and a double division a row made the Scene view's orbit ~6 %
+   * slower.) */
+  if ((w0 > tol0) & (w1 > tol1) & (w2 > tol2)) return true;
+  if ((w0 < -tol0) | (w1 < -tol1) | (w2 < -tol2)) return false;
+  if (!(w0 > tol0) && !edge_covers_exact(x[1], y[1], x[2], y[2], px, py)) return false;
+  if (!(w1 > tol1) && !edge_covers_exact(x[2], y[2], x[0], y[0], px, py)) return false;
+  if (!(w2 > tol2) && !edge_covers_exact(x[0], y[0], x[1], y[1], px, py)) return false;
+  return true;
 }
 
 void Renderer3D::raster_tile(int tile_index) {
@@ -1036,6 +1084,30 @@ void Renderer3D::raster_tile(int tile_index) {
       if (area <= 0.0f) continue;
       const float inv_area = 1.0f / area;
       const float A[3] = {A0, A1, A2}, B[3] = {B0, B1, B2}, C[3] = {C0, C1, C2};
+      /* Round 554: how far the stepped float values can be from the true ones over this box - a rounding of the largest
+       * |w| the box reaches for each of the setup's few operations and each step along a row (at most the tile's width),
+       * twice over; within it a pixel is settled exactly (tri_covers). */
+      const float bx = (float)std::max(std::abs(minx), std::abs(maxx + 1)), by = (float)std::max(std::abs(miny), std::abs(maxy + 1));
+      const float ulps = 2.0f * (float)(T + 8) * 1.1920929e-7f;  // (2^-23 a rounding)
+      float tol[3];
+      for (int q = 0; q < 3; q++) tol[q] = ulps * (std::fabs(A[q]) * bx + std::fabs(B[q]) * by + std::fabs(C[q])) + 1e-6f;
+      const float vx[3] = {x0, x1, x2}, vy[3] = {y0, y1, y2};
+      /* Round 554 (review, then #448's CI): the row's span solved in double from the vertices (A, B and C each exact or a
+       * single rounding), so its crossing is a hair from the true one and the old 1e-4 pixel margin brings a centre on the
+       * crossing to tri_covers. (The review's margin of the float band over |A| - tens of pixels for a nearly horizontal
+       * edge - and even a whole pixel of margin made two sculpt tests' strokes find no surface under the mouse on #448's CI,
+       * though their pixels kept the sphere's id; the old margin passes them. Round 556's checks (no pixel outside the
+       * triangles, a dense orthographic sphere's depths on its surface) pass with the wide margin too, so they don't show
+       * what the strokes tripped on; a wide span sends many more pixels through tri_covers, and the frame's cost is one
+       * guess - not proven.) */
+      double Ad[3], Bd[3], Cd[3], iAd[3];  // (A and B too: the float ones are differences rounded to float - 50.3 - 10.1 isn't exact)
+      for (int q = 0; q < 3; q++) {
+        const int a = (q + 1) % 3, b = (q + 2) % 3;
+        Ad[q] = (double)vy[a] - vy[b], Bd[q] = (double)vx[b] - vx[a];
+        Cd[q] = (double)vx[a] * vy[b] - (double)vx[b] * vy[a];
+        iAd[q] = Ad[q] != 0.0 ? 1.0 / Ad[q] : 0.0;  // (once a triangle, not a division a row; its rounding, 1e-16 of the
+                                                    // crossing, is far inside the 1e-4 pixel margin)
+      }
       const bool spans = opt_.span_rows;
       for (int y = miny; y <= maxy; y++) {
         const float py = y + 0.5f;
@@ -1043,15 +1115,19 @@ void Renderer3D::raster_tile(int tile_index) {
          * pixel of the bounding box (big win for thin / diagonal triangles). */
         float xl = (float)minx, xr = (float)maxx + 0.999f;
         bool empty = false;
+        /* Round 554: each edge's crossing in double, 1e-4 pixel of margin either side (tri_covers settles a centre on it); a
+         * horizontal edge's row skipped only when clearly outside - on the edge, its pixels go to the exact test (the two
+         * triangles of a horizontal shared edge, their row values rounded either way, would otherwise both leave it). */
         for (int q = 0; q < 3 && spans; q++) {
-          float row_c = B[q] * py + C[q];  // w = A*px + row_c, px = x + 0.5
-          if (A[q] > 0) xl = std::max(xl, -row_c / A[q] - 0.5f);
-          else if (A[q] < 0) xr = std::min(xr, -row_c / A[q] - 0.5f);
-          else if (row_c < 0) { empty = true; break; }
+          const double row_c = Bd[q] * py + Cd[q];  // w = A*px + row_c, px = x + 0.5
+          const double crossing = -row_c * iAd[q] - 0.5;
+          if (Ad[q] > 0) xl = (float)std::max((double)xl, crossing - 1e-4);
+          else if (Ad[q] < 0) xr = (float)std::min((double)xr, crossing + 1e-4);
+          else if (row_c < -1e-9 * (std::fabs(Bd[q] * py) + std::fabs(Cd[q]) + 1.0)) { empty = true; break; }
         }
         if (empty) continue;
-        int sx = pixel_in(std::ceil(xl - 1e-4f), minx, maxx + 1);
-        int ex = pixel_in(std::floor(xr + 1e-4f), minx - 1, maxx);
+        int sx = pixel_in(std::ceil(xl), minx, maxx + 1);
+        int ex = pixel_in(std::floor(xr), minx - 1, maxx);
         if (sx > ex) continue;
         float px = sx + 0.5f;
         float w0 = A0 * px + B0 * py + C0;
@@ -1060,7 +1136,7 @@ void Renderer3D::raster_tile(int tile_index) {
         size_t row = (size_t)y * W;
         uint32_t *crow = rt_->color ? rt_->color + (size_t)y * rt_->stride : nullptr;
         for (int x = sx; x <= ex; x++, w0 += A0, w1 += A1, w2 += A2) {
-          if ((w0 < 0) | (w1 < 0) | (w2 < 0)) continue;
+          if (!tri_covers(vx, vy, x + 0.5f, py, w0, w1, w2, tol[0], tol[1], tol[2])) continue;
           const float b0 = w0 * inv_area, b1 = w1 * inv_area, b2 = w2 * inv_area;
           const float z = b0 * st.z[0] + b1 * st.z[1] + b2 * st.z[2];
           float &dz = depth[row + x];
@@ -1687,6 +1763,8 @@ void Renderer3D::shade_deferred() {
     Vec2 lm_uv[3];
     bool has_rt = false;  // realtime lightmaps (task 0016)
     Vec2 rt_uv[3];
+    bool has_vc = false;  // (task 0533) the corners' vertex colours, for a Vertex Color material
+    Vec4 vc[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
     bool footprint = false;  // (task 0164) the footprint is read: a live texture, a Box / Generated mapping, a procedural
     /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
@@ -1768,6 +1846,9 @@ void Renderer3D::shade_deferred() {
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
+    T.has_vc = T.mat->vertex_color && it.material_colors && it.material_colors->size() == rm.positions.size();
+    if (T.has_vc)
+      for (int k = 0; k < 3; k++) T.vc[k] = (*it.material_colors)[tri[k]];
     T.has_rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_rt)
       for (int k = 0; k < 3; k++) T.rt_uv[k] = (*it.rt_uv)[(size_t)st.prim * 3 + k];
@@ -1975,6 +2056,7 @@ void Renderer3D::shade_deferred() {
           sp.world_footprint = std::max(length(wp(bx) - sp.position), length(wp(by) - sp.position));
           if (!finite_bits(sp.footprint) || !finite_bits(sp.world_footprint)) sp.footprint = sp.world_footprint = 0.0f, sp.live_textures = false;
         }
+        if (T.has_vc) sp.vertex_color = T.vc[0] * B.x + T.vc[1] * B.y + T.vc[2] * B.z;  // (task 0533, perspective-correct)
         if (T.has_lm) {
           const Vec2 lm_uv = T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z;
           sp.lightmap = it.lightmap->sample(lm_uv);
@@ -2456,6 +2538,10 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
       const Mat4 fog_inv = mat.volume() ? it.model.inverse() : Mat4::identity();
       const Vec3 le = fog_inv.point(eye), bmn = rm.bounds.min, bmx = rm.bounds.max;
       const bool eye_in_fog = mat.volume() && le.x > bmn.x && le.y > bmn.y && le.z > bmn.z && le.x < bmx.x && le.y < bmx.y && le.z < bmx.z;
+      /* (Round 554: the products the barycentrics are made of reach about the box's size squared; their rounding over the
+       * area is how far a barycentric can be off.) */
+      const float span_x = std::max(maxx - minx, 1.0f) + 1.0f, span_y = std::max(maxy - miny, 1.0f) + 1.0f;
+      const float see_tol = std::max(1e-6f, 8.0f * 1.1920929e-7f * span_x * span_y * ia * 4.0f);
       for (int y = iy0; y <= iy1; y++) {
         const float py = y + 0.5f;
         for (int x = ix0; x <= ix1; x++) {
@@ -2463,7 +2549,10 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           float w0 = ((t.x[1] - px) * (t.y[2] - py) - (t.x[2] - px) * (t.y[1] - py)) * ia;
           float w1 = ((t.x[2] - px) * (t.y[0] - py) - (t.x[0] - px) * (t.y[2] - py)) * ia;
           float w2 = 1.0f - w0 - w1;
-          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+          /* (Round 554: the barycentrics' float rounding settled exactly near an edge, as raster_tile's - the band the
+           * size of the products' rounding over the area, so a sliver's wider band is settled too.) */
+          if (!tri_covers(t.x, t.y, px, py, w0, w1, w2, see_tol, see_tol, see_tol)) continue;
+          w0 = std::max(w0, 0.0f), w1 = std::max(w1, 0.0f), w2 = std::max(w2, 0.0f);
           const size_t pi = (size_t)y * W + x;
           float z = w0 * t.z[0] + w1 * t.z[1] + w2 * t.z[2];
           if (z < 0.0f || (z >= depth[pi] && !mat.volume())) continue;  // (a fog behind what is drawn still covers what is in it: draw_volume_pixel cuts it there)
@@ -2481,6 +2570,10 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           if (!rm.uvs.empty()) {
             const Vec3 U = opt_.affine_uv ? t.c[0] * w0 + t.c[1] * w1 + t.c[2] * w2 : B;  // affine: screen-linear
             sp.uv = rm.uvs[tri[0]] * U.x + rm.uvs[tri[1]] * U.y + rm.uvs[tri[2]] * U.z;
+          }
+          if (mat.vertex_color && it.material_colors && it.material_colors->size() == rm.positions.size()) {  // (task 0533)
+            const std::vector<Vec4> &vc = *it.material_colors;
+            sp.vertex_color = vc[tri[0]] * B.x + vc[tri[1]] * B.y + vc[tri[2]] * B.z;
           }
           if (opt_.tex.active()) sp.tex = &opt_.tex;
           if (!rm.tangents.empty()) {

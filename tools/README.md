@@ -30,3 +30,7 @@ reports beside `stress/results/latest.md`. `tools\clean.bat` removes them.
 
 `tools/perf_suite.py` runs `image_edit`, `sculpt_paint`, `sequencer`, `importers`, `unity_export`, `asset_windows` and
 `cold_first_use` with the rest of `DEFAULT_SECTIONS` (`stress/stress_survey.inc`; round 511 saves the baseline that holds them).
+
+## Round 555: a slice of a test group
+
+- `BLENDITY_TEST_RANGE=lo-hi` and `BLENDITY_TEST_ALSO=text` (round 555): a run of `blendity_tests` takes only the tests numbered lo to hi, in their order, plus those whose name contains text - to find which earlier test leaves state behind for a later one (bisect lo-hi).

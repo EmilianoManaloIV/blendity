@@ -51,6 +51,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <random>
 #include <deque>
 #include <fstream>
 #include <iterator>
@@ -85,12 +86,39 @@ extern int g_fail, g_checks;  // (test_main.cpp)
 #define CHECK_NEAR(a, b, eps) CHECK(std::fabs((double)(a) - (double)(b)) <= (eps))
 
 inline void test(const char *name, const std::function<void()> &fn) {
+  /* An environment variable set to "" counts as unset: the runner's own tests clear one with set_env(k, ""), which removes
+   * it on Windows and leaves it empty on POSIX (round 555). */
+  auto var = [](const char *k) -> const char * {
+    const char *v = std::getenv(k);
+    return v && *v ? v : nullptr;
+  };
   /* BLENDITY_TEST_FILTER=text runs only the tests whose name contains it. */
-  static const char *filter = std::getenv("BLENDITY_TEST_FILTER");
+  static const char *filter = var("BLENDITY_TEST_FILTER");
+  /* Round 555: BLENDITY_TEST_RANGE=lo-hi runs the tests numbered lo to hi (from 1, in the order the run reaches them - the
+   * number counts every test, whatever the filter, so it stays the same), and BLENDITY_TEST_ALSO=text adds the tests whose
+   * name contains it - "the first half of the group, then the one that fails after it" in one run, to find which earlier
+   * test leaves something behind. Each test that runs shows its number on its result line then. */
+  static const char *range = var("BLENDITY_TEST_RANGE");
+  static const char *also = var("BLENDITY_TEST_ALSO");
+  static int lo = 0, hi = 0;
+  static const bool range_ok = [] {
+    if (!range) return true;
+    const bool ok = std::sscanf(range, "%d-%d", &lo, &hi) == 2 && lo >= 1 && hi >= lo;
+    if (!ok) std::printf("BLENDITY_TEST_RANGE=%s is not lo-hi (1 <= lo <= hi): only BLENDITY_TEST_ALSO's tests run\n", range);
+    return ok;
+  }();
+  static int number = 0;
+  number++;
+  if (range) {
+    const bool in_range = range_ok && number >= lo && number <= hi;
+    const bool named = also && std::strstr(name, also);
+    if (!in_range && !named) return;
+  }
   if (filter && !std::strstr(name, filter)) return;
   int before = g_fail;
   ScopedTimer t;
   fn();
+  if (range) std::printf("#%d ", number);  // (on the result line: a test's own lines come before it)
   std::printf("%s %s (%.0f ms)\n", g_fail == before ? "[ ok ]" : "[FAIL]", name, t.ms());
   std::fflush(stdout);  // (a crash in the next test still shows this one)
 }
@@ -112,6 +140,35 @@ inline size_t count_bad(const char *what, const V &v, F ok) {
 }
 inline bool opaque(uint32_t c) { return (c >> 24) == 0xFF; }
 
+/* Round 550: a run's own scratch folder under `base` - "run-<stamp>-<n>", the stamp the system clock's ticks when the run
+ * began, n a random number (two runs started on the same tick) - and run folders whose stamp is more than `max_age_s` old
+ * removed. The age is read from the name, not the folder's time: a folder's time changes only when an entry right inside
+ * it does, so a run still at work deep in its scratch project would look old. Before, every run without BLENDITY_TEST_DIR
+ * shared one folder for good: its scratch project kept every material, clip and file of every earlier run and of every
+ * other session running tests at the time - 2,054 materials on the development machine - and a test that clicks a
+ * material row found it scrolled far below the window ("assets: Ctrl and Shift click select several materials" failed
+ * there and passed on CI, which starts empty). */
+inline void prune_test_runs(const std::string &base, double max_age_s, unsigned long long now_stamp) {
+  std::error_code ec;
+  const double tick_s = (double)std::chrono::system_clock::period::num / (double)std::chrono::system_clock::period::den;
+  for (std::filesystem::directory_iterator it(std::filesystem::u8path(base), ec), end; !ec && it != end; it.increment(ec)) {
+    std::string name;
+    try {
+      name = it->path().filename().u8string();
+    } catch (...) {
+      continue;  // (a name the narrow code page can't hold: not one of ours)
+    }
+    if (name.rfind("run-", 0) != 0) continue;
+    const unsigned long long stamp = std::strtoull(name.c_str() + 4, nullptr, 10);
+    if (stamp == 0 || stamp > now_stamp) continue;  // (not a stamp, or a clock set back: kept)
+    if ((double)(now_stamp - stamp) * tick_s > max_age_s) std::filesystem::remove_all(it->path(), ec);
+  }
+}
+inline unsigned long long test_run_stamp() { return (unsigned long long)std::chrono::system_clock::now().time_since_epoch().count(); }
+inline std::string test_run_dir(const std::string &base, unsigned long long stamp, unsigned salt) {
+  return fs::join(base, "run-" + std::to_string(stamp) + "-" + std::to_string(salt));
+}
+
 /* Scratch files go to the OS temp folder, not next to the shipped executables. */
 inline std::string test_dir() {
   static std::string dir = [] {
@@ -123,8 +180,12 @@ inline std::string test_dir() {
       return std::string(own);
     }
     std::error_code ec;
-    std::string d = (std::filesystem::temp_directory_path(ec) / "blendity_tests").string();
-    if (ec) d = fs::join(fs::executable_dir(), "test_output");
+    std::string base = (std::filesystem::temp_directory_path(ec) / "blendity_tests").string();
+    if (ec) base = fs::join(fs::executable_dir(), "test_output");
+    fs::make_dirs(base);
+    const unsigned long long stamp = test_run_stamp();
+    prune_test_runs(base, 24.0 * 3600.0, stamp);  // (round 550: runs begun within a day kept, for a look afterwards)
+    const std::string d = test_run_dir(base, stamp, std::random_device{}() % 100000u);
     fs::make_dirs(d);
     return d;
   }();
@@ -143,10 +204,22 @@ inline std::string scratch_project() {
   return p;
 }
 
+/* Removes a variable (set_env(k, "") means the run's own folder for BLENDITY_PROJECT, BLENDITY_TRASH and, since round 556,
+ * BLENDITY_PREFS_DIR - this is for a test of what no variable at all does). */
+inline void clear_env(const char *k) {
+#ifdef _WIN32
+  _putenv_s(k, "");
+#else
+  unsetenv(k);
+#endif
+}
 inline void set_env(const char *k, const std::string &v_in) {
   std::string v = v_in;
   if (v.empty() && std::string(k) == "BLENDITY_PROJECT") v = scratch_project();
   if (v.empty() && std::string(k) == "BLENDITY_TRASH") v = fs::join(test_dir(), "trash");
+  /* Round 556 (task 0538): "" is the run's own preferences, never an empty path (that was a prefs.txt in the folder the
+   * tests run from) nor the user's ~/.blendity. */
+  if (v.empty() && std::string(k) == "BLENDITY_PREFS_DIR") v = fs::join(test_dir(), "prefs");
 #ifdef _WIN32
   _putenv_s(k, v.c_str());
 #else

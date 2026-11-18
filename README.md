@@ -126,13 +126,15 @@ Each stage is a **layout** that arranges the windows and shows only that stage's
 everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
-- **Blocking Out** - primitives and parametric shapes, a **Blockout** whose boxes, cylinders and spheres add to or cut one mesh that follows them as they move (round 477), with **rooms** - air that brings its walls, floor and ceiling and merges with its neighbours or keeps its walls - doors, windows and pieces that intersect (round 478), dragged out with handles on every face that snap to the other pieces and a **Room tool** that draws a room on the ground or a face (round 479), **windows and doors with a style** - frame, bars, sill board and glass; single, double, sliding, arched and revolving - made from numbers (rounds 498 and 499), **architectural pieces** - columns, pilasters, beams, railings, roofs, stairs with a landing, spiral stairs and arcades - each one piece with numbers (round 500), Blockouts that **snap to each other and join when they touch** (round 501), **modifiers on a Blockout** (round 502) and **on a single piece** - Bevel the arches, Array ten columns from one (round 514), door leaves that are objects and swing about their hinge without a rebuild (round 515), with a **Blend radius** a piece that rounds its join like a metaball while the rest stays crisp (round 481), **materials by floor, wall and ceiling with world-scale UVs, Bake to Mesh and back** (round 482), **a Draw Piece tool that shows the piece while it is drawn, scale that never shears a piece** (round 496), with **wedges, stairs, arches, outlines pulled up and any mesh** as pieces (round 480), pieces drawn straight onto a Blockout's faces - a Subtract box pushed in, a ramp, stairs, an arch (round 495), SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
+- **Blocking Out** - primitives and parametric shapes, a **Blockout** whose boxes, cylinders and spheres add to or cut one mesh that follows them as they move (round 477), with **rooms** - air that brings its walls, floor and ceiling and merges with its neighbours or keeps its walls - doors, windows and pieces that intersect (round 478), dragged out with handles on every face that snap to the other pieces and a **Room tool** that draws a room on the ground or a face (round 479), **windows and doors with a style** - frame, bars, sill board and glass; single, double, sliding, arched and revolving - made from numbers (rounds 498 and 499), **architectural pieces** - columns, pilasters, beams, railings, roofs, stairs with a landing, spiral stairs and arcades - each one piece with numbers (round 500), Blockouts that **snap to each other and join when they touch** (round 501), **modifiers on a Blockout** (round 502) and **on a single piece** - Bevel the arches, Array ten columns from one (round 514), door leaves that are objects and swing about their hinge without a rebuild (round 515), **a door's and a window's parts - leaf, frame, glass - each an object that takes its own modifiers** (round 547), with a **Blend radius** a piece that rounds its join like a metaball while the rest stays crisp (round 481), **materials by floor, wall and ceiling with world-scale UVs, Bake to Mesh and back** (round 482), **a Draw Piece tool that shows the piece while it is drawn, scale that never shears a piece** (round 496), with **wedges, stairs, arches, outlines pulled up and any mesh** as pieces (round 480), pieces drawn straight onto a Blockout's faces - a Subtract box pushed in, a ramp, stairs, an arch (round 495), SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
   **drawing in perspective** with a pen - SketchBook-style rulers, ellipses, symmetry and a 3-point guide that *is* the
   camera, strokes corrected to what the hand meant, canvases on the ground and on faces, and boxes, cylinders, faces and
   whole scaffolds built from the construction lines, never guessed.
-- **Modeling & Topology** - Blender's Edit Mode (extrude, inset, bevel, loop cut, bridge, knife, n-gons, F9; a
-  50k-face mesh enters it in about a frame, its overlapping-vertex check off the main thread), a
+- **Modeling & Topology** - Blender's Edit Mode (extrude, inset, bevel, loop cut, bridge, knife, n-gons, LoopTools, F9; a
+  50k-face mesh enters it in about a frame, the selection's size typed in (Dimensions, round 536), its overlapping-vertex check off the main thread), a
   modifier stack (Array, Bevel, Boolean, Mirror, Subdivision, Lattice, Curve, Mesh Deform...), curves and lattices
+  a Quad Sphere primitive (Even Area or Even Angle, F9 for its subdivisions) and Snap to Object Origins for the V snap, a modal G with Ctrl and the drawing tools (round 535),
+  panoramic cameras (Equirectangular, Fisheye, Central Cylindrical, Mirror Ball: Camera > Projection > Panoramic) in the views, F12's raster render and the path tracer (round 538),
   edited with the same keys.
 - **UV Unwrapping** - a UV Editor with LSCM unwrap, Smart UV Project, Part Unwrap (PartUV's charts by parts, ABF++),
   projections and island packing.
@@ -155,18 +157,25 @@ everything):
   baked probes hold the sky's own light by direction, and a changed sky still relights them without a re-bake (round 453);
   Shadowmask keeps four Mixed lights' baked shadows (a fifth is baked), Distance Shadowmask shows the key light's realtime shadow near the camera and the mask beyond the Shadow Distance, and Unity's own masks and light channels come in with Use Unity's Lightmaps while an exported package carries the masks as Shadowmask textures (round 454);
   a Unity scene's lights take their intensity as its project's Graphics settings say (linear or gamma), so a world like SideRail bakes far closer to Unity's light (round 459);
+  the Sky world's sun lights the scene when no Directional Light does, as Blender 5.3's EEVEE (round 542);
+  saved PNG and JPEG images carry the sRGB ICC profile, as Blender 5.3 writes them (round 542);
   a bake's filter reads each texel's noise by the samples that carry its light, so a texel lit by a few lucky rays is smoothed away and a bake leaves far fewer specks (round 486);
   Generate Lighting's gather runs on every ticked graphics card, as F12 does, in batches sized by the cards' speed, and says which cards gathered (round 487: SideRail's lightmaps 37.7 s to 16.2 s);
   Remove Ringing (Hanning or Lanczos, a view setting) softens the dark ring a bright lamp leaves in baked probes, and Light Probe Groups are objects - placed and moved in the Scene view, imported from Unity - that Generate Lighting bakes at in place of the automatic grid (round 455);
+  Point Cloud objects - Points or Gaussian Splats with spherical harmonics up to degree 3 (round 530);
+  Gaussian splats drawn in the Scene view on the CPU and the card - EWA ellipses, view-dependent colour, sorted back to front on a worker (round 532);
+  Gaussian splats traced on the graphics card too - GPU Compute and OptiX (round 534);
+  splat import from PLY, SPZ (v1-4) and glTF's KHR_gaussian_splatting (round 531);
   Draw Piece draws a door or a window onto a wall of a Blockout by dragging a rectangle, from a Shape list that groups them under Openings (round 513);
+  a door or window takes modifiers: an Array or a Mirror repeats the whole opening, a Bevel rounds its hole (round 546);
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
-  the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
+  the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage, shadows traced by the card's ray tracing where it has it - round 543); camera filters from colour
   grading to PlayStation and manga looks; the **Editing** tab develops a render or an image (exposure, white balance,
   curves, HSL, clarity, dehaze, crop; presets), non-destructively.
 - **Rigging**, and **Skinning & Weight Painting** - bones (drag their heads and tails, Extrude new ones), Blender/Maya-style
   **rig controls** (IK boxes and poles, FK circles, coloured by side), characters under one root as Unity imports them,
-  skins, weight paint and IK in a Rigging window; **automatic
+  skins, weight paint (with Blender 5.3's automasking), vertex paint and colour attributes (shown by a material's Vertex Color, read from PLY / glTF / FBX), and IK in a Rigging window; **automatic
   weights and weight transfer by inpainting** (Epic, 2023); a **Mixamo-style marker auto-rig** for people and
   four-legged animals; rigged FBX / glTF import with bind poses.
 - **Animation** - a **Unity-style dopesheet** and **Curves view** (key tangents: Clamped Auto, Free Smooth, Flat,
@@ -222,6 +231,7 @@ Poiyomi, lilToon and URP texture presets, Material ID masks and Bake All Maps (r
 the dependency-free build's Render Animation offers Blender's libraries for its MP4 (round 366);
 a Capsule, Unity's unique names, and the console's save / open / new / rotate / scale (round 367);
 the pen's eraser end, tilt and a pressure curve in sculpting (round 368);
+a brush keeps its own size, strength and colour, with Unified switches, and Paint's hardness and spacing follow the pen's pressure curve (round 540);
 Unity packages unpacked into the project (round 369) and their prefabs and scenes brought in,
 scripts kept as Engine Components (round 370),
 with Unity's materials converted by shader (lilToon, Poiyomi, MToon, UTS2, Standard, URP) and PhysBones' settings kept as spring bones (round 371),
@@ -244,6 +254,7 @@ Unity's own ACES curve, its BRDF's weight on a Unity scene's reflections and thr
 Unity's BlendShapes foldout with Edit this shape and the Animation window in Unity's layout (round 406);
 Unity .anim clips read and written (round 407);
 clips retargeted between humanoid rigs like Mecanim (round 408);
+rotation keys converted between Euler and Quaternion, motion copied and pasted in world space, Paste Pose with an influence and flipped, Align to Transform Orientation, a ruler that pauses playback while it is scrubbed and a Wrap Playhead switch, as in Blender 5.3 (round 541);
 Export Unity Package sends the work back under the same GUIDs (round 372);
 Godot scenes (.tscn) come in, scripts kept, and go back with their nodes' transforms (round 373);
 .blend files come in through the installed Blender, and the Blender and Unreal bridges Send to Blendity (round 374);
@@ -417,7 +428,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (62782 unit checks in 3162 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (103578 unit checks in 3681 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

@@ -9,6 +9,10 @@
 #include <chrono>
 #include "../src/texture/surface.h"
 #include "../src/render/mesh_maps.h"
+#include "../src/render/sky_sun.h"
+#include "../src/image/icc_profile.h"
+#include <limits>
+#include "test_panoramic.h"
 
 static void colormanagement_tests() {
   test("display: exact sRGB table and SIMD encoders", [] {
@@ -10248,6 +10252,7 @@ static void tests_round184() {
   });
 
   test("toon at a distance: a two-tone sphere seen from 20 m carries no more high-frequency energy inside it than its 2 m picture downsampled (its cel edge is one antialiased pixel, not a sparkle), on the CPU and on the card", [&] {
+    long cpu_edge = -1;  // (round 553: the CPU's edge pixels at 20 m, which the card's are held to)
     for (int device : {1, 2}) {
       if (device == 2 && !gpu::available()) continue;
       Editor ed;
@@ -10271,10 +10276,68 @@ static void tests_round184() {
       /* The edge is there: with softness 0 the sphere at 2 m is the two tones (a few edge pixels aside), and at 20 m
        * the band edge is one antialiased pixel - mid tones between the two, which a hard edge never gives. */
       const R184 near = r184_view(ed, ball, 2.0f, device), far = r184_view(ed, ball, 20.0f, device);
+      if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {  // (round 553: the 20 m picture and its object mask, to look at)
+        fs::make_dirs(dir);
+        std::vector<uint32_t> m(far.mask.size());
+        for (size_t i = 0; i < m.size(); i++) m[i] = far.mask[i] ? 0xFFFFFFFFu : 0xFF000000u;
+        const std::string base = fs::join(dir, device == 2 ? "toon20_card" : "toon20_cpu");
+        write_png(base + ".png", far.px.data(), far.rect.w, far.rect.h, far.rect.w);
+        write_png(base + "_mask.png", m.data(), far.rect.w, far.rect.h, far.rect.w);
+      }
+      /* Round 553 (task 0534): the sphere's own pixels - the largest 4-connected part of the mask. Moving the sphere away
+       * also changes its shadow on the floor, at the view's bottom, and those pixels counted as the sphere's: at 20 m they
+       * were most of the CPU's 17 "between" pixels (its shadow's edge mid-grey where the card's is dark), so the CPU's count
+       * looked twice the card's while the sphere's own edge was 8 pixels on the CPU and 6-7 on the card. The part kept is
+       * the one at the crop's centre - the camera's pivot is the sphere's centre - so a shadow touching the sphere's rim
+       * at 2 m, larger than it, can't be taken instead (the largest part when the centre is not the object's). */
+      auto sphere_only = [](const R184 &r) {
+        const int W = r.rect.w, H = W > 0 ? (int)(r.mask.size() / (size_t)W) : 0;
+        std::vector<int> comp(r.mask.size(), -1);
+        int best = -1;
+        size_t best_n = 0;
+        for (size_t start = 0; start < r.mask.size(); start++) {
+          if (!r.mask[start] || comp[start] >= 0) continue;
+          const int id = (int)start;
+          std::vector<size_t> stack = {start};
+          comp[start] = id;
+          size_t n = 0;
+          while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            n++;
+            const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
+            const int nx[4] = {x - 1, x + 1, x, x}, ny[4] = {y, y, y - 1, y + 1};
+            for (int k = 0; k < 4; k++) {
+              if (nx[k] < 0 || ny[k] < 0 || nx[k] >= W || ny[k] >= H) continue;
+              const size_t j = (size_t)ny[k] * W + nx[k];
+              if (r.mask[j] && comp[j] < 0) comp[j] = id, stack.push_back(j);
+            }
+          }
+          if (n > best_n) best_n = n, best = id;
+        }
+        const size_t centre = H > 0 ? (size_t)(H / 2) * W + (size_t)(W / 2) : 0;
+        if (centre < comp.size() && comp[centre] >= 0) best = comp[centre];
+        std::vector<uint8_t> keep(r.mask.size(), 0);
+        for (size_t i = 0; i < keep.size(); i++) keep[i] = comp[i] == best && best >= 0;
+        return keep;
+      };
+      int rows = 0;  // (the sphere's height in pixel rows, set by `tones` for the picture it last measured)
       auto tones = [&](const R184 &r, size_t &lit_n, size_t &shade_n, size_t &mid_n) {
+        const std::vector<uint8_t> own = sphere_only(r);
         std::vector<float> l;
+        int top = 1 << 30, bottom = -1;
         for (size_t i = 0; i < r.px.size(); i++)
-          if (r.mask[i]) l.push_back(luma(r.px[i]));
+          if (own[i]) {
+            l.push_back(luma(r.px[i]));
+            const int y = r.rect.w > 0 ? (int)(i / (size_t)r.rect.w) : 0;
+            top = std::min(top, y), bottom = std::max(bottom, y);
+          }
+        rows = bottom >= top ? bottom - top + 1 : 0;
+        if (l.empty()) {  // (no object pixel: fail, not index an empty list)
+          CHECK(!l.empty());
+          lit_n = shade_n = mid_n = 0;
+          return 0.0f;
+        }
         std::sort(l.begin(), l.end());
         const float lo = l[l.size() / 10], hi = l[l.size() * 9 / 10];  // (the shade tone and the lit tone: the deciles)
         const float margin = (hi - lo) * 0.25f;  // (a tone is the lit or the shade one within a quarter of their contrast; the middle half is "between")
@@ -10288,9 +10351,20 @@ static void tests_round184() {
       };
       size_t ln2, sn2, mn2, lnf, snf, mnf;
       const float contrast2 = tones(near, ln2, sn2, mn2), contrastf = tones(far, lnf, snf, mnf);
+      const int far_rows = rows;
       std::printf("    %s: at 2 m the tones %.0f apart, %zu lit / %zu shade / %zu between of %zu; at 20 m %.0f apart, %zu / %zu / %zu of %zu\n", device == 2 ? "the card" : "the CPU",
                   contrast2, ln2, sn2, mn2, ln2 + sn2 + mn2, contrastf, lnf, snf, mnf, lnf + snf + mnf);
-      CHECK(contrast2 > 15.0f && mnf > 0 && mnf * 20 >= lnf + snf);  // (a clear step between the tones; at 20 m a one-pixel edge over a 27-pixel sphere is a twentieth of it or more)
+      /* A clear step between the tones; at 20 m the band edge antialiased - mid tones along it, a run of them across the
+       * sphere's height (a hard edge leaves none, or a stray one or two). Round 553 (task 0534): counted on the sphere's own
+       * pixels (above), and against its height in rows, not its area - an edge's length goes with the diameter. The old
+       * "a 20th of the area" never held for the sphere on either renderer: the CPU met it only through its shadow's edge
+       * (8 of its 17), and round 551's "the card's edge narrower" was that. Measured on an RTX 4070 SUPER: the sphere 243
+       * pixels and 17 rows on the CPU, 242 on the card; its edge 8 pixels on the CPU, 6-7 on the card; held to a fifth of
+       * the rows (4 here). And the card's edge as the CPU's, within 3. */
+      std::printf("    the sphere at 20 m: %d rows, %zu edge pixels\n", far_rows, mnf);
+      CHECK(contrast2 > 15.0f && mnf > 0 && (int)mnf * 5 >= far_rows);
+      if (device == 1) cpu_edge = (long)mnf;
+      else if (cpu_edge >= 0) CHECK(std::labs((long)mnf - cpu_edge) <= 3);
       ed.viewport_device_for_test(1);
     }
   });
@@ -12300,6 +12374,1093 @@ static void tests_round462() {
   });
 }
 
+/* ---- round 542 (task 0522): the Sky world's sun lights the scene; saved sRGB images carry an ICC profile ---- */
+static uint32_t r542_be32(const std::string &s, size_t o) {
+  return ((uint32_t)(uint8_t)s[o] << 24) | ((uint32_t)(uint8_t)s[o + 1] << 16) | ((uint32_t)(uint8_t)s[o + 2] << 8) | (uint32_t)(uint8_t)s[o + 3];
+}
+static float r542_lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+static std::vector<uint32_t> r542_picture(int w, int h) {
+  std::vector<uint32_t> px((size_t)w * h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      px[(size_t)y * w + x] = 0xFF000000u | ((uint32_t)(x * 255 / (w - 1)) << 16) | ((uint32_t)(y * 255 / (h - 1)) << 8) | (uint32_t)((x + y) * 255 / (w + h - 2));
+  return px;
+}
+
+static void tests_round542() {
+  test("sky sun: the sun's light is full strength at the zenith, weaker and redder toward the horizon, and gone at or below it", [] {
+    const Vec3 zen = sky_sun_transmittance(0.5f * kPi, 3.0f);
+    CHECK(std::fabs(r542_lum(zen) - 1.0f) < 0.02f);
+    float prev_lum = r542_lum(zen), prev_ratio = zen.x / zen.z;
+    for (float deg : {60.0f, 40.0f, 20.0f, 10.0f, 4.0f}) {
+      const Vec3 t = sky_sun_transmittance(deg * kDeg2Rad, 3.0f);
+      std::printf("    %4.0f deg: lum %.3f r/b %.2f\n", deg, r542_lum(t), t.x / std::max(t.z, 1e-6f));
+      CHECK(r542_lum(t) < prev_lum && r542_lum(t) > 0.0f);
+      CHECK(t.x / std::max(t.z, 1e-6f) > prev_ratio);
+      prev_lum = r542_lum(t), prev_ratio = t.x / std::max(t.z, 1e-6f);
+    }
+    for (float e : {0.0f, -0.1f, -1.5f}) {
+      const Vec3 t = sky_sun_transmittance(e, 3.0f);
+      CHECK(t.x == 0.0f && t.y == 0.0f && t.z == 0.0f);
+    }
+    const Vec3 nan = sky_sun_transmittance(std::nanf(""), 3.0f), nan2 = sky_sun_transmittance(0.5f, std::nanf(""));
+    CHECK(nan.x == 0.0f && nan.y == 0.0f && nan2.x == 0.0f && nan2.y == 0.0f);
+  });
+  test("sky sun: a hazier sky dims the low sun more", [] {
+    const float clear = r542_lum(sky_sun_transmittance(10.0f * kDeg2Rad, 2.0f)), hazy = r542_lum(sky_sun_transmittance(10.0f * kDeg2Rad, 9.0f));
+    CHECK(hazy < clear);
+  });
+  test("sky sun: the light points away from the sun and is a directional light", [] {
+    EnvironmentSettings es;
+    es.mode = 1;
+    const Vec3 to_sun = normalize(Vec3(0.3f, 0.8f, -0.4f));
+    auto l = sky_sun_light(es, to_sun * 3.0f);  // (any length)
+    CHECK(l.has_value());
+    if (!l) return;
+    CHECK(l->type == RenderLight::Directional);
+    CHECK(length(l->direction - (-to_sun)) < 1e-4f);
+    CHECK(l->intensity > 0.0f && l->intensity <= 1.0f + 1e-3f && l->color.x > 0.0f && l->color.z > 0.0f);
+    es.sun_intensity = 2.0f;
+    auto l2 = sky_sun_light(es, to_sun);
+    CHECK(l2 && std::fabs(l2->intensity - 2.0f * l->intensity) < 1e-4f);
+  });
+  test("sky sun: no light for a NaN or zero direction, below the horizon, another world, the switch off or Sun Intensity 0", [] {
+    EnvironmentSettings es;
+    es.mode = 1;
+    const Vec3 up(0, 1, 0);
+    CHECK(sky_sun_light(es, up).has_value());
+    CHECK(!sky_sun_light(es, Vec3(0, 0, 0)).has_value());
+    CHECK(!sky_sun_light(es, Vec3(std::nanf(""), 1, 0)).has_value());
+    CHECK(!sky_sun_light(es, Vec3(0, 1, std::numeric_limits<float>::infinity())).has_value());
+    CHECK(!sky_sun_light(es, Vec3(1, -0.2f, 0)).has_value());
+    CHECK(!sky_sun_light(es, Vec3(1, 0, 0)).has_value());
+    for (int m : {0, 2, 3}) {
+      EnvironmentSettings o = es;
+      o.mode = m;
+      CHECK(!sky_sun_light(o, up).has_value());
+    }
+    EnvironmentSettings off = es;
+    off.sun_lights_scene = false;
+    CHECK(!sky_sun_light(off, up).has_value());
+    EnvironmentSettings zero = es;
+    zero.sun_intensity = 0.0f;
+    CHECK(!sky_sun_light(zero, up).has_value());
+    zero.sun_intensity = std::nanf("");
+    CHECK(!sky_sun_light(zero, up).has_value());
+    zero.sun_intensity = -1.0f;
+    CHECK(!sky_sun_light(zero, up).has_value());
+  });
+  test("sky sun: the lighting cache key changes with the switch, Sun Intensity, Turbidity and the world, and is 0 when the sun adds nothing", [] {
+    EnvironmentSettings es;
+    es.mode = 1;
+    const uint64_t base = sky_sun_key(es);
+    CHECK(base != 0);
+    EnvironmentSettings a = es;
+    a.sun_lights_scene = false;
+    CHECK(sky_sun_key(a) == 0 && sky_sun_key(a) != base);
+    a = es, a.sun_intensity = 2.0f;
+    CHECK(sky_sun_key(a) != base);
+    a = es, a.turbidity = 5.0f;
+    CHECK(sky_sun_key(a) != base);
+    a = es, a.mode = 0;
+    CHECK(sky_sun_key(a) == 0);
+  });
+
+  test("ICC: the embedded sRGB profile is a valid ICC v4 display profile (size, acsp, mntr RGB XYZ, D50, every tag inside)", [] {
+    const std::string &p = srgb_icc_profile();
+    CHECK(p.size() > 132);
+    if (p.size() <= 132) return;
+    CHECK(r542_be32(p, 0) == p.size());
+    CHECK(p.compare(36, 4, "acsp") == 0);
+    CHECK(p.compare(12, 4, "mntr") == 0 && p.compare(16, 4, "RGB ") == 0 && p.compare(20, 4, "XYZ ") == 0);
+    CHECK((uint8_t)p[8] == 4);
+    /* The illuminant at 68: D50 as s15Fixed16 (0.9642, 1, 0.8249). */
+    auto fixed = [&](size_t o) { return (float)(int32_t)r542_be32(p, o) / 65536.0f; };
+    CHECK(std::fabs(fixed(68) - 0.9642f) < 0.001f && std::fabs(fixed(72) - 1.0f) < 0.001f && std::fabs(fixed(76) - 0.8249f) < 0.001f);
+    const uint32_t tags = r542_be32(p, 128);
+    CHECK(tags >= 3 && tags < 64 && 132 + (size_t)tags * 12 <= p.size());
+    for (uint32_t i = 0; i < tags && 132 + (size_t)i * 12 + 12 <= p.size(); i++) {
+      const size_t e = 132 + (size_t)i * 12;
+      const uint64_t off = r542_be32(p, e + 4), size = r542_be32(p, e + 8);
+      CHECK(off + size <= p.size() && size > 0);
+      CHECK(off % 4 == 0);
+    }
+    CHECK(&srgb_icc_profile() == &p);  // (built once)
+  });
+  test("ICC: a saved PNG holds an iCCP chunk before its pixels, whose zlib body inflates to exactly the sRGB profile", [] {
+    const std::vector<uint32_t> px = r542_picture(24, 16);
+    const std::string png = encode_png(px.data(), 24, 16, 24);
+    CHECK(png.size() > 8 && png.compare(1, 3, "PNG") == 0);
+    size_t o = 8;
+    int iccp_at = -1, idat_at = -1, n = 0;
+    std::string iccp;
+    while (o + 12 <= png.size()) {
+      const uint32_t len = r542_be32(png, o);
+      const std::string type = png.substr(o + 4, 4);
+      if (o + 12 + len > png.size()) break;
+      if (type == "iCCP") iccp_at = n, iccp = png.substr(o + 8, len);
+      if (type == "IDAT" && idat_at < 0) idat_at = n;
+      o += 12 + len, n++;
+    }
+    CHECK(iccp_at >= 0 && idat_at >= 0 && iccp_at < idat_at);
+    CHECK(o == png.size());  // (the chunks tile the file)
+    const size_t z = iccp.find('\0');
+    CHECK(z != std::string::npos && z >= 1 && z <= 79 && z + 2 < iccp.size());
+    if (z == std::string::npos || z + 2 >= iccp.size()) return;
+    CHECK(iccp[z + 1] == 0);  // (compression method 0)
+    std::vector<uint8_t> out;
+    CHECK(zlib_inflate((const uint8_t *)iccp.data() + z + 2, iccp.size() - z - 2, out));
+    CHECK(std::string(out.begin(), out.end()) == srgb_icc_profile());
+    /* An alpha PNG too. */
+    const std::string rgba = encode_png(px.data(), 24, 16, 24, true);
+    CHECK(rgba.find("iCCP") != std::string::npos && rgba.find("iCCP") < rgba.find("IDAT"));
+  });
+  test("ICC: a saved JPEG holds an APP2 ICC_PROFILE marker with the whole sRGB profile, before the picture's tables", [] {
+    const std::vector<uint32_t> px = r542_picture(24, 16);
+    const std::string jpg = encode_jpeg(px.data(), 24, 16, 24);
+    CHECK((uint8_t)jpg[0] == 0xFF && (uint8_t)jpg[1] == 0xD8);
+    size_t o = 2;
+    bool found = false;
+    while (o + 4 <= jpg.size() && (uint8_t)jpg[o] == 0xFF) {
+      const uint8_t m = (uint8_t)jpg[o + 1];
+      if (m == 0xDA) break;
+      const size_t len = ((uint8_t)jpg[o + 2] << 8) | (uint8_t)jpg[o + 3];
+      if (m == 0xE2 && jpg.compare(o + 4, 12, std::string("ICC_PROFILE\0", 12)) == 0) {
+        found = true;
+        CHECK((uint8_t)jpg[o + 16] == 1 && (uint8_t)jpg[o + 17] == 1);  // (chunk 1 of 1)
+        CHECK(jpg.substr(o + 18, len - 16) == srgb_icc_profile());
+      }
+      if (m == 0xDB || m == 0xC0 || m == 0xC2) CHECK(found);  // (the profile came before the tables)
+      o += 2 + len;
+    }
+    CHECK(found);
+  });
+  test("ICC: Blendity's own decoders and the default decoder read a tagged PNG to exactly the pixels written, a tagged JPEG to within the lossy tolerance", [] {
+    const int w = 32, h = 24;
+    const std::vector<uint32_t> px = r542_picture(w, h);
+    const std::string png = encode_png(px.data(), w, h, w), jpg = encode_jpeg(px.data(), w, h, w, 95);
+    for (int own = 0; own < 2; own++) {
+      Bitmap b;
+      std::string err;
+      CHECK(own ? decode_image_own(png, b, err) : decode_image(png, b, err));
+      CHECK(b.width == w && b.height == h && b.rgba8.size() == (size_t)w * h * 4);
+      int bad = 0;
+      for (size_t i = 0; i < (size_t)w * h && b.rgba8.size() >= (i + 1) * 4; i++)
+        bad += b.rgba8[i * 4] != ((px[i] >> 16) & 255) || b.rgba8[i * 4 + 1] != ((px[i] >> 8) & 255) || b.rgba8[i * 4 + 2] != (px[i] & 255) || b.rgba8[i * 4 + 3] != 255;
+      CHECK(bad == 0);
+      Bitmap j;
+      CHECK(own ? decode_image_own(jpg, j, err) : decode_image(jpg, j, err));
+      CHECK(j.width == w && j.height == h && j.rgba8.size() == (size_t)w * h * 4);
+      double sum = 0;
+      int worst = 0;
+      for (size_t i = 0; i < (size_t)w * h && j.rgba8.size() >= (i + 1) * 4; i++)
+        for (int c = 0; c < 3; c++) {
+          const int d = std::abs((int)j.rgba8[i * 4 + c] - (int)((px[i] >> (16 - 8 * c)) & 255));
+          sum += d, worst = std::max(worst, d);
+        }
+      std::printf("    %s JPEG: mean error %.2f, worst %d\n", own ? "own" : "default", sum / (w * h * 3), worst);
+      CHECK(sum / (w * h * 3) < 3.0 && worst < 24);
+    }
+  });
+}
+
+/* ---- Round 538 (task 0518): panoramic cameras - the projection maths (the views' and the tracer's checks are the
+ * test-engineer's) ---- */
+static PanoramicParams pano_params(int type) {
+  PanoramicParams p;
+  p.type = type;
+  p.sensor_w = p.sensor_h = 36.0f;  // (a square picture: the fisheyes' circle is round)
+  return p;
+}
+
+static void tests_round538() {
+  test("panoramic: every type's direction from a picture point and the picture point from that direction agree (1e-4)", [] {
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      const PanoramicParams p = pano_params(type);
+      int checked = 0;
+      for (int iy = 1; iy < 10; iy++)
+        for (int ix = 1; ix < 10; ix++) {
+          const float u = ix / 10.0f, v = iy / 10.0f;
+          const Vec3 d = panoramic_direction(p, u, v);
+          if (length(d) < 0.5f) continue;  // (outside the circle: nothing to look along)
+          /* The mirror ball's rim (radius 1 on the ball: (0.8, 0.6) and the like) reflects straight back, the one
+           * direction every rim point shares, so no single picture point comes back from it - skipped, as Cycles' own
+           * inverse is undefined there. */
+          if (type == kPanoMirrorBall && std::hypot(2.0f * u - 1.0f, 2.0f * v - 1.0f) > 0.98f) continue;
+          float ru = -1, rv = -1;
+          CHECK(panoramic_uv(p, d, ru, rv));
+          CHECK_NEAR(ru, u, 1e-4);
+          CHECK_NEAR(rv, v, 1e-4);
+          checked++;
+        }
+      std::printf("    %s: %d of 81 points round-tripped\n", panoramic_type_name(type), checked);
+      CHECK(checked >= 30);  // (Equisolid's circle is small on a 36 mm sensor: about half the grid)
+    }
+  });
+  test("panoramic: an Equirectangular camera's centre looks along +Z, its left and right edges straight back, its top straight up, a quarter across to the right", [] {
+    const PanoramicParams p = pano_params(kPanoEquirectangular);
+    auto near_dir = [](Vec3 d, Vec3 e) { return length(d - e) < 1e-4f; };
+    CHECK(near_dir(panoramic_direction(p, 0.5f, 0.5f), Vec3(0, 0, 1)));
+    CHECK(near_dir(panoramic_direction(p, 0.0f, 0.5f), Vec3(0, 0, -1)));
+    CHECK(near_dir(panoramic_direction(p, 1.0f, 0.5f), Vec3(0, 0, -1)));
+    CHECK(near_dir(panoramic_direction(p, 0.5f, 0.0f), Vec3(0, 1, 0)));
+    CHECK(near_dir(panoramic_direction(p, 0.5f, 1.0f), Vec3(0, -1, 0)));
+    CHECK(near_dir(panoramic_direction(p, 0.75f, 0.5f), Vec3(1, 0, 0)));  // (the camera's right is +X)
+  });
+  test("panoramic: a Fisheye Equidistant circle's edge is 90 degrees off axis at 180 degrees, its corners show nothing; Equisolid obeys r = 2 f sin(theta / 2); a Mirror Ball's centre looks along the camera's forward", [] {
+    const PanoramicParams fe = pano_params(kPanoFisheyeEquidistant);
+    const Vec3 edge = panoramic_direction(fe, 1.0f, 0.5f);
+    CHECK_NEAR(dot(edge, Vec3(0, 0, 1)), 0.0, 1e-5);  // (90 degrees off the forward)
+    CHECK_NEAR(edge.x, 1.0, 1e-5);
+    const Vec3 corner = panoramic_direction(fe, 0.0f, 0.0f);
+    CHECK(corner.x == 0.0f && corner.y == 0.0f && corner.z == 0.0f);
+    const PanoramicParams es = pano_params(kPanoFisheyeEquisolid);
+    for (float u : {0.55f, 0.65f, 0.8f}) {
+      const Vec3 d = panoramic_direction(es, u, 0.5f);
+      CHECK(length(d) > 0.5f);
+      const float theta = std::acos(clampf(d.z, -1.0f, 1.0f));
+      const float r = (u - 0.5f) * es.sensor_w;  // mm on the sensor
+      CHECK_NEAR(r, 2.0f * es.fisheye_lens * std::sin(theta * 0.5f), 1e-3);
+    }
+    const Vec3 mb = panoramic_direction(pano_params(kPanoMirrorBall), 0.5f, 0.5f);
+    CHECK(length(mb - Vec3(0, 0, 1)) < 1e-5f);
+  });
+  test("panoramic: the cube faces a projection needs - a fisheye of 90 degrees the front, 120 the front and four sides, 300 all six; Equirectangular all six", [] {
+    auto mask = [](int type, float fov_deg) {
+      PanoramicParams p = pano_params(type);
+      p.fisheye_fov = fov_deg * kDeg2Rad;
+      return panoramic_face_mask(p);
+    };
+    const uint32_t front = 1u << 4, sides = 0xF, back = 1u << 5;
+    CHECK(mask(kPanoFisheyeEquidistant, 90.0f) == front);
+    CHECK(mask(kPanoFisheyeEquidistant, 120.0f) == (front | sides));
+    CHECK(mask(kPanoFisheyeEquidistant, 240.0f) == (front | sides));  // (half 120: a side face still reaches it along a diagonal - 126.6 degrees)
+    CHECK(mask(kPanoFisheyeEquidistant, 260.0f) == (front | sides | back));
+    CHECK(mask(kPanoFisheyeEquidistant, 300.0f) == (front | sides | back));
+    CHECK(mask(kPanoFisheyeEquisolid, 120.0f) == (front | sides));
+    CHECK(mask(kPanoEquirectangular, 180.0f) == (front | sides | back));
+  });
+  test("panoramic: faces drawn in colours land where their direction maps in an Equirectangular picture, and a fisheye's corners stay black", [] {
+    PanoramicParams p = pano_params(kPanoEquirectangular);
+    const int w = 64, h = 32;
+    std::vector<uint32_t> out((size_t)w * h);
+    PanoramicState st;
+    PanoramicCameraFrame cam;
+    cam.eye = {0, 0, 0}, cam.right = {1, 0, 0}, cam.up = {0, 1, 0}, cam.forward = {0, 0, 1};
+    int drawn = 0;
+    auto face_colour = [](int f) { return 0xFF000000u | (uint32_t)(40 + f * 30) << 16 | (uint32_t)(200 - f * 25) << 8 | (uint32_t)(f * 20 + 10); };
+    auto draw = [&](int f, const Mat4 &, const Mat4 &, RenderTarget &rt) {
+      drawn++;
+      for (int y = 0; y < rt.height; y++)
+        for (int x = 0; x < rt.width; x++) rt.color[(size_t)y * rt.stride + x] = face_colour(f);
+    };
+    panoramic_render(p, w, h, cam, st, out.data(), w, draw);
+    CHECK(drawn == 6);
+    CHECK(out[(size_t)16 * w + 32] == face_colour(4));  // the centre: straight ahead (+Z)
+    CHECK(out[(size_t)16 * w + 0] == face_colour(5));   // the left edge: straight back
+    CHECK(out[(size_t)16 * w + 48] == face_colour(0));  // a quarter across: +X
+    CHECK(out[(size_t)16 * w + 16] == face_colour(1));  // a quarter in: -X
+    CHECK(out[(size_t)0 * w + 32] == face_colour(2));   // the top: up
+    CHECK(out[(size_t)31 * w + 32] == face_colour(3));  // the bottom: down
+    const PanoramicParams fe = pano_params(kPanoFisheyeEquidistant);
+    std::vector<uint32_t> circle((size_t)40 * 40);
+    drawn = 0;
+    panoramic_render(fe, 40, 40, cam, st, circle.data(), 40, draw);
+    CHECK(drawn == 5);  // (180 degrees: the front and the four sides)
+    CHECK(circle[0] == 0xFF000000u);
+    CHECK(circle[(size_t)20 * 40 + 20] == face_colour(4));
+  });
+  test("panoramic: every output pixel takes its colour from the face position the projection says, seams included, and none needs a face position past the overscan", [] {
+    /* The draw callback encodes each face pixel's (x, y) in red and green (4 x, 4 y: linear, so the bilinear lookup keeps it)
+     * and the face in blue; a decoded pixel is where on which face the output pixel looked. */
+    struct Case { int type; float fov_deg; };
+    for (const Case &cs : {Case{kPanoEquirectangular, 0}, Case{kPanoFisheyeEquisolid, 260.0f}, Case{kPanoFisheyeEquidistant, 250.0f},Case{kPanoMirrorBall, 0}, Case{kPanoCentralCylindrical, 0}}) {
+      PanoramicParams p = pano_params(cs.type);
+      if (cs.fov_deg > 0) p.fisheye_fov = cs.fov_deg * kDeg2Rad;
+      const int w = 128, h = 64;
+      std::vector<uint32_t> out((size_t)w * h);
+      PanoramicState st;
+      PanoramicCameraFrame cam;
+      cam.right = {1, 0, 0}, cam.up = {0, 1, 0}, cam.forward = {0, 0, 1};
+      panoramic_render(p, w, h, cam, st, out.data(), w, [](int f, const Mat4 &, const Mat4 &, RenderTarget &rt) {
+        for (int y = 0; y < rt.height; y++)
+          for (int x = 0; x < rt.width; x++) rt.color[(size_t)y * rt.stride + x] = 0xFF000000u | (uint32_t)std::min(255, x * 4) << 16 | (uint32_t)std::min(255, y * 4) << 8 | (uint32_t)(f * 30);
+      });
+      const int side = panoramic_face_side(w, h);
+      CHECK(side == 64);
+      const uint32_t mask = panoramic_face_mask(p);
+      int judged = 0, wrong_face = 0, seam = 0;
+      double worst = 0.0;
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+          const Vec3 d = panoramic_direction(p, (x + 0.5f) / w, (y + 0.5f) / h);
+          if (length(d) < 0.5f) continue;
+          int face = -1;
+          float best = -2.0f;
+          for (int f = 0; f < 6; f++) {
+            Vec3 fw, up;
+            panoramic_face(f, fw, up);
+            if ((mask & (1u << f)) && dot(d, fw) > best) best = dot(d, fw), face = f;
+          }
+          Vec3 fw, up;
+          panoramic_face(face, fw, up);
+          const Vec3 right = cross(up, fw);
+          const float tx = dot(d, right) / best, ty = dot(d, up) / best;
+          CHECK(std::fabs(tx) <= kPanoramicOverscan + 1e-3f && std::fabs(ty) <= kPanoramicOverscan + 1e-3f);  // (no pixel asks for more than the faces draw)
+          if (std::fabs(tx) > 0.95f || std::fabs(ty) > 0.95f) seam++;
+          const float ex = (tx / kPanoramicOverscan * 0.5f + 0.5f) * side, ey = (0.5f - ty / kPanoramicOverscan * 0.5f) * side;
+          const uint32_t px = out[(size_t)y * w + x];
+          judged++;
+          if ((int)(px & 255) != face * 30) {
+            wrong_face++;
+            continue;
+          }
+          const double gx = ((px >> 16) & 255) / 4.0 + 0.5, gy = ((px >> 8) & 255) / 4.0 + 0.5;  // (the face position decoded)
+          worst = std::max(worst, std::max(std::fabs(gx - ex), std::fabs(gy - ey)));
+        }
+      std::printf("    %s: %d pixels judged, %d on the wrong face, %d near a seam, worst position error %.3f face pixels\n", panoramic_type_name(cs.type), judged, wrong_face, seam, worst);
+      CHECK(judged > 2000);
+      CHECK(seam > 50);
+      CHECK(wrong_face == 0);
+      CHECK(worst < 0.4);
+    }
+  });
+  test("panoramic: bad numbers - NaN, a minimum above its maximum, a field of view of 0 or 400 degrees - give finite directions and a render through panoramic_render that doesn't crash, even at 1x1", [] {
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      PanoramicParams p = pano_params(type);
+      p.lat_min = std::nanf(""), p.lat_max = -5.0f;
+      p.lon_min = 4.0f, p.lon_max = -4.0f;
+      p.fisheye_fov = type % 2 ? 0.0f : 400.0f * kDeg2Rad;
+      p.fisheye_lens = std::nanf(""), p.cyl_v_min = 3.0f, p.cyl_v_max = std::nanf("");
+      p.sanitize();
+      for (int i = 0; i <= 10; i++) {
+        const Vec3 d = panoramic_direction(p, i / 10.0f, 0.5f);
+        CHECK(std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z));
+      }
+      PanoramicState st;
+      PanoramicCameraFrame cam;
+      cam.right = {1, 0, 0}, cam.up = {0, 1, 0}, cam.forward = {0, 0, 1};
+      uint32_t one = 0;
+      panoramic_render(p, 1, 1, cam, st, &one, 1, [](int, const Mat4 &, const Mat4 &, RenderTarget &rt) {
+        for (int y = 0; y < rt.height; y++)
+          for (int x = 0; x < rt.width; x++) rt.color[(size_t)y * rt.stride + x] = 0xFF123456u;
+      });
+      CHECK((one >> 24) == 0xFF);
+    }
+  });
+
+  /* ---- the test-engineer's: the views, F12 and the path tracer through a real scene (acceptance criterion 4, 7) ---- */
+  /* F12 through the console on the default 900x600 editor with the six walls: engine "Rasterized" or "Path". */
+  auto f12 = [](Editor &ed, const char *engine, int w, int h) -> const Image & {
+    ed.command(std::string("set Render.RenderEngine ") + engine);
+    ed.command("set Render.ResolutionX " + std::to_string(w));
+    ed.command("set Render.ResolutionY " + std::to_string(h));
+    ed.command("set Render.Samples 4");
+    ed.command("set Render.Denoise false");
+    ed.command("device cpu");
+    ed.command("render");
+    for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    return ed.render_image_for_test();
+  };
+  auto open_walls = [](Editor &ed, int w = 900, int h = 600) {
+    ed.init_headless(w, h);
+    ed.step_frame_headless();
+    GameObject *cam = r538_six_walls(ed);
+    CHECK(cam && cam->get<Camera>());
+    ed.command("select Main Camera");
+    ed.step_frame_headless();
+    return cam ? cam->get<Camera>() : nullptr;
+  };
+  auto name_of = [](int type) { return std::string(panoramic_type_name(type)); };
+
+  test("panoramic: the Camera Preview of an Equirectangular camera shows each coloured wall where its direction maps (cyan ahead in the middle, red a quarter right, green a quarter left, magenta at both edges, blue at the top, yellow at the bottom)", [&] {
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    ed.command("camera panoramic equirectangular");
+    r34_steps(ed, 6);
+    const Recti box = r538_preview_picture(ed);
+    CHECK(box.w > 60 && box.h > 30);
+    if (box.w <= 0) return;
+    const Image &fb = ed.framebuffer();
+    auto at = [&](int x, int y) { return fb.pixels[(size_t)(box.y + y) * fb.width + box.x + x]; };
+    /* The named points first: the user's own reading of the picture. */
+    auto wall_at = [&](float u, float v) { return r538_classify(at((int)(u * box.w), (int)(v * box.h))); };
+    CHECK(wall_at(0.50f, 0.50f) == 4);
+    CHECK(wall_at(0.75f, 0.50f) == 0);
+    CHECK(wall_at(0.25f, 0.50f) == 1);
+    CHECK(wall_at(0.03f, 0.50f) == 5);
+    CHECK(wall_at(0.97f, 0.50f) == 5);
+    CHECK(wall_at(0.50f, 0.08f) == 2);
+    CHECK(wall_at(0.50f, 0.92f) == 3);
+    /* And every pixel that looks squarely at one wall. */
+    const Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    const R538Check c = r538_compare(panoramic_params_for(*cam, box.w, box.h), box.w, box.h, at, 3, 2);  // (a 1-pixel outline of the inset is drawn over the picture's edge: left out)
+    std::printf("    Camera Preview %dx%d: %d pixels judged, %d wrong %s\n", box.w, box.h, c.judged, c.wrong, c.first_wrong.c_str());
+    CHECK(c.judged > 500);
+    CHECK(c.wrong == 0);
+  });
+
+  test("panoramic: the Game view of every panoramic type shows the six walls where the projection says; a fisheye's corners and a cylinder's missing sky stay black", [&] {
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      ed.command("camera panoramic " + name_of(type));
+      r34_steps(ed, 6);
+      const Recti g = ed.game_rect_for_test();
+      const Image &fb = ed.framebuffer();
+      const Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+      CHECK(cam->panoramic_type == type);
+      auto at = [&](int x, int y) { return fb.pixels[(size_t)(g.y + y) * fb.width + g.x + x]; };
+      const R538Check c = r538_compare(panoramic_params_for(*cam, g.w, g.h), g.w, g.h, at, 5);
+      std::printf("    Game view, %s, %dx%d: %d judged, %d wrong, %d outside (%d not black) %s\n", name_of(type).c_str(), g.w, g.h, c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 300);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+    }
+  });
+
+  test("panoramic: F12's rasterized render of every panoramic type shows the six walls where the projection says, with depth of field on, an orthographic flag set and a camera filter added (panoramic wins; the filters are skipped)", [&] {
+    Editor ed;
+    Camera *cam = open_walls(ed);
+    if (!cam) return;
+    cam->dof = true;
+    cam->orthographic = true;  // (ignored while panoramic)
+    ed.command("filter add Retro Console");
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      ed.command("camera panoramic " + name_of(type));
+      const Image &img = f12(ed, "Rasterized", 160, 80);
+      CHECK(img.width == 160 && img.height == 80);
+      if (img.width != 160) continue;
+      const PanoramicParams p = panoramic_params_for(*cam, 160, 80);
+      const R538Check c = r538_compare(p, 160, 80, [&](int x, int y) { return img.pixels[(size_t)y * 160 + x]; }, 2);
+      std::printf("    F12 rasterized, %s: %d judged, %d wrong, %d outside (%d not black) %s\n", name_of(type).c_str(), c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 200);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+      for (uint32_t px : img.pixels)
+        if ((px >> 24) != 0xFF) {
+          CHECK(false);  // (an unfilled or NaN-poisoned pixel)
+          break;
+        }
+    }
+  });
+
+  test("panoramic: F12's path-traced render of every panoramic type agrees with the projection on the six walls (the CPU tracer's primary rays)", [&] {
+    Editor ed;
+    Camera *cam = open_walls(ed);
+    if (!cam) return;
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++) {
+      ed.command("camera panoramic " + name_of(type));
+      const Image &img = f12(ed, "Path", 96, 48);
+      CHECK(img.width == 96 && img.height == 48 && !ed.rendering_for_test());
+      if (img.width != 96) continue;
+      const PanoramicParams p = panoramic_params_for(*cam, 96, 48);
+      const R538Check c = r538_compare(p, 96, 48, [&](int x, int y) { return img.pixels[(size_t)y * 96 + x]; }, 2);
+      std::printf("    F12 path-traced, %s: %d judged, %d wrong, %d outside (%d not black) %s\n", name_of(type).c_str(), c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 100);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+    }
+  });
+
+  test("panoramic: the raster picture and the path-traced picture of the same Equirectangular camera show the same wall at every judged pixel", [&] {
+    Editor ed;
+    Camera *cam = open_walls(ed);
+    if (!cam) return;
+    ed.command("camera panoramic equirectangular");
+    const std::vector<uint32_t> ras = f12(ed, "Rasterized", 128, 64).pixels;
+    const std::vector<uint32_t> pt = f12(ed, "Path", 128, 64).pixels;
+    CHECK(ras.size() == 128 * 64 && pt.size() == ras.size());
+    if (ras.size() != pt.size()) return;
+    const PanoramicParams p = panoramic_params_for(*cam, 128, 64);
+    int judged = 0, differ = 0;
+    for (int y = 0; y < 64; y += 2)
+      for (int x = 0; x < 128; x += 2) {
+        if (r538_wall_of(panoramic_direction(p, (x + 0.5f) / 128, (y + 0.5f) / 64)) < 0) continue;
+        judged++;
+        differ += r538_classify(ras[(size_t)y * 128 + x]) != r538_classify(pt[(size_t)y * 128 + x]);
+      }
+    std::printf("    raster against path tracer: %d pixels, %d showing another wall\n", judged, differ);
+    CHECK(judged > 500);
+    CHECK(differ == 0);
+  });
+
+  test("panoramic: the path tracer through the PathTracer API with the camera's lens shows the six walls for Equirectangular and a Fisheye Equidistant, black outside the circle", [] {
+    static const Vec3 pos[6] = {{5, 0, 0}, {-5, 0, 0}, {0, 5, 0}, {0, -5, 0}, {0, 0, 5}, {0, 0, -5}};
+    static const Vec3 euler[6] = {{0, 90, 0}, {0, 90, 0}, {90, 0, 0}, {90, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    MeshPtr quad = primitives::quad(14.0f);
+    std::vector<std::vector<MaterialPtr>> mats(6);
+    std::vector<PTObject> objs;
+    for (int f = 0; f < 6; f++) {
+      MaterialPtr m = make_material("wall", Vec3(0.0f));
+      m->emission = r538_wall_colour(f), m->emission_strength = 1.0f, m->specular = 0.0f, m->double_sided = true;
+      mats[(size_t)f] = {m};
+      objs.push_back({&quad->render_mesh_tangents(), Mat4::trs(pos[f], Quat::euler(euler[f]), Vec3(1.0f)), &mats[(size_t)f]});
+    }
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0, 0, 0};
+    for (int type : {kPanoEquirectangular, kPanoFisheyeEquidistant}) {
+      const int W = 96, H = 48;
+      PanoramicParams p;
+      p.type = type;
+      p.sensor_w = 36.0f, p.sensor_h = 18.0f;
+      PathTracer pt;
+      pt.build(objs, {}, env);
+      PTSettings st;
+      st.max_bounces = 1, st.clamp_indirect = 0, st.denoise = false;
+      pt.set_settings(st);
+      PTLens lens;
+      lens.pano = p;
+      pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 100.0f), W, H, lens);
+      pt.render(1e9, 4);
+      std::vector<uint32_t> out((size_t)W * H);
+      pt.resolve(out.data(), W, false);
+      const R538Check c = r538_compare(p, W, H, [&](int x, int y) { return out[(size_t)y * W + x]; }, 2);
+      std::printf("    PathTracer, %s: %d judged, %d wrong, %d outside (%d not black) %s\n", panoramic_type_name(type), c.judged, c.wrong, c.black_outside, c.outside_wrong, c.first_wrong.c_str());
+      CHECK(c.judged > 100);
+      CHECK(c.wrong == 0);
+      CHECK(c.outside_wrong == 0);
+      if (type == kPanoFisheyeEquidistant) CHECK(c.black_outside > 100);
+      /* A card in the machine is asked for but a panoramic camera traces on the CPU: the same picture. */
+      if (gpu::available()) {
+        PathTracer pg;
+        pg.build(objs, {}, env);
+        PTSettings sg = st;
+        sg.gpus = {gpu::devices()[0].index};
+        pg.set_settings(sg);
+        pg.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, W / (float)H, 0.1f, 100.0f), W, H, lens);
+        pg.render(1e9, 4);
+        std::vector<uint32_t> og((size_t)W * H);
+        pg.resolve(og.data(), W, false);
+        const R538Check cg = r538_compare(p, W, H, [&](int x, int y) { return og[(size_t)y * W + x]; }, 2);
+        std::printf("    PathTracer with a card asked for, %s: %d judged, %d wrong\n", panoramic_type_name(type), cg.judged, cg.wrong);
+        CHECK(cg.judged > 100 && cg.wrong == 0);
+      }
+    }
+  });
+
+  test("panoramic: the Game view on the GPU raster path shows the six walls where the projection says (skipped without a Vulkan card)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    ed.command("camera panoramic equirectangular");
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 8);
+    const FrameProfile before = ed.frame_profile_totals();
+    ed.scene().find_by_name("Main Camera")->get<Camera>()->latitude_max = 89.0f;  // (a change: every view draws again)
+    ed.mark_changed_for_test("camera");
+    r34_steps(ed, 8);
+    const FrameProfile after = ed.frame_profile_totals();
+    std::printf("    %s; %llu views on the GPU, %llu on the CPU instead\n", ed.gpu_view_status().c_str(), (unsigned long long)(after.gpu_views - before.gpu_views),
+                (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks));
+    CHECK(after.gpu_views > before.gpu_views);  // (the faces really went through the card, not the CPU rasterizer)
+    const Recti g = ed.game_rect_for_test();
+    const Image &fb = ed.framebuffer();
+    const Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    const R538Check c = r538_compare(panoramic_params_for(*cam, g.w, g.h), g.w, g.h, [&](int x, int y) { return fb.pixels[(size_t)(g.y + y) * fb.width + g.x + x]; }, 5);
+    std::printf("    Game view on the GPU: %d judged, %d wrong %s\n", c.judged, c.wrong, c.first_wrong.c_str());
+    CHECK(c.judged > 300);
+    CHECK(c.wrong == 0);
+    ed.viewport_device_for_test(1);
+  });
+
+  test("panoramic: F12 with MoonRay chosen and a panoramic camera renders with the path tracer instead (MoonRay's export has no panoramic lens), not as a perspective picture", [] {
+    Editor ed;
+    r34_open(ed);
+    moonray::Install in;
+    in.kind = moonray::Install::Native;
+    in.root = "stand-in";
+    in.version = "test";
+    in.launcher = {test_program(), "--fake-moonray"};
+    ed.moonray_set_for_test(in);
+    ed.command("engine moonray");
+    ed.command("select Main Camera");
+    ed.command("camera panoramic equirectangular");
+    ed.command("set Render.ResolutionX 32");
+    ed.command("set Render.ResolutionY 16");
+    ed.command("set Render.Samples 2");
+    ed.command("set Render.Denoise false");
+    ed.command("device cpu");
+    ed.command("render");
+    CHECK(!ed.moonray_rendering_for_test());  // (a MoonRay job would be under way)
+    for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+    std::printf("    status: '%s'\n", ed.render_status_for_test().substr(0, 60).c_str());
+    CHECK(ed.render_status_for_test().find("MoonRay") == std::string::npos);
+    CHECK(!ed.render_image_for_test().pixels.empty());
+    ed.command("camera panoramic off");  // (the same scene with an ordinary camera does go to MoonRay)
+    ed.command("render");
+    CHECK(ed.moonray_rendering_for_test() || ed.render_status_for_test().rfind("MoonRay", 0) == 0);
+    ed.stop_render_for_test();
+    ed.step_frame_headless();
+  });
+
+  test("panoramic: bad numbers in the camera (NaN, latitude min above max, a fisheye field of view of 0 or 400, the smallest F12 render of 16x16) leave the Camera Preview, Game view, F12 raster and F12 path tracer opaque and finite", [&] {
+    Editor ed;
+    r34_open(ed);
+    r538_six_walls(ed);
+    ed.command("select Main Camera");
+    Camera *cam = ed.scene().find_by_name("Main Camera")->get<Camera>();
+    const Camera original(*cam);
+    struct Case { const char *what; std::function<void(Camera &)> set; };
+    const float nan = std::nanf("");
+    const std::vector<Case> cases = {
+        {"latitude min 80 above max -20", [](Camera &c) { c.panoramic_type = 1, c.latitude_min = 80, c.latitude_max = -20; }},
+        {"longitude min above max", [](Camera &c) { c.panoramic_type = 1, c.latitude_min = -90, c.latitude_max = 90, c.longitude_min = 120, c.longitude_max = -120; }},
+        {"every number NaN", [nan](Camera &c) { c.panoramic_type = 1, c.latitude_min = c.latitude_max = c.longitude_min = c.longitude_max = nan; }},
+        {"fisheye field of view 0", [](Camera &c) { c.panoramic_type = 2, c.fisheye_fov = 0; }},
+        {"fisheye field of view 400", [](Camera &c) { c.panoramic_type = 2, c.fisheye_fov = 400; }},
+        {"fisheye field of view NaN", [nan](Camera &c) { c.panoramic_type = 3, c.fisheye_fov = nan; }},
+        {"equisolid lens 0 and NaN", [nan](Camera &c) { c.panoramic_type = 3, c.fisheye_fov = 180, c.fisheye_lens = 0; c.sensor_width = nan; }},
+        {"cylinder height min above max", [](Camera &c) { c.panoramic_type = 4, c.cylinder_min = 5, c.cylinder_max = -5; }},
+        {"cylinder height NaN and equal", [nan](Camera &c) { c.panoramic_type = 4, c.cylinder_min = nan, c.cylinder_max = 0; }},
+        {"mirror ball with everything infinite", [](Camera &c) { c.panoramic_type = 5, c.fisheye_fov = INFINITY, c.sensor_width = INFINITY; }},
+        {"a type number out of range", [](Camera &c) { c.panoramic_type = 9; }},
+    };
+    for (const Case &cs : cases) {
+      *cam = original;  // (the camera as it was, in place: the object keeps its component and its owner)
+      cs.set(*cam);
+      ed.mark_changed_for_test("bad numbers");
+      r34_steps(ed, 5);
+      auto sane = [&](const Image &img, const char *where) {
+        bool opaque = img.width > 0;
+        for (uint32_t px : img.pixels) opaque = opaque && (px >> 24) == 0xFF;
+        if (!opaque) std::printf("    %s: %s gave a picture with unfilled pixels\n", cs.what, where);
+        return opaque;
+      };
+      /* The views: the framebuffer's Game view and preview regions are opaque (no crash is the other half). */
+      Image game;
+      const Recti g = ed.game_rect_for_test();
+      game.resize(g.w, g.h);
+      for (int y = 0; y < g.h; y++)
+        for (int x = 0; x < g.w; x++) game.pixels[(size_t)y * g.w + x] = ed.framebuffer().pixels[(size_t)(g.y + y) * ed.framebuffer().width + g.x + x];
+      CHECK(sane(game, "the Game view"));
+      const Recti box = r538_preview_picture(ed);
+      if (box.w > 0) {
+        Image pv;
+        pv.resize(box.w, box.h);
+        for (int y = 0; y < box.h; y++)
+          for (int x = 0; x < box.w; x++) pv.pixels[(size_t)y * box.w + x] = ed.framebuffer().pixels[(size_t)(box.y + y) * ed.framebuffer().width + box.x + x];
+        CHECK(sane(pv, "the Camera Preview"));
+      }
+      ed.command("set Render.RenderEngine Rasterized");
+      ed.command("set Render.ResolutionX 48");
+      ed.command("set Render.ResolutionY 24");
+      ed.command("device cpu");
+      ed.command("render");
+      CHECK(sane(ed.render_image_for_test(), "F12 rasterized"));
+      ed.command("set Render.RenderEngine Path");
+      ed.command("set Render.Samples 1");
+      ed.command("set Render.Denoise false");
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      CHECK(sane(ed.render_image_for_test(), "F12 path traced"));
+    }
+    /* The smallest render F12 allows (it clamps to 16x16; panoramic_render itself is checked at 1x1 above), raster and path-traced. */
+    *cam = original;
+    cam->panoramic_type = 1;
+    ed.mark_changed_for_test("tiny");
+    for (const char *engine : {"Rasterized", "Path"}) {
+      ed.command(std::string("set Render.RenderEngine ") + engine);
+      ed.command("set Render.ResolutionX 1");
+      ed.command("set Render.ResolutionY 1");
+      ed.command("set Render.Samples 2");
+      ed.command("set Render.Denoise false");
+      ed.command("render");
+      for (int i = 0; i < 4000 && ed.rendering_for_test(); i++) ed.step_frame_headless();
+      const Image &img = ed.render_image_for_test();
+      std::printf("    %s render at 1x1 -> %dx%d, pixel 0x%08X\n", engine, img.width, img.height, img.pixels.empty() ? 0u : img.pixels[0]);
+      CHECK(img.width >= 1 && img.height >= 1 && !img.pixels.empty() && (img.pixels[0] >> 24) == 0xFF);
+    }
+  });
+
+  test("panoramic: the path tracer's linear light stays finite for every type with bad numbers in the lens (NaN, reversed ranges, a field of view of 0 and 400)", [] {
+    MeshPtr quad = primitives::quad(14.0f);
+    std::vector<MaterialPtr> mats = {make_material("wall", Vec3(0.5f))};
+    mats[0]->double_sided = true;
+    std::vector<PTObject> objs = {{&quad->render_mesh_tangents(), Mat4::trs({0, 0, 5}, Quat(), Vec3(1.0f)), &mats}};
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = {0.2f, 0.2f, 0.2f};
+    const float nan = std::nanf("");
+    for (int type = kPanoEquirectangular; type < kPanoTypeCount; type++)
+      for (int bad = 0; bad < 3; bad++) {
+        PanoramicParams p;
+        p.type = type;
+        p.sensor_w = 36.0f, p.sensor_h = 24.0f;
+        if (bad == 0) p.lat_min = nan, p.lat_max = nan, p.lon_min = nan, p.fisheye_fov = nan, p.fisheye_lens = nan, p.cyl_v_min = nan;
+        if (bad == 1) p.lat_min = 1.0f, p.lat_max = -1.0f, p.lon_min = 3.0f, p.lon_max = -3.0f, p.fisheye_fov = 0.0f, p.cyl_v_min = 4.0f, p.cyl_v_max = -4.0f;
+        if (bad == 2) p.fisheye_fov = 400.0f * kDeg2Rad, p.fisheye_lens = 0.0f, p.sensor_w = 0.0f;
+        PathTracer pt;
+        pt.build(objs, {}, env);
+        PTSettings st;
+        st.max_bounces = 2, st.denoise = false;
+        pt.set_settings(st);
+        PTLens lens;
+        lens.pano = p;  // (not sanitized here: the tracer meets the numbers as a caller hands them)
+        pt.set_camera(Mat4::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}), Mat4::perspective(60 * kDeg2Rad, 2.0f, 0.1f, 100.0f), 32, 16, lens);
+        pt.render(1e9, 2);
+        const std::vector<float> rgb = pt.linear_rgb(false);
+        bool finite = rgb.size() == 32 * 16 * 3;
+        for (float f : rgb) finite = finite && std::isfinite(f) && f >= 0.0f;
+        if (!finite) std::printf("    %s with bad numbers %d: a pixel is NaN, infinite or negative\n", panoramic_type_name(type), bad);
+        CHECK(finite);
+      }
+  });
+}
+
+/* ---------------------------------------------------------------- round 554 (task 0535): shared edges covered exactly once */
+/* A W x H view where a world point (x, y, 0) lands on the pixel position (x + W / 2, H / 2 - y) or its mirror - either way
+ * a pixel centre on a pixel centre: an orthographic camera one world unit a pixel. */
+struct R554View {
+  int W = 64, H = 64;
+  Mat4 v = Mat4::look_at({0, 0, -10}, {0, 0, 0}, {0, 1, 0});
+  Mat4 p = Mat4::ortho(32.0f, 1.0f, 0.1f, 100.0f);
+  Vec3 at(float sx, float sy) const { return {sx - W * 0.5f, H * 0.5f - sy, 0.0f}; }  // (screen position -> world)
+};
+static MeshPtr r554_tri(Vec3 a, Vec3 b, Vec3 c) {
+  MeshPtr m = std::make_shared<Mesh>();
+  m->add_vert(a), m->add_vert(b), m->add_vert(c);
+  m->add_face({0, 1, 2});
+  m->sync_attributes();
+  return m;
+}
+/* The ids buffer of these triangles drawn together (each its own id, 1..n), double-sided, unlit. */
+/* (`keep`: the renderer, for project() afterwards - with `img` and `rt`, the target it drew into, kept alive by the caller:
+ * the renderer points at them. Review of round 554: they were this function's locals, and project() read a dead frame -
+ * AddressSanitizer's stack-use-after-return.) */
+static std::vector<uint32_t> r554_draw(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, Renderer3D *keep = nullptr,
+                                       Image *img_out = nullptr, RenderTarget *rt_out = nullptr) {
+  CfScene sc;
+  for (size_t i = 0; i < tris.size(); i++) {
+    sc.add(r554_tri(tris[i][0], tris[i][1], tris[i][2]), Mat4::identity(), (uint32_t)i + 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+    sc.items.back().double_sided = true;
+  }
+  sc.seal();
+  Image img_local;
+  RenderTarget rt_local;
+  Image &img = img_out ? *img_out : img_local;
+  RenderTarget &rt = rt_out ? *rt_out : rt_local;
+  cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF204060u, keep);
+  return rt.ids;
+}
+static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float py);
+/* Exactly once: the pixels each triangle covers alone add up to the pixels they cover together (none twice), and every
+ * pixel centre more than 0.01 pixel inside the union - `outline`, a convex polygon in world space, projected by the
+ * renderer itself - is covered (none missed). */
+static void r554_check(const R554View &view, const std::vector<std::array<Vec3, 3>> &tris, const std::vector<Vec3> &outline,
+                       size_t &gaps, size_t &doubles, size_t *outside = nullptr) {
+  Renderer3D r3d;
+  Image img;
+  RenderTarget rt;
+  const std::vector<uint32_t> all = r554_draw(view, tris, &r3d, &img, &rt);
+  std::vector<Vec2> poly;
+  for (const Vec3 &w : outline) {
+    Vec2 sp;
+    float z;
+    CHECK(r3d.project(w, sp, z));
+    poly.push_back(sp);
+  }
+  size_t together = 0, alone = 0;
+  for (uint32_t id : all) together += id != 0;
+  for (const auto &t : tris) {
+    const std::vector<uint32_t> one = r554_draw(view, {t});
+    for (uint32_t id : one) alone += id != 0;
+  }
+  doubles = alone > together ? alone - together : 0;
+  gaps = 0;
+  for (int y = 0; y < view.H; y++)
+    for (int x = 0; x < view.W; x++)
+      if (r554_inside_convex(poly, x + 0.5f, y + 0.5f) > 0.01f && all[(size_t)y * view.W + x] == 0) gaps++;
+  /* Round 556: and none covered whose centre is outside the union by more than 0.01 pixel (a wider span once let a
+   * triangle take pixels past its edge - see the dense sphere's test). */
+  if (outside) {
+    *outside = 0;
+    for (int y = 0; y < view.H; y++)
+      for (int x = 0; x < view.W; x++)
+        if (r554_inside_convex(poly, x + 0.5f, y + 0.5f) < -0.01f && all[(size_t)y * view.W + x] != 0) (*outside)++;
+  }
+}
+/* How far (pixels) a point is inside a convex polygon given in screen positions, either winding (negative: outside). */
+static float r554_inside_convex(const std::vector<Vec2> &poly, float px, float py) {
+  float area = 0.0f;
+  for (size_t i = 0; i < poly.size(); i++) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const float s = area >= 0.0f ? 1.0f : -1.0f;
+  float d = 1e30f;
+  for (size_t i = 0; i < poly.size(); i++) {
+    const Vec2 a = poly[i], b = poly[(i + 1) % poly.size()];
+    const float ex = b.x - a.x, ey = b.y - a.y, len = std::sqrt(ex * ex + ey * ey);
+    if (len <= 0.0f) continue;
+    d = std::min(d, s * (ex * (py - a.y) - ey * (px - a.x)) / len);
+  }
+  return d;
+}
+
+static void tests_round554() {
+  test("rasterizer (round 554): a quad's two triangles cover every pixel on their shared diagonal exactly once - the diagonal through pixel centres, at sub-pixel offsets and turned - on every compiler", [] {
+    const R554View view;
+    size_t worst_gaps = 0, worst_doubles = 0, worst_outside = 0, cases = 0;
+    for (float turn : {0.0f, 45.0f, 30.0f, 60.0f, 17.0f})
+      for (float off : {0.0f, 0.25f, 0.5f, 1.0f / 3.0f}) {
+        /* A square 36 pixels across about (32 + off, 32 + off), its corners turned by `turn`: at 0 and 45 its diagonal and
+         * edges run through pixel centres. */
+        const float cx = 32.0f + off, cy = 32.0f + off, r = 18.0f * std::sqrt(2.0f);
+        std::vector<Vec2> sq;
+        for (int k = 0; k < 4; k++) {
+          const float a = (45.0f + turn + 90.0f * k) * kDeg2Rad;
+          sq.push_back({cx + r * std::cos(a), cy + r * std::sin(a)});
+        }
+        const Vec3 A = view.at(sq[0].x, sq[0].y), B = view.at(sq[1].x, sq[1].y), C = view.at(sq[2].x, sq[2].y), D = view.at(sq[3].x, sq[3].y);
+        size_t gaps = 0, doubles = 0, outside = 0;
+        r554_check(view, {{A, B, C}, {A, C, D}}, {A, B, C, D}, gaps, doubles, &outside);
+        worst_gaps = std::max(worst_gaps, gaps), worst_doubles = std::max(worst_doubles, doubles), worst_outside = std::max(worst_outside, outside), cases++;
+        if (gaps || doubles || outside) std::printf("    turned %.0f, offset %.2f: %zu missed, %zu twice, %zu outside\n", turn, off, gaps, doubles, outside);
+      }
+    std::printf("    %zu squares: at worst %zu pixels missed, %zu covered twice, %zu outside\n", cases, worst_gaps, worst_doubles, worst_outside);
+    CHECK(worst_gaps == 0 && worst_doubles == 0 && worst_outside == 0);
+  });
+  test("rasterizer (round 554, review): a quad split along a horizontal line through pixel centres, its ends between pixels, and the same line tilted a hair, covers the line's pixels once", [] {
+    const R554View view;
+    /* The shared edge from (10.1, 32.5) to (50.3, 32.5): its row values round either way (the ends aren't halves), where
+     * the span setup used to skip the row for both triangles. Then the far end raised by 1e-5 pixel: a nearly horizontal
+     * edge whose float crossing is far from the true one. */
+    for (float tilt : {0.0f, 1e-5f, -1e-5f}) {
+      const Vec3 L = view.at(10.1f, 32.5f), R = view.at(50.3f, 32.5f - tilt);
+      const Vec3 top = view.at(30.2f, 12.25f), bottom = view.at(30.2f, 52.75f);
+      size_t gaps = 0, doubles = 0, outside = 0;
+      r554_check(view, {{L, R, top}, {R, L, bottom}}, {L, top, R, bottom}, gaps, doubles, &outside);
+      std::printf("    the horizontal split, tilted %g: %zu missed, %zu twice, %zu outside\n", tilt, gaps, doubles, outside);
+      CHECK(gaps == 0 && doubles == 0 && outside == 0);
+    }
+  });
+  test("rasterizer (round 556): a dense sphere covers no pixel outside its outline and every pixel it covers has its surface's depth - no triangle takes a pixel past its edge with an extrapolated depth", [] {
+    /* Round 554's span, widened by its rounding band over |A| (and even by one pixel), made two sculpt strokes find no
+     * surface under the mouse on #448's CI though every pixel there kept the sphere's id. This test (and round 554's
+     * "outside" counts) guard that a span wider than needed still draws only the triangles' pixels at their depths: a sphere
+     * of 20 pixels' radius, orthographic (one world unit a pixel), 48 x 24 segments - each covered pixel's depth against the
+     * sphere's front surface there, within the facets' chord error, and no pixel covered off its disc. Measured on Windows:
+     * it passes with the shipped 1e-4 pixel margin and with the review's wide one alike (1,264 pixels, worst 0.124) - so these
+     * checks don't show what the sculpt strokes tripped on (one orthographic sphere; the strokes' perspective pick path and
+     * rim pixels aren't covered here; see raster_tile's note). */
+    const R554View view;
+    const float radius = 20.0f;
+    CfScene sc;
+    const float centre_z = 15.0f;  // (in front of the camera at z = -10: its front at z = -5)
+    sc.add(primitives::uv_sphere(radius, 48, 24), Mat4::translate({0.0f, 0.0f, centre_z}), 1, cf_unlit({0.8f, 0.8f, 0.8f}));
+    sc.seal();
+    Image img;
+    RenderTarget rt;
+    cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc);
+    /* The camera at z = -10 looking down +z, near 0.1, far 100: a world z gives the depth (z + 10 - 0.1) / 99.9. */
+    /* (A facet lies behind the sphere by its sag, 0.04 here, along the view by sag x sqrt(1 + slope^2) - 1.67 times within
+     * 0.8 of the radius, where the depth is checked: at the rim the surface turns edge-on. So a facet is behind the surface
+     * by at most ~0.07; a triangle's plane carried past its edge on this convex sphere comes in FRONT of the surface, which
+     * the -0.02 bound catches. The disc check uses the circle, not the 48-gon: pixels between them aren't policed, and the
+     * check is symmetric, so a mirrored mapping would pass it too.) */
+    const float chord = 0.3f;
+    size_t covered = 0, outside = 0, off_depth = 0;
+    float worst = 0.0f;
+    for (int y = 0; y < view.H; y++)
+      for (int x = 0; x < view.W; x++) {
+        const size_t i = (size_t)y * view.W + x;
+        if (rt.ids[i] == 0) continue;
+        covered++;
+        const float wx = x + 0.5f - view.W * 0.5f, wy = view.H * 0.5f - (y + 0.5f), r2 = wx * wx + wy * wy;
+        if (r2 > (radius + 0.01f) * (radius + 0.01f)) {
+          outside++;
+          continue;
+        }
+        if (r2 > 0.64f * radius * radius) continue;  // (the depth checked within 0.8 of the radius)
+        const float surface = centre_z - std::sqrt(std::max(0.0f, radius * radius - r2));  // (the front: nearest the camera)
+        const float world_z = rt.depth_at(x, y) * 99.9f + 0.1f - 10.0f;
+        const float err = world_z - surface;  // (a facet is behind the sphere, never in front of it)
+        worst = std::max(worst, std::fabs(err));
+        if (err < -0.02f || err > chord) off_depth++;
+      }
+    std::printf("    %zu pixels covered; %zu outside the disc, %zu off the surface's depth (worst %.3f, the facets' chord %.3f)\n", covered,
+                outside, off_depth, worst, chord);
+    CHECK(covered > 1000);
+    CHECK(outside == 0 && off_depth == 0);
+  });
+  test("rasterizer (round 554, review): a see-through quad's two triangles blend their shared diagonal once - its pixels the same colour as the rest of the quad", [] {
+    const R554View view;
+    for (float off : {0.0f, 0.37f}) {
+      const Vec3 A = view.at(12.5f + off, 12.5f + off), B = view.at(52.5f + off, 12.5f + off), C = view.at(52.5f + off, 52.5f + off),
+                 D = view.at(12.5f + off, 52.5f + off);
+      CfScene sc;
+      for (const auto &t : std::vector<std::array<Vec3, 3>>{{A, B, C}, {A, C, D}}) {
+        MaterialPtr m = cf_unlit({1.0f, 1.0f, 1.0f});
+        m->surface = (int)MaterialSurface::Transparent;
+        m->alpha = 0.5f;
+        sc.add(r554_tri(t[0], t[1], t[2]), Mat4::identity(), 1, m);
+        sc.items.back().double_sided = true;
+      }
+      sc.seal();
+      Image img;
+      RenderTarget rt;
+      cf_render(img, rt, view.W, view.H, view.v, view.p, RasterOptions{}, sc, 0xFF000000u);
+      /* The quad's middle: one colour where the blend landed once. Along the diagonal x == y: a darker pixel was missed, a
+       * lighter one blended twice. */
+      const uint32_t mid = img.pixels[(size_t)30 * view.W + 40] & 0xFFFFFFu;
+      size_t odd = 0, inside = 0;
+      for (int y = 16; y < 50; y++)
+        for (int x = 16; x < 50; x++) {
+          inside++;
+          odd += (img.pixels[(size_t)y * view.W + x] & 0xFFFFFFu) != mid;
+        }
+      std::printf("    offset %.2f: the quad's colour %06X, %zu of its %zu inner pixels another\n", off, mid, odd, inside);
+      CHECK(mid != 0 && odd == 0);
+    }
+  });
+  test("rasterizer (round 554): a fan of eight triangles around a pixel centre covers its disc once - no pixel missed or covered twice at the centre or along the spokes", [] {
+    const R554View view;
+    for (float off : {0.0f, 0.5f}) {
+      const float cx = 32.5f + off, cy = 32.5f + off, r = 20.0f;  // (the centre on a pixel centre, then between four)
+      std::vector<Vec2> rim;
+      for (int k = 0; k < 8; k++) rim.push_back({cx + r * std::cos(k * 45.0f * kDeg2Rad), cy + r * std::sin(k * 45.0f * kDeg2Rad)});
+      std::vector<std::array<Vec3, 3>> fan;
+      for (int k = 0; k < 8; k++) fan.push_back({view.at(cx, cy), view.at(rim[k].x, rim[k].y), view.at(rim[(k + 1) % 8].x, rim[(k + 1) % 8].y)});
+      std::vector<Vec3> outline;
+      for (const Vec2 &q : rim) outline.push_back(view.at(q.x, q.y));
+      size_t gaps = 0, doubles = 0;
+      r554_check(view, fan, outline, gaps, doubles);
+      std::printf("    the fan about (%.1f, %.1f): %zu missed, %zu twice\n", cx, cy, gaps, doubles);
+      CHECK(gaps == 0 && doubles == 0);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- round 556 (task 0538): shadows at a distance, CPU and card */
+static void tests_round556() {
+  /* Round 556 (task 0538): round 553 had seen the card's contact shadow at 20 m darker and harder than the CPU's - with a
+   * level camera, which sees the floor edge-on, so the sphere's whole shadow was a row or two and a pixel at its end read as
+   * a harder edge. Looking down 30 degrees the shadow lies on the floor. The window is fixed from the scene, not found in
+   * the picture: the sphere's centre carried along the sun's direction to the floor, a metre and more around it (the shadow
+   * of a 0.5 m ball with the sun 30 degrees up is about 1 x 2 m), projected. In it, the darkening the sphere casts (its
+   * picture casting against not casting) must be the same pixels on the card as on the CPU - and be there at all: so many
+   * pixels, and nothing brightened. The sphere's own pixels are left out, and the grid is off (its X axis line lies over
+   * the floor). */
+  test("shadows at a distance (round 556): a sphere's shadow on the floor seen from 20 m darkens the same pixels on the card as on the CPU - and it is there: the floor under the sun's line through the sphere darkened, nothing brightened", [] {
+    auto luma = [](uint32_t p) { return 0.2126f * ((p >> 16) & 255) + 0.7152f * ((p >> 8) & 255) + 0.0722f * (p & 255); };
+    std::vector<float> cpu_dark;
+    for (int device : {1, 2}) {
+      if (device == 2 && !gpu::available()) {
+        std::printf("    no card: the CPU's shadow only\n");
+        continue;
+      }
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Main Camera");
+      ed.command("select Cube");
+      ed.command("delete");
+      GameObject *ball = ed.scene().create("Ball");
+      ball->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 64, 32);
+      ball->add<MeshRenderer>()->materials = {make_material("grey", Vec3(0.6f, 0.6f, 0.6f))};
+      ball->set_local_position({0.0f, 1.0f, 0.0f});
+      ed.command("set Directional Light.Transform.rotation 30 -60 0");
+      ed.command("overlay grid off");
+      ed.viewport_device_for_test(device);
+      ed.command("camera 0 30 20 0 1 0");  // (looking down 30 degrees: a level camera sees the floor edge-on, the shadow one row)
+      const GameObject *sun = ed.scene().find_by_name("Directional Light");
+      CHECK(sun != nullptr);
+      if (!sun) return;
+      const Vec3 d = normalize(sun->world_rotation().rotate({0, 0, 1}));  // (the way the light travels, as the renderers take it)
+      CHECK(d.y < -0.1f);
+      if (!(d.y < -0.1f)) return;
+      const Vec3 c = Vec3(0.0f, 1.0f, 0.0f) + d * (-1.0f / d.y);  // (the sphere's centre along the light to the floor)
+      r34_steps(ed, 3);
+      const Recti rect = ed.scene_view_rect();
+      float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+      for (float sx : {-1.5f, 1.5f})
+        for (float sz : {-1.5f, 1.5f}) {
+          Vec2 s;
+          CHECK(ed.project_for_test(c + Vec3(sx, 0.0f, sz), s));
+          x0 = std::min(x0, s.x), y0 = std::min(y0, s.y), x1 = std::max(x1, s.x), y1 = std::max(y1, s.y);
+        }
+      const int W = rect.w, wx0 = std::max(0, (int)x0), wy0 = std::max(0, (int)y0);
+      const int wx1 = std::min(W - 1, (int)x1), wy1 = std::min(rect.h - 1, (int)y1);
+      CHECK(wx1 - wx0 > 10 && wy1 - wy0 > 5);
+      /* The sphere's own pixels (its lower rim reaches into the window, and shades itself once it casts): where it is drawn
+       * against not drawn, left out - a mask of the sphere, not a search for the shadow. */
+      ball->get<MeshRenderer>()->enabled = false;
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> bare = r34_crop(ed, rect);
+      ball->get<MeshRenderer>()->enabled = true;
+      ball->get<MeshRenderer>()->cast_shadows = false;
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> off = r34_crop(ed, rect);
+      ball->get<MeshRenderer>()->cast_shadows = true;
+      r34_steps(ed, 3);
+      const std::vector<uint32_t> on = r34_crop(ed, rect);
+      std::vector<float> dark;
+      long darkened = 0, brightened = 0;
+      float core = 0.0f;
+      for (int y = wy0; y <= wy1; y++)
+        for (int x = wx0; x <= wx1; x++) {
+          const size_t i = (size_t)y * W + x;
+          const bool sphere = i >= bare.size() || i >= off.size() || bare[i] != off[i];
+          const float v = !sphere && i < on.size() ? luma(off[i]) - luma(on[i]) : 0.0f;
+          dark.push_back(v);
+          darkened += v > 3.0f, brightened += v < -3.0f, core = std::max(core, v);
+        }
+      if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {
+        fs::make_dirs(dir);
+        const std::string base = fs::join(dir, device == 2 ? "shadow20_card" : "shadow20_cpu");
+        write_png(base + ".png", on.data(), W, rect.h, W);
+        write_png(base + "_nocast.png", off.data(), W, rect.h, W);
+      }
+      std::printf("    %s: window %d..%d x %d..%d; %ld pixels darkened (core %.0f grey levels), %ld brightened\n",
+                  device == 2 ? "the card" : "the CPU", wx0, wx1, wy0, wy1, darkened, core, brightened);
+      /* The shadow is there (172 pixels on the CPU, 171 on an RTX 4070 SUPER, core 43): a run without a card still catches a
+       * shadow gone missing or shrunk. Casting only darkens - but when the ball starts casting the sun's shadow map is
+       * refitted, and a few lone floor pixels around the shadow flip either way on both renderers (3 brightened, measured
+       * from dumps; none inside the shadow), so a few are allowed. */
+      CHECK(darkened >= 100 && core >= 20.0f);
+      CHECK(brightened <= 4);
+      /* (Lone: a brightened pixel next to another would be a patch, not the refit's texels changing their depth bias.) */
+      const int ww = wx1 - wx0 + 1, wh = wy1 - wy0 + 1;
+      long touching = 0;
+      for (int y = 0; y < wh; y++)
+        for (int x = 0; x < ww; x++) {
+          if (!(dark[(size_t)y * ww + x] < -3.0f)) continue;
+          for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+              const int nx = x + dx, ny = y + dy;
+              if ((dx || dy) && nx >= 0 && ny >= 0 && nx < ww && ny < wh && dark[(size_t)ny * ww + nx] < -3.0f) touching++;
+            }
+        }
+      CHECK(touching == 0);
+      if (device == 1) {
+        cpu_dark = dark;
+        continue;
+      }
+      long differ = 0;
+      float worst = 0.0f;
+      for (size_t i = 0; i < dark.size() && i < cpu_dark.size(); i++) {
+        differ += (dark[i] > 3.0f) != (cpu_dark[i] > 3.0f);
+        worst = std::max(worst, std::fabs(dark[i] - cpu_dark[i]));
+      }
+      if (dark.size() != cpu_dark.size()) differ += 1000000;
+      std::printf("    card - CPU: %ld pixels darkened on one only; the darkening differs by %.1f grey levels at most\n", differ, worst);
+      /* (Pixel by pixel - counts alone would pass a shadow moved or turned, and a shadow a pixel off differs in ~20. Measured
+       * 3: two of the lone refit flips and one pixel on the shadow's edge.) */
+      CHECK(differ <= 4);
+    }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -12354,4 +13515,8 @@ void run_render_tests() {
   tests_round343();
   tests_round341();
   tests_round462();
+  tests_round542();
+  tests_round538();
+  tests_round554();
+  tests_round556();
 }

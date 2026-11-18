@@ -154,6 +154,9 @@ struct Material {
   int filter = 2;       // TexFilter
   bool double_sided = false;
   bool unlit = false;   // Unity "Unlit" shader / Blender Emission-only
+  /* Task 0533: the mesh's render colour layer multiplied into Base Color and Alpha (Blender: a Color Attribute node
+   * into Base Color; Unity: a vertex-colour shader). Off: the colours don't show outside Vertex Paint. */
+  bool vertex_color = false;
   bool cast_shadows = true;
   /* Axis material (ADR 0018): surfaces facing up take Top, steep ones Side, downward ones Bottom (asset paths;
    * empty = this material's own maps), by the normal in World or Local space, projected triplanar. */
@@ -274,7 +277,7 @@ MaterialPtr make_material(const std::string &name, Vec3 color);
 void prefetch_material_textures(const std::vector<MaterialPtr> &materials);
 /* Round 437: every image file a scene's renderers' materials read, decoded on every core into the texture cache - a
  * scene's first frame then draws from the cache (SideRail's had decoded 1.2 s of textures in its first frame). */
-struct Scene;
+class Scene;  // (as scene.h defines it: MSVC names functions taking one by the keyword it met first)
 void prefetch_scene_textures(const Scene &s);
 const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",

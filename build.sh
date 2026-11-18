@@ -179,7 +179,7 @@ QUADRIFLOW_SRC=""
 if [ "$USE_QUADRIFLOW" = 1 ]; then  # (the sources CMake lists: main.cpp and post-solver.cpp - a Ceres tool - are not built)
   QUADRIFLOW_SRC="$(for f in adjacent-matrix dedge hierarchy loader localsat merge-vertex optimizer parametrizer parametrizer-flip parametrizer-int parametrizer-mesh parametrizer-scale parametrizer-sing subdivide; do echo extern/quadriflow/src/$f.cpp; done) $(for f in arg_parser base color lp_base lp_skeleton random bits/windows; do echo extern/quadriflow/3rd/lemon-1.3.1/lemon/$f.cc; done)"
 fi
-LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp $PLATFORM_SRC $OPTIX_SRC $QUADRIFLOW_SRC"
+LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp src/texture/*.cpp src/editor/*.cpp src/research/*.cpp src/deps/*.cpp 2>/dev/null) extern/ufbx/ufbx.c extern/sky/source/sky_hosek.cpp extern/sky/source/sky_multiple_scattering.cpp $PLATFORM_SRC $OPTIX_SRC $QUADRIFLOW_SRC"
 # Blender's libc_compat: the -ffast-math math symbols newer glibc dropped that its prebuilt static codecs (FFmpeg's
 # x265) still call (Linux only; empty elsewhere).
 [ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"

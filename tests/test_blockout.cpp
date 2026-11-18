@@ -16,6 +16,7 @@ using namespace bl;
 // Round 515's tests live in test_blockout_leaf.cpp (this file's object reached the MSVC section limit); run from run_blockout_tests below.
 void tests_round515();
 void tests_round515_te();
+void tests_round547();  // (test_blockout_parts.cpp: round 547, the frame and the glass as objects, modifiers on every part)
 void tests_round503();  // (test_blockout_writeup.cpp: the bench interior with the pass's pieces, the lesson's new steps)
 
 namespace {
@@ -19058,16 +19059,41 @@ R498Wall r498_wall(Editor &ed, int style, int method, bool glass = true) {
   return w;
 }
 
-/* Whether a point of the window's own space is inside the Blockout's matter: the parity of a ray's crossings of the mesh. */
+/* Round 547 (ADR 0149): a styled opening's Frame and Glass are objects, not faces of the Blockout's mesh: the crossings of a ray (given in the Blockout's space) with their meshes, so that
+ * every probe of what the opening looks like - "is there matter here", "how many faces does a ray cross" - reads the same world as before, the whole opening. A door's leaf is not counted (as
+ * since round 515). */
+int r547_part_hits(const GameObject &bo, const GameObject &opening, const Ray &ray_in_bo, bool *any_odd = nullptr) {
+  int hits = 0;
+  const Mat4 to_bo_inv = bo.world_matrix();
+  for (const GameObject *c : opening.children) {
+    const BlockoutLeaf *mark = c->get<BlockoutLeaf>();
+    const MeshFilter *mf = c->get<MeshFilter>();
+    if (!mark || mark->kind == kPartKindLeaf || !mf || !mf->mesh) continue;
+    const Mat4 inv = c->world_matrix().inverse();
+    const Vec3 world_o = to_bo_inv.point(ray_in_bo.origin), world_d = to_bo_inv.dir(ray_in_bo.dir);
+    const Ray ray{inv.point(world_o), normalize(inv.dir(world_d))};
+    const RenderMesh &rm = mf->mesh->render_mesh();
+    int mine = 0;
+    for (size_t t = 0; t < rm.tri_count(); t++) mine += ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]) > 0.0f;
+    hits += mine;
+    if (any_odd && (mine & 1)) *any_odd = true;
+  }
+  return hits;
+}
+
+/* Whether a point of the window's own space is inside the Blockout's matter: the parity of a ray's crossings of the mesh (and, round 547, of the opening's Frame and Glass objects). */
 bool r498_matter(const GameObject &bo, const GameObject &win, Vec3 local) {
   const Mesh *m = r495_mesh(bo);
   if (!m) return false;
   const Vec3 at = bo.world_matrix().inverse().point(win.world_matrix().point(local));
   const Ray ray{at, normalize(Vec3(0.31f, 0.52f, 0.79f))};
   const RenderMesh &rm = m->render_mesh();
+  /* The union of the Blockout's matter and each part's (the sill board lies inside the wall under the window: the two overlap, as two objects can). */
+  bool in_part = false;
+  r547_part_hits(bo, win, ray, &in_part);
   int hits = 0;
   for (size_t t = 0; t < rm.tri_count(); t++) hits += ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]) > 0.0f;
-  return (hits & 1) != 0;
+  return in_part || (hits & 1) != 0;
 }
 
 struct R498Probe {
@@ -19135,6 +19161,21 @@ R498Class r498_class(const GameObject &bo, const GameObject &win, int cls) {
     for (uint32_t i = 0; i < m->face_size(f); i++) {
       const float z = to_win.point(m->positions[m->face_verts(f)[i]]).z;
       out.z_lo = std::min(out.z_lo, z), out.z_hi = std::max(out.z_hi, z);
+    }
+  }
+  /* Round 547: the frame, bars and sill board (Solid) and the pane (Glass) are the Frame's and the Glass's objects now; their faces are counted where the Blockout's were. */
+  const int part = cls == kClassSolid ? kPartKindFrame : cls == kClassGlass ? kPartKindGlass : -1;
+  for (const GameObject *c : win.children) {
+    const BlockoutLeaf *mark = c->get<BlockoutLeaf>();
+    const MeshFilter *mf = c->get<MeshFilter>();
+    if (!mark || mark->kind != part || !mf || !mf->mesh) continue;
+    const Mat4 to_part_win = win.world_matrix().inverse() * c->world_matrix();
+    for (size_t f = 0; f < mf->mesh->face_count(); f++) {
+      out.faces++;
+      for (uint32_t i = 0; i < mf->mesh->face_size(f); i++) {
+        const float z = to_part_win.point(mf->mesh->positions[mf->mesh->face_verts(f)[i]]).z;
+        out.z_lo = std::min(out.z_lo, z), out.z_hi = std::max(out.z_hi, z);
+      }
     }
   }
   return out;
@@ -19319,92 +19360,80 @@ static void tests_round498_numbers() {
 
   /* ---- Criterion 4: materials, the Glass class and the UVs ---- */
   test("blockout window styles (498): frame and bars are in the Solid class's slot, the pane in the Glass class's; a Blockout's Glass Material and a window's own override put a material on the panes only, and the UVs follow round 482's rule", [] {
+    /* Round 547 (ADR 0149): the frame, bars and sill board are the Frame object's, in the Solid class's material; the pane is the Glass object's, in the Glass class's. The Blockout's mesh
+     * has none of their faces. (Before: slots of the Blockout's own mesh, by the class of each face.) */
     for (int method : r498_methods()) {
       Editor ed;
       const R498Wall w = r498_wall(ed, kWindowGrid, method);
+      auto settle = [&] {  // (the walk that makes the parts runs on a frame)
+        r495_built(ed);
+        r477_settle(ed, 3);
+        r495_built(ed);
+      };
       const std::string solid = r482_material("R498Solid", Vec3(0.8f, 0.3f, 0.1f)), glass = r482_material("R498Glass", Vec3(0.2f, 0.5f, 0.9f)), own = r482_material("R498Own", Vec3(0.9f, 0.9f, 0.2f)),
                         own_solid = r482_material("R498OwnSolid", Vec3(0.1f, 0.9f, 0.4f));
       ed.select_for_test(w.bo->id, false);
       ed.command("blockout set texscale 0.5");
       ed.command("blockout set material solid " + solid);
       ed.command("blockout set material glass " + glass);
-      r495_built(ed);
+      settle();
       const Blockout *b = w.bo->get<Blockout>();
       const MeshRenderer *mr = w.bo->get<MeshRenderer>();
       const Mesh *m = r495_mesh(*w.bo);
       CHECK(b->material[kClassGlass] == glass && b->material[kClassSolid] == solid && m && mr);
       if (!m || !mr) return;
-      std::vector<blockout::Piece> pieces;
-      blockout::Settings settings;
-      blockout_snapshot(*w.bo, pieces, settings);
-      /* Each face has the material its class says: from the pieces the faces name (the wall's own faces are Solid too). */
-      auto expect = [&](size_t f, const std::string &blockout_solid, const std::string &window_solid, const std::string &window_glass, int *cls_out) {
-        const blockout::Piece *piece = nullptr;
-        for (const blockout::Piece &p : pieces)
-          if (p.id == b->state.faces.piece[f]) piece = &p;
-        const int cls = piece ? blockout_face_class(*piece, b->state.faces.side[f]) : -1;
-        if (cls_out) *cls_out = cls;
-        const bool mine = piece && blockout_piece_owner(piece->id) == w.win->id;
-        if (cls == kClassGlass) return mine ? window_glass : glass;
-        if (cls == kClassSolid) return mine ? window_solid : blockout_solid;
-        return std::string();
+      auto part = [&](int kind) -> const GameObject * {
+        for (const GameObject *c : w.win->children)
+          if (c->get<BlockoutLeaf>() && c->get<BlockoutLeaf>()->kind == kind) return c;
+        return nullptr;
       };
-      size_t glass_faces = 0, solid_faces = 0, wrong = 0;
-      for (size_t f = 0; f < m->face_count(); f++) {
-        int cls = -1;
-        const std::string want = expect(f, solid, solid, glass, &cls);
-        glass_faces += cls == kClassGlass, solid_faces += cls == kClassSolid;
-        if (r482_face_material(*m, *mr, f) != want) wrong++;
-      }
-      CHECK(glass_faces >= 6 && solid_faces > 10 && wrong == 0);
-      /* The pane's faces and no others carry the Blockout's Glass Material. */
+      auto holds = [&](const GameObject *g, const std::string &path) {
+        const MeshRenderer *r = g ? g->get<MeshRenderer>() : nullptr;
+        return r && r->materials.size() == 1 && r->materials[0] && r->materials[0]->asset_path == path;
+      };
+      CHECK(part(kPartKindFrame) && part(kPartKindGlass) && holds(part(kPartKindFrame), solid) && holds(part(kPartKindGlass), glass));
+      CHECK(r498_class(*w.bo, *w.win, kClassGlass).faces >= 6 && r498_class(*w.bo, *w.win, kClassSolid).faces > 10);  // (the parts' faces: counted where the mesh's were)
+      /* The Blockout's mesh has no face of the Solid or Glass class's material in it from the window: none of its faces use a slot the window's parts do. */
       size_t on_glass = 0;
       for (size_t f = 0; f < m->face_count(); f++) on_glass += r482_face_material(*m, *mr, f) == glass;
-      CHECK(on_glass == glass_faces);
+      CHECK(on_glass == 0);
       CHECK(r482_scratch_same(*w.bo));
-      /* The window's own override of Glass: the panes change, nothing else does. */
-      std::vector<std::string> before;
-      for (size_t f = 0; f < m->face_count(); f++) before.push_back(r482_face_material(*m, *mr, f));
+      /* The window's own override of Glass: the Glass object changes, nothing else does (no build of the Blockout). */
+      const uint64_t bytes = blockout_mesh_hash(*m);
       ed.select_for_test(w.win->id, false);
       ed.command("blockout set material glass " + own);
-      r495_built(ed);
-      m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
-      size_t changed = 0, on_own = 0;
-      for (size_t f = 0; m && f < m->face_count(); f++) {
-        const std::string now = r482_face_material(*m, *mr, f);
-        changed += now != before[f], on_own += now == own;
-        if (now != before[f]) CHECK(before[f] == glass && now == own);
-      }
-      CHECK(changed == glass_faces && on_own == glass_faces);
-      /* The window's Solid override takes the frame's, bars' and sill board's faces and not the wall's. */
+      settle();
+      CHECK(holds(part(kPartKindGlass), own) && holds(part(kPartKindFrame), solid));
+      /* The window's Solid override takes the Frame's material and not the wall's. */
       ed.command("blockout set material solid " + own_solid);
-      r495_built(ed);
+      settle();
       m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
-      size_t on_frame = 0, bad_wall = 0, wall_faces = 0;
-      for (size_t f = 0; m && f < m->face_count(); f++) {
-        const std::string now = r482_face_material(*m, *mr, f);
-        const bool wall = b->state.faces.piece[f] != w.win->id && !blockout_id_generated(b->state.faces.piece[f]);
-        on_frame += now == own_solid;
-        wall_faces += wall;
-        if (wall && now == own_solid) bad_wall++;
-      }
-      CHECK(on_frame > 10 && bad_wall == 0 && wall_faces > 0);
+      CHECK(holds(part(kPartKindFrame), own_solid) && holds(part(kPartKindGlass), own));
+      size_t on_frame = 0;
+      for (size_t f = 0; m && f < m->face_count(); f++) on_frame += r482_face_material(*m, *mr, f) == own_solid;
+      CHECK(on_frame == 0 && m && blockout_mesh_hash(*m) == bytes);
       CHECK(r482_scratch_same(*w.bo));
-      /* Round 482's UV rule: a face's coordinates are its corners' metres in its own plane over the Texture Scale (0.5 m a tile): on a face square to Z, U runs along
-       * X (turned by the normal's sign) and V up. */
-      size_t uv_faces = 0, uv_bad = 0;
-      for (size_t f = 0; m && f < m->face_count(); f++) {
-        const Vec3 n = m->face_normal(f);
-        if (std::fabs(n.z) < 0.9999f) continue;
-        uv_faces++;
-        const uint32_t first = m->face_offsets[f];
-        for (uint32_t i = 0; i < m->face_size(f); i++) {
-          const Vec3 p = m->positions[m->face_verts(f)[i]];
-          const Vec2 uv = m->uvs[first + i];
-          if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) uv_bad++;
+      /* Round 482's UV rule on the parts' faces, in the part's own space (the same projection as the wall's, so the Frame and the wall beside it agree in scale): a face square to Z has U along X (turned by
+       * the normal's sign) and V up, in metres over the Texture Scale (0.5 m a tile). */
+      for (int kind : {kPartKindFrame, kPartKindGlass}) {
+        const GameObject *g = part(kind);
+        const Mesh *pm = g && g->get<MeshFilter>() ? g->get<MeshFilter>()->mesh.get() : nullptr;
+        CHECK(pm != nullptr);
+        if (!pm) continue;
+        size_t uv_faces = 0, uv_bad = 0;
+        for (size_t f = 0; f < pm->face_count(); f++) {
+          const Vec3 n = pm->face_normal(f);
+          if (std::fabs(n.z) < 0.9999f) continue;
+          uv_faces++;
+          const uint32_t first = pm->face_offsets[f];
+          for (uint32_t i = 0; i < pm->face_size(f); i++) {
+            const Vec3 p = pm->positions[pm->face_verts(f)[i]];
+            const Vec2 uv = pm->uvs[first + i];
+            if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) uv_bad++;
+          }
         }
+        CHECK(uv_faces > 4 && uv_bad == 0);
       }
-      CHECK(uv_faces > 10 && uv_bad == 0);
     }
   });
 
@@ -19513,7 +19542,7 @@ static void tests_round498_more() {
     blockout_snapshot(*s.bo, pieces, settings);
     size_t made = 0;
     for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
-    CHECK(made > 10 && made < 400);
+    CHECK(made == 1);  // (round 547: the hole is the one kernel piece of a styled window - the 500 x 500 panes are the Glass object's, bounded by its own limits)
     for (const blockout::Piece &p : pieces)
       if (blockout_id_generated(p.id)) {
         const Vec3 half = p.size * 0.5f;
@@ -19598,19 +19627,24 @@ static void tests_round498_more() {
       ed.select_for_test(s.bo->id, false);
       ed.command("blockout set material glass " + glass);
       r495_built(ed);
+      r477_settle(ed, 3);
+      r495_built(ed);
       const uint64_t bo_id = s.bo->id, win_id = s.win->id;
       const Mesh live = *r495_mesh(*s.bo);
       const BlockoutPiece numbers = *s.win->get<BlockoutPiece>();
+      /* Round 547 (ADR 0149): the pane is the Glass object's - no face of the Blockout's mesh has the glass material; the Frame, the Glass and the Blockout are three mesh nodes. */
       const std::map<std::string, size_t> want = r482_triangles(*s.bo);
-      std::string pane_name;  // (the only material of the mesh with a name: the others are the default material)
+      CHECK(want.size() == 1);
+      const std::string pane_name = "R498Pane";  // (the material's name: the only one of the export with a name)
       size_t pane_triangles = 0;
-      for (const auto &w : want)
-        if (!w.first.empty()) pane_name = w.first, pane_triangles = w.second;
-      CHECK(want.size() == 2 && pane_triangles > 0);
+      for (const GameObject *c : s.win->children)
+        if (c->get<BlockoutLeaf>() && c->get<BlockoutLeaf>()->kind == kPartKindGlass && c->get<MeshFilter>() && c->get<MeshFilter>()->mesh)
+          for (size_t f = 0; f < c->get<MeshFilter>()->mesh->face_count(); f++) pane_triangles += c->get<MeshFilter>()->mesh->face_size(f) - 2;
+      CHECK(pane_triangles > 0);
       for (const char *format : {"fbx", "glb", "obj"}) {
         const std::string name = std::string("r498_live.") + format;
         const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
-        CHECK(back.ok && back.mesh_nodes == 1 && back.uvs);
+        CHECK(back.ok && back.mesh_nodes == 3 && back.uvs);
         if (std::string(format) == "obj") continue;
         size_t got = 0;
         for (const auto &t : back.triangles)
@@ -19797,26 +19831,27 @@ static void tests_round498_more() {
     struct Edit {
       const char *what;
       std::function<void()> apply, undo;
+      bool changes = true;  // round 547 (ADR 0149): only what the hole reads is in the snapshot's hash - the frame, the panes, the glass, the sill board and the window's own materials of the parts are the parts'
     };
     const BlockoutPiece base = *bp;
     const std::vector<Edit> edits = {
         {"the Blockout's Glass Material", [&] { s.bo->get<Blockout>()->material[kClassGlass] = "Assets/Materials/X.mat"; }, [&] { s.bo->get<Blockout>()->material[kClassGlass].clear(); }},
-        {"the window's own Glass Material", [&] { bp->material[kClassGlass] = "Assets/Materials/X.mat"; }, [&] { bp->material[kClassGlass].clear(); }},
+        {"the window's own Glass Material", [&] { bp->material[kClassGlass] = "Assets/Materials/X.mat"; }, [&] { bp->material[kClassGlass].clear(); }, false},
         {"the style", [&] { bp->style = kWindowArched; }, [&] { bp->style = base.style; }},
-        {"the frame width", [&] { bp->frame_width = 0.09f; }, [&] { bp->frame_width = base.frame_width; }},
-        {"the frame depth", [&] { bp->frame_depth = 0.15f; }, [&] { bp->frame_depth = base.frame_depth; }},
-        {"the panes across", [&] { bp->panes_across = 4; }, [&] { bp->panes_across = base.panes_across; }},
-        {"the panes up", [&] { bp->panes_up = 2; }, [&] { bp->panes_up = base.panes_up; }},
-        {"the glass", [&] { bp->glass = false; }, [&] { bp->glass = base.glass; }},
-        {"the sill board", [&] { bp->sill_board = false; }, [&] { bp->sill_board = base.sill_board; }},
-        {"the sill overhang", [&] { bp->sill_overhang = 0.1f; }, [&] { bp->sill_overhang = base.sill_overhang; }},
+        {"the frame width", [&] { bp->frame_width = 0.09f; }, [&] { bp->frame_width = base.frame_width; }, false},
+        {"the frame depth", [&] { bp->frame_depth = 0.15f; }, [&] { bp->frame_depth = base.frame_depth; }, false},
+        {"the panes across", [&] { bp->panes_across = 4; }, [&] { bp->panes_across = base.panes_across; }, false},
+        {"the panes up", [&] { bp->panes_up = 2; }, [&] { bp->panes_up = base.panes_up; }, false},
+        {"the glass", [&] { bp->glass = false; }, [&] { bp->glass = base.glass; }, false},
+        {"the sill board", [&] { bp->sill_board = false; }, [&] { bp->sill_board = base.sill_board; }, true},  // (round 547 review: the board is a notch in the hole under the window - its thickness is in the hole's numbers)
+        {"the sill overhang", [&] { bp->sill_overhang = 0.1f; }, [&] { bp->sill_overhang = base.sill_overhang; }, false},
         {"the width", [&] { bp->width = 1.3f; }, [&] { bp->width = base.width; }},
     };
     for (const Edit &e : edits) {
       e.apply();
       const uint64_t h = hash();
-      if (h == h0) std::printf("    %s did not change the hash\n", e.what);
-      CHECK(h != h0);
+      if ((h != h0) != e.changes) std::printf("    %s %s the hash\n", e.what, e.changes ? "did not change" : "changed");
+      CHECK((h != h0) == e.changes);
       e.undo();
       CHECK(hash() == h0);
     }
@@ -19915,7 +19950,7 @@ static void tests_round498_origins() {
         const Blockout *b = w.bo->get<Blockout>();
         size_t named_by_made = 0;
         for (uint64_t id : b->state.faces.piece) named_by_made += blockout_id_generated(id) && blockout_piece_owner(id) == w.win->id;
-        CHECK(named_by_made > 10 && ed.scene().find(w.win->id | kBlockoutGeneratedBit) == nullptr);
+        CHECK(named_by_made >= 4 && ed.scene().find(w.win->id | kBlockoutGeneratedBit) == nullptr);  // (round 547: the hole's reveal faces are what is left of the window in the mesh; the frame and the pane are objects whose click selects the window)
       }
   });
 
@@ -19929,7 +19964,7 @@ static void tests_round498_origins() {
     std::vector<blockout::Piece> pieces;
     blockout::Settings settings;
     blockout_snapshot(*s.bo, pieces, settings);
-    CHECK(pieces.size() > 4 && blockout_user_piece_count(pieces) == 2);
+    CHECK(pieces.size() == 2 && blockout_user_piece_count(pieces) == 2);  // (round 547: the wall and the window's one hole)
     /* A hostile window is a plain hole the kernel names - once. */
     s.win->get<BlockoutPiece>()->width = std::numeric_limits<float>::quiet_NaN();
     r495_built(ed);
@@ -20114,7 +20149,7 @@ int t498_hits(const GameObject &bo, const GameObject &win, Vec3 from, Vec3 dir) 
   const Mat4 inv = bo.world_matrix().inverse();
   const Ray ray{inv.point(win.world_matrix().point(from)), normalize(inv.dir(win.world_matrix().dir(dir)))};
   const RenderMesh &rm = m->render_mesh();
-  int hits = 0;
+  int hits = r547_part_hits(bo, win, ray);
   for (size_t t = 0; t < rm.tri_count(); t++) hits += ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]) > 0.0f;
   return hits;
 }
@@ -20509,7 +20544,7 @@ static void tests_round498_te() {
           if (!why.empty()) std::printf("    %s: %s\n", label.c_str(), why.c_str());
           else if (refused) std::printf("    (%s: refused: %s)\n", label.c_str(), r.bo->get<Blockout>()->state.status.refusal.c_str());
           CHECK(why.empty());
-          if (no_wall && !refused) CHECK(t498_faces(*r.bo) > 0);  // (a window in the air stands as its blank: the frame and pane)
+          if (no_wall && !refused) CHECK(t498_faces(*r.bo) == 0);  // (round 547: a window in the air is a hole in nothing - its frame and pane are the Frame and Glass objects; round 498 stood it as its blank)
         }
   });
 
@@ -20647,6 +20682,16 @@ static void tests_round498_te() {
         Mesh first;
         CHECK(t498_scratch(*r.bo, first));
         const BlockoutPiece base = *r.win->get<BlockoutPiece>();
+        /* Round 547 (ADR 0149): the Blockout's mesh is the wall with the hole - of all these numbers only an Arched window's Arch Rise shapes it; the numbers a style reads are the Frame's and the
+         * Glass's, read here from the parts' meshes made from the numbers (blockout_part_plans, blockout_leaf_mesh). */
+        auto parts_bytes = [](const BlockoutPiece &bp) {
+          std::vector<BlockoutLeafPlan> plans;
+          blockout_part_plans(bp, plans);
+          uint64_t h = plans.size();
+          for (const BlockoutLeafPlan &plan : plans) h = h * 1000003u ^ blockout_mesh_hash(*blockout_leaf_mesh(plan, 1.0f)) ^ (uint64_t)plan.part;
+          return h;
+        };
+        const uint64_t parts_first = parts_bytes(base);
         size_t wrong = 0;
         for (const Knob &k : knobs) {
           BlockoutPiece *p = r.win->get<BlockoutPiece>();
@@ -20654,9 +20699,11 @@ static void tests_round498_te() {
           k.set(*p);
           Mesh changed;
           CHECK(t498_scratch(*r.bo, changed));
-          const bool same = r477_same(first, changed);
-          if (same == k.reads[style]) wrong++, std::printf("    %s %s: %s %s the mesh%s\n", r498_method_name(method), kBlockoutWindowStyleNames[style], k.name, same ? "did not change" : "changed",
+          const bool same = parts_bytes(*p) == parts_first;
+          if (same == k.reads[style]) wrong++, std::printf("    %s %s: %s %s the parts%s\n", r498_method_name(method), kBlockoutWindowStyleNames[style], k.name, same ? "did not change" : "changed",
                                                          k.reads[style] ? " (the style reads it)" : " (the style does not read it)");
+          const bool hole_reads = (style == kWindowArched && std::string(k.name) == "arch rise") || ((style == kWindowArched || style == kWindowGrid) && std::string(k.name) == "sill board");  // (a board is a notch in the hole under the window, round 547 review)
+          if (r477_same(first, changed) == hole_reads) wrong++, std::printf("    %s %s: %s %s the Blockout's mesh\n", r498_method_name(method), kBlockoutWindowStyleNames[style], k.name, hole_reads ? "did not change" : "changed");
         }
         CHECK(wrong == 0);
       }
@@ -20996,11 +21043,15 @@ static void tests_round498_te() {
       ed.select_for_test(w.bo->id, false);
       ed.command("blockout set material glass " + glass);
       r495_built(ed);
+      /* Round 547 (ADR 0149): the panes are the Glass object's faces, in the Glass material; "faces with a material" counts those of the Glass object that holds it. */
       auto faces_with = [&](const std::string &mat) {
-        const Mesh *m = r495_mesh(*w.bo);
-        const MeshRenderer *mr = w.bo->get<MeshRenderer>();
         size_t n = 0;
-        for (size_t f = 0; m && mr && f < m->face_count(); f++) n += r482_face_material(*m, *mr, f) == mat;
+        for (const GameObject *c : w.win->children) {
+          const BlockoutLeaf *mark = c->get<BlockoutLeaf>();
+          const MeshRenderer *mr = mark && mark->kind == kPartKindGlass ? c->get<MeshRenderer>() : nullptr;
+          const MeshFilter *mf = c->get<MeshFilter>();
+          if (mr && mf && mf->mesh && mr->materials.size() == 1 && mr->materials[0] && mr->materials[0]->asset_path == mat) n += mf->mesh->face_count();
+        }
         return n;
       };
       const size_t panes = faces_with(glass);
@@ -21073,9 +21124,9 @@ static void tests_round498_te() {
     sp->style = kWindowOpeningOnly;  // (the mesh of the plain window of these numbers, to compare with)
     r495_built(ed);
     const Mesh plain = *r495_mesh(*s.bo);
-    sp->style = kWindowGrid;
+    sp->style = kWindowGrid, sp->sill_board = false;  // (with a sill board the hole has the board's notch: round 547 review)
     r495_built(ed);
-    CHECK(!r477_same(plain, *r495_mesh(*s.bo)));
+    CHECK(r477_same(plain, *r495_mesh(*s.bo)));  // (round 547: the Grid's bars and lights are the Frame's and Glass's; the Blockout's mesh is the plain hole's, byte for byte)
     const std::string text = save_scene_text(ed.scene());
     CHECK(text.find("  Style ") != std::string::npos);
     std::istringstream is(text);
@@ -21193,7 +21244,7 @@ static void tests_round498_te() {
         CHECK(finite_bits(p.size.x) && finite_bits(p.size.y) && finite_bits(p.size.z));
         for (int k = 0; k < 16; k++) CHECK(finite_bits(p.to_blockout.m[k]));
       }
-      CHECK(made >= 6 && made < 700);
+      CHECK(made == 1);  // (round 547: the one hole, whatever the numbers; their sizes above are the kernel's)
       s.bo->get<Blockout>()->cell = 0.1f;  // (the build, at the default cell: a fine grid over 12 x 12 lights is a measurement, not a check)
       r495_built(ed);
       const std::string why = t498_verdict(*s.bo);
@@ -21306,6 +21357,19 @@ std::vector<R498Slab> r498fix_slabs(const BlockoutPiece &bp) {
   return out;
 }
 
+/* Round 547 (ADR 0149): the sill board is part of the Frame object. How far (along Z, from the window's middle) the Frame's mesh reaches: the board's. */
+float r547_board_reach(const BlockoutPiece &bp) {
+  std::vector<BlockoutLeafPlan> plans;
+  blockout_part_plans(bp, plans);
+  float reach = -1.0f;
+  for (const BlockoutLeafPlan &plan : plans) {
+    if (plan.part != kPartKindFrame) continue;
+    const MeshPtr mesh = blockout_leaf_mesh(plan, 1.0f);
+    for (const Vec3 &q : mesh->positions) reach = std::max(reach, q.z);
+  }
+  return reach;
+}
+
 BlockoutPiece r498fix_window(int style) {
   BlockoutPiece bp;
   bp.opening = 2, bp.operation = 1, bp.style = style, bp.width = 1.2f, bp.head = 2.0f, bp.sill = 0.9f, bp.depth = 0.4f;
@@ -21316,7 +21380,7 @@ BlockoutPiece r498fix_window(int style) {
 
 static void tests_round498_fix() {
   /* ---- M1: the grid shows a window as it can ---- */
-  test("blockout window styles (498 fix): on the grid at the default Field Cell a Single window gets a real hole, a frame a cell wide and no pane - sound, no more unresolved places than the plain hole, and the status says what Field Cell shows it", [] {
+  test("blockout window styles (498 fix, 547): on the grid at the default Field Cell a Single window gets a real hole and its Frame and Glass objects are as made - sound, no more unresolved places than the plain hole, and the status has no note (the frame is no longer meshed on the grid)", [] {
     Editor ed;
     const T498Rig r = t498_rig(ed, 2, 0.1f, kWindowSingle);
     CHECK(t498_verdict(*r.bo).empty());
@@ -21326,22 +21390,19 @@ static void tests_round498_fix() {
     const size_t plain_unresolved = plain.bo->get<Blockout>()->state.status.unresolved;
     std::printf("    field, cell 0.1: Single %zu unresolved places, the plain hole %zu, %zu faces\n", unresolved, plain_unresolved, t498_faces(*r.bo));
     CHECK(unresolved <= plain_unresolved);
-    CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 1.45f, -0.075f}) && !r498_matter(*r.bo, *r.win, {0.0f, 1.45f, 0.0f}));  // (the hole is open - and has no pane)
-    CHECK(r498_matter(*r.bo, *r.win, {0.65f, 1.45f, -0.075f}) && r498_matter(*r.bo, *r.win, {0.0f, 0.6f, 0.0f}));      // (the wall round it is there)
-    CHECK(r498_matter(*r.bo, *r.win, {0.555f, 1.45f, 0.0f}) && r498_matter(*r.bo, *r.win, {0.52f, 1.45f, 0.0f}));      // (the frame is at least a cell: 0.1 m of the 0.6 m half-width)
-    CHECK(!r498_matter(*r.bo, *r.win, {0.47f, 1.45f, 0.0f}));
-    CHECK(r498_class(*r.bo, *r.win, kClassGlass).faces == 0 && r498_class(*r.bo, *r.win, kClassSolid).faces > 0);
-    const std::vector<BlockoutWindowFit> &fits = r.bo->get<Blockout>()->state.window_fits;
-    CHECK(fits.size() == 1 && fits[0].coarse && !fits[0].plain && fits[0].id == r.win->id && std::fabs(fits[0].frame - 0.06f) < 1e-6f);
-    const std::vector<std::string> lines = r498fix_status(ed, *r.bo);
-    CHECK(r498fix_has(lines, "Window 'Window': its frame is finer than Field Cell 0.10 m - lower Field Cell to 0.02 m to see it"));
-    /* Counted once for many windows. */
+    /* Round 547: round 498 held the frame at a cell and left the pane out here (the cell's 0.1 m of the 0.6 m half-width); the Frame object is the true 6 cm and the Glass object is there. */
+    CHECK(r498_matter(*r.bo, *r.win, {0.47f, 1.45f, 0.0f}) && !r498_matter(*r.bo, *r.win, {0.47f, 1.45f, -0.045f}) && !r498_matter(*r.bo, *r.win, {0.52f, 1.45f, -0.045f}));  // (the pane is there now, and the light in front of it open)
+    CHECK(r498_matter(*r.bo, *r.win, {0.57f, 1.45f, 0.0f}) && r498_matter(*r.bo, *r.win, {0.65f, 1.45f, -0.075f}) && r498_matter(*r.bo, *r.win, {0.0f, 0.6f, 0.0f}));  // (the frame, the wall round it)
+    CHECK(r498_class(*r.bo, *r.win, kClassGlass).faces > 0 && r498_class(*r.bo, *r.win, kClassSolid).faces > 0);
+    CHECK(r.bo->get<Blockout>()->state.window_fits.empty());
+    CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "finer than Field Cell"));
+    /* Many windows: still no note. */
     t498_window(ed, *r.bo, kWindowDouble, r.win->local().position + Vec3(-0.0f, 0.0f, 0.0f), 90.0f, true, 0.4f, "Second");
     r.bo->get<Blockout>()->cell = 0.1f;
     r495_built(ed);
     size_t notes = 0;
     for (const std::string &l : r498fix_status(ed, *r.bo)) notes += l.find("finer than Field Cell") != std::string::npos;
-    CHECK(notes == 1);
+    CHECK(notes == 0);
   });
 
   test("blockout window styles (498 fix): at a Field Cell of 0.02 m a Single window has its true 6 cm frame and its pane and the status has no note; on the exact path the Field Cell changes nothing", [] {
@@ -21377,23 +21438,24 @@ static void tests_round498_fix() {
       CHECK(got[first + i].id == made[i].id && std::memcmp(got[first + i].to_blockout.m, made[i].to_blockout.m, sizeof(made[i].to_blockout.m)) == 0 && got[first + i].size == made[i].size);
   });
 
-  test("blockout window styles (498 fix): a window the grid cannot hold at all (a Grid of 12 x 12 lights on 1.2 m at a Field Cell of 0.1 m) is the plain hole, and the status says so", [] {
+  test("blockout window styles (498 fix, 547): a Grid of 12 x 12 lights on 1.2 m at a Field Cell of 0.1 m is a plain hole in the Blockout - one kernel piece, no note - and its Frame object has the bars", [] {
     Editor ed;
     const T498Rig r = t498_rig(ed, 2, 0.1f, kWindowGrid);
     BlockoutPiece *bp = r.win->get<BlockoutPiece>();
     bp->panes_across = 12, bp->panes_up = 12;
     r495_built(ed);
+    r477_settle(ed, 3);
+    r495_built(ed);
     CHECK(t498_verdict(*r.bo).empty());
-    const std::vector<BlockoutWindowFit> &fits = r.bo->get<Blockout>()->state.window_fits;
-    CHECK(fits.size() == 1 && fits[0].plain);
-    CHECK(!r498_matter(*r.bo, *r.win, {0.0f, 1.45f, 0.0f}) && !r498_matter(*r.bo, *r.win, {0.3f, 1.2f, 0.0f}));  // (a hole, no bars)
-    CHECK(r498fix_has(r498fix_status(ed, *r.bo), "its parts are finer than Field Cell 0.10 m - made as the plain hole; lower Field Cell to"));
+    CHECK(r.bo->get<Blockout>()->state.window_fits.empty());  // (round 498: the plain hole, with a note; the lights are the Frame's now)
+    CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "finer than Field Cell"));
+    CHECK(r498_class(*r.bo, *r.win, kClassSolid).faces > 100 && r498_class(*r.bo, *r.win, kClassGlass).faces > 100);
     std::vector<blockout::Piece> pieces;
     blockout::Settings st;
     blockout_snapshot(*r.bo, pieces, st);
     size_t made = 0;
     for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
-    CHECK(made == 0);
+    CHECK(made == 1);
   });
 
   /* ---- M2: an arched head that rises more than the window leaves keeps its bottom rail ---- */
@@ -21422,9 +21484,7 @@ static void tests_round498_fix() {
       for (float depth : {0.4f, 0.8f}) {  // (a wall of 0.2 and 0.6 m: Depth is the thickness + 0.2)
         BlockoutPiece bp = r498fix_window(kWindowSingle);
         bp.depth = depth, bp.sill_overhang = overhang;
-        float reach = -1.0f;
-        for (const R498Slab &s : r498fix_slabs(bp))
-          if (!s.subtract && s.z1 - s.z0 > 0.15f && std::fabs(s.z1 + s.z0) < 1e-5f) reach = std::max(reach, s.z1);  // (the board: deeper than the 10 cm frame, centred)
+        const float reach = r547_board_reach(bp);  // (round 547: the Frame object's mesh reaches as far as its board)
         const float wall_half = 0.5f * depth - 0.1f, want = wall_half + std::max(0.0f, overhang);
         if (std::fabs(reach - want) > 1e-5f) std::printf("    overhang %g, depth %g: the board reaches z = %g, wanted %g\n", overhang, depth, reach, want);
         CHECK_NEAR(reach, want, 1e-5f);
@@ -21511,9 +21571,9 @@ static void tests_round498_fix() {
     size_t skipped = 0;
     for (const auto &k : st.skipped) skipped += k.first == r.win->id;
     std::printf("    pieces %zu, used %zu, %zu skipped, %zu notes (%zu on the window)\n", st.pieces, st.used, st.skipped.size(), st.notes.size(), noted);
-    CHECK(noted >= 1 && skipped == 0 && st.used == st.pieces);
-    const std::vector<std::string> lines = r498fix_status(ed, *r.bo);
-    CHECK(r498fix_has(lines, "'Window': a part of it was left out: "));
+    /* Round 547: the kernel gets only the hole, so no part of the window is left out there (the sill board is the Frame object's): no note, the window stays used. */
+    CHECK(noted == 0 && skipped == 0 && st.used == st.pieces);
+    CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "a part of it was left out"));
   });
 
   test("blockout window styles (498 fix): an opening that is no window has no style - a window switched to Door starts at Opening Only - and `blockout set material` names a styled window's classes in its warning", [] {
@@ -21550,43 +21610,32 @@ static void tests_round498_fix() {
     }
   });
 
-  test("blockout window styles (498 fix): the Field Cell the status advises makes the note go away - also with a Sill Overhang of 0.1 m, where the board ends with the cutters", [] {
+  test("blockout window styles (498 fix, 547): a Single window at a Field Cell of 0.1 m has no note whatever its Sill Overhang (round 498's advice - a Field Cell that makes the note go away - is not needed: the board is the Frame object's)", [] {
     for (float overhang : {0.04f, 0.1f, 0.2f}) {
       Editor ed;
       const T498Rig r = t498_rig(ed, 2, 0.1f, kWindowSingle);
       r.win->get<BlockoutPiece>()->sill_overhang = overhang;
       r495_built(ed);
-      std::string note;
-      for (const std::string &l : r498fix_status(ed, *r.bo))
-        if (l.find("finer than Field Cell") != std::string::npos) note = l;
-      CHECK(!note.empty());
-      const size_t at = note.find("lower Field Cell to ");
-      const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
-      std::printf("    overhang %g: %s\n", overhang, note.c_str());
-      CHECK(advised > 0.0f && advised < 0.1f);
-      r.bo->get<Blockout>()->cell = advised;
-      r495_built(ed);
-      CHECK(r.bo->get<Blockout>()->state.window_fits.empty());
-      CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "finer than Field Cell"));
+      for (const std::string &l : r498fix_status(ed, *r.bo)) CHECK(l.find("finer than Field Cell") == std::string::npos);
+      CHECK(r.bo->get<Blockout>()->state.window_fits.empty() && t498_verdict(*r.bo).empty());
     }
   });
 
-  test("blockout window styles (498 fix): lights under the limit are the plain hole with its note even when nothing else is too fine - a Grid of 12 x 12 on 0.6 m at a Field Cell of 0.02 m", [] {
+  test("blockout window styles (498 fix, 547): a Grid of 12 x 12 on 0.6 m at a Field Cell of 0.02 m is a plain hole of one piece with no note - its lights are the Frame's and Glass's", [] {
     Editor ed;
     const T498Rig r = t498_rig(ed, 2, 0.02f, kWindowGrid);
     BlockoutPiece *bp = r.win->get<BlockoutPiece>();
     bp->width = 0.6f, bp->panes_across = 12, bp->panes_up = 12;
     r495_built(ed);
-    const std::vector<BlockoutWindowFit> &fits = r.bo->get<Blockout>()->state.window_fits;
-    CHECK(fits.size() == 1 && fits[0].plain);
+    CHECK(r.bo->get<Blockout>()->state.window_fits.empty());
     CHECK(t498_verdict(*r.bo).empty());
-    CHECK(r498fix_has(r498fix_status(ed, *r.bo), "its parts are finer than Field Cell 0.02 m - made as the plain hole"));
+    CHECK(!r498fix_has(r498fix_status(ed, *r.bo), "finer than Field Cell"));
     std::vector<blockout::Piece> pieces;
     blockout::Settings st;
     blockout_snapshot(*r.bo, pieces, st);
     size_t made = 0;
     for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
-    CHECK(made == 0);
+    CHECK(made == 1);
   });
 
   test("blockout window styles (498 fix): a Blockout scaled 2 and Apply Scale to Pieces grows the window's wall part of Depth, not its 0.2 m overshoot - the sill board stands out the scaled overhang from the wall's face", [] {
@@ -21603,9 +21652,7 @@ static void tests_round498_fix() {
     const float wall = before.depth - 0.2f;
     CHECK_NEAR(bp->depth, 2.0f * wall + 0.2f, 1e-5f);
     CHECK_NEAR(bp->sill_overhang, 2.0f * before.sill_overhang, 1e-6f);
-    float reach = -1.0f;
-    for (const R498Slab &sl : r498fix_slabs(*bp))
-      if (!sl.subtract && sl.z1 - sl.z0 > 0.3f && std::fabs(sl.z1 + sl.z0) < 1e-5f) reach = std::max(reach, sl.z1);
+    const float reach = r547_board_reach(*bp);  // (round 547: from the Frame object's mesh)
     CHECK_NEAR(reach, wall + bp->sill_overhang, 1e-5f);  // (the wall's half thickness, 2 x 0.1, plus the scaled overhang)
     CHECK(t498_verdict(*s.bo).empty());
   });
@@ -21782,7 +21829,8 @@ R499Scene r499_pair(Editor &ed, const std::string &door_words, int method = 0, f
 std::vector<GameObject *> r515_leaves(const GameObject &door) {
   std::vector<GameObject *> out;
   for (GameObject *c : door.children)
-    if (c->get<BlockoutLeaf>()) out.push_back(c);
+    if (c->get<BlockoutLeaf>() && c->get<BlockoutLeaf>()->kind == kPartKindLeaf)  // (round 547: the Frame and the Glass are parts too; these helpers count the leaves)
+      out.push_back(c);
   return out;
 }
 
@@ -21829,10 +21877,11 @@ static void tests_round499_styles() {
       for (int style : {kDoorSingle, kDoorDouble, kDoorSliding, kDoorArched}) {
         Editor ed;
         const R499Wall w = r499_wall(ed, style, method);
+        r515_settle(ed);  // (round 547: the frame is an object: made by the sync, counted where the mesh's faces were)
         const std::string label = std::string(r498_method_name(method)) + " " + kBlockoutDoorStyleNames[style];
         const R498Class leaf = r498_class(*w.bo, *w.door, kClassLeaf), frame = r498_class(*w.bo, *w.door, kClassSolid), cut = r498_class(*w.bo, *w.door, kClassCut);
         std::printf("    %s: %zu Leaf faces, %zu Solid, %zu Cut\n", label.c_str(), leaf.faces, frame.faces, cut.faces);
-        CHECK(leaf.faces == 0 && frame.faces >= 4 && cut.faces >= 4);
+        CHECK(leaf.faces == 0 && frame.faces >= 4 && cut.faces >= 3);  // (round 547: Solid is the Frame object's faces; the hole's reveal is the jambs and the head: three faces of Cut)
         CHECK(!r498_matter(*w.bo, *w.door, {0.0f, 1.0f, style == kDoorSliding ? 0.12f : 0.0f}) && !r498_matter(*w.bo, *w.door, {0.0f, 1.0f, 0.0f}));  // (the doorway is clear: the leaf is an object)
         r515_settle(ed);
         CHECK(r515_leaves(*w.door).size() == (style == kDoorDouble ? 2u : 1u));
@@ -22194,7 +22243,16 @@ static void tests_round499_more() {
         leaf_faces += cls == kClassLeaf, solid_faces += cls == kClassSolid;
         if (cls == kClassSolid && r482_face_material(*m, *mr, f) != solid) wrong++;
       }
-      CHECK(leaf_faces == 0 && solid_faces > 10 && wrong == 0);
+      /* Round 547 (ADR 0149): the frame is the Frame object's, in the Solid class's material; the Blockout's mesh has no Solid face of the door. */
+      auto frame_material = [&]() -> std::string {
+        for (const GameObject *c : w.door->children) {
+          const BlockoutLeaf *mark = c->get<BlockoutLeaf>();
+          const MeshRenderer *fr = mark && mark->kind == kPartKindFrame ? c->get<MeshRenderer>() : nullptr;
+          if (fr) return fr->materials.size() == 1 && fr->materials[0] ? fr->materials[0]->asset_path : std::string();
+        }
+        return "(no frame)";
+      };
+      CHECK(leaf_faces == 0 && solid_faces > 0 && wrong == 0 && frame_material() == solid);  // (the Solid faces left in the mesh are the wall piece's own; the door's frame is the Frame object, in the same material)
       CHECK(r482_scratch_same(*w.bo));
       /* The door's own override of Leaf: the leaf object changes, the Blockout's mesh does not. */
       const uint64_t mesh_bytes = blockout_mesh_hash(*m);
@@ -22205,9 +22263,11 @@ static void tests_round499_more() {
       CHECK(leaf_material() == own);
       m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
       CHECK(m && blockout_mesh_hash(*m) == mesh_bytes);
-      /* The door's Solid override takes the frame's faces and not the wall's. */
+      /* The door's Solid override takes the Frame object's material and not the wall's. */
       ed.command("blockout set material solid " + own_solid);
       r495_built(ed);
+      r515_settle(ed);
+      CHECK(frame_material() == own_solid);
       m = r495_mesh(*w.bo), mr = w.bo->get<MeshRenderer>();
       size_t on_frame = 0, bad_wall = 0, wall_faces = 0;
       for (size_t f = 0; m && f < m->face_count(); f++) {
@@ -22218,7 +22278,7 @@ static void tests_round499_more() {
         if (wall && now == own_solid) bad_wall++;
       }
       std::printf("    the door's Solid override: %zu frame faces, %zu wall faces, %zu of them wrongly\n", on_frame, wall_faces, bad_wall);
-      CHECK(on_frame >= 5 && bad_wall == 0 && wall_faces > 0);  // (round 515: five faces of the frame take the override now that no leaf stands in it - the printed count; round 499 counted six or more with the leaf's edges)
+      CHECK(on_frame == 0 && bad_wall == 0 && wall_faces > 0);  // (round 547: the frame's faces are the Frame object's, so none of the Blockout's takes the override; round 515 counted five of the frame, round 499 six or more)
       CHECK(r482_scratch_same(*w.bo));
       /* A door with its Leaf off, and a Revolving one, has no Leaf class: the console says so. */
       ed.command("blockout set leaf off");
@@ -22238,7 +22298,24 @@ static void tests_round499_more() {
           if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) uv_bad++;
         }
       }
-      CHECK(uv_faces >= 4 && uv_bad == 0);  // (round 515: the wall's and the frame's faces; the leaf's two are no longer among them)
+      CHECK(uv_faces >= 2 && uv_bad == 0);  // (round 547: the wall's faces; the frame's and the leaf's are objects' - the Frame's are checked in the part's own space below)
+      for (const GameObject *c : w.door->children) {
+        const BlockoutLeaf *mark = c->get<BlockoutLeaf>();
+        const Mesh *pm = mark && mark->kind == kPartKindFrame && c->get<MeshFilter>() ? c->get<MeshFilter>()->mesh.get() : nullptr;
+        if (!pm) continue;
+        size_t part_faces = 0, part_bad = 0;
+        for (size_t f = 0; f < pm->face_count(); f++) {
+          const Vec3 n = pm->face_normal(f);
+          if (std::fabs(n.z) < 0.9999f) continue;
+          part_faces++;
+          for (uint32_t i = 0; i < pm->face_size(f); i++) {
+            const Vec3 p = pm->positions[pm->face_verts(f)[i]];
+            const Vec2 uv = pm->uvs[pm->face_offsets[f] + i];
+            if (std::fabs(uv.x - p.x * (n.z > 0 ? 1.0f : -1.0f) / 0.5f) > 1e-3f || std::fabs(uv.y - p.y / 0.5f) > 1e-3f) part_bad++;
+          }
+        }
+        CHECK(part_faces >= 4 && part_bad == 0);
+      }
     }
   });
 
@@ -22272,7 +22349,7 @@ static void tests_round499_more() {
         {"the Leaf Thickness", [&] { bp->leaf_thickness = 0.05f; }, [&] { bp->leaf_thickness = base.leaf_thickness; }, false},
         {"the Open Amount", [&] { bp->open_amount = 0.4f; }, [&] { bp->open_amount = base.open_amount; }, false},
         {"the Hinge Side", [&] { bp->open_amount = 0.4f, bp->hinge_side = 1; }, [&] { bp->open_amount = base.open_amount, bp->hinge_side = base.hinge_side; }, false},
-        {"the Frame Width", [&] { bp->frame_width = 0.08f; }, [&] { bp->frame_width = base.frame_width; }, true},
+        {"the Frame Width", [&] { bp->frame_width = 0.08f; }, [&] { bp->frame_width = base.frame_width; }, false},  // (round 547: the frame is the Frame object's; the hole is the same)
     };
     for (const Edit &e : edits) {
       e.apply();
@@ -22348,7 +22425,7 @@ static void tests_round499_more() {
     blockout_snapshot(*w.bo, pieces, settings);
     size_t made = 0;
     for (const blockout::Piece &p : pieces) made += blockout_id_generated(p.id);
-    CHECK(made >= 3 && made < 12);  // (the blank, the two reveals and the clear opening: no piece of the leaf, whatever its thickness or Open Amount)
+    CHECK(made == 1);  // (round 547: the clear hole and nothing else - no piece of the frame (an object now) or of the leaf, whatever its thickness or Open Amount)
     bp->open_amount = 5.0f;  // (held to 1: the same pieces as 1)
     CHECK(blockout_door_open(*bp) == 1.0f);
     std::vector<blockout::Piece> again;
@@ -22649,7 +22726,7 @@ static void tests_round499_ui() {
       for (const char *format : {"fbx", "glb", "obj"}) {
         const std::string name = std::string("r499_live.") + format;
         const R482Back back = r482_read(r482_export(ed, format, name.c_str()));
-        CHECK(back.ok && back.mesh_nodes == 2 && back.uvs);  // (the Blockout's mesh and the leaf's)
+        CHECK(back.ok && back.mesh_nodes == 3 && back.uvs);  // (the Blockout's mesh, the Frame's and the leaf's: round 547 made the frame an object)
         if (std::string(format) == "obj") continue;
         size_t got = 0;
         for (const auto &t : back.triangles)
@@ -22689,20 +22766,9 @@ static void tests_round499_ui() {
     const R499Wall w = r499_wall(ed, kDoorSingle, 2, 0.1f);
     CHECK(r498_judge(*w.bo).empty());
     const std::vector<BlockoutWindowFit> &fits = w.bo->get<Blockout>()->state.window_fits;
-    CHECK(fits.size() == 1 && fits[0].coarse && !fits[0].plain && fits[0].door && fits[0].id == w.door->id);
-    CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces == 0 && r498_class(*w.bo, *w.door, kClassSolid).faces > 0);
-    const std::vector<std::string> lines = r498fix_status(ed, *w.bo);
-    std::string note;
-    for (const std::string &l : lines)
-      if (l.find("Door 'Door'") != std::string::npos) note = l;
-    std::printf("    %s\n", note.c_str());
-    CHECK(note.find("its frame or ring is finer than Field Cell 0.10 m - lower Field Cell to ") != std::string::npos);  // (round 515: the leaf is an object, no part of the grid's)
-    const size_t at = note.find("lower Field Cell to ");
-    const float advised = at == std::string::npos ? 0.0f : (float)std::atof(note.c_str() + at + 20);
-    CHECK(advised > 0.0f && advised < 0.1f);
-    w.bo->get<Blockout>()->cell = advised;
-    r495_built(ed);
-    CHECK(w.bo->get<Blockout>()->state.window_fits.empty());  // (the Field Cell the status advises shows the whole frame)
+    CHECK(fits.empty());  // (round 547: the frame is an object - a Single door's hole is a plain box the grid meshes; round 499 held the frame at a cell and named the Field Cell that shows it)
+    r515_settle(ed);
+    CHECK(r498_class(*w.bo, *w.door, kClassLeaf).faces == 0 && r498_class(*w.bo, *w.door, kClassSolid).faces > 0);  // (the Frame object's faces)
     CHECK(!r498fix_has(r498fix_status(ed, *w.bo), "Door 'Door'"));
     /* A Revolving door. */
     Editor rev;
@@ -22721,7 +22787,7 @@ static void tests_round499_ui() {
       blockout_snapshot(*e.bo, a, st);
       e.bo->get<Blockout>()->cell = 0.02f;
       blockout_snapshot(*e.bo, b, st);
-      bool same = a.size() == b.size() && a.size() > 2;
+      bool same = a.size() == b.size() && a.size() >= 2;  // (round 547: the wall and the door's one hole or its ring and drum)
       for (size_t i = 0; same && i < a.size(); i++)
         same = a[i].id == b[i].id && a[i].shape == b[i].shape && a[i].op == b[i].op && a[i].outline.size() == b[i].outline.size() &&
                std::memcmp(a[i].to_blockout.m, b[i].to_blockout.m, sizeof(a[i].to_blockout.m)) == 0 && std::memcmp(&a[i].size, &b[i].size, sizeof(Vec3)) == 0;
@@ -22747,7 +22813,7 @@ static void tests_round499_ui() {
         const Blockout *b = w.bo->get<Blockout>();
         size_t named_by_made = 0;
         for (uint64_t id : b->state.faces.piece) named_by_made += blockout_id_generated(id) && blockout_piece_owner(id) == w.door->id;
-        CHECK(named_by_made > 4 && ed.scene().find(w.door->id | kBlockoutGeneratedBit) == nullptr);
+        CHECK(named_by_made >= 3 && ed.scene().find(w.door->id | kBlockoutGeneratedBit) == nullptr);  // (round 547: the faces of the door's hole - the reveal - are all that is left of it; a Revolving door's ring and drum have more)
       }
   });
 }
@@ -22911,9 +22977,9 @@ static void tests_round499_review() {
       Editor ed;
       const R499Wall w = r499_wall(ed, kDoorSingle, 1, 0.05f);
       w.door->get<BlockoutPiece>()->drum_radius = nan;
-      CHECK(made(w) > 2);  // (round 515: the frame - the blank, the reveals, the opening - and no piece of the leaf)
+      CHECK(made(w) == 1);  // (round 547: the clear hole - the frame is an object; round 515: the blank, the reveals and the opening, no piece of the leaf)
       w.door->get<BlockoutPiece>()->leaf = false, w.door->get<BlockoutPiece>()->leaf_thickness = nan;
-      CHECK(made(w) > 2);
+      CHECK(made(w) == 1);
       w.door->get<BlockoutPiece>()->style = kDoorRevolving, w.door->get<BlockoutPiece>()->frame_width = nan, w.door->get<BlockoutPiece>()->arch_rise = nan, w.door->get<BlockoutPiece>()->drum_radius = 1.0f;  // (a Revolving door reads the Drum Radius: the earlier NaN is put right)
       CHECK(made(w) == 3);  // (the ring, the drum and the entries)
       w.door->get<BlockoutPiece>()->drum_radius = nan;
@@ -23106,7 +23172,7 @@ static void tests_round499_lesson() {
         const std::string log = r477_log_since(mark, &warnings);
         if (warnings) std::printf("    %s run %d:\n%s", busy ? "beside another Blockout" : "default scene", run + 1, log.c_str());
         CHECK(warnings == 0);
-        CHECK(styles.size() == 4 && styles[0] == kDoorSingle && styles[1] == kDoorDouble && styles[2] == kDoorSliding && styles[3] == kDoorRevolving);
+        CHECK(styles.size() == 5 && styles[0] == kDoorSingle && styles[1] == kDoorDouble && styles[2] == kDoorSliding && styles[3] == kDoorSingle && styles[4] == kDoorRevolving);  // (round 547: a Single again, to put modifiers on its parts, before the Revolving one)
         size_t bad = 0;
         ed.scene().for_each([&](GameObject &g) {
           if (!g.get<Blockout>() || !r495_mesh(g)) return;
@@ -23631,6 +23697,7 @@ static void tests_round499_te() {
     const std::string leaf_mat = r482_material("R499TeLeaf", Vec3(0.2f, 0.6f, 0.9f));
     for (int method : r498_methods())
       for (int style = 0; style < kBlockoutDoorStyles; style++) {
+        std::printf("    style %d method %d\n", style, method), std::fflush(stdout);  // (round 547: a crash shows which style)
         Editor ed;
         const R499Wall w = r499_wall(ed, style, method, 0.01f);
         BlockoutPiece *bp = w.door->get<BlockoutPiece>();
@@ -23649,7 +23716,7 @@ static void tests_round499_te() {
           const MeshFilter *mf = l->get<MeshFilter>();
           for (size_t f = 0; mf && mf->mesh && f < mf->mesh->face_count(); f++) leaf_tris += mf->mesh->face_size(f) - 2;
         }
-        std::printf("    %s: %zu leaf triangles\n", name.c_str(), leaf_tris);
+        std::printf("    %s: %zu leaf triangles\n", name.c_str(), leaf_tris); std::fflush(stdout);  // (round 547: a crash shows which style)
         CHECK(has_leaf ? leaf_tris > 0 : leaf_tris == 0);
         const size_t leaves = r515_leaves(*w.door).size();
         const R482Back back = r482_read(r482_export(ed, "glb", "r499te.glb"));
@@ -26827,4 +26894,5 @@ void run_blockout_tests() {
   tests_round515();
   tests_round515_te();
   tests_round503();
+  tests_round547();
 }

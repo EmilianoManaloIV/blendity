@@ -14,7 +14,7 @@
 
 namespace bl {
 
-struct Scene;
+class Scene;
 struct GameObject;
 
 struct RetargetResult {

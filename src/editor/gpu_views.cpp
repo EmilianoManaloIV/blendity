@@ -8,6 +8,7 @@
  * compare the two. */
 #include "editor.h"
 #include "view_keeps.h"
+#include "scene_splats.h"
 #include "../core/view_perf.h"
 #include "../core/profiling.h"
 
@@ -293,6 +294,7 @@ gpu::RasterLight raster_light(const RenderLight &l) {
   g.height = l.height;
   g.disk = l.disk;
   g.bake_mode = l.bake_mode;  // (task 0197)
+  g.shadows = l.shadows;      // (round 543: whether it casts traced shadows)
   return g;
 }
 
@@ -405,6 +407,7 @@ void raster_axis(gpu::RasterInstance &in, const Material &m, const RenderMesh &r
     gpu::RasterInstance part = in;
     part.flags = gpu::RasterInstance::AxisPart;
     raster_textured(part, *tx.axis[k], rm, tex, tx.axis_tx[k]);
+    part.vertex_color_mul = tx.axis[k]->vertex_color;  // (task 0537: each part multiplies by its own material, as the CPU's)
     part.metal_spec[3] = tx.axis[k]->alpha;
     parts.push_back({part, k});
   }
@@ -609,6 +612,33 @@ void solid_instance(gpu::RasterInstance &in, const DrawItem &it) {
   if (it.unlit) in.flags |= gpu::RasterInstance::Unlit;
 }
 
+/* Task 0537: an item's material colours (DrawItem::material_colors) for the card, one RGBA a render vertex. */
+uint32_t material_vertex_colors(const DrawItem &it, std::vector<float> &out) {
+  const uint32_t first = (uint32_t)(out.size() / 4) + 1;
+  const std::vector<Vec4> &c = *it.material_colors;
+  const size_t n = it.mesh->positions.size();
+  out.reserve(out.size() + n * 4);
+  auto ch = [](float x) { return finite_bits(x) ? std::max(0.0f, std::min(x, 1.0f)) : 1.0f; };  // (GLSL's clamp of a NaN is undefined)
+  for (size_t v = 0; v < n; v++) {
+    const Vec4 x = v < c.size() ? c[v] : Vec4(1, 1, 1, 1);
+    out.insert(out.end(), {ch(x.x), ch(x.y), ch(x.z), ch(x.w)});
+  }
+  return first;
+}
+
+/* IEEE half from a float in 0..1 (a vertex colour channel, already clamped): rounded to nearest. */
+static uint16_t half_of(float f) {
+  if (!(f > 0.0f)) return 0;
+  if (f >= 1.0f) return 0x3C00;
+  uint32_t b;
+  std::memcpy(&b, &f, 4);
+  const int e = (int)((b >> 23) & 0xFF) - 127 + 15;
+  if (e < -10) return 0;  // (under the smallest subnormal half)
+  if (e <= 0) return (uint16_t)(((b & 0x7FFFFF) | 0x800000) >> (14 - e));  // (subnormal: the mantissa with its leading one, shifted down)
+  const uint32_t m = (b & 0x7FFFFF) + 0x1000;  // (round to nearest at bit 13)
+  return (uint16_t)((e << 10) + (m >> 13));
+}
+
 /* Weight Paint's colours for the card: one a vertex, the object's colour past the end (as shade_vertex reads them). */
 uint32_t solid_vertex_colors(const DrawItem &it, std::vector<float> &out) {
   const uint32_t first = (uint32_t)(out.size() / 4) + 1;
@@ -712,6 +742,13 @@ void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> 
       const RenderMesh &rm = *it.mesh;
       const uint32_t prim = see[(size_t)i].prim;
       const bool hl = it.face_highlight && prim < rm.tri_face.size() && rm.tri_face[prim] < it.face_highlight->size() && (*it.face_highlight)[rm.tri_face[prim]];
+      /* (Task 0537: this triangle's material reads the vertex colours.) */
+      bool vc_slot = false;
+      if (it.material_colors && it.material_colors->size() == rm.positions.size() && it.materials && !it.materials->empty()) {
+        const int slot = prim < rm.tri_material.size() ? rm.tri_material[prim] : 0;
+        const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
+        vc_slot = mp && mp->vertex_color;
+      }
       for (int q = 0; q < 3; q++) {
         const gpu::RasterVertex rv = raster_vertex(rm, rm.indices[(size_t)prim * 3 + q]);
         gpu::SeeCorner &c = out[(size_t)i * 3 + q];
@@ -721,7 +758,14 @@ void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> 
         std::memcpy(c.t, rv.t, 16);
         c.inst = see[(size_t)i].inst;
         c.highlight = hl ? 1.0f : 0.0f;
-        c.pad[0] = c.pad[1] = 0.0f;
+        /* Task 0537: the corner's vertex colour as four halves (white where its material doesn't read one). */
+        Vec4 vc(1, 1, 1, 1);
+        const uint32_t ri = rm.indices[(size_t)prim * 3 + q];
+        if (vc_slot && ri < it.material_colors->size()) vc = (*it.material_colors)[ri];
+        auto h = [](float x) { return half_of(std::max(0.0f, std::min(finite_bits(x) ? x : 1.0f, 1.0f))); };
+        const uint32_t lo = (uint32_t)h(vc.x) | ((uint32_t)h(vc.y) << 16), hi = (uint32_t)h(vc.z) | ((uint32_t)h(vc.w) << 16);
+        std::memcpy(&c.pad[0], &lo, 4);
+        std::memcpy(&c.pad[1], &hi, 4);
       }
     }
   };
@@ -1532,6 +1576,14 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.gpu_fallbacks++;
     return false;
   }
+  /* Round 532, 557: Gaussian splats go to the card as its own static set and each frame's order (scene_splats_to_card); a card
+   * without the pass, more clouds than it numbers, or a picture kept in linear light (the splats' pixels would need the
+   * "none" mark in it) draw such a view on the CPU. */
+  /* (Wireframe draws no splats, as on the CPU: render_solid gathers none there.) */
+  const bool splats = shading_ != Shading::Wireframe && scene_has_splats(*scene_);
+  if (splats && !g->can_draw_splats()) return gpu_view_refuse(slot, "Gaussian splats (the card's splat pass couldn't be made)");
+  if (splats && scene_splat_draws(*scene_).size() > kCardMaxSplatClouds) return gpu_view_refuse(slot, "Gaussian splats in more than 255 clouds");
+  if (splats && rt.want_hdr) return gpu_view_refuse(slot, "Gaussian splats over a picture kept in linear light (drawn on the CPU)");
   ProfileScope ps{prof_.ms_gpu};
   gpu_calls_++;
   std::string err;
@@ -1761,19 +1813,32 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const char *close_up_why = nullptr;
   /* One item's instances - and its see-through job, its baked ids - at the end of `inst`. */
   auto gather_item = [&](const DrawItem &it, int mesh, GpuMesh &e) {
-    if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's colours, a mesh made anew every frame)
+    if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors || it.material_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's or a Vertex Color material's colours, a mesh made anew every frame)
     if (it.materials && keepable)  // (live_close_up_of looks at every material of the item, used or not: its answer is the eye's)
       for (const MaterialPtr &mp : *it.materials)
         for (int k = 0; mp && k < 5; k++)
           if (mp->textures().live[k]) keepable = false;
     const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
-    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
+    const bool mul = !gouraud && it.material_colors && it.material_colors->size() == it.mesh->positions.size();  // (task 0537)
+    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : mul ? material_vertex_colors(it, vcols) : 0;
+    auto colour_slot = [&](const Material &m, gpu::RasterInstance &in) {  // (a slot whose material reads them multiplies; the others none)
+      if (!mul) return;
+      /* The colours reach the slot's vertices when its material or one of its Axis parts reads them; the slot itself
+       * multiplies only by its own material (an Axis part by its own: raster_axis). */
+      bool src = m.vertex_color;
+      if (m.axis_mode != 0)
+        for (int k = 0; k < 4; k++) src = src || (m.textures().axis[k] && m.textures().axis[k]->vertex_color);
+      in.vertex_colors = src ? vc : 0;
+      in.vertex_color_src = src;
+      in.vertex_color_mul = m.vertex_color;
+    };
     const uint32_t first_inst = (uint32_t)inst.size();
     if (e.parts.empty()) {
       inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
       note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
       inst.back().highlight = hl;
       inst.back().vertex_colors = vc;
+      colour_slot(*slot_material(it, mesh_slots(*it.mesh)[0]), inst.back());
       if (gouraud) solid_instance(inst.back(), it);
       axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
       if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
@@ -1787,6 +1852,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       in.index_count = part[2];
       in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
       in.vertex_colors = vc;
+      colour_slot(*slot_material(it, part[0]), in);
       if (gouraud) solid_instance(in, it);
       inst.push_back(in);
       axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
@@ -2051,6 +2117,10 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.slot = slot;
   fr.width = rt.width;
   fr.height = rt.height;
+  if (splats) {  // (rounds 532, 557: this slot's own pass, so each view keeps its sorted orders; the card holds the splats and projects them)
+    if (const char *why = scene_splats_to_card(*scene_, slot, rt.width, rt.height, v, p, env.view_transform, env.exposure, *g, fr))
+      return gpu_view_refuse(slot, why);
+  } else if (g->splat_set_key_held() && !scene_has_splats(*scene_)) g->release_splats();  // (the scene has none left: its card memory goes)
   std::memcpy(fr.view_proj, vp.m, 64);
   set3(fr.eye, eye);
   fr.shadow_size = env.shadow && env.shadow_light >= 0 ? env.shadow->size : 0;
@@ -2063,11 +2133,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   fr.cull_backfaces = opt.backface_culling;
   fr.shadowmask_distance = env.shadowmask_mode == 1 ? std::max(env.shadow_distance, 1e-3f) : 0.0f;  // (round 454)
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
+  fr.rt_shadows = rt_shadows_ && rt_shadows_available();  // (round 543)
   raster_world(fr, env, cam, scene_lights);
   if (render_clear_override_on_) fr.background = 0, fr.clear = render_clear_override_;  // (a transparent render's black / white pass: task 0195)
+  fr.vertex_colors = std::move(vcols);  // (Solid's Weight Paint colours, or Vertex Color materials' - task 0537)
   if (gouraud) {  // (shade()'s ambient: the LightingEnv's own colours, whatever the world)
     fr.gouraud = true;
-    fr.vertex_colors = std::move(vcols);
     set3(fr.sky, env.sky);
     set3(fr.equator, env.equator);
     set3(fr.ground, env.ground);
@@ -2125,6 +2196,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
    * that checks the picture is the same). Task 0204: with nothing to copy back the frame is left running on the card
    * while the editor goes on (the present, or the next use of the card, waits for it). */
   const bool nothing_back = !color && !depth && !ids && !(want_hdr && !post_on_card);  // (round 416: the card's filters read the linear light there; nothing comes back for them)
+  if (ok && gpu_frame_snapshot_on_ && &rt == &scene_rt_)  // (task 0537: tests read the packings; before see_through is moved)
+    gpu_frame_snapshot_ = {*insts, fr.vertex_colors, fr.see_through};
   if (ok) {
     ScopedTimer render_timer;
     if (gpu_split_readback_for_test_) ok = g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err);
@@ -2132,6 +2205,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     else ok = g->render_read(fr, color, depth, ids, &err);
     prof_.ms_gpu_render += render_timer.ms();
   }
+  if (splats) scene_splats_release_keep(slot);  // (the frame is written: the static set's host copy is no longer needed)
   if (ok && rows.valid && !fr.see_through.empty()) rows.see_frame = std::move(fr.see_through), rows.see_frame_ok = true;  // (round 471)
   if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
   if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)
@@ -2477,6 +2551,23 @@ bool Editor::gpu_cage(gpu::Raster &g, gpu::RasterFrame &fr, std::string &err) {
   fr.cage_point_radius = dots ? cage_dot_radius() : face_dots ? ui_.px(ngon_mode_ ? 2.5f : 2.0f) : 0.0f;  // (edit_face_dots' radii, at this frame's scale)
   fr.cage_point_first = face_dots ? (uint32_t)m.vert_count() : 0u;
   return true;
+}
+
+/* Round 543 (task 0523): the views can trace their shadows - the card is open and its device has ray queries. */
+bool Editor::rt_shadows_available() const { return gpu_view_ && gpu_view_->can_trace_shadows(); }
+/* Round 543: for the windowed check's rows - how many structures the traced shadows built so far, and the host's time to
+ * record the last frame's builds (the card's time to run them is inside the frame's own). */
+void Editor::print_rt_shadow_stats() const {
+  if (!rt_shadows_ || !gpu_view_) return;
+  const gpu::RtShadowStats s = gpu_view_->rt_shadow_stats();
+  std::printf("    traced shadows: %s; %llu top-level and %llu bottom-level builds so far, the last frame's recorded in %.3f ms\n",
+              gpu_view_->can_trace_shadows() ? "on" : "not available (the shadow map)", (unsigned long long)s.tlas_builds,
+              (unsigned long long)s.blas_builds, s.last_build_ms);
+}
+void Editor::set_rt_shadows(bool on) {
+  rt_shadows_ = on;
+  save_prefs();
+  scene_cache_.key = game_cache_.key = 0;  // (the views' kept pictures had the other shadows)
 }
 
 }  // namespace bl

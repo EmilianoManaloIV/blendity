@@ -415,7 +415,12 @@ uint64_t blockout_at_surface(const Scene &scene, Vec3 point, Vec3 normal) {
   SceneHit hit;
   /* A short ray back onto the face from just before it. */
   if (!scene_raycast(scene, point + n * 0.02f, n * -1.0f, 0.05f, hit) || !hit.object) return 0;
-  return hit.object->get<Blockout>() ? hit.object->id : 0;
+  if (hit.object->get<Blockout>()) return hit.object->id;
+  /* Round 547: a window's or door's Frame and Glass are objects of their own; a face of one is the surface of the Blockout its opening stands in. */
+  const BlockoutLeaf *part = hit.object->get<BlockoutLeaf>();
+  const GameObject *opening = part && hit.object->parent && hit.object->parent->get<BlockoutPiece>() ? hit.object->parent : nullptr;
+  const GameObject *owner = opening ? blockout_of_piece(*opening) : nullptr;
+  return owner ? owner->id : 0;
 }
 
 void Editor::set_room_tool(bool on) {
@@ -534,7 +539,7 @@ bool Editor::room_update(const Recti &view) {
   }
   /* Round 496: R turns the piece's direction a quarter round the surface's normal while one is in progress (elsewhere R keeps its keymap meaning;
    * Shift+R is the tool's own switch). Only a wedge, stairs and an arch face a way; the choice is kept for the next piece of that shape. */
-  const bool plain_r = !in.ctrl() && !in.shift() && !in.alt();
+  const bool plain_r = in.chord_mods(platform::KEY_R) == 0;  // (round 548: R's own chord - a quick Shift+R, Shift let go in the frame, turned the piece instead of switching the tool off)
   if ((r.stage == 1 || r.stage == 2) && plain_r && in.key_pressed[platform::KEY_R] && !u.wants_keyboard()) {
     in.key_pressed[platform::KEY_R] = false;
     if (r.solid && opening_of(r.piece)) Log::info("R does nothing for a door or window: it turns with its wall (draw it on another wall to face the other way).");

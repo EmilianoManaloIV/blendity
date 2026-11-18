@@ -171,6 +171,8 @@ void Material::reflect(Reflector &r) {
   r.enumeration("Filter", filter, filters, 3);
   r.field("Double Sided", double_sided);
   r.field("Unlit", unlit);
+  r.field("Vertex Color", vertex_color);
+  r.help("Multiplies the mesh's vertex colors (its render color layer, Vertex Paint's) into Base Color and Alpha (Blender: a Color Attribute node into Base Color).");
   r.field("Cast Shadows", cast_shadows);
   /* The axis and toon fields in drop-downs (task 0145), so a plain material's Inspector stays short. */
   if (r.group("Axis Material", axis_mode != 0)) {

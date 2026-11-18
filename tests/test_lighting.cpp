@@ -12242,6 +12242,258 @@ static void tests_round508() {
   });
 }
 
+/* ---- round 542 (task 0522): the Sky world's sun in the light list ---- */
+static size_t r542_directional_count(const LightingEnv &le) {
+  size_t n = 0;
+  for (const RenderLight &l : le.lights) n += l.type == RenderLight::Directional;
+  return n;
+}
+/* A scene with no light at all and the world set to `mode`. */
+static void r542_world(Editor &ed, int mode) {
+  ed.init_headless(300, 200);
+  std::vector<GameObject *> lights;
+  ed.scene().for_each([&](GameObject &g) { if (g.get<Light>()) lights.push_back(&g); });
+  for (GameObject *g : lights) ed.scene().destroy(g);
+  ed.scene().environment.mode = mode;
+  ed.commit_change("world");
+}
+/* The mean grey (0..255) of a double-sided plane lying flat, seen from above, lit by `env`'s lights alone. */
+static double r542_plane_mean_raster(LightingEnv env) {
+  env.view_transform = ViewTransform::Standard;
+  env.exposure = 0.0f;
+  env.camera_pos = {0, 3, 0};
+  const int n = 32;
+  Image img;
+  img.resize(n, n);
+  RenderTarget rt;
+  rt.attach(img, {0, 0, n, n});
+  Renderer3D r;
+  RasterOptions opt;
+  opt.shade = ShadeMode::Deferred;
+  const MeshPtr plane = primitives::quad(6.0f);
+  std::vector<MaterialPtr> mats = {make_material("grey", {0.8f, 0.8f, 0.8f})};
+  r.begin(&rt, Mat4::look_at({0, 3, 0}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 20), env, opt);
+  r.clear(0xFF000000);
+  DrawItem it;
+  it.mesh = &plane->render_mesh_tangents();
+  it.model = Mat4::rotate(Quat::axis_angle({1, 0, 0}, 90 * kDeg2Rad));
+  it.materials = &mats;
+  it.double_sided = true;
+  r.add(it);
+  r.flush();
+  double sum = 0;
+  for (uint32_t p : img.pixels) sum += (((p >> 16) & 255) + ((p >> 8) & 255) + (p & 255)) / 3.0;
+  return sum / (double)img.pixels.size();
+}
+
+static void tests_round542() {
+  test("Sky world with no Directional Light: the sun lights the scene as one more Directional light; with the switch off nothing is added", [] {
+    Editor ed;
+    r542_world(ed, 1);
+    const LightingEnv on = ed.make_lighting_for_test();
+    CHECK(r542_directional_count(on) == 1 && on.lights.size() == 1);
+    if (on.lights.empty()) return;
+    CHECK(on.lights[0].direction.y < 0.0f);  // (the sun is above: its light points down)
+    ed.scene().environment.sun_lights_scene = false;
+    ed.commit_change("switch off");
+    const LightingEnv off = ed.make_lighting_for_test();
+    CHECK(off.lights.empty());
+    /* Back on: the sun is back, equal to the first one. (Outside a frame every call walks; the keep itself is checked in
+     * the editor group's round 542 test, over real frames.) */
+    ed.scene().environment.sun_lights_scene = true;
+    ed.commit_change("switch on");
+    const LightingEnv again = ed.make_lighting_for_test();
+    CHECK(again.lights.size() == 1 && again.lights[0].intensity == on.lights[0].intensity);
+  });
+  test("Sky world: the switch toggled between two calls changes the light list at once, with no scene edit in between", [] {
+    Editor ed;
+    r542_world(ed, 1);
+    CHECK(ed.make_lighting_for_test().lights.size() == 1);
+    ed.scene().environment.sun_lights_scene = false;  // (no commit: a direct change; the in-frame keep check is in the editor group)
+    CHECK(ed.make_lighting_for_test().lights.empty());
+    ed.scene().environment.sun_lights_scene = true;
+    CHECK(ed.make_lighting_for_test().lights.size() == 1);
+    ed.scene().environment.sun_intensity = 3.0f;
+    const LightingEnv bright = ed.make_lighting_for_test();
+    ed.scene().environment.sun_intensity = 1.0f;
+    const LightingEnv normal = ed.make_lighting_for_test();
+    CHECK(bright.lights.size() == 1 && normal.lights.size() == 1 && bright.lights[0].intensity > 2.5f * normal.lights[0].intensity);
+    ed.scene().environment.turbidity = 9.0f;
+    const LightingEnv hazy = ed.make_lighting_for_test();
+    CHECK(hazy.lights.size() == 1 && hazy.lights[0].intensity != normal.lights[0].intensity);
+  });
+  test("Sky world: the sun is added only for the Sky - the Gradient, HDRI and Color worlds add no light", [] {
+    for (int mode : {0, 2, 3}) {
+      Editor ed;
+      r542_world(ed, mode);
+      CHECK(ed.make_lighting_for_test().lights.empty());
+    }
+    Editor ed;
+    r542_world(ed, 1);
+    CHECK(ed.make_lighting_for_test().lights.size() == 1);
+    ed.scene().environment.mode = 0;  // (no commit: a direct change)
+    CHECK(ed.make_lighting_for_test().lights.empty());
+  });
+  test("Sky world with an enabled Directional Light: that light is the sun, the sky adds none (one sun)", [] {
+    Editor ed;
+    r542_world(ed, 1);
+    GameObject *sun = ed.scene().create("Sun");
+    Light *l = sun->add<Light>();
+    l->type = 0;
+    ed.commit_change("sun");
+    LightingEnv le = ed.make_lighting_for_test();
+    CHECK(r542_directional_count(le) == 1 && le.lights.size() == 1);
+    /* Disabled, it is no sun: the sky's comes back (still one). */
+    l->enabled = false;
+    ed.commit_change("sun off");
+    le = ed.make_lighting_for_test();
+    CHECK(r542_directional_count(le) == 1 && le.lights.size() == 1);
+    l->enabled = true;
+    ed.commit_change("sun on");
+    le = ed.make_lighting_for_test();
+    CHECK(r542_directional_count(le) == 1 && le.lights.size() == 1);
+    /* A Point Light is not a sun: the sky's sun comes back beside it. */
+    l->type = 1;
+    ed.commit_change("point");
+    const LightingEnv with_point = ed.make_lighting_for_test();
+    CHECK(r542_directional_count(with_point) == 1 && with_point.lights.size() == 2);
+  });
+  test("Sky world: a plane facing up is clearly brighter with the sky's sun than with Sun Lights Scene off (rasterizer)", [] {
+    Editor ed;
+    r542_world(ed, 1);
+    const LightingEnv on = ed.make_lighting_for_test();
+    ed.scene().environment.sun_lights_scene = false;
+    ed.commit_change("off");
+    const LightingEnv off = ed.make_lighting_for_test();
+    const double lit = r542_plane_mean_raster(on), ambient = r542_plane_mean_raster(off);
+    std::printf("    plane mean grey: sun on %.1f, off %.1f\n", lit, ambient);
+    CHECK(lit > ambient * 1.3 && lit > ambient + 15.0);
+  });
+  test("Sky world: with the switch off the lights are the ones a world without a sky sun gives (the Gradient's), and the plane draws the same under them", [] {
+    /* Before round 542 no world added a light; the Gradient world still adds none, so its list is "today's" list. */
+    Editor ed;
+    r542_world(ed, 0);
+    const LightingEnv gradient = ed.make_lighting_for_test();
+    ed.scene().environment.mode = 1;
+    ed.scene().environment.sun_lights_scene = false;
+    ed.commit_change("off");
+    LightingEnv off = ed.make_lighting_for_test();
+    CHECK(off.lights.size() == gradient.lights.size());
+    for (size_t i = 0; i < off.lights.size() && i < gradient.lights.size(); i++)
+      CHECK(off.lights[i].type == gradient.lights[i].type && off.lights[i].intensity == gradient.lights[i].intensity);
+    LightingEnv same = off;  // (the Sky's ambient on both: only the lights differ, if they do)
+    same.lights = gradient.lights;
+    CHECK(r542_plane_mean_raster(off) == r542_plane_mean_raster(same));
+  });
+  test("Sky sun: the rasterizer and the CPU path tracer light the same plane alike (their means within 25 %)", [] {
+    Editor ed;
+    r542_world(ed, 1);
+    LightingEnv le = ed.make_lighting_for_test();
+    CHECK(le.lights.size() == 1);
+    if (le.lights.size() != 1) return;
+    /* The sun alone: a black world and no ambient, on both. */
+    le.sky = le.equator = le.ground = Vec3(0.0f);
+    Environment black;
+    black.mode = Environment::Color;
+    black.color = Vec3(0.0f);
+    le.environment = &black;
+    const double raster = r542_plane_mean_raster(le);
+    const int n = 32;
+    const MeshPtr plane = primitives::quad(6.0f);
+    std::vector<MaterialPtr> mats = {make_material("grey", {0.8f, 0.8f, 0.8f})};
+    mats[0]->double_sided = true;
+    PathTracer pt;
+    PTSettings s;
+    s.denoise = false, s.use_oidn = false, s.use_cpu = true, s.gpus.clear();
+    s.view_transform = ViewTransform::Standard;
+    s.max_bounces = 2;
+    pt.set_settings(s);
+    pt.build({{&plane->render_mesh_tangents(), Mat4::rotate(Quat::axis_angle({1, 0, 0}, 90 * kDeg2Rad)), &mats}}, le.lights, black);
+    pt.set_camera(Mat4::look_at({0, 3, 0}, {0, 0, 0}, {0, 0, 1}), Mat4::perspective(40 * kDeg2Rad, 1, 0.1f, 20), n, n);
+    pt.render(20000.0, 64);
+    std::vector<uint32_t> out((size_t)n * n);
+    pt.resolve(out.data(), n, false);
+    double sum = 0;
+    for (uint32_t p : out) sum += (((p >> 16) & 255) + ((p >> 8) & 255) + (p & 255)) / 3.0;
+    const double traced = sum / out.size();
+    std::printf("    sun-lit plane mean grey: rasterizer %.1f, path tracer %.1f (%d samples)\n", raster, traced, pt.samples());
+    CHECK(pt.samples() >= 16);
+    CHECK(raster > 20.0 && traced > 20.0);
+    CHECK(std::fabs(raster - traced) < 0.25 * std::max(raster, traced));
+  });
+}
+
+/* ================================================================ round 545b2 (task 0537): Vertex Color in the bakes */
+namespace {
+/* The floor's colour layer: every vertex `c` (a Point layer, the render layer). */
+void vcb_paint(GameObject *g, Vec4 c) {
+  MeshFilter *mf = g->get<MeshFilter>();
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  ColorAttribute a = m.make_color("Col", ColorAttribute::Domain::Point, c);
+  m.color_attributes.push_back(std::move(a));
+  m.active_color = m.render_color = 0;
+  m.touch();
+}
+
+struct VcbResult {
+  Vec3 wall;   // the baked lightmap on a white wall's face beside the floor, mean of its two faces
+  Vec3 probe;  // the probe volume's bounce at 0.5 above the floor, looking down at it
+  bool ok = false;
+};
+
+/* A floor (white albedo; a red Vertex Color layer when `layer`; the material reads it when `flag`) lit by a sun straight
+ * down, a white wall standing on it, a dark world: what bounces onto the wall and what the probes above the floor see. */
+VcbResult vcb_bake(bool flag, bool layer = true) {
+  Editor ed;
+  r35_open(ed);
+  ed.scene().environment.color = Vec3(0.02f);
+  GameObject *floor_go = r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(1.0f));
+  GameObject *wall = r35_add(ed, "Cube", "Wall", {0, 1, 0}, {0.2f, 2, 6}, Vec3(0.8f));
+  floor_go->get<MeshRenderer>()->materials[0]->vertex_color = flag;
+  if (layer) vcb_paint(floor_go, Vec4(1, 0, 0, 1));
+  GameObject *sun = ed.scene().find_by_name("Directional Light");
+  sun->set_local_euler({90, 0, 0});
+  ed.scene().create("Probes")->add<ProbeVolume>()->global = true;
+  ed.commit_change("vcb setup");
+  r35_sun_mode(ed, 2);  // (Baked: the sun's direct light is in the lightmaps and probes)
+  r35_bake(ed);
+  VcbResult r;
+  const LightingData &ld = ed.lighting_data_for_test();
+  const Mesh *wm = wall->evaluated_mesh(1);
+  Vec3 a, b;
+  r.ok = wm && r35_sample(ld, wall->id, *wm, wall->world_matrix(), {0.1f, 0.4f, 0.0f}, a) && r35_sample(ld, wall->id, *wm, wall->world_matrix(), {-0.1f, 0.4f, 0.0f}, b);
+  r.wall = (a + b) * 0.5f;
+  Vec3 p(0.0f);
+  r.ok = r.ok && ed.probes_for_test().sample(Vec3(2.0f, 0.5f, 2.0f), Vec3(0, -1, 0), Vec3(0.0f), false, p);
+  r.probe = p;
+  return r;
+}
+}  // namespace
+
+static void tests_round545b2() {
+  test("vertex colour in the bakes (task 0537): a red Vertex Color floor under a white sun bounces red onto a white wall in the lightmap, and into the probes above it; with the flag off the bounce is white", [] {
+    const VcbResult on = vcb_bake(true), off = vcb_bake(false);
+    std::printf("    flag on: wall %.4f %.4f %.4f, probe %.4f %.4f %.4f\n", on.wall.x, on.wall.y, on.wall.z, on.probe.x, on.probe.y, on.probe.z);
+    std::printf("    flag off: wall %.4f %.4f %.4f, probe %.4f %.4f %.4f\n", off.wall.x, off.wall.y, off.wall.z, off.probe.x, off.probe.y, off.probe.z);
+    CHECK(on.ok && off.ok);
+    /* Lightmap: red, not white. */
+    CHECK(on.wall.x > 0.01f && on.wall.x > 1.5f * on.wall.z && on.wall.x > 1.5f * on.wall.y);
+    CHECK(off.wall.x > 0.01f && std::fabs(off.wall.x - off.wall.z) <= 0.2f * off.wall.x && std::fabs(off.wall.x - off.wall.y) <= 0.2f * off.wall.x);
+    /* Probes: the floor seen from above is red (no green or blue bounce), white with the flag off. */
+    CHECK(on.probe.x > 0.01f && on.probe.x > 3.0f * on.probe.z && on.probe.x > 3.0f * on.probe.y);
+    CHECK(off.probe.x > 0.01f && std::fabs(off.probe.x - off.probe.z) <= 0.2f * off.probe.x && std::fabs(off.probe.x - off.probe.y) <= 0.2f * off.probe.x);
+  });
+  test("vertex colour in the bakes (task 0537): a Vertex Color material on a mesh without a colour layer bakes as its base colour - white bounce, same as flag off, no NaN", [] {
+    const VcbResult none = vcb_bake(true, false), off = vcb_bake(false, false);
+    std::printf("    flag on, no layer: wall %.4f %.4f %.4f, probe %.4f %.4f %.4f\n", none.wall.x, none.wall.y, none.wall.z, none.probe.x, none.probe.y, none.probe.z);
+    CHECK(none.ok && off.ok);
+    CHECK(r35_finite(none.wall) && r35_finite(none.probe));
+    CHECK(none.wall.x > 0.01f && std::fabs(none.wall.x - none.wall.z) <= 0.2f * none.wall.x);
+    CHECK(none.probe.x > 0.01f && std::fabs(none.probe.x - none.probe.z) <= 0.2f * none.probe.x);
+    CHECK(std::fabs(none.wall.x - off.wall.x) <= 0.15f * off.wall.x);  // (the bakes' own sampling noise apart)
+  });
+}
+
 /* Round 549 (task 0529): on CI's ubuntu-26.04 runners "GI on but adding nothing" was not the plain picture - a realtime lightmap
  * pass published while Sky Occlusion was on still shaded the Game view's objects until the next pass landed (a slow machine is
  * still there when the picture is taken). The views read no published maps while GI adds nothing. */
@@ -12315,5 +12567,7 @@ void run_lighting_tests() {
   tests_round507();
   tests_round507_te();
   tests_round508();
+  tests_round542();
+  tests_round545b2();
   tests_round549();
 }

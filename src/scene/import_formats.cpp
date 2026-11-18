@@ -9,11 +9,13 @@
 // stood up, the inverse of Blender's forward -Z / up Y axis conversion.
 #include "import.h"
 #include "import_anim.h"
+#include "import_splat.h"  // (round 531)
 
 #include "../core/core.h"
 #include "../core/json.h"
 #include "../../extern/fast_float/fast_float.h"
 #include "../core/jobs.h"
+#include "../image/image.h"  // (task 0533: srgb_to_linear for PLY colour bytes)
 
 #include <atomic>
 
@@ -108,6 +110,8 @@ void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
       for (const ShapeKey &s : m.shape_keys)  // (and with the same shape keys: a mouth's corners must part)
         if (s.delta.size() == m.vert_count() && !(s.delta[i] == s.delta[first[k]])) same = false;
       if (normals && normals->size() == m.vert_count() && dot((*normals)[i], (*normals)[first[k]]) < 0.9999f) same = false;  // (a hard edge)
+      for (const ColorAttribute &c : m.color_attributes)  // (task 0533: and with the same colours - a painted edge must part)
+        if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m.vert_count() && std::memcmp(&c.rgba[i], &c.rgba[first[k]], sizeof(Vec4)) != 0) same = false;
       if (same) {
         found = k;
         break;
@@ -149,11 +153,27 @@ void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
       else if (dot(cnorm[remap[i]], m.custom_normals[i]) < 0.9999f * length(cnorm[remap[i]]) * length(m.custom_normals[i])) cnorm[remap[i]] = Vec3(0.0f);
     }
   }
+  /* Task 0533: Point colour layers renumbered as the groups (a welded vertex had the same colour); the others go. The
+   * chosen layers' names are read first: the layers are moved below. */
+  auto colour_name = [&](int i) { return i >= 0 && i < (int)m.color_attributes.size() ? m.color_attributes[(size_t)i].name : std::string(); };
+  const std::string active_name = colour_name(m.active_color), render_name = colour_name(m.render_color);
+  std::vector<ColorAttribute> colours;
+  for (ColorAttribute &c : m.color_attributes) {
+    if (c.domain != ColorAttribute::Domain::Point || c.rgba.size() != m.vert_count()) continue;
+    std::vector<Vec4> d(kept.size(), Vec4(1, 1, 1, 1));
+    for (size_t i = 0; i < remap.size(); i++)
+      if (first[remap[i]] == i) d[remap[i]] = c.rgba[i];
+    c.rgba = std::move(d);
+    colours.push_back(std::move(c));
+  }
   m.positions = kept;
   for (uint32_t &v : m.corner_verts) v = remap[v];
   /* Triangles that collapsed (degenerate in the file) would break topology tools. */
   Mesh clean;
   clean.positions = m.positions;
+  clean.color_attributes = std::move(colours);
+  clean.active_color = clean.find_color(active_name);
+  clean.render_color = clean.find_color(render_name);
   clean.vertex_groups = std::move(groups);
   clean.shape_keys = std::move(shapes);
   clean.custom_normals = std::move(cnorm);
@@ -430,13 +450,72 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
   /* Meshes: every primitive becomes material slots of one mesh. */
   std::vector<MeshPtr> meshes;
   std::vector<std::vector<MaterialPtr>> mesh_mats;
+  std::vector<PointCloudPtr> mesh_clouds;  // (round 531: each mesh's point cloud, by mesh index; shorter when the last have none)
+  /* Round 531 (review): whether an accessor's elements all lie inside its buffer view and the view inside its buffer -
+   * checked before read_accessor allocates count x components floats. No buffer view (Draco, sparse-only): no. */
+  auto points_accessor_fits = [&](int index) {
+    const Json &a = doc["accessors"][(size_t)std::max(0, index)];
+    if (index < 0 || a.type != Json::Obj || a["bufferView"].integer() < 0) return false;
+    const Json &v = doc["bufferViews"][(size_t)a["bufferView"].integer()];
+    const int bi = v["buffer"].integer();
+    if (v.type != Json::Obj || bi < 0 || bi >= (int)buffers.size()) return false;
+    const std::string type = a["type"].str;
+    const int ct = a["componentType"].integer();
+    const double comps = type == "SCALAR" ? 1 : type == "VEC2" ? 2 : type == "VEC3" ? 3 : type == "VEC4" ? 4 : 0;
+    const double csize = ct == 5126 || ct == 5125 ? 4 : ct == 5123 || ct == 5122 ? 2 : ct == 5121 || ct == 5120 ? 1 : 0;
+    const double count = a["count"].number(-1.0), elem = comps * csize;
+    const double stride = v["byteStride"].number() > 0 ? v["byteStride"].number() : elem;
+    const double view_off = v["byteOffset"].number(), view_len = v["byteLength"].number(-1.0), off = a["byteOffset"].number();
+    if (!(count >= 1.0) || elem <= 0.0 || view_len < 0.0 || view_off < 0.0 || off < 0.0) return false;
+    if (view_off + view_len > (double)buffers[(size_t)bi].size()) return false;
+    return off + (count - 1.0) * stride + elem <= view_len;
+  };
   size_t verts = 0, faces = 0;
   for (const Json &jm : doc["meshes"].arr) {
     auto m = std::make_shared<Mesh>();
     m->name = jm["name"].str.empty() ? "Mesh" : jm["name"].str;
     std::vector<MaterialPtr> slots;
-    bool any_uv = false;
+    bool any_uv = false, any_colour = false;
+    std::vector<Vec4> gltf_colours;  // (task 0533) COLOR_0 per vertex, over all the primitives
     for (const Json &pr : jm["primitives"].arr) any_uv = any_uv || pr["attributes"]["TEXCOORD_0"].integer() >= 0;
+    /* Round 531: POINTS primitives - KHR_gaussian_splatting's or plain ones - become the mesh's point cloud (the first
+     * such primitive; Blender joins them, which a later round can). An accessor whose count the buffer can't hold is
+     * left out before it is read (its floats would be allocated from the count). */
+    for (const Json &pr : jm["primitives"].arr) {
+      if (pr["mode"].integer(4) != 0) continue;
+      if (mesh_clouds.size() > meshes.size()) {
+        out.notes.push_back("glTF: a mesh with more than one point primitive - only its first is imported");
+        continue;
+      }
+      std::map<std::string, std::vector<float>> attrs;
+      std::map<std::string, int> comps;
+      bool unread = false;
+      for (const auto &kv : pr["attributes"].obj) {
+        /* Only what a cloud reads (review 531: every attribute of a hostile file was allocated at once). */
+        if (kv.first != "POSITION" && kv.first != "COLOR_0" && kv.first.rfind("KHR_gaussian_splatting:", 0) != 0) continue;
+        if (!points_accessor_fits(kv.second.integer())) {
+          unread = true;
+          continue;
+        }
+        int c = 0;
+        std::vector<float> f = read_accessor(kv.second.integer(), c);
+        comps[kv.first] = c;
+        attrs[kv.first] = std::move(f);
+      }
+      if (unread) out.notes.push_back("glTF: a point attribute whose data lies outside its buffer (or is compressed, or sparse) was left out");
+      if (pr["indices"].integer() >= 0) out.notes.push_back("glTF: a point primitive's indices are ignored - every point of its attributes is imported");
+      const bool splats = pr["extensions"]["KHR_gaussian_splatting"].type == Json::Obj;
+      SplatReadReport report;
+      PointCloudPtr cloud = gltf_point_cloud(attrs, comps, splats, report);
+      for (std::string &n : report.notes) out.notes.push_back(std::move(n));
+      if (!cloud) {
+        out.notes.push_back(report.error);
+        continue;
+      }
+      cloud->name = m->name;
+      mesh_clouds.resize(meshes.size() + 1);
+      mesh_clouds.back() = cloud;
+    }
     for (const Json &pr : jm["primitives"].arr) {
       const int mode = pr["mode"].integer(4);
       if (mode != 4 && mode != 5 && mode != 6) continue;  // points and lines have no faces
@@ -463,6 +542,22 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
         }
       const uint32_t base = (uint32_t)m->vert_count();
       for (size_t i = 0; i < nv; i++) m->add_vert(from_y_up({pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]}));
+      /* Task 0533: COLOR_0 (linear; VEC3 or VEC4, float or normalized bytes / shorts) - white where a primitive has none. */
+      {
+        int cc = 0;
+        /* (An accessor its buffer can't hold reads as zeros past the end: no colours rather than black, see-through ones.) */
+        const int ci = pr["attributes"]["COLOR_0"].integer();
+        const std::vector<float> col = ci >= 0 && points_accessor_fits(ci) ? read_accessor(ci, cc) : std::vector<float>();
+        const bool ok = (cc == 3 || cc == 4) && col.size() >= nv * (size_t)cc;
+        any_colour = any_colour || ok;
+        gltf_colours.resize(base, Vec4(1, 1, 1, 1));
+        for (size_t i = 0; i < nv; i++) {
+          Vec4 c(1, 1, 1, 1);
+          if (ok) c = Vec4(col[i * cc], col[i * cc + 1], col[i * cc + 2], cc == 4 ? col[i * cc + 3] : 1.0f);
+          auto f = [](float v, float hi) { return finite_bits(v) ? std::max(0.0f, std::min(v, hi)) : 0.0f; };
+          gltf_colours.push_back(Vec4(f(c.x, 1e6f), f(c.y, 1e6f), f(c.z, 1e6f), finite_bits(c.w) ? f(c.w, 1.0f) : 1.0f));  // (NaN alpha: opaque, as FBX's)
+        }
+      }
       /* The file's normals (task 0149), alongside the vertices (a primitive without them leaves zeros); kept as custom
        * normals after the weld when they differ from the recomputed ones. */
       int ncomp = 0;
@@ -523,6 +618,12 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
         m->add_face(fv, 3, any_uv ? fuv : nullptr, slot);
       }
     }
+    if (any_colour && gltf_colours.size() == m->vert_count()) {  // (task 0533) Blender names it "Color"
+      ColorAttribute c = m->make_color("Color", ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
+      c.rgba = std::move(gltf_colours);
+      m->color_attributes.push_back(std::move(c));
+      m->active_color = m->render_color = 0;
+    }
     weld_exact(*m);  // (as before the file's normals came along: the smooth angle makes the hard edges; copies that disagree leave a zero)
     {
       std::vector<Vec3> fn = std::move(m->custom_normals);
@@ -577,9 +678,13 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
     if (mi >= 0 && mi < (int)meshes.size()) {
       node.mesh = meshes[(size_t)mi];
       node.materials = mesh_mats[(size_t)mi];
+      if ((size_t)mi < mesh_clouds.size() && mesh_clouds[(size_t)mi]) {  // (round 531: a mesh of points only has no mesh of its own)
+        node.points = mesh_clouds[(size_t)mi];
+        if (!node.mesh->face_count()) node.mesh = nullptr, node.materials.clear();
+      }
       /* The morph weights: the node's, else the mesh's defaults (task 0135). */
       const Json &w = n["weights"].size() ? n["weights"] : doc["meshes"][(size_t)mi]["weights"];
-      for (size_t k = 0; k < node.mesh->shape_keys.size() && k < w.size(); k++) node.shape_weights.push_back({node.mesh->shape_keys[k].name, (float)w[k].number()});
+      for (size_t k = 0; node.mesh && k < node.mesh->shape_keys.size() && k < w.size(); k++) node.shape_weights.push_back({node.mesh->shape_keys[k].name, (float)w[k].number()});
     }
     node_index[(size_t)ni] = (int)out.nodes.size();
     out.nodes.push_back(std::move(node));
@@ -650,6 +755,10 @@ bool import_gltf_file(const std::string &path, ImportResult &out) {
       node.name = meshes[i]->name;
       node.mesh = meshes[i];
       node.materials = mesh_mats[i];
+      if (i < mesh_clouds.size() && mesh_clouds[i]) {  // (round 531)
+        node.points = mesh_clouds[i];
+        if (!node.mesh->face_count()) node.mesh = nullptr, node.materials.clear();
+      }
       out.nodes.push_back(node);
     }
   }
@@ -750,6 +859,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
     out.error = "PLY: not a PLY file";
     return false;
   }
+  if (ply_is_point_cloud(data)) return import_ply_point_cloud(path, data, out);  // (round 531: splats or points, not a refusal)
   size_t body = data.find('\n', hend);
   body = body == std::string::npos ? data.size() : body + 1;
   /* Task 0209: each property's type as a code, worked out once from its name (it was compared as a string for every
@@ -822,6 +932,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
   };
   struct Layout {
     int ix = -1, iy = -1, iz = -1, is = -1, it = -1, ilist = -1;
+    int ir = -1, ig = -1, ib = -1, ia = -1;  // (task 0533) the vertex colours
     bool lists = false;
     size_t stride = 0;
     std::vector<size_t> off;  // (binary, no lists) each property's byte offset in a record
@@ -843,8 +954,37 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
       else if (n == "z") L.iz = (int)k;
       else if (n == "s" || n == "u" || n == "texture_u" || n == "texture_s") L.is = (int)k;
       else if (n == "t" || n == "v" || n == "texture_v" || n == "texture_t") L.it = (int)k;
+      else if (n == "red" || n == "r") L.ir = (int)k;
+      else if (n == "green" || n == "g") L.ig = (int)k;
+      else if (n == "blue" || n == "b") L.ib = (int)k;
+      else if (n == "alpha" || n == "a") L.ia = (int)k;
     }
     return L;
+  };
+  /* Task 0533: a colour channel as stored: integer types are bytes (or shorts) of sRGB colour - as Blendity and Blender
+   * write them, alpha linear - floats are linear 0..1. */
+  auto colour_of = [&](double v, Ty t, bool rgb) {
+    float f = (float)v;
+    if (t == U8) f = (float)(v / 255.0);
+    else if (t == I8) f = (float)(v / 127.0);  // (signed: as glTF normalises them)
+    else if (t == U16) f = (float)(v / 65535.0);
+    else if (t == I16) f = (float)(v / 32767.0);
+    else if (t == U32) f = (float)(v / 4294967295.0);
+    else if (t == I32) f = (float)(v / 2147483647.0);
+    if (!finite_bits(f)) f = rgb ? 0.0f : 1.0f;  // (NaN alpha: opaque, as the other importers)
+    f = std::max(0.0f, f);
+    if (rgb && t != F32 && t != F64) f = srgb_to_linear(std::min(f, 1.0f));
+    return rgb ? f : std::min(f, 1.0f);
+  };
+  std::vector<Vec4> vcol;
+  bool has_col = false;
+  auto colour_from = [&](const Elem &el, const Layout &L, auto value_at) {
+    Vec4 c(1, 1, 1, 1);
+    if (L.ir >= 0) c.x = colour_of(value_at(L.ir), el.props[(size_t)L.ir].ty, true);
+    if (L.ig >= 0) c.y = colour_of(value_at(L.ig), el.props[(size_t)L.ig].ty, true);
+    if (L.ib >= 0) c.z = colour_of(value_at(L.ib), el.props[(size_t)L.ib].ty, true);
+    if (L.ia >= 0) c.w = colour_of(value_at(L.ia), el.props[(size_t)L.ia].ty, false);
+    return c;
   };
   auto m = std::make_shared<Mesh>();
   m->name = fs::stem(path);
@@ -897,9 +1037,11 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
         }
         if (vert && L.ix >= 0 && L.iy >= 0 && L.iz >= 0) {
           has_uv = L.is >= 0 && L.it >= 0;
+          has_col = L.ir >= 0 && L.ig >= 0 && L.ib >= 0;
           const size_t first = m->positions.size();
           m->positions.resize(first + el.count);
           if (has_uv) vuv.resize(first + el.count);
+          if (has_col) vcol.resize(first + el.count);
           const Ty tx = el.props[(size_t)L.ix].ty, ty_ = el.props[(size_t)L.iy].ty, tz = el.props[(size_t)L.iz].ty;
           const size_t ox = L.off[(size_t)L.ix], oy = L.off[(size_t)L.iy], oz = L.off[(size_t)L.iz];
           js.parallel_for((int64_t)el.count, 8192, [&](int64_t a, int64_t b) {
@@ -907,6 +1049,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
               const char *q = p + (size_t)i * L.stride;
               m->positions[first + (size_t)i] = from_z_up({(float)scalar(q + ox, tx), (float)scalar(q + oy, ty_), (float)scalar(q + oz, tz)});
               if (has_uv) vuv[first + (size_t)i] = {(float)scalar(q + L.off[(size_t)L.is], el.props[(size_t)L.is].ty), (float)scalar(q + L.off[(size_t)L.it], el.props[(size_t)L.it].ty)};
+              if (has_col) vcol[first + (size_t)i] = colour_from(el, L, [&](int k) { return scalar(q + L.off[(size_t)k], el.props[(size_t)k].ty); });
             }
           });
         }
@@ -989,9 +1132,11 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
         std::atomic<bool> fail{false};
         if (vert && !L.lists && L.ix >= 0 && L.iy >= 0 && L.iz >= 0) {
           has_uv = L.is >= 0 && L.it >= 0;
+          has_col = L.ir >= 0 && L.ig >= 0 && L.ib >= 0;  // (a line holds 64 values at most: `simple` is off for more properties)
           const size_t first = m->positions.size();
           m->positions.resize(first + el.count);
           if (has_uv) vuv.resize(first + el.count);
+          if (has_col) vcol.resize(first + el.count);
           js.parallel_for((int64_t)el.count, 4096, [&](int64_t a, int64_t b) {
             double vals[64];
             for (int64_t i = a; i < b; i++) {
@@ -1003,6 +1148,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
               }
               m->positions[first + (size_t)i] = from_z_up({(float)vals[L.ix], (float)vals[L.iy], (float)vals[L.iz]});
               if (has_uv) vuv[first + (size_t)i] = {(float)vals[L.is], (float)vals[L.it]};
+              if (has_col) vcol[first + (size_t)i] = colour_from(el, L, [&](int k) { return vals[k]; });
             }
           });
         }
@@ -1070,6 +1216,8 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
       m->corner_verts.clear();
       vuv.clear();
       has_uv = false;
+      vcol.clear();
+      has_col = false;
       bad = false;
       auto read_value = [&](double &v) {
         const char *q2 = ascii_number(p, e, v);
@@ -1083,6 +1231,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
         const bool vert = el.name == "vertex", face = el.name == "face";
         const Layout L = layout_of(el, face);
         if (vert) has_uv = L.is >= 0 && L.it >= 0;
+        if (vert) has_col = L.ir >= 0 && L.ig >= 0 && L.ib >= 0;
         for (size_t i = 0; i < el.count && !bad; i++) {
           vals.assign(el.props.size(), 0.0);
           list.clear();
@@ -1100,6 +1249,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
           if (vert && L.ix >= 0 && L.iy >= 0 && L.iz >= 0) {
             m->add_vert(from_z_up({(float)vals[(size_t)L.ix], (float)vals[(size_t)L.iy], (float)vals[(size_t)L.iz]}));
             if (has_uv) vuv.push_back({(float)vals[(size_t)L.is], (float)vals[(size_t)L.it]});
+            if (has_col) vcol.push_back(colour_from(el, L, [&](int k) { return vals[(size_t)k]; }));
           }
           else if (face && list.size() >= 3) {
             bool valid = true;
@@ -1125,6 +1275,12 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
   if (!m->face_count()) {
     out.error = "PLY: no faces (point clouds are not supported)";
     return false;
+  }
+  if (has_col && vcol.size() == m->positions.size()) {  // (task 0533) Blender's PLY importer names the layer "Col"
+    ColorAttribute c = m->make_color("Col", ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
+    c.rgba = std::move(vcol);
+    m->color_attributes.push_back(std::move(c));
+    m->active_color = m->render_color = 0;
   }
   weld_exact(*m);  // PLY exporters split vertices at normals and UVs
   m->smooth = true;

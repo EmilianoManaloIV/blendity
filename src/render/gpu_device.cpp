@@ -52,6 +52,9 @@ std::string status(bool) { return "GPU rendering: not built (needs Blender's vul
 void prewarm(bool, bool) {}
 bool compile_kernels(bool, std::string *) { return false; }
 std::string pipeline_cache_file(int, bool) { return ""; }
+std::string raster_pipeline_cache_file(int) { return ""; }
+bool pipeline_cache_load(int, const std::string &, std::string &blob) { return blob.clear(), false; }
+void pipeline_cache_store(const std::string &, std::string) {}
 std::unique_ptr<Renderer> Renderer::create(int, bool, std::string *error) {
   if (error) *error = "this build has no GPU rendering";
   return nullptr;
@@ -465,6 +468,7 @@ class VulkanRenderer final : public Renderer {
     VkPhysicalDeviceProperties props;
     g.f.vkGetPhysicalDeviceProperties(pd_, &props);
     ts_period_ns_ = props.limits.timestampPeriod;
+    max_storage_range_ = props.limits.maxStorageBufferRange;
     uint32_t qn = 0;
     g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
     std::vector<VkQueueFamilyProperties> qs(qn);
@@ -497,7 +501,7 @@ class VulkanRenderer final : public Renderer {
   bool upload(const Scene &s, std::string *err) override {
     wait_all(nullptr);
     f_.vkDeviceWaitIdle(dev_);
-    for (int i = 3; i < 16; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers
+    for (int i = 3; i < kBufs; i++) free_buffer(bufs_[i]);  // 0-2: params and pixel buffers (16 is the TLAS: never a buffer)
     free_accel();
     scene_params_ = s.params;
     const VkBufferUsageFlags as_input = rt_ ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) : 0;
@@ -510,7 +514,9 @@ class VulkanRenderer final : public Renderer {
                     batch_put(b, 10, s.mesh_lights.data(), s.mesh_lights.size() * sizeof(GMeshLight), 0, err) &&
                     batch_put(b, 11, s.mesh_cdf.data(), s.mesh_cdf.size() * 4, 0, err) && batch_put(b, 12, s.tex8.data(), s.tex8.size() * 4, 0, err) &&
                     batch_put(b, 13, s.texf.data(), s.texf.size() * 4, 0, err) && batch_put(b, 14, s.textures.data(), s.textures.size() * sizeof(GTexInfo), 0, err) &&
-                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err);
+                    batch_put(b, 15, s.tlas_order.data(), s.tlas_order.size() * 4, 0, err) &&
+                    batch_put(b, 17, s.splats.data(), s.splats.size() * sizeof(GSplat), 0, err) &&  // round 534: the splats
+                    batch_put(b, 18, s.splat_sh.data(), s.splat_sh.size() * 4, 0, err);
     if (!ok || !batch_send(b, err)) return false;
     if (rt_ && !build_accel(s, err)) return false;
     if (pixels_ == 0) set_params(s.params);  // (the first scene: the pixel buffers; later reset() sends the parameters at the frame's size)
@@ -569,6 +575,11 @@ class VulkanRenderer final : public Renderer {
   /* A new device buffer for the binding, its data queued in the batch (an empty section gets a 16-byte buffer, zeroed). */
   bool batch_put(Batch &b, int binding, const void *data, size_t bytes, VkBufferUsageFlags extra, std::string *err) {
     free_buffer(bufs_[binding]);
+    if (bytes > max_storage_range_) {  // (round 534: a 1M-splat cloud's SH is 180 MB; some drivers bind no more than 128 MB)
+      if (err) *err = strprintf("%s: a %.1f MB buffer is over the card's storage-buffer limit (%.1f MB)", info_.name.c_str(), bytes / 1048576.0,
+                                max_storage_range_ / 1048576.0);
+      return false;
+    }
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | extra;
     if (!make_buffer(bufs_[binding], bytes, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
       if (err) *err = strprintf("%s: out of GPU memory (%.1f MB buffer)", info_.name.c_str(), bytes / 1048576.0);
@@ -828,7 +839,10 @@ class VulkanRenderer final : public Renderer {
   VkPipeline pipeline_ = VK_NULL_HANDLE;
   VkDescriptorPool dpool_ = VK_NULL_HANDLE;
   VkDescriptorSet set_ = VK_NULL_HANDLE;
-  Buffer bufs_[16];
+  /* By binding: 0-15 and the splats' 17-18 (round 534); 16 is the TLAS, a descriptor of its own. */
+  static constexpr int kBufs = 19;
+  uint64_t max_storage_range_ = ~0ull;  // the card's maxStorageBufferRange (create_timestamps reads it)
+  Buffer bufs_[kBufs];
   Buffer readback_;
   bool readback_coherent_ = true;
   void invalidate_readback() {
@@ -951,7 +965,8 @@ class VulkanRenderer final : public Renderer {
       return false;
     }
     std::vector<VkDescriptorSetLayoutBinding> b;
-    for (uint32_t i = 0; i < 16; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+    for (uint32_t i = 0; i < (uint32_t)kBufs; i++)
+      if (i != 16) b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
     if (rt_) b.push_back({16, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = (uint32_t)b.size();
@@ -974,7 +989,7 @@ class VulkanRenderer final : public Renderer {
      * even when the driver's own cache is cold. A file from another GPU or driver is ignored (its header). */
     const std::string cache_path = pipeline_cache_file(index_, rt_);
     std::string blob;
-    if (!fs::read_file(cache_path, blob) || !strip_pipeline_trailer(blob) || !pipeline_cache_matches(blob)) blob.clear();
+    if (!pipeline_cache_load(index_, cache_path, blob)) blob.clear();
     VkPipelineCache pcache = VK_NULL_HANDLE;
     VkPipelineCacheCreateInfo pcci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     pcci.initialDataSize = blob.size();
@@ -996,7 +1011,7 @@ class VulkanRenderer final : public Renderer {
       pipeline_ = VK_NULL_HANDLE;
       return false;
     }
-    std::vector<VkDescriptorPoolSize> ps = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16}};
+    std::vector<VkDescriptorPoolSize> ps = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)kBufs - 1}};
     if (rt_) ps.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1});
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 1;
@@ -1012,10 +1027,10 @@ class VulkanRenderer final : public Renderer {
   }
 
   void update_descriptors() {
-    VkDescriptorBufferInfo infos[16];
+    VkDescriptorBufferInfo infos[kBufs];
     std::vector<VkWriteDescriptorSet> w;
-    for (uint32_t i = 0; i < 16; i++) {
-      if (!bufs_[i].buf) continue;
+    for (uint32_t i = 0; i < (uint32_t)kBufs; i++) {
+      if (i == 16 || !bufs_[i].buf) continue;
       infos[i] = {bufs_[i].buf, 0, VK_WHOLE_SIZE};
       VkWriteDescriptorSet ws{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       ws.dstSet = set_;
@@ -1053,13 +1068,21 @@ class VulkanRenderer final : public Renderer {
                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, err))
       return false;
     as_buffers_.push_back(ib);
+    /* Round 534: the splats' boxes, for the clouds' BLASes of AABBs. */
+    Buffer ab;
+    if (!s.splat_aabbs.empty()) {
+      if (!make_device_buffer(ab, s.splat_aabbs.data(), s.splat_aabbs.size() * 4,
+                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, err))
+        return false;
+      as_buffers_.push_back(ab);
+    }
     std::vector<VkDeviceAddress> blas_addr;
-    if (!build_blases(s, ib, blas_addr, err)) return false;
+    if (!build_blases(s, ib, ab, blas_addr, err)) return false;
     blas_addr_ = blas_addr;
     return build_tlas(s, err);
   }
   /* Every BLAS built in one submission (task 0162: it was one each), their addresses out. */
-  bool build_blases(const Scene &s, const Buffer &ib, std::vector<VkDeviceAddress> &blas_addr, std::string *err) {
+  bool build_blases(const Scene &s, const Buffer &ib, const Buffer &ab, std::vector<VkDeviceAddress> &blas_addr, std::string *err) {
     const VkBufferUsageFlags as_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     const VkBufferUsageFlags scratch_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     std::vector<VkAccelerationStructureGeometryKHR> geos(s.blas.size());
@@ -1071,16 +1094,26 @@ class VulkanRenderer final : public Renderer {
       const GBlas &gb = s.blas[k];
       VkAccelerationStructureGeometryKHR &geo = geos[k];
       geo = VkAccelerationStructureGeometryKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-      geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-      geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-      auto &tr = geo.geometry.triangles;
-      tr.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-      tr.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-      tr.vertexData.deviceAddress = bufs_[6].address + (VkDeviceAddress)gb.vtx_off * sizeof(GVertex);
-      tr.vertexStride = sizeof(GVertex);
-      tr.maxVertex = std::max(1u, gb.vtx_count) - 1;
-      tr.indexType = VK_INDEX_TYPE_UINT32;
-      tr.indexData.deviceAddress = ib.address + (VkDeviceAddress)gb.idx_off * 12;
+      if (gb.kind == kBlasSplats) {
+        /* Round 534: a splat cloud - one box a splat; the kernel's ray query tests the splat itself (gsplat_gpu_glsl.h). */
+        geo.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+        geo.flags = VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;  // (a shadow ray multiplies each splat's share once)
+        geo.geometry.aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+        geo.geometry.aabbs.data.deviceAddress = ab.address + (VkDeviceAddress)gb.idx_off * 24;
+        geo.geometry.aabbs.stride = 24;
+      }
+      else {
+        geo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        auto &tr = geo.geometry.triangles;
+        tr.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        tr.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        tr.vertexData.deviceAddress = bufs_[6].address + (VkDeviceAddress)gb.vtx_off * sizeof(GVertex);
+        tr.vertexStride = sizeof(GVertex);
+        tr.maxVertex = std::max(1u, gb.vtx_count) - 1;
+        tr.indexType = VK_INDEX_TYPE_UINT32;
+        tr.indexData.deviceAddress = ib.address + (VkDeviceAddress)gb.idx_off * 12;
+      }
       VkAccelerationStructureBuildGeometryInfoKHR &bi = infos[k];
       bi = VkAccelerationStructureBuildGeometryInfoKHR{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
       bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -1142,7 +1175,7 @@ class VulkanRenderer final : public Renderer {
       for (int r = 0; r < 3; r++)
         for (int c = 0; c < 4; c++) in.transform.matrix[r][c] = m[c * 4 + r];
       in.instanceCustomIndex = (uint32_t)o;
-      in.mask = 0xFF;
+      in.mask = s.blas[s.object_blas[o]].kind == kBlasSplats ? 0x02 : 0x01;  // (round 534: shadow rays ask the meshes and the splats apart)
       in.instanceShaderBindingTableRecordOffset = 0;
       in.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
       in.accelerationStructureReference = blas_addr[s.object_blas[o]];
@@ -1222,55 +1255,14 @@ class VulkanRenderer final : public Renderer {
     as_buffers_.clear();
   }
 
-  /* A VkPipelineCache's header (Vulkan spec, VkPipelineCacheHeaderVersionOne): it must name this GPU. */
-  bool pipeline_cache_matches(const std::string &blob) const {
-    if (blob.size() < 32) return false;
-    uint32_t hsize, version, vendor, device;
-    std::memcpy(&hsize, blob.data(), 4);
-    std::memcpy(&version, blob.data() + 4, 4);
-    std::memcpy(&vendor, blob.data() + 8, 4);
-    std::memcpy(&device, blob.data() + 12, 4);
-    VkPhysicalDeviceProperties props;
-    G().f.vkGetPhysicalDeviceProperties(pd_, &props);
-    return hsize >= 32 && hsize <= blob.size() && version == 1 && vendor == props.vendorID && device == props.deviceID &&
-           std::memcmp(blob.data() + 16, props.pipelineCacheUUID, 16) == 0;
-  }
-
-  /* The file is the driver's data, then its length, an FNV-1a hash and a tag: a torn or truncated file (the
-   * driver must get exactly what it gave) is ignored. True with the trailer removed. */
-  static uint64_t fnv64(const char *p, size_t n) { return fnv1a(p, n); }
-  static bool strip_pipeline_trailer(std::string &blob) {
-    if (blob.size() < 16) return false;
-    const size_t body = blob.size() - 16;
-    uint64_t len, hash;
-    std::memcpy(&len, blob.data() + body, 4 + 4);  // length (u32) + tag (u32)
-    std::memcpy(&hash, blob.data() + body + 8, 8);
-    const uint32_t n = (uint32_t)(len & 0xFFFFFFFFu), tag = (uint32_t)(len >> 32);
-    if (tag != 0x43504C42u || n != body || hash != fnv64(blob.data(), body)) return false;  // "BLPC"
-    blob.resize(body);
-    return true;
-  }
-
-  /* Written when it grew, to a temporary file of this process and thread, then renamed over the old one in one
-   * step (another Blendity may be reading it). */
+  /* Written when it grew (pipeline_cache_store: the file's trailer, the atomic rename). */
   void save_pipeline_cache(VkPipelineCache pc, const std::string &path, size_t had) const {
     size_t n = 0;
     if (f_.vkGetPipelineCacheData(dev_, pc, &n, nullptr) != VK_SUCCESS || n == 0 || n == had || n > ((size_t)256 << 20)) return;
     std::string data(n, '\0');
     if (f_.vkGetPipelineCacheData(dev_, pc, &n, &data[0]) != VK_SUCCESS) return;
     data.resize(n);
-    const uint32_t len = (uint32_t)n, tag = 0x43504C42u;
-    const uint64_t hash = fnv64(data.data(), n);
-    data.append(reinterpret_cast<const char *>(&len), 4);
-    data.append(reinterpret_cast<const char *>(&tag), 4);
-    data.append(reinterpret_cast<const char *>(&hash), 8);
-    const uint64_t unique = (uint64_t)std::hash<std::thread::id>{}(std::this_thread::get_id()) ^
-                            (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t)(uintptr_t)this;
-    const std::string tmp = path + strprintf(".%016llx.tmp", (unsigned long long)unique);
-    if (!fs::write_file(tmp, data)) return;
-    std::error_code ec;
-    std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);  // replaces the old file
-    if (ec) std::remove(tmp.c_str());
+    pipeline_cache_store(path, std::move(data));
   }
 
   void destroy() {
@@ -1326,7 +1318,7 @@ bool compile_kernels(bool ray_query, std::string *error) {
 void prewarm(bool open_devices, bool hardware_rt) {
   static std::atomic<bool> started{false};
   if (started.exchange(true) || !available()) return;
-  if (backend() == 2) optix_list_async();  // (task 0170: CUDA's devices listed off the UI thread)
+  if (backend() == 2) optix_list_async(), optix_prewarm();  // (task 0170: CUDA's devices listed off the UI thread; round 558: and OptiX's kernel compiled)
   bool rt = false, sw = false;
   for (const DeviceInfo &d : G().infos) (d.hardware_rt ? rt : sw) = true;
   /* Detached: compile_kernel keeps its results in leaked statics, so quitting
@@ -1341,6 +1333,58 @@ void prewarm(bool open_devices, bool hardware_rt) {
         if (std::unique_ptr<Renderer> r = take_renderer(d.index, hardware_rt, &pending)) return_renderer(std::move(r), d.index, hardware_rt);
       }
   }).detach();
+}
+
+/* A VkPipelineCache's header (Vulkan spec, VkPipelineCacheHeaderVersionOne) must name this GPU, and the file's trailer -
+ * the driver's data, then its length, a tag and an FNV-1a hash - must be whole: a torn or truncated file, or one from
+ * another card or driver, is ignored (the driver must get exactly what it gave). Round 557: shared with the rasterizer. */
+bool pipeline_cache_load(int index, const std::string &path, std::string &blob) {
+  blob.clear();
+  if (!available() || index < 0 || index >= (int)G().infos.size() || path.empty()) return false;
+  if (!fs::read_file(path, blob) || blob.size() < 16 + 32) return blob.clear(), false;
+  const size_t body = blob.size() - 16;
+  uint64_t len, hash;
+  std::memcpy(&len, blob.data() + body, 4 + 4);  // length (u32) + tag (u32)
+  std::memcpy(&hash, blob.data() + body + 8, 8);
+  const uint32_t n = (uint32_t)(len & 0xFFFFFFFFu), tag = (uint32_t)(len >> 32);
+  if (tag != 0x43504C42u || n != body || hash != fnv1a(blob.data(), body)) return blob.clear(), false;  // "BLPC"
+  blob.resize(body);
+  uint32_t hsize, version, vendor, device;
+  std::memcpy(&hsize, blob.data(), 4);
+  std::memcpy(&version, blob.data() + 4, 4);
+  std::memcpy(&vendor, blob.data() + 8, 4);
+  std::memcpy(&device, blob.data() + 12, 4);
+  VkPhysicalDeviceProperties props;
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  const bool ok = hsize >= 32 && hsize <= blob.size() && version == 1 && vendor == props.vendorID && device == props.deviceID &&
+                  std::memcmp(blob.data() + 16, props.pipelineCacheUUID, 16) == 0;
+  if (!ok) blob.clear();
+  return ok;
+}
+
+/* Written to a temporary file of this process and thread, then renamed over the old one in one step (another Blendity
+ * may be reading it). */
+void pipeline_cache_store(const std::string &path, std::string data) {
+  if (path.empty() || data.empty()) return;
+  const uint32_t len = (uint32_t)data.size(), tag = 0x43504C42u;
+  const uint64_t hash = fnv1a(data.data(), data.size());
+  data.append(reinterpret_cast<const char *>(&len), 4);
+  data.append(reinterpret_cast<const char *>(&tag), 4);
+  data.append(reinterpret_cast<const char *>(&hash), 8);
+  const uint64_t unique = (uint64_t)std::hash<std::thread::id>{}(std::this_thread::get_id()) ^
+                          (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t)(uintptr_t)&data;
+  const std::string tmp = path + strprintf(".%016llx.tmp", (unsigned long long)unique);
+  if (!fs::write_file(tmp, data)) return;
+  std::error_code ec;
+  std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);  // replaces the old file
+  if (ec) std::remove(tmp.c_str());
+}
+
+std::string raster_pipeline_cache_file(int index) {
+  if (!available() || index < 0 || index >= (int)G().infos.size()) return "";
+  VkPhysicalDeviceProperties props;
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  return fs::join(cache_dir(), strprintf("raster_pipelines_%04x_%04x.bin", props.vendorID, props.deviceID));
 }
 
 std::string pipeline_cache_file(int index, bool hardware_rt) {
@@ -1852,6 +1896,7 @@ std::unique_ptr<Renderer> open_renderer(int index, bool hardware_rt, std::string
 uint64_t renderers_generation() { return pool().generation.load(); }
 
 bool renderers_opening() {
+  if (optix_prewarm_state() == 1) return true;  // (round 558: OptiX's kernel compiling for a card is inside the driver too)
   RendererPool &p = pool();
   std::lock_guard<std::mutex> lock(p.m);
   return !p.opening.empty();

@@ -772,7 +772,7 @@ void Editor::draw_sequencer_window(const Recti &r) {
     ui_.tooltip("Delete the bar and move the later bars on its track left to close the gap (Premiere's Ripple Delete).");
   });
   if (!u.hovered(r) || u.wants_keyboard()) return;
-  if (in.shift() && in.key_pressed[platform::KEY_DELETE]) return;  // (round 391: Ripple Delete's - the keymap's seq.ripple)
+  if ((in.chord_mods(platform::KEY_DELETE) & platform::MOD_SHIFT) && in.key_pressed[platform::KEY_DELETE]) return;  // (round 548: Shift as Delete went down)  // (round 391: Ripple Delete's - the keymap's seq.ripple)
   if (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE]) {
     seq_delete_selected();
     in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;

@@ -248,6 +248,14 @@ jobs:
         run: python3 tools/make_books.py --check-cited
       - name: The inventory sweep's command table is current (round 411)
         run: python3 tools/sweep_commands.py --check
+      # Round 559: the HCI sweep's two static audits. They read the source, not the build, so they run even when a unit test
+      # failed (the runs whose logs get read), each its own step so one failing does not hide the other.
+      - name: UI wording - one spelling (round 559)
+        if: always()
+        run: python3 tools/hci_consistency_audit.py --check
+      - name: UI wording - no shortcut written by hand (round 559)
+        if: always()
+        run: python3 tools/hci_label_audit.py --check
 
   linux-stress:
     needs: linux-build

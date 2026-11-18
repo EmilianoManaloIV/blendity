@@ -90,7 +90,12 @@ void run_blockout_tests();
 void run_blockout_modifiers_tests();
 void run_blockout_join_tests();
 void run_blockout_piece_modifiers_tests();
+void run_splats_tests();
+void run_splats_raster_tests();
+void run_blockout_opening_modifiers_tests();
 void run_runner_tests();
+void run_splats_trace_tests();
+void run_splats_gpu_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -112,6 +117,11 @@ static const TestGroup kTestGroups[] = {
     {"blockout_modifiers", run_blockout_modifiers_tests},
     {"blockout_join", run_blockout_join_tests},
     {"blockout_piece_modifiers", run_blockout_piece_modifiers_tests},
+    {"splats", run_splats_tests},  // (Pass 27: point clouds and Gaussian splats)
+    {"splats_raster", run_splats_raster_tests},  // (round 532)
+    {"splats_trace", run_splats_trace_tests},
+    {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
+    {"blockout_opening_modifiers", run_blockout_opening_modifiers_tests},
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 
@@ -140,6 +150,10 @@ int main(int argc, char **argv) {
   Log::echo_stdout = false;
   set_env("BLENDITY_PROJECT", "");  // the scratch project
   set_env("BLENDITY_TRASH", "");
+  /* Round 556 (task 0538): the run's own preferences folder unless the caller chose one. A headless editor reads no
+   * preferences, but it made the folder, and its livelink.json and brushes.txt went there: the user's ~/.blendity on
+   * Windows when the variable was unset, a relative folder on Linux when a test had emptied it. */
+  if (!std::getenv("BLENDITY_PREFS_DIR") || !*std::getenv("BLENDITY_PREFS_DIR")) set_env("BLENDITY_PREFS_DIR", "");
   set_env("BLENDITY_AI_DIR", fs::join(test_dir(), "no_ai"));  // (never the user's AI download: task 0129)
   /* Assets a test makes before any editor exists (clips, materials) go into the scratch project too: with no asset
    * root a relative path is the folder the tests run from - a real project's Assets (task 0081). */
@@ -154,9 +168,23 @@ int main(int argc, char **argv) {
   if (!std::getenv("BLENDITY_VIEWPORT_DEVICE")) set_env("BLENDITY_VIEWPORT_DEVICE", "cpu");
   /* And the path tracer's cards run GPU Compute (task 0170): the OptiX device's tests ask for it by name. */
   if (!std::getenv("BLENDITY_GPU_BACKEND")) set_env("BLENDITY_GPU_BACKEND", "vulkan");
+  /* Round 558: OptiX's kernel cache of the tests' own - never the user's (%LOCALAPPDATA%\NVIDIA\OptixCache), one for
+   * every test process (OptiX's cache takes several at once) and kept between runs, so a run after the first finds the
+   * kernel compiled for its PTX. */
+  if (!std::getenv("OPTIX_CACHE_PATH")) {
+    const std::string optix_cache = fs::join(fs::temp_dir(), "blendity_tests_optix_cache");
+    fs::make_dirs(optix_cache);
+    set_env("OPTIX_CACHE_PATH", optix_cache);
+  }
   /* Scenes default to Automatic lighting updates here (the behaviour the tests before task 0020 were written
    * for); Manual's own tests ask for it. */
   if (!std::getenv("BLENDITY_LIGHTING_UPDATES")) set_env("BLENDITY_LIGHTING_UPDATES", "automatic");
+  /* Round 557: the cards' caches (the compiled kernels, the tracer's and the rasterizer's pipeline caches) in a folder of
+   * the test programs' own, never the user's ~/.blendity/cache. One that stays between runs: a folder per run would
+   * build every pipeline again (minutes of a card's first open). 557b: one per build - named by the folder the program
+   * runs from - so two sessions' test runs (two worktrees, two builds) never share it. */
+  if (!std::getenv("BLENDITY_CACHE_DIR"))
+    set_env("BLENDITY_CACHE_DIR", fs::join(fs::temp_dir(), strprintf("blendity_test_cache_%016llx", (unsigned long long)std::hash<std::string>{}(fs::executable_dir()))));
 
   std::string group;
   for (int a = 1; a < argc; a++) {

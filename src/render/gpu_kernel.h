@@ -10,6 +10,7 @@
 #pragma once
 
 #include "gpu_glsl.h"
+#include "gsplat_gpu_glsl.h"
 
 namespace bl::gpu {
 
@@ -195,6 +196,7 @@ struct SurfacePoint {
   vec3 position, normal, geo_normal, local_position, local_normal;
   vec2 uv;
   vec4 tangent;
+  vec4 vc;  // task 0537: the mesh's vertex colour here (the vertices' spare lanes: p.w, n.w, uv.zw; 1 where none)
   bool has_tangent;
   vec3 bmin, bmax;
 };
@@ -220,6 +222,7 @@ int surface_at(uint obj, uint prim, float u, float v, out SurfacePoint sp) {
   sp.normal = normalize((ins.normal_mat * vec4(sp.local_normal, 0.0)).xyz);
   sp.geo_normal = normalize((ins.normal_mat * vec4(cross(b.p.xyz - a.p.xyz, c.p.xyz - a.p.xyz), 0.0)).xyz);
   sp.uv = ins.info.z != 0u ? a.uv.xy * w + b.uv.xy * u + c.uv.xy * v : vec2(0.0);
+  sp.vc = vec4(a.p.w, a.n.w, a.uv.z, a.uv.w) * w + vec4(b.p.w, b.n.w, b.uv.z, b.uv.w) * u + vec4(c.p.w, c.n.w, c.uv.z, c.uv.w) * v;
   sp.has_tangent = ins.info.w != 0u;
   sp.tangent = vec4(0.0);
   if (sp.has_tangent) {
@@ -298,6 +301,10 @@ Sample evaluate_plain(Material m, SurfacePoint sp, bool force_box) {
     vec4 c = msample(m, m.tex0.x, uv, box, bw, bp);
     s.albedo *= c.xyz;
     s.alpha *= c.w;
+  }
+  if ((m.flags.w & 8192) != 0) {  // task 0537: a Vertex Color material (evaluate_surface: after the base map, capped at 1)
+    s.albedo *= clamp(sp.vc.xyz, 0.0, 1.0);
+    s.alpha *= clamp(sp.vc.w, 0.0, 1.0);
   }
   if (m.tex0.y >= 0) s.metallic *= msample(m, m.tex0.y, uv, box, bw, bp).x;
   if (m.tex0.z >= 0) s.roughness *= msample(m, m.tex0.z, uv, box, bw, bp).x;
@@ -539,15 +546,28 @@ vec3 env_radiance(vec3 d) {
 R"GLSL(
 /* --------------------------------------------------------- ray queries */
 struct Hit { float t; float u; float v; uint prim; uint obj; };
+)GLSL",
+kGlslSplats,
+R"GLSL(
 
 #ifdef USE_RAY_QUERY
 bool intersect(vec3 o, vec3 d, inout Hit h) {
   rayQueryEXT q;
-  rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, d, h.t);
-  while (rayQueryProceedEXT(q)) {}
-  if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
+  rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, g_meshes_only ? 0x01u : 0xFFu, o, 0.0, d, h.t);  // (round 534: mask 2 the splats)
+  while (rayQueryProceedEXT(q)) {
+    /* Round 534: a splat's box - the splat's own test in its cloud's space, kept below what is committed so far. */
+    if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionAABBEXT) continue;
+    uint so = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false));
+    float tmax = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT ? h.t : rayQueryGetIntersectionTEXT(q, true);
+    float ts = tmax;
+    if (splat_hit_in(so, uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionObjectRayOriginEXT(q, false),
+                     rayQueryGetIntersectionObjectRayDirectionEXT(q, false), kSplatTmin, tmax, ts))
+      rayQueryGenerateIntersectionEXT(q, ts);
+  }
+  uint kind = rayQueryGetIntersectionTypeEXT(q, true);
+  if (kind == gl_RayQueryCommittedIntersectionNoneEXT) return false;
   h.t = rayQueryGetIntersectionTEXT(q, true);
-  vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, true);
+  vec2 bc = kind == gl_RayQueryCommittedIntersectionTriangleEXT ? rayQueryGetIntersectionBarycentricsEXT(q, true) : vec2(0.0);
   h.u = bc.x;
   h.v = bc.y;
   h.prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
@@ -608,7 +628,7 @@ bool blas_intersect(uint node_off, uint tri_off, vec3 o, vec3 d, inout Hit h) {
   return hit;
 }
 bool intersect(vec3 o, vec3 d, inout Hit h) {
-  if (P.counts.w == 0) return false;
+  if (P.counts.w == 0) return splat_clouds(o, d, h);  // (round 534: a scene of splats alone)
   vec3 inv = safe_inverse(d);
   uint stack[32];
   int sp = 0;
@@ -637,6 +657,7 @@ bool intersect(vec3 o, vec3 d, inout Hit h) {
     else if (ha && sp < 31) stack[sp++] = a;
     else if (hb && sp < 31) stack[sp++] = b;
   }
+  if (splat_clouds(o, d, h)) hit = true;  // round 534: the splat clouds, up to the meshes' hit
   return hit;
 }
 #endif
@@ -700,7 +721,7 @@ vec3 bsdf_any(bool toon, Sample s, vec3 n, vec3 V, vec3 L) { return toon ? s.alb
 
 /* PathTracer::transmittance: through cutout holes and transparent surfaces. */
 
-vec3 transmittance(vec3 o, vec3 d, float tmax) {
+vec3 transmittance_meshes(vec3 o, vec3 d, float tmax) {
   if (P.counts.z == 0) return occluded(o, d, tmax) ? vec3(0.0) : vec3(1.0);
   vec3 T = vec3(1.0);
   float left = tmax;
@@ -728,6 +749,16 @@ vec3 transmittance(vec3 o, vec3 d, float tmax) {
     left -= step;
   }
   return T;
+}
+/* Round 534: the splats let by the product of (1 - alpha) of those the ray crosses (as the CPU's, round 533), the
+ * meshes what transmittance_meshes (above) says. */
+vec3 transmittance(vec3 o, vec3 d, float tmax) {
+  float ts = scene_has_splats() ? splat_transmittance(o, d, tmax) : 1.0;
+  if (!(ts > 0.0)) return vec3(0.0);
+  g_meshes_only = true;
+  vec3 T = transmittance_meshes(o, d, tmax);
+  g_meshes_only = false;
+  return T * ts;
 }
 float mesh_light_pdf(uint li, float dist, float cos_light) {
   MeshLight l = mlights[li];
@@ -834,6 +865,12 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
       if (camera_miss) { albedo_out = vec3(1.0); normal_out = vec3(0.0); depth_out = 1e6; id_out = 0.0; }
+      break;
+    }
+    if (is_splat_obj(h.obj)) {  // round 534: a Gaussian splat shines its colour along the ray and ends the path
+      vec3 c = beta * splat_shade(h, rd, bounce == 0 && camera_path, albedo_out, normal_out, depth_out, id_out);
+      if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
+      L += c;
       break;
     }
     SurfacePoint sp;
@@ -1146,6 +1183,7 @@ void main() {
   bool any_hit = false;
   for (int k = 0; k < count; k++) {
     int s = PC.sample_index + k;
+    g_splat_seed = uint(s);  // round 534: the splats' stochastic test draws per sample (gsplat_math.h hash_point)
     uint rng;
     vec3 ro, rd;
     if (bake) {

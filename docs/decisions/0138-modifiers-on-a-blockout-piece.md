@@ -83,3 +83,7 @@ inert and the Inspector shows no Modifiers section for it.
 - Not decided here: stacks on rooms, doors and windows, and Intersect pieces with a stack (a later round, if wanted);
   Apply on a piece's modifier (it would have to turn the piece into a mesh piece of its own - refused at first, with
   the reason).
+
+## Amendment (round 546, ADR 0150)
+A door or window takes a stack now: its Array and Mirror repeat the whole opening (`blockout_opening_placements`), the other
+modifiers reshape its hole as this ADR runs a piece's stack. Rooms, presets and Intersect pieces still take none.

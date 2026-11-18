@@ -165,6 +165,7 @@ set SRCRSP=%OBJ%\sources.rsp
   rem Blender's own bundled dependencies (see extern\README.md)
   echo extern\ufbx\ufbx.c
   echo extern\sky\source\sky_hosek.cpp
+  echo extern\sky\source\sky_multiple_scattering.cpp
   if "%USE_OPTIX%"=="1" echo extern\cuew\src\cuew.c
   if "%USE_TRACY%"=="1" echo "%XTRA%\tracy\public\TracyClient.cpp"
   if "%USE_QUADRIFLOW%"=="1" for %%f in (adjacent-matrix dedge hierarchy loader localsat merge-vertex optimizer parametrizer parametrizer-flip parametrizer-int parametrizer-mesh parametrizer-scale parametrizer-sing subdivide) do echo extern\quadriflow\src\%%f.cpp
