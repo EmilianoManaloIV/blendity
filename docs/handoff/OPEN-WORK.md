@@ -3,7 +3,7 @@
 Every follow-up that was named and not taken, as of 2026-11-18 (the tree of PR #472 plus Pass 28's write-up).
 Each item gives what is wrong or missing, the evidence, the files, and what "done" would look like, so it can
 become a task spec (`docs/tasks/TEMPLATE.md`) with little more reading. Line numbers are those of this tree and
-will drift; the function names will not. Nothing here blocks 1.0.0.
+will drift; the function names will not. Nothing here blocks 1.0.0; whether item 19 (a crash seen once on CI, not reproduced) holds it was the owner's call.
 
 Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 
@@ -125,6 +125,29 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   whether any remain by running the `gpu` group with the libraries on a card.
 - **Done:** the `gpu` group is clean in the libraries build on a card, or each remaining difference has a
   justified tolerance written in the test.
+
+### 19. A crash seen once on CI in the dependency-free Windows test program (M; not reproduced)
+- **What happened:** GitHub Actions run 44354841677 (`windows-unit`, the dependency-free Windows build, on PR #472's
+  tree `36dd42af`): `blendity_tests.exe`, run as CI runs it - the whole suite in one process - ended with a
+  segmentation fault after 644 tests. The last test that finished was "a Paint layer (ADR 0081)"; the next is "smart
+  materials (ADR 0082): Worn Steel on a subdivided cube's baked maps ...", whose mesh-map bake (`bake_mesh_maps`) is
+  where it is suspected to have died. No `[FAIL]` line, no stack. The same job passed on #460 to #470.
+- **Not reproduced:** about 40 local runs by three sessions (round 565's 27, round 563 / 564's 12, the write-up's).
+  The write-up's: the dependency-free Windows build of the same commit ran its 25 groups one a process (100,021
+  checks, 0 failed), the tests naming ADR 008x five times, and the whole suite once in one process as CI does - that
+  run passed the crash point and was past 3,300 of its 3,801 tests with no failure when the release was published.
+- **Ruled out, by reading the changes between the passing and the crashing trees:** no `Editor` exists yet at that
+  test (rounds 563 / 564's session); that binary holds no graphics-card code (round 565's); round 572's depth writes
+  are not on the path, and nothing reached before test 645 differs between #468 and #472 (round 562 / 572's); every
+  branch Pass 26 added runs only for a skinned mesh. So it is taken for a rare fault older than Pass 28.
+- **Suspect:** the built-in job pool (`src/core/jobs.cpp`, the build without oneTBB): a `parallel_for` started from
+  inside a worker of another `parallel_for`, as `bake_mesh_maps` may do.
+- **Next step:** catch it under a debugger - `cdb -g -G -o dist\windows\blendity_tests.exe` on the dependency-free
+  exe, looping the modeling and render groups in one process, with `.dump /ma` at the fault (do not turn on Windows
+  Error Reporting's LocalDumps: that is a system setting); and read `jobs.cpp`'s built-in pool for what a nested
+  `parallel_for` from a worker does with the pool's shared state.
+- **Done:** the fault caught and explained, a test that forces the nesting, and the dependency-free Windows suite in
+  one process 200 times clean.
 
 ## Product follow-ups
 

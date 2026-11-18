@@ -36,6 +36,11 @@ code. The 0.x versions were pre-releases; the entries below are the whole histor
   says what to click). Macs with an Intel processor are not supported.
 - The PDFs in `docs/` still carry 0.13.0 on their title pages; the release's own PDFs are built from the 1.0.0
   sources.
+- Seen once on CI (the dependency-free Windows build, run 44354841677, on #472's tree): the test program crashed
+  after 644 tests of the suite run as one process, where "smart materials (ADR 0082)" and its mesh-map bake come next,
+  after the whole modeling group in the same process. Not reproduced in about 40 local runs by three sessions. The
+  cause is unknown; the suspect is the built-in job pool's nested `parallel_for` (`src/core/jobs.cpp`). The facts,
+  what was ruled out and the next step are in `docs/handoff/OPEN-WORK.md`.
 - The other open follow-ups are listed in round 574's entry, below.
 
 **Checked:** the full unit suite again on builds of this tree, which report 1.0.0 (no 0.13.0 string is left in the programs), every group in its own process with its own test and prefs folder: Windows with Blender's libraries 106,864 checks in 3,801 tests (the card groups on the card: gpu 1,655, splats_raster 276, splats_gpu 3,917, splats_trace 3,996), Linux dependency-free (WSL) 100,060 in 3,801; 25 groups each, 0 failed - the updater's and the manual's tests among them (assets, render, editor). The dependency-free Windows build ran on the tree before the version changed (round 574: 100,021, 0 failed); on this tree it is CI's. The 1.0.0 `Blendity.exe` starts headless in a scratch project and writes its picture. The suites ran before rounds 575 and 577 were merged in (new documents, pictures and the README: no code). `tools/sweep_commands.py --check`, `tools/test_coverage_map.py --check`, both HCI audits, the shard table, `make_books.py --check-cited` and `changelog.py check` pass. Code review: approve (rounds 574 and 578), its notes taken.
