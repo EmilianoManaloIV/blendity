@@ -2,7 +2,7 @@
 
 - Asked: correct the five findings from the 1.0.0 documentation audit and document how assigned work reaches final owner review.
 - Changed: the Architecture module map wraps the Blender shader path and the User Guide names the double-chevron overflow button. The README points to the released manuals and the architecture guide distinguishes the PR citation check from release regeneration. The standing workflow records the owner assignment before implementation and routes owner-reserved decisions through the hub. Explicit project-wide workflow changes carry forward to future sessions within the scope set by the owner. The hub updates affected briefs and tooling, and each role cites its evidence.
-- Checked: the Windows build and release workflows both request MSVC 14.51. Both current-book URLs resolved to their 1.0.0 attachments. The committed citation check passed with 182 references. Regeneration checked 184 references and both books compiled with LuaLaTeX and Biber. On physical page 14 of Architecture the complete path fits its column. On physical page 11 of the User Guide the button name renders and extracts as text.
+- Checked: the Windows build and release workflows both request MSVC 14.51. Both current-book URLs resolved to their 1.0.0 attachments. The committed citation check passed with 182 references. After joining the Workshop changes, the parser accepted the Steamworks lesson citation with Valve attribution. Release regeneration checked 185 references and both books compiled with LuaLaTeX and Biber. On physical page 14 of Architecture the complete path fits its column. On physical page 11 of the User Guide the button name renders and extracts as text.
 
 <!-- README -->
 replace: [User Guide](docs/Blendity-User-Guide.pdf)

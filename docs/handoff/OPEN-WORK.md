@@ -82,6 +82,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   Mass test is removed; playback by hand unchanged.
 
 ### 9. Make `sweep_commands`' pick stable (S)
+- **Verified:** The explicit inventory retains all 203 runnable verbs and 32 skips on both test scenes. A missing verb fails the local check and names the verb. [PR 477](https://github.com/EmilianoManaloIV/blendity/pull/477)
 - **Evidence:** three red Linux jobs (#443, #462, #466). `tools/sweep_commands.py` `examples()` picks, per verb,
   "the shortest invocation with arguments the tests run", so any new test line can change the committed
   `stress/sweep_commands.inc`; CI's check step then exits 1 with no failing test.
@@ -154,12 +155,14 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Round 582 compatibility status (2026-11-19).** The 14.52 candidate compiled and passed quick stress under
   release defaults, with precise floating-point mode, and with link-time code generation disabled. The full
   Windows unit suite failed in all three runs. The cause remains unresolved. [Task 0564 and CI results](../tasks/0564-msvc-1452.md)
+- **Unresolved.** The 14.52 full suite failed in each tested configuration. [PR 485](https://github.com/EmilianoManaloIV/blendity/pull/485)
 - **Acceptance remains open.** Keep Windows CI and release builds pinned to 14.51 until the original failures
   are explained and addressed and the full Windows unit suite and quick stress both pass on the intended 14.52 release build.
 
 ## Product follow-ups
 
 ### 14. Corner colour layers are dropped by most mesh operators (M-L)
+- **Verified:** Mesh edits carry per-corner paint, including across seams. The modeling checks cover Boolean difference, remesh, Join, Separate and modifier application. [PR 480](https://github.com/EmilianoManaloIV/blendity/pull/480)
 - **Evidence:** ADR 0152 and round 545 (`docs/tasks/0525-vertex-paint.md`): point colours follow vertex
   groups through edits; a Corner layer is dropped whole by every operator that rebuilds corners (the Edit Mode
   tools, the modifiers, Join, Separate), and the Inspector says when one was dropped.

@@ -34,7 +34,30 @@ The closeout was applied to the render-fix stack at `3e5f5a65` ([PR 490](https:/
 
 All 60 book and image inputs on this candidate matched the compiled inputs, including a fresh generation of the bibliography and three indices with `tools/make_books.py`. Text comparisons normalized line endings. The 69-page Architecture and 76-page User Guide PDFs and their Poppler page renders are recorded under the round's scratch directory `build/docs598/` in the original worktree. The committed-key and fragment checks passed on this stack. The verified candidate contains 15 fragments. At preparation time, `origin/main` at `4f880bb3` contained zero numbered fragments, so the shared-document fold stays separate until eligible merges reach main.
 
-## Evidence still needed for pass closeout
-- Record the joined outcome for Edit Mode first-frame work (0571), Lighting status verification (0574) and Textures performance (0576) from their final revisions and run receipts. For the moving-object experiment (0577), retain the withdrawal and measured 3.25% median improvement against its 5% target when its reviewed report joins the stack.
-- Keep Windows journey timings and hosted ARM64 results distinct from physical Pi 5 measurements. The physical board remains unmeasured. [Pi 5 verification](https://github.com/EmilianoManaloIV/blendity/pull/487)
-- Record the Workshop import verification on the final joined revision (0582–0588), including fresh app/test objects, the six relevant test groups and the detached-process smoke result. Use the hub's reviewed outcomes and final CI head to reconcile the affected docs and recheck fragment eligibility.
+## Pass outcomes on the Workshop stack
+
+Round 598 merged Workshop publication head `899fca32` in `f5dfb4ef`. The original audit and render-fix verification above describe their respective revisions.
+
+| Work | Verified outcome and limits |
+| --- | --- |
+| Handoff follow-ups | Items 9 (stable command inventory) and 14 (face-corner paint) met their acceptance checks. Item 19 remains open: MSVC 14.52 failed the full suite in all three tested configurations. [PR 477](https://github.com/EmilianoManaloIV/blendity/pull/477), [PR 480](https://github.com/EmilianoManaloIV/blendity/pull/480), [PR 485](https://github.com/EmilianoManaloIV/blendity/pull/485) |
+| Lighting status, 0574 | Narrow panes show the update mode and hover reveals the complete status. The twelve Windows HCI configurations matched baseline. The hosted Linux suite passed 125,311 checks. [Task 0574](0574-lighting-status-labels.md) |
+| Textures first open, 0576 | In three paired Windows runs with 2,000 already-loaded procedural textures, first open went from 281.0, 291.7 and 294.7 ms to 77.7, 79.7 and 91.2 ms. All three met the 100 ms budget. [Measurement conditions and controls](0576-textures-window.md) |
+| Moving-object experiment, 0577 | The 50,000-cube drag median went from 221.7 to 214.5 ms. The 3.25% gain missed the 5% adoption threshold. The candidate was withdrawn. [Task 0577](0577-moving-object.md) |
+| Workshop, 0582–0588 | Fresh Windows and hosted Linux builds each passed 6,160 focused checks, including detached-source and repeated-import checks. The three real character-and-map scenes retained their renders on Windows after detachment. The verification record describes the missing Alyx base-game textures and other asset limits. [Task 0588](0588-workshop-verification.md), [Linux run 44608047654](https://github.com/EmilianoManaloIV/blendity/actions/runs/44608047654) |
+| Pi 5, 0578 | Windows journey timings and hosted ARM64 results have separate records. Physical Pi 5 responsiveness and memory headroom remain unmeasured. [Task 0578](0578-pi5-performance.md) |
+
+The Edit Mode first-frame outcome (0571) awaits its quick-stress receipt and reviewed report. [Run 44609521187](https://github.com/EmilianoManaloIV/blendity/actions/runs/44609521187)
+
+### Final manual build
+
+The normal merge of [Workshop PR 491](https://github.com/EmilianoManaloIV/blendity/pull/491) at `1e7bdb28` adds five producer status records to the first Workshop merge. Both revisions have identical book inputs. Release regeneration initially failed on the Workshop lesson's Steamworks reference. The manual parser in `tools/make_books.py` now records that source with Valve attribution and its supplied URL.
+
+The project commands `--bib --check-cited` and `--pdf` regenerated and checked 185/185 references and compiled both books with LuaLaTeX and Biber. The committed snapshot passed `--check-cited` at 182/182. Poppler verified the complete shader path on Architecture page 14, the searchable overflow label on User Guide page 11 and the Workshop instructions on pages 28 and 42 respectively. The lesson source appears on User Guide page 66. The release assets and tracked historical outputs follow the snapshot policy in ADR 0104.
+
+| Compiled manual | Physical pages | SHA-256 |
+| --- | ---: | --- |
+| Architecture | 69 | `fa1a1037791094fcff927108991377a6b479fcde511abed5aefceebbbceadda8` |
+| User Guide | 77 | `231414ec5128bcb949d55c681f48c732d0ca6823ce45ed53acd2195b4afb1b0e` |
+
+The build log, PDFs, page renders and extraction report are in the original round worktree under `build/docs598/joined-workshop/`. All 25 fragments passed the applicability check. Main at `4f880bb3` contains zero numbered fragments eligible for folding.
