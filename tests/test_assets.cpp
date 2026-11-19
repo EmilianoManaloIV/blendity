@@ -15973,6 +15973,246 @@ static void tests_round507_te() {
   });
 }
 
+/* Round 594 (task 0576): the Textures browser's first-open discovery, filtering and selection. */
+namespace r594 {
+namespace stdfs = std::filesystem;
+
+struct Project {
+  std::string path, previous_root, previous_project;
+  explicit Project(const char *name)
+      : path(fs::join(test_dir(), name)), previous_root(asset_root()), previous_project(std::getenv("BLENDITY_PROJECT")) {
+    set_env("BLENDITY_PROJECT", path);
+  }
+  ~Project() {
+    set_env("BLENDITY_PROJECT", previous_project);
+    set_asset_root(previous_root);
+    std::error_code ec;
+    stdfs::remove_all(stdfs::u8path(path), ec);
+  }
+};
+
+static void init(Editor &ed) {
+  ed.init_headless(1600, 1200);
+  ed.set_render_cache_verify(false);
+  ed.command("shading wire");
+  ed.record_buttons_for_test(true);
+  ed.step_frame_headless();
+}
+
+static void open(Editor &ed) {
+  ed.command("window Textures");
+  r34_steps(ed, 2);
+  // Give the selected texture's toolbar enough room for Search beside the editing controls.
+  ed.command(strprintf("layout H(0.42,L(%d:0),L(%d:0))", (int)WindowKind::Scene, (int)WindowKind::Textures));
+  r34_steps(ed, 2);
+}
+
+static bool write(const std::string &path, ProceduralTexture &t) {
+  const std::string file = resolve_asset_path(path);
+  return fs::make_dirs(fs::parent(file)) && fs::write_file(file, save_texture_text(t));
+}
+
+static Recti thumb(Editor &ed, const std::string &name) {
+  return ed.texture_ui_rect_for_test("thumb:" + name);
+}
+
+static bool click(Editor &ed, Recti r) {
+  if (r.empty()) return false;
+  r34_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+  ed.step_frame_headless();
+  return true;
+}
+
+static void type(Editor &ed, const std::string &value) {
+  std::vector<platform::Event> input;
+  for (unsigned char ch : value) {
+    platform::Event event;
+    event.type = R34ET::Text;
+    event.codepoint = ch;
+    input.push_back(event);
+  }
+  ed.step_frame_headless(input);
+  platform::Event enter;
+  enter.type = R34ET::KeyDown;
+  enter.key = platform::KEY_ENTER;
+  ed.step_frame_headless({enter});
+  enter.type = R34ET::KeyUp;
+  ed.step_frame_headless({enter});
+}
+
+static Recti search(const Editor &ed) {
+  for (const auto &control : ed.ui_for_test().controls)
+    if (control.label == "Search textures") return control.r.intersect(control.clip);
+  return {};
+}
+
+static void wheel(Editor &ed, const Recti &over, float distance) {
+  const int x = over.x + over.w / 2, y = over.y + over.w / 2;
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+  platform::Event event = r34_mouse(R34ET::Wheel, x, y);
+  event.wheel_y = distance;
+  ed.step_frame_headless({event});
+}
+
+static std::vector<uint32_t> thumbnail_center(const Editor &ed, const Recti &r) {
+  if (r.empty()) return {};
+  const Image &fb = ed.framebuffer();
+  const Recti crop{r.x + r.w / 2 - 4, r.y + r.w / 2 - 4, 8, 8};
+  return r34_crop(ed, crop.intersect({0, 0, fb.width, fb.height}));
+}
+}  // namespace r594
+
+static void tests_round594() {
+  test("Textures window (round 594): nested paths stay sorted, scrolling reveals the right thumbnail, and a case-insensitive search keeps the same texture open for editing", [] {
+    r594::Project project("r594-texture-browser");
+    Editor ed;
+    r594::init(ed);
+    const std::string first_path = "Assets/Library/01/ZuluFile.ptex", next_path = "Assets/Library/02/AlphaFile.PTEX";
+    const std::string last_path = "Assets/Library/04/WheelEnd.ptex";
+    ProceduralTexture blank;
+    blank.width = blank.height = 64;
+    blank.name = "Linen Blue";  // a loaded display name differs from its filename
+    ProceduralTexture bricks = blank;
+    CHECK(bricks.add("Brick") && r594::write(last_path, bricks));
+    CHECK(r594::write(next_path, blank));
+    const ProceduralTexturePtr first = create_texture_asset(blank, first_path);
+    CHECK(first);
+    for (int i = 0; i < 48; i++) CHECK(r594::write(strprintf("Assets/Library/03/Fill%02d.ptex", i), blank));
+    r594::open(ed);
+
+    const Recti a = r594::thumb(ed, "Linen Blue"), b = r594::thumb(ed, "AlphaFile");
+    CHECK(ed.texture_count_shown_for_test() == 51);
+    CHECK(!a.empty() && !b.empty() && (a.y < b.y || (a.y == b.y && a.x < b.x)));
+    const auto linen_pixels = r594::thumbnail_center(ed, a);
+    CHECK(linen_pixels.size() == 64);
+    CHECK(r594::click(ed, a));
+    CHECK(first && ed.texture_selected_for_test() == first && first->asset_path == first_path);
+
+    const Recti last_before = r594::thumb(ed, "WheelEnd");
+    CHECK(last_before.y > ed.texture_ui_rect_for_test("preview").y);
+    r594::wheel(ed, r594::thumb(ed, "Linen Blue"), -40.0f);
+    Recti last;
+    CHECK(ed.button_rect_for_test("tex:WheelEnd", last) && last.y < last_before.y);
+    const auto bricks_pixels = r594::thumbnail_center(ed, last);
+    CHECK(bricks_pixels.size() == 64 && bricks_pixels != linen_pixels);
+    CHECK(ed.texture_selected_for_test() == first);
+    CHECK(r594::click(ed, last));
+    const ProceduralTexturePtr selected = ed.texture_selected_for_test();
+    CHECK(selected && selected->asset_path == last_path && selected == texture_asset(last_path));
+
+    CHECK(r594::click(ed, r594::search(ed)));
+    r594::type(ed, "lInEn");
+    CHECK(ed.texture_count_shown_for_test() == 1 && r594::thumb(ed, "WheelEnd").empty());
+    const Recti filtered = r594::thumb(ed, "Linen Blue");
+    CHECK(!filtered.empty() && r594::thumbnail_center(ed, filtered) == linen_pixels);
+    CHECK(ed.texture_selected_for_test() == selected);
+    Recti size;
+    CHECK(ed.button_rect_for_test("field:Physical Size", size) && r594::click(ed, size));
+    r594::type(ed, "7");
+    CHECK(selected && selected->physical_size == 7.0f);
+    CHECK(first && first->physical_size == 1.0f);
+  });
+
+  test("Textures window (round 594): linked files and directories preserve their existing asset paths", [] {
+    const std::string outside = fs::join(fs::normalize(test_dir()), "r594-external-textures");
+    const std::string outside_file = fs::join(outside, "R594External.ptex");
+    struct RemoveSource {
+      const std::string &file, &folder;
+      ~RemoveSource() {
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(file), ec);
+        std::filesystem::remove(std::filesystem::u8path(folder), ec);
+      }
+    } remove_source{outside_file, outside};
+    r594::Project project("r594-texture-aliases");
+    Editor ed;
+    r594::init(ed);
+    const std::string canonical = "TextureSources/R594LinkedTile.ptex";
+    const std::string source_folder = "TextureSources/Folder";
+    const std::string from_folder = source_folder + "/R594LinkedBrick.ptex";
+    const std::string outside_link = "Assets/Links/OutsideAlias";
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(canonical, src) && r594::write(from_folder, src));
+    CHECK(r594::write(outside_file, src));
+    CHECK(fs::make_dirs(resolve_asset_path("Assets/Links")));
+    auto path = [](const std::string &rel) { return std::filesystem::u8path(resolve_asset_path(rel)); };
+    std::error_code file_error, dir_error, missing_error, outside_error;
+    std::filesystem::create_symlink(path(canonical), path("Assets/Links/FileAlias.ptex"), file_error);
+    std::filesystem::create_directory_symlink(path(source_folder), path("Assets/Links/FolderAlias"), dir_error);
+    std::filesystem::create_symlink(path("TextureSources/Absent.ptex"), path("Assets/Links/MissingAlias.ptex"), missing_error);
+    std::filesystem::create_directory_symlink(path(outside), path(outside_link), outside_error);
+#ifndef _WIN32
+    CHECK(!file_error && !dir_error && !missing_error && !outside_error);
+#endif
+    if (file_error || dir_error || missing_error || outside_error)
+      std::printf("    link creation: file %s, directory %s, dangling %s, outside project %s\n",
+                  file_error.message().c_str(), dir_error.message().c_str(), missing_error.message().c_str(), outside_error.message().c_str());
+    r594::open(ed);
+    CHECK(ed.texture_count_shown_for_test() == size_t(!file_error) + size_t(!dir_error) + size_t(!outside_error));
+    CHECK(r594::thumb(ed, "FileAlias").empty() && r594::thumb(ed, "MissingAlias").empty());
+    auto check_link = [&](const std::string &name, const std::string &expected_path) {
+      CHECK(r594::click(ed, r594::thumb(ed, name)));
+      const ProceduralTexturePtr t = ed.texture_selected_for_test();
+      CHECK(t && t->asset_path == expected_path && t == texture_asset(expected_path));
+    };
+    if (!file_error) check_link("R594LinkedTile", canonical);
+    if (!dir_error) check_link("R594LinkedBrick", from_folder);
+    if (!outside_error) check_link("R594External", resolve_asset_path(outside_link + "/R594External.ptex"));
+  });
+
+  test("Textures window (round 594): missing and unreadable nested assets have no thumbnail, and deleting an assigned texture leaves the material's map missing", [] {
+    r594::Project project("r594-texture-missing");
+    Editor ed;
+    r594::init(ed);
+    const std::string root = "Assets/Library/Nested/";
+    const std::string deleted = root + "R594Removed.ptex", survivor = root + "R594Survivor.ptex";
+    const std::string malformed = root + "R594Malformed.ptex", missing = root + "R594Missing.ptex";
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(deleted, src) && r594::write(survivor, src));
+    CHECK(fs::write_file(resolve_asset_path(malformed), "not a texture descriptor\n"));
+#ifndef _WIN32
+    const std::string blocked = root + "R594Blocked.ptex";
+    CHECK(r594::write(blocked, src));
+    std::error_code ec;
+    std::filesystem::permissions(std::filesystem::u8path(resolve_asset_path(blocked)), std::filesystem::perms::none, ec);
+    std::string unused;
+    const bool permission_blocks_read = !fs::read_file(resolve_asset_path(blocked), unused);
+    if (!permission_blocks_read) std::printf("    unreadable file check skipped: the current process can still read the file\n");
+#endif
+    r594::open(ed);
+    CHECK(r594::thumb(ed, "R594Malformed").empty() && r594::thumb(ed, "R594Missing").empty());
+    CHECK(!resolve_texture_ref(TextureRef{malformed + "#albedo", false}));
+    CHECK(!resolve_texture_ref(TextureRef{missing + "#albedo", false}));
+#ifndef _WIN32
+    if (permission_blocks_read) {
+      CHECK(r594::thumb(ed, "R594Blocked").empty());
+      CHECK(!resolve_texture_ref(TextureRef{blocked + "#albedo", false}));
+    }
+#endif
+    const auto before = r594::thumbnail_center(ed, r594::thumb(ed, "R594Survivor"));
+    CHECK(before.size() == 64);
+    CHECK(r594::click(ed, r594::thumb(ed, "R594Removed")));
+    const auto chosen = ed.texture_selected_for_test();
+    CHECK(chosen && chosen->asset_path == deleted);
+    ed.command("select Cube");
+    ed.step_frame_headless();
+    CHECK(r594::click(ed, ed.texture_ui_rect_for_test("assign")));
+    const std::string ref = deleted + "#albedo";
+    const GameObject *cube = ed.scene().find_by_name("Cube");
+    const MeshRenderer *renderer = cube ? cube->get<MeshRenderer>() : nullptr;
+    const MaterialPtr used = renderer && !renderer->materials.empty() ? renderer->materials.front() : nullptr;
+    CHECK(used && used->base_map.path == ref && resolve_texture_ref(used->base_map));
+    CHECK(r594::click(ed, ed.texture_ui_rect_for_test("delete")));
+    CHECK(r594::click(ed, ed.confirm_rect_for_test("tex_delete")));
+    CHECK(!fs::exists(resolve_asset_path(deleted)) && !ed.texture_selected_for_test());
+    CHECK(r594::thumb(ed, "R594Removed").empty() && !texture_asset(deleted));
+    CHECK(used && used->base_map.path == ref && !resolve_texture_ref(used->base_map));
+    CHECK(r594::thumbnail_center(ed, r594::thumb(ed, "R594Survivor")) == before);
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -16039,4 +16279,5 @@ void run_assets_tests() {
   tests_round507();
   tests_round507_import();
   tests_round507_te();
+  tests_round594();
 }
