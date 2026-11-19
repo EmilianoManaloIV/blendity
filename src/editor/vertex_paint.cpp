@@ -423,7 +423,10 @@ void Editor::carry_colors(MeshPtr &mesh, const Mesh *before, uint64_t obj) {
   for (const ColorAttribute &c : mesh->color_attributes) unfit = unfit || !mesh->color_fits(c);
   if (!unfit && mesh->dropped_colors.empty()) return;
   Mesh &m = *mesh_make_mutable(mesh);
-  if (before) meshops::transfer_point_colors(*before, m, false);
+  if (before) {
+    meshops::transfer_corner_colors(*before, m);
+    meshops::transfer_point_colors(*before, m, false);
+  }
   else m.prune_colors();
   if (!m.dropped_colors.empty()) {
     std::string names;

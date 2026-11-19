@@ -397,7 +397,7 @@ bool dynamesh(const Mesh &in, int resolution, int smooth, Mesh &out, DynaMeshSta
   for (size_t f = 0; f <= nf; f++) out.face_offsets[f] = (uint32_t)(f * 4);
   if (in.mask_fits()) out.sculpt_mask = std::move(nets.mask);  // (interpolated at the crossings: exact where the surface was)
   if (!in.vertex_groups.empty()) transfer_vertex_groups(in, out);
-  carry_colors_rebuilt(in, out);  // (task 0525: Point colours by position, as the groups; Corner ones reported)
+  carry_colors_rebuilt(in, out);  // Point colours follow the vertex map, Corner colours sample a source triangle per face.
   out.touch();
   if (stats) {
     for (int a = 0; a < 3; a++) stats->cells[a] = grid.g[a] - 1;

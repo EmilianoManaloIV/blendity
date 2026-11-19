@@ -3,6 +3,7 @@
 // the brush with a detail size) on Blendity's arrays: a vertex-to-faces table kept up to date, new triangles appended,
 // removed faces tombstoned (their corners one vertex: no area) and compacted away at the stroke's end.
 #include "dyntopo.h"
+#include "mesh_internal.h"
 
 #include "../core/core.h"
 
@@ -12,7 +13,7 @@
 
 namespace bl::meshops {
 
-Dyntopo::Dyntopo(Mesh &m) : m_(m) {
+Dyntopo::Dyntopo(Mesh &m) : m_(m), corner_layers_(valid_corner_layers(m)) {
   vf_.assign(m.vert_count(), {});
   dead_.assign(m.face_count(), 0);
   for (uint32_t f = 0; f < (uint32_t)m.face_count(); f++)
@@ -53,6 +54,7 @@ void Dyntopo::kill_face(size_t f) {
     list.erase(std::remove(list.begin(), list.end(), (uint32_t)f), list.end());
   }
   for (uint32_t c = b; c < e; c++) m_.corner_verts[c] = m_.corner_verts[b];
+  for (size_t i : corner_layers_) std::fill_n(m_.color_attributes[i].corners.begin() + b, e - b, m_.corner_verts[b]);
   dead_[f] = 1;
   tomb_++;
   faces_changed_ = true;
@@ -71,6 +73,8 @@ void Dyntopo::triangulate_face(size_t f) {
   for (size_t t = 0; t + 2 < local.size(); t += 3) {
     const Vec2 uv[3] = {uvs.empty() ? Vec2() : uvs[local[t]], uvs.empty() ? Vec2() : uvs[local[t + 1]], uvs.empty() ? Vec2() : uvs[local[t + 2]]};
     add_tri(verts[local[t]], verts[local[t + 1]], verts[local[t + 2]], f, uvs.empty() ? nullptr : uv);
+    const uint32_t corners[]{b+local[t], b+local[t+1], b+local[t+2]};
+    append_corner_copies(m_, corner_layers_, corners, 3);
   }
 }
 
@@ -173,8 +177,16 @@ uint32_t Dyntopo::split_edge(uint32_t a, uint32_t b) {
       if (!((p == a && q == b) || (p == b && q == a))) continue;
       const Vec2 uvm = (uv[s] + uv[(s + 1) % 3]) * 0.5f;
       const Vec2 uv1[3] = {uv[s], uvm, uv[(s + 2) % 3]}, uv2[3] = {uvm, uv[(s + 1) % 3], uv[(s + 2) % 3]};
+      const uint32_t cp = base+s, cq = base+(s+1)%3, cr = base+(s+2)%3;
+      const uint32_t first[]{cp,cp,cr}, second[]{cq,cq,cr};
       add_tri(p, v, r, f, m_.uvs.empty() ? nullptr : uv1);
+      append_corner_copies(m_, corner_layers_, first, 3);
       add_tri(v, q, r, f, m_.uvs.empty() ? nullptr : uv2);
+      append_corner_copies(m_, corner_layers_, second, 3);
+      for (size_t idx : corner_layers_) {
+        auto &rgba = m_.color_attributes[idx].rgba;
+        rgba[rgba.size()-5] = rgba[rgba.size()-3] = (rgba[cp] + rgba[cq]) * 0.5f;
+      }
       break;
     }
   }
@@ -250,7 +262,10 @@ bool Dyntopo::collapse_edge(uint32_t a, uint32_t b) {
   rekey_edges(a, b, a);
   for (uint32_t f : std::vector<uint32_t>(vf_[b])) {
     for (uint32_t c = m_.face_offsets[f]; c < m_.face_offsets[f + 1]; c++)
-      if (m_.corner_verts[c] == b) m_.corner_verts[c] = a;
+      if (m_.corner_verts[c] == b) {
+        m_.corner_verts[c] = a;
+        for (size_t i : corner_layers_) m_.color_attributes[i].corners[c] = a;
+      }
     vf_[a].push_back(f);
   }
   vf_[b].clear();
@@ -383,6 +398,14 @@ void Dyntopo::finish() {
     if (!m.face_material.empty()) mat.push_back(m.face_material[f]);
     if (!m.face_smooth.empty()) sm.push_back(m.face_smooth[f]);
     if (!m.face_group.empty()) grp.push_back(m.face_group[f]);
+  }
+  for (size_t i : corner_layers_) {
+    auto &layer = m.color_attributes[i];
+    size_t dst = 0;
+    for (size_t f = 0; f < m.face_count(); ++f)
+      if (alive(f)) for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f+1]; ++c) layer.rgba[dst++] = layer.rgba[c];
+    layer.rgba.resize(dst);
+    layer.corners = cv;
   }
   m.face_offsets = std::move(offs), m.corner_verts = std::move(cv);
   if (!m.uvs.empty()) m.uvs = std::move(uv);

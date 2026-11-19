@@ -4,7 +4,8 @@
 // collapse. UVs are attributes the simplifier tries to preserve; each
 // material is simplified separately with its border locked, so material
 // regions keep their outlines.
-#include "mesh.h"
+#include "mesh_internal.h"
+#include <cstring>
 
 #include "../deps/meshopt.h"
 
@@ -29,18 +30,42 @@ bool decimate(Mesh &m, float ratio) {
   /* Vertex buffer: one entry per (mesh vertex, UV), as a GPU mesh would have. */
   std::map<std::tuple<uint32_t, float, float>, uint32_t> vid_of;
   std::vector<float> pos, uv;
-  std::vector<uint32_t> orig_vert;
+  const auto layers = valid_corner_layers(m);
+  std::vector<uint32_t> orig_vert, orig_corner;
+  // Separate property vertices across a colour seam even when its UVs coincide.
+  std::map<std::vector<uint32_t>, uint32_t> painted_vertices;
   auto vid = [&](uint32_t corner) {
     uint32_t v = m.corner_verts[corner];
     Vec2 t = has_uv ? m.uvs[corner] : Vec2(0.0f, 0.0f);
-    auto [it, inserted] = vid_of.try_emplace(std::make_tuple(v, t.x, t.y), (uint32_t)orig_vert.size());
+    uint32_t id = (uint32_t)orig_vert.size();
+    bool inserted;
+    if (layers.empty()) {
+      auto entry = vid_of.try_emplace(std::make_tuple(v, t.x, t.y), id);
+      id = entry.first->second;
+      inserted = entry.second;
+    } else {
+      std::vector<uint32_t> key{v};
+      auto append_bits = [&](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        key.push_back(bits);
+      };
+      append_bits(t.x);
+      append_bits(t.y);
+      for (size_t index : layers)
+        for (int k = 0; k < 4; ++k) append_bits(m.color_attributes[index].rgba[corner][k]);
+      auto entry = painted_vertices.try_emplace(std::move(key), id);
+      id = entry.first->second;
+      inserted = entry.second;
+    }
     if (inserted) {
       Vec3 p = m.positions[v];
       pos.insert(pos.end(), {p.x, p.y, p.z});
       uv.insert(uv.end(), {t.x, t.y});
       orig_vert.push_back(v);
+      if (!layers.empty()) orig_corner.push_back(corner);
     }
-    return it->second;
+    return id;
   };
   /* Triangles grouped by material slot. */
   std::map<int, std::vector<uint32_t>> groups;
@@ -57,6 +82,7 @@ bool decimate(Mesh &m, float ratio) {
   out.smooth = m.smooth;
   out.smooth_angle = m.smooth_angle;
   std::vector<uint32_t> new_vert(m.vert_count(), UINT32_MAX);
+  std::vector<uint32_t> corner_source;
   for (auto &[mat, idx] : groups) {
     std::vector<uint32_t> dst(idx.size());
     size_t target = (size_t)(idx.size() / 3 * ratio) * 3;
@@ -70,6 +96,7 @@ bool decimate(Mesh &m, float ratio) {
       Vec2 ft[3];
       for (int j = 0; j < 3; j++) {
         uint32_t v = orig_vert[dst[t + j]];
+        if (!layers.empty()) corner_source.push_back(orig_corner[dst[t+j]]);
         if (new_vert[v] == UINT32_MAX) new_vert[v] = out.add_vert(m.positions[v]);
         fv[j] = new_vert[v];
         ft[j] = {uv[dst[t + j] * 2], uv[dst[t + j] * 2 + 1]};
@@ -100,6 +127,12 @@ bool decimate(Mesh &m, float ratio) {
     out.color_attributes.push_back(std::move(nc));
   }
   if (!m.color_attributes.empty()) {
+    for (size_t index : layers) {
+      const auto &src = m.color_attributes[index];
+      auto layer = out.make_color(src.name, src.domain, {});
+      for (size_t k = 0; k < corner_source.size(); ++k) layer.rgba[k] = src.rgba[corner_source[k]];
+      out.color_attributes.push_back(std::move(layer));
+    }
     note_unkept_colors(m, out);
     auto name_of = [&](int i) { return i >= 0 && i < (int)m.color_attributes.size() ? m.color_attributes[(size_t)i].name : std::string(); };
     out.active_color = out.find_color(name_of(m.active_color));

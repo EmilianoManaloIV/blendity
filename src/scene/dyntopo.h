@@ -49,6 +49,7 @@ class Dyntopo {
   bool boundary_vertex(uint32_t v) const;
   bool masked(uint32_t v) const;
   Mesh &m_;
+  std::vector<size_t> corner_layers_;
   std::vector<std::vector<uint32_t>> vf_;  // (a vertex's live faces)
   std::vector<uint8_t> had_faces_;         // (at the start: a vertex with faces; a loose one stays whatever the stroke does)
   std::vector<uint8_t> dead_;

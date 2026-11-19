@@ -4889,6 +4889,22 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
         if (examples.size() < 60) examples.push_back(strprintf("%s: %s -> %s", cs.name.c_str(), what, bad.c_str()));
       }
     };
+    // Paint each original face a distinct colour, including alpha. Every child corner must still identify its parent.
+    {
+      Mesh painted = base;
+      auto layer = painted.make_color("Corner stress", ColorAttribute::Domain::Corner, {});
+      for (size_t f = 0; f < painted.face_count(); ++f)
+        for (uint32_t k = painted.face_offsets[f]; k < painted.face_offsets[f+1]; ++k) layer.rgba[k] = Vec4(1,0,0,float(f+1));
+      painted.color_attributes.push_back(std::move(layer));
+      const Mesh refined = meshops::subdivide_simple(painted);
+      const int index = refined.find_color("Corner stress");
+      bool ok = index >= 0 && refined.color_fits(refined.color_attributes[(size_t)index]) && refined.corner_count() == painted.corner_count()*4;
+      for (size_t f = 0; ok && f < painted.face_count(); ++f)
+        for (size_t k = size_t(painted.face_offsets[f])*4; k < size_t(painted.face_offsets[f+1])*4; ++k)
+          if (std::fabs(refined.color_attributes[(size_t)index].rgba[k].w-float(f+1)) > 1e-3f) ok = false;
+      ++ops;
+      if (!ok) { ++problems; ++problem_types["subdivided corner colour lost its parent face"]; }
+    }
     for (float w : {0.02f * s, 0.0f, -0.1f * s, 10.0f * s, nan})
       for (int seg : {1, 3}) run("bevel", [&](Mesh &m) { meshops::bevel_modifier(m, w, seg, 30.0f); });
     run("bevel all edges", [&](Mesh &m) { meshops::bevel_modifier(m, 0.01f * s, 2, -1.0f); });

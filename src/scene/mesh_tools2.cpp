@@ -25,7 +25,11 @@ void copy_face(FaceBuilder &fb, const Mesh &m, size_t f, const std::vector<uint3
   std::vector<uint32_t> v(m.face_verts(f), m.face_verts(f) + m.face_size(f));
   if (remap)
     for (uint32_t &x : v) x = (*remap)[x];
-  fb.add(v.data(), v.size(), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+  std::vector<uint32_t> corners;
+  if (remap && !fb.layers.empty()) {
+    for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f+1]; ++k) corners.push_back(k);
+  }
+  fb.add(v.data(), v.size(), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f), f, corners.empty() ? nullptr : corners.data());
 }
 
 Vec2 face_uv_center(const Mesh &m, size_t f) {
@@ -81,7 +85,8 @@ size_t poke_faces(Mesh &m, std::vector<uint8_t> &face_sel, float offset) {
         t[1] = m.uvs[m.face_offsets[f] + (i + 1) % k];
         t[2] = tc;
       }
-      fb.add(tri, 3, fb.has_uv ? t : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.add(tri, 3, fb.has_uv ? t : nullptr, m.material_of(f), m.smooth_of(f), f);
+      fb.face_point(f,fb.cv.size()-1,m.face_offsets[f],1.0f);
       out_sel.push_back(1);
     }
     n++;
@@ -111,7 +116,7 @@ size_t triangulate_faces(Mesh &m, std::vector<uint8_t> &face_sel) {
       Vec2 t[3];
       if (fb.has_uv)
         for (int k = 0; k < 3; k++) t[k] = m.uvs[b0 + local[i + k]];
-      fb.add(tri, 3, fb.has_uv ? t : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.add(tri, 3, fb.has_uv ? t : nullptr, m.material_of(f), m.smooth_of(f), f);
       out_sel.push_back(1);
     }
     n++;
@@ -124,7 +129,7 @@ size_t triangulate_faces(Mesh &m, std::vector<uint8_t> &face_sel) {
 
 size_t tris_to_quads(Mesh &m, std::vector<uint8_t> &face_sel, float max_angle_deg) {
   face_sel.resize(m.face_count(), 0);
-  struct Pair { float score; uint32_t a, b; uint32_t quad[4]; Vec2 uv[4]; };
+  struct Pair { float score; uint32_t a, b; uint32_t quad[4], corners[4]; Vec2 uv[4]; };
   std::vector<Pair> pairs;
   const auto edges = directed_edges(m, &face_sel);
   const float cos_max = std::cos(max_angle_deg * kDeg2Rad);
@@ -157,6 +162,10 @@ size_t tris_to_quads(Mesh &m, std::vector<uint8_t> &face_sel, float max_angle_de
       bool convex = true;
       for (int k = 0; k < 4; k++) convex = convex && dot(cross(q[(k + 1) % 4] - q[k], q[(k + 2) % 4] - q[(k + 1) % 4]), n) > 0;
       if (!convex) continue;
+      p.corners[0] = m.face_offsets[g] + ((uint32_t)gi+2)%3;
+      p.corners[1] = m.face_offsets[g] + (uint32_t)gi;
+      p.corners[2] = m.face_offsets[f] + (i+1)%3;
+      p.corners[3] = m.face_offsets[f] + (i+2)%3;
       if (m.has_uvs()) {
         const uint32_t fb0 = m.face_offsets[f], gb0 = m.face_offsets[g];
         p.uv[0] = m.uvs[fb0 + i];
@@ -189,7 +198,7 @@ size_t tris_to_quads(Mesh &m, std::vector<uint8_t> &face_sel, float max_angle_de
       continue;
     }
     if (pairs[(size_t)k].a != f) continue;  // emitted with its partner
-    fb.add(pairs[(size_t)k].quad, 4, fb.has_uv ? pairs[(size_t)k].uv : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(pairs[(size_t)k].quad, 4, fb.has_uv ? pairs[(size_t)k].uv : nullptr, m.material_of(f), m.smooth_of(f), f, pairs[(size_t)k].corners);
     out_sel.push_back(1);
     n++;
   }
@@ -249,6 +258,7 @@ size_t duplicate_faces(Mesh &m, std::vector<uint8_t> &face_sel) {
 }
 
 size_t split_faces(Mesh &m, std::vector<uint8_t> &face_sel) {
+  const auto layers = valid_corner_layers(m);
   face_sel.resize(m.face_count(), 0);
   std::vector<uint8_t> in_sel(m.vert_count(), 0), in_other(m.vert_count(), 0);
   for (size_t f = 0; f < m.face_count(); f++)
@@ -265,6 +275,7 @@ size_t split_faces(Mesh &m, std::vector<uint8_t> &face_sel) {
   for (size_t f = 0; f < m.face_count(); f++)
     if (face_sel[f])
       for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) m.corner_verts[c] = remap[m.corner_verts[c]];
+  for (size_t i : layers) m.color_attributes[i].corners = m.corner_verts;
   m.touch();
   return n;
 }
@@ -328,7 +339,17 @@ size_t dissolve_faces(Mesh &m, std::vector<uint8_t> &face_sel) {
           for (uint32_t i = 0; i < m.face_size(g); i++) at[m.face_verts(g)[i]] = m.uvs[m.face_offsets[g] + i];
       for (uint32_t v : loop) uv.push_back(at[v]);
     }
-    fb.add(loop.data(), loop.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    std::vector<uint32_t> corners;
+    if (!fb.layers.empty()) {
+      for (size_t i = 0; i < loop.size(); ++i) {
+        const uint32_t a = loop[i], b = loop[(i+1)%loop.size()];
+        const uint32_t source = edges.at(((uint64_t)a << 32) | b);
+        uint32_t k = m.face_offsets[source];
+        while (m.corner_verts[k] != a) ++k;
+        corners.push_back(k);
+      }
+    }
+    fb.add(loop.data(), loop.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f), m.smooth_of(f), f, corners.empty() ? nullptr : corners.data());
     out_sel.push_back(1);
     n++;
   }
@@ -362,7 +383,7 @@ size_t dissolve_vertices(Mesh &m, std::vector<uint8_t> &vert_sel) {
         v.push_back(x);
         if (fb.has_uv) t.push_back(m.uvs[m.face_offsets[f] + i]);
       }
-      if (v.size() >= 3) fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f), m.smooth_of(f));
+      if (v.size() >= 3) fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
     }
     fb.commit(m);
   }
@@ -479,6 +500,7 @@ size_t edge_split(Mesh &m, std::vector<uint8_t> &vert_sel) {
     }
   }
   if (!split) return 0;
+  const auto layers = valid_corner_layers(m);
   std::unordered_map<uint32_t, uint32_t> group_vert;  // root corner -> vertex
   std::vector<uint8_t> taken(m.vert_count(), 0);
   for (size_t c = 0; c < m.corner_count(); c++) {
@@ -496,6 +518,7 @@ size_t edge_split(Mesh &m, std::vector<uint8_t> &vert_sel) {
     }
     m.corner_verts[c] = it->second;
   }
+  for (size_t idx : layers) m.color_attributes[idx].corners = m.corner_verts;
   m.touch();
   return split;
 }

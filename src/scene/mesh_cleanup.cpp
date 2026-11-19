@@ -254,7 +254,7 @@ size_t drop_duplicate_faces(Mesh &m, const std::vector<uint8_t> &in_scope) {
       removed++;
       continue;
     }
-    fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f), f);
   }
   if (!removed) return 0;
   fb.commit(m);
@@ -406,12 +406,12 @@ std::vector<uint32_t> weld_faces_local(Mesh &m, const std::vector<uint32_t> &to)
     const auto it = loops.find(f);
     if (it == loops.end()) {
       remap[f] = (uint32_t)(fb.offs.size() - 1);
-      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f), f);
       continue;
     }
     if (it->second.size() < 3) continue;
     remap[f] = (uint32_t)(fb.offs.size() - 1);
-    fb.add(it->second.data(), it->second.size(), fb.has_uv ? luvs[f].data() : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(it->second.data(), it->second.size(), fb.has_uv ? luvs[f].data() : nullptr, m.material_of(f), m.smooth_of(f), f);
   }
   fb.commit(m);
   return remap;

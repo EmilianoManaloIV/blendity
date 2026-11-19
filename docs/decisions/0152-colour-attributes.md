@@ -34,23 +34,24 @@ Blendity's `Mesh` has no colour data. It does have two ways per-element data alr
      | Subdivision (modifier), Boolean (modifier), Bevel, Screw, Wireframe | interpolated: the modifier stack's carry by position (`run_modifier`: the vertex groups' barycentric transfer map) |
      | Extrude, Loop Cut, Inset, Subdivide edges, Poke, Split, Duplicate, Bevel tool | interpolated: the editor's carry by position at the undo step (`carry_vertex_groups`) |
      | Sculpt Dyntopo (splits, collapses, the stroke's compaction) | interpolated: a new vertex the mean of its edge's ends, a collapse the mean of the two; the loops cost nothing on a mesh without layers (printed by its test) |
-     | Voxel Remesh, Quad Remesh | interpolated by position (`carry_colors_rebuilt`, beside their group transfer); Corner layers reported dropped |
+     | Voxel Remesh, Quad Remesh | interpolated by position (`carry_colors_rebuilt`, beside their group transfer); Corner layers sampled on the nearest source triangle for each new face |
      | Decimate | exact: each kept vertex its own colour (meshopt keeps original vertices) |
      | An edit that adds vertices without carrying a layer, then renumbers (a delete, a weld, Dyntopo's compaction) | the renumbering empties the layer it finds stale (`remap_color_vertices`), so a count coincidence can never make it fit on the wrong vertices; the editor's carry then restores it by position. A layer an operator carried exactly is never resampled (the review of round 545: a by-position resample of every layer at the same count would have left Grab-stroked paint behind) |
      | Boolean *apply* and object-mode Subdivide (they build a new Mesh) | dropped, as their vertex groups are today - a known gap, listed in the changelog |
-   - **Corner layers** carry `corners`, the corner list they belong to, and count only while it equals the mesh's
-     `corner_verts`. Kept exactly by copy-on-write, save / load, undo, winding flips (`reverse_corner_layers`, used by
-     Flip Normals and the exporters) and vertex renumbering (`remove_loose_verts`). The export's Triangulate option
-     averages a Corner layer per vertex before it rebuilds the corners: softened, never dropped. **Dropped whole** by every operator
-     that rebuilds corners (the Edit Mode tools, the modifiers, Join, Separate) - even one that ends with the same
-     corner count, which a size check alone would have let through onto the wrong corners. Carrying them through
-     `FaceBuilder` and interpolating them as the UVs are is the follow-up.
-   - `sync_attributes` (the operators' common tidy-up) drops a Corner layer that no longer matches; it leaves a Point
-     layer of the wrong size for the carry by position to mend (dropping it there would lose it before the carry ran).
-     Readers (the Scene view, the exporters) only ever read a layer that fits.
-   - **Point is the default** (the hub, 2026-11-16): entering Vertex Paint adds a Point layer, and New Point Layer is
-     the first button. A Corner layer comes only from New Corner Layer (or an importer, round 545b), because today
-     only Point layers survive the common edits.
+   - **Corner layers** carry a reference copy of their corner-vertex list. Readers check the full list and length before using RGBA. An operator that rebuilds topology writes the new signature after transferring the values. Round 584 uses each output corner's source face, independently of UVs.
+     | Operator | Corner colours |
+     |---|---|
+     | Copy, undo, surviving faces, winding flips, vertex renumbering, Split, Duplicate | Exact values in output face order. |
+     | Delete, Dissolve, Merge, Triangulate, Fill | Surviving corners copy their source. A merged face takes each boundary corner from the face on its outgoing edge. A generated boundary uses its adjacent face. A corner with no painted source starts opaque white. |
+     | Mirror, Array, radial Array, Solidify | Copies follow source winding. Each side of a newly generated rim takes its adjacent edge's values. |
+     | Extrude, Inset, Loop Cut, Knife, Poke, grids, face subdivisions | Each new corner interpolates on its own parent face, including alpha. The extruded cap keeps its exact values. |
+     | Simple and Catmull-Clark subdivision, including evaluated and applied results | Per parent face, the child quad spans the original corner, two edge midpoints, and the face mean. |
+     | Bevel, Bridge, Screw, Spin, Follow, Wireframe | Side strips follow the generating edges. Bridge and Bevel blend the two sides across segments. |
+     | Boolean | The solver's source-face ID chooses the operand and face on which to sample. This includes reversed cutter faces. |
+     | Dyntopo, Decimate | Dyntopo splits use each face's edge mean, collapses retain surviving corners and compaction remaps them. Decimate keeps original corner values with separate simplifier vertices at painted seams. |
+     | Voxel Remesh, Quad Remesh | Choose the nearest input triangle to an output face centre once per face. Equal distances prefer the best aligned normal, then source triangle order. Sample each new corner on that triangle with clamped barycentric weights. |
+     | Join, Separate | Join matches by name and domain, fills missing sides with opaque white, and resolves conflicts between domains with the first free numbered suffix. Separate copies each face's corner range and retains active/render choices. |
+   - `sync_attributes` drops stale Corner layers. It leaves a Point layer of the wrong size for the existing vertex-group transfer. Point stays the default domain when entering Vertex Paint.
    - **Never lost silently:** a layer an edit dropped is named in a warning in the log and in a note in the Inspector
      (under the MeshFilter, until OK is pressed), which says Undo brings it back. `Mesh::dropped_colors` carries the
      names from `prune_colors` to the editor's carry at the undo step.
@@ -70,8 +71,7 @@ Blendity's `Mesh` has no colour data. It does have two ways per-element data alr
 
 ## Consequences
 - Every renderer and exporter reads one layer (`render_color`), so a mesh with several layers behaves predictably.
-- Operators that rebuild corners without carrying a Corner layer drop it; the round lists which ones do, and a test
-  pins the drop. Point layers survive every operator that keeps vertex groups.
+- Face-corner transfer preserves a painted seam through topology changes. A malformed layer still follows the dropped-layer reporting path.
 - Memory: 16 bytes per element per layer (float RGBA). Byte storage would quarter it; it can come later behind the
   same struct if large scans need it.
 
