@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "test_common.h"
+#include "../src/core/hash.h"
 
 namespace {
 
@@ -177,6 +178,31 @@ std::vector<Placement> inspect_scene(Scene &scene, size_t imports, bool new_pixe
   return result;
 }
 
+bool relocation_record(const std::string &project, const std::string &path) {
+  const std::string directory = "Assets/Materials/workshop_fixture/.source-assets";
+  if (fs::parent(path) != directory) return false;
+  const std::string name = fs::filename(path);
+  if (name.size() != 18 || (name[0] != 'p' && name[0] != 'f') || name[1] != '_') return false;
+
+  std::string record;
+  if (!fs::read_file(fs::join(project, path), record)) return false;
+  const size_t newline = record.find('\n');
+  if (newline == std::string::npos || record.substr(newline + 1) != map_entry) return false;
+  const std::string key = record.substr(0, newline);
+  if (name != strprintf("%c_%016llx", name[0], (unsigned long long)fnv1a(key.data(), key.size()))) return false;
+  const size_t separator = key.find('\t');
+  if (name[0] == 'p' && separator != std::string::npos) return false;
+  // Both pinned fixtures carry identical bytes for the selected .vmap_c entry.
+  if (name[0] == 'f' && (separator == std::string::npos || key.substr(separator + 1) != "package:7c0d530f:81"))
+    return false;
+
+  const std::string provider = fs::normalize(key.substr(0, separator));
+  const std::string root = fs::parent(project);
+  for (const char *relative : {"Installed-A/WorkshopIdentity.vpk", "Installed-B/WorkshopIdentity.vpk", "Installed-C/MovedCopy.vpk"})
+    if (provider == fs::normalize(fs::join(root, relative))) return true;
+  return false;
+}
+
 std::string asset_inventory(const std::string &project, const std::array<AssetPaths, 2> &assets) {
   std::vector<std::string> inventory;
   std::set<std::string> mat_files, tex_files;
@@ -184,8 +210,10 @@ std::string asset_inventory(const std::string &project, const std::array<AssetPa
   std::error_code ec;
   for (disk::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
     const auto path = it->path().lexically_relative(root).generic_u8string();
-    const bool folder = it->is_directory(ec);
+    const auto kind = it->symlink_status(ec);
     if (ec) break;
+    const bool folder = disk::is_directory(kind);
+    if (disk::is_regular_file(kind) && relocation_record(project, path)) continue;
     inventory.push_back(path + (folder ? "/" : ""));
     CHECK(path.rfind(".blendity-source-import-", 0) != 0);
     if (!folder && path.rfind("Assets/Materials/", 0) == 0 && fs::extension(path) == ".mat") mat_files.insert(path);
@@ -211,6 +239,24 @@ std::string asset_inventory(const std::string &project, const std::array<AssetPa
   std::string text;
   for (const auto &path : inventory) text += path + "\n";
   return text;
+}
+
+void check_inventory(const std::string &project, const std::array<AssetPaths, 2> &assets, const std::string &expected) {
+  const std::string actual = asset_inventory(project, assets);
+  if (actual != expected) {
+    auto paths_in = [](const std::string &inventory) {
+      std::istringstream input(inventory);
+      std::set<std::string> paths;
+      for (std::string path; std::getline(input, path);) paths.insert(std::move(path));
+      return paths;
+    };
+    const auto before = paths_in(expected), after = paths_in(actual);
+    for (const std::string &path : after)
+      if (!before.count(path)) std::printf("    Added project path: %s\n", path.c_str());
+    for (const std::string &path : before)
+      if (!after.count(path)) std::printf("    Removed project path: %s\n", path.c_str());
+  }
+  CHECK(actual == expected);
 }
 
 bool read_baseline(const std::string &path, std::array<AssetPaths, 2> &assets, std::string &inventory) {
@@ -306,7 +352,7 @@ void recheck(Editor &editor, const std::string &phase, const std::string &projec
   const size_t prior_count = phase == "offline-v2" ? 3 : (phase == "repeat-v2" ? 2 : 1);
   const bool prior_v2 = refresh_textures && (phase == "offline-v2" || phase == "repeat-v2");
   const auto prior = inspect_scene(editor.scene(), prior_count, prior_v2, true, &assets);
-  CHECK(asset_inventory(project, assets) == inventory);
+  check_inventory(project, assets, inventory);
   if (!prior_v2) check_png_bytes(baseline, assets);
 
   std::array<uint64_t, 2> live_ids{};
@@ -329,10 +375,10 @@ void recheck(Editor &editor, const std::string &phase, const std::string &projec
       return old.id == now.id && old.region == now.region && old.assets == now.assets;
     }));
   }
-  CHECK(asset_inventory(project, assets) == inventory);
+  check_inventory(project, assets, inventory);
   if (!refresh_textures) check_png_bytes(baseline, assets);
   save(editor, project);
-  CHECK(asset_inventory(project, assets) == inventory);
+  check_inventory(project, assets, inventory);
   if (!refresh_textures) check_png_bytes(baseline, assets);
 }
 
