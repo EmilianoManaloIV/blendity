@@ -3962,6 +3962,140 @@ void run_hci_tests() {
    * this round's HCI conditions (the grouped Shape list, the keyboard, the preview, the refusals' words) and its behaviour. */
   run_blockout_openings_tests();
 
+  test("hci: Lighting shows the current mode first and explains its live bake counts on hover (round 592)", [] {
+    using ET = platform::EventType;
+    for (const bool narrow : {true, false}) {
+      Editor ed;
+      Fix::open(ed, narrow ? 1024 : 1366, narrow ? 640 : 768, narrow ? 1.5f : 1.0f);
+      ed.command("theme Dark");
+      if (narrow) ed.command("window Lighting");
+      else ed.command(strprintf("layout L(%d:0)", (int)WindowKind::Lighting));
+      double now = 100.0;
+      ed.set_clock_for_test(now);
+      Kb::settle(ed);
+
+      const auto &u = ed.ui_for_test();
+      const Recti pane = ed.window_rect_for_test(WindowKind::Lighting);
+      const Image &fb = ed.framebuffer();
+      const Recti screen{0, 0, fb.width, fb.height};
+      Font font;
+      if (u.font.is_builtin()) font.set_pixel_height(u.font.pixel_height());
+      else CHECK(font.load_file(u.font.source(), u.font.pixel_height()));
+
+      // Use the tooltip anchors for coordinates, then check the row's own framebuffer pixels with the pointer away.
+      auto status_rect = [&](const std::string &text) {
+        Recti row{};
+        for (const auto &[rect, help] : u.tooltip_texts)
+          if (help == text) {
+            std::sscanf(rect.c_str(), "%d,%d,%d,%d", &row.x, &row.y, &row.w, &row.h);
+            break;
+          }
+        return row;
+      };
+      auto move_to = [&](const Recti &r) {
+        ed.step_frame_headless({ev(ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      };
+      auto dwell = [&] {
+        ed.set_clock_for_test(now += 1.0);
+        ed.step_frame_headless();
+        return u.tooltip_text_for_test();
+      };
+      auto check_hover = [&](const Recti &row, const std::string &label) {
+        const std::string actual = dwell();
+        if (actual != label) std::printf("    Lighting row %s hover: expected '%s', got '%s'\n", rect_str(row).c_str(), label.c_str(), actual.c_str());
+        CHECK(actual == label);
+      };
+      auto check_status = [&](const std::string &label, const std::string &leading) {
+        ed.step_frame_headless({ev(ET::MouseMove, 0, 0)});
+        const Recti row = status_rect(label);
+        const bool visible = !row.empty() && inside(row, pane) && inside(row, screen);
+        if (!visible) std::printf("    Lighting status '%s' has row %s in pane %s\n", label.c_str(), rect_str(row).c_str(), rect_str(pane).c_str());
+        CHECK(visible);
+        if (!visible) return;
+
+        const bool fits = font.text_width(label) <= row.w;
+        CHECK(narrow || fits);
+        const bool prefix_only = narrow && !fits;
+        const std::string &shown = prefix_only ? leading : label;
+        const int width = prefix_only ? font.text_width(leading) : row.w;
+        CHECK(width <= row.w);
+        if (width > row.w) return;
+        Image expected;
+        expected.resize(width, row.h);
+        Canvas reference;
+        reference.begin(&expected);
+        reference.fill_rect({0, 0, width, row.h}, u.theme.pane);
+        reference.text(font, 0, (row.h - font.line_height()) / 2, shown, u.theme.text_dim);
+        bool matches = true;
+        for (int y = 0; y < row.h && matches; y++) {
+          const auto first = fb.pixels.begin() + (size_t)(row.y + y) * fb.width + row.x;
+          matches = std::equal(first, first + width, expected.row(y));
+        }
+        if (!matches) std::printf("    Lighting row %s did not paint '%s' at %s\n", rect_str(row).c_str(), shown.c_str(), narrow ? "tablet scale" : "wide scale");
+        CHECK(matches);
+        move_to(row);
+        check_hover(row, label);
+      };
+
+      for (const char *control : {"Generate Lighting", "Clear Baked Data"}) {
+        const std::string key = Fix::named(ed, control);
+        CHECK(!key.empty() && Fix::whole(ed, key));
+        const auto &controls = u.controls;
+        const auto found = std::find_if(controls.begin(), controls.end(), [&](const ui::Context::ControlRec &c) {
+          return c.layer == 0 && c.label == key && std::string(c.kind) == "button" && !c.r.empty() &&
+                 inside(c.r, pane) && inside(c.r, c.clip) && inside(c.r, screen);
+        });
+        CHECK(found != controls.end());
+      }
+      const std::string automatic = "Automatic lighting updates (Realtime GI follows every change)";
+      ed.command("lighting mode manual");
+      check_status("Manual lighting updates (lighting stays as last computed until you update)", "Manual");
+      ed.command("lighting mode automatic");
+      check_status(automatic, "Automatic");
+      check_status("Contribute GI: 0 objects   Lightmaps: 0 x 0 px   Baked: 0 objects", "Contribute GI:");
+      ed.command("select Cube");
+      ed.command("set MeshRenderer.ContributeGI true");
+      check_status("Contribute GI: 1 objects   Lightmaps: 0 x 0 px   Baked: 0 objects", "Contribute GI:");
+      const GameObject *cube = ed.selected_object();
+      CHECK(cube != nullptr);
+      if (!cube) continue;
+
+      if (narrow) {
+        // Start with baked GI off so waiting and then finishing the preview do not depend on wall clock time.
+        ed.scene().lighting.texels_per_unit = 4.0f;
+        ed.scene().lighting.max_size = 64;
+        ed.scene().lighting.bounces = 0;
+        ed.scene().lighting.baked_gi = false;
+        ed.command("lighting preview on");
+        ed.step_frame_headless();
+        const Recti row = status_rect(automatic + "  -  Preview: waiting");
+        CHECK(!row.empty());
+        if (!row.empty()) {
+          move_to(row);
+          CHECK(u.tooltip_text_for_test().empty());
+          ed.scene().lighting.baked_gi = true;
+          ed.set_clock_for_test(now += 0.25);
+          Kb::settle(ed);
+          CHECK(ed.preview_samples_for_test() == 256);
+          check_hover(row, automatic + "  -  Preview: 256 samples");
+        }
+        ed.scene().lighting.baked_gi = true;
+        ed.command("lighting preview off");
+      }
+
+      // Fixture data pins the nonzero page count, width and baked object count without generating a bake on disk.
+      LightingData &bake = ed.lighting_data_mut_for_test();
+      bake.scene_key = ed.lightmap_scene_key_for_test();
+      bake.pages.resize(2);
+      for (Lightmap &page : bake.pages) {
+        page.width = page.height = 64;
+        page.texels.assign(64 * 64, Vec3(0.5f));
+      }
+      bake.entries.emplace(cube->id, LightingData::Entry{});
+      check_status("Contribute GI: 1 objects   Lightmaps: 2 x 64 px   Baked: 1 objects", "Contribute GI:");
+    }
+  });
+
   tests_round559_layout();
   tests_round570_adjust_key();
   tests_round573();
