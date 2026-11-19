@@ -96,6 +96,24 @@ void run_blockout_opening_modifiers_tests();
 void run_runner_tests();
 void run_splats_trace_tests();
 void run_splats_gpu_tests();
+#if __has_include("test_source_content.cpp")
+void test_source_content();
+#endif
+#if __has_include("test_source1_model.cpp")
+void test_source1_model();
+#endif
+#if __has_include("test_source1_map.cpp")
+void test_source1_map();
+#endif
+#if __has_include("test_source2_model.cpp")
+void test_source2_model();
+#endif
+#if __has_include("test_source2_map.cpp")
+void test_source2_map();
+#endif
+#if __has_include("test_source_workshop.cpp")
+void test_source_workshop();
+#endif
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -123,6 +141,24 @@ static const TestGroup kTestGroups[] = {
     {"splats_gpu", run_splats_gpu_tests},  // (round 534: Gaussian splats in the card path tracer)
     {"blockout_opening_modifiers", run_blockout_opening_modifiers_tests},
     {"runner", run_runner_tests},  // (round 492: this program's own options)
+#if __has_include("test_source_content.cpp")
+    {"source_content", test_source_content},
+#endif
+#if __has_include("test_source1_model.cpp")
+    {"source1_model", test_source1_model},
+#endif
+#if __has_include("test_source1_map.cpp")
+    {"source1_map", test_source1_map},
+#endif
+#if __has_include("test_source2_model.cpp")
+    {"source2_model", test_source2_model},
+#endif
+#if __has_include("test_source2_map.cpp")
+    {"source2_map", test_source2_map},
+#endif
+#if __has_include("test_source_workshop.cpp")
+    {"source_workshop", test_source_workshop},
+#endif
 };
 
 /* `--group`'s value as names: "a,b,c" (round 492). False, with the offender in `bad`, when a name is no group or is

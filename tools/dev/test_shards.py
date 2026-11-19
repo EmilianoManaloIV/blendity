@@ -36,6 +36,11 @@ SHARDS = [
     ["assets", "livelink", "input", "sculpt", "hci", "vr", "runner", "blockout_modifiers", "blockout_join", "blockout_piece_modifiers", "splats", "splats_raster", "blockout_opening_modifiers"],  # 8.9 (runner: new in round 492, seconds; blockout_modifiers: round 502; blockout_join: round 501; blockout_piece_modifiers: round 514; splats: round 530, seconds; splats_raster: round 532, seconds)
 ]
 
+# These suites arrive on separate branches of the Workshop pass. A source is
+# registered as soon as its test file is present in the current checkout.
+WORKSHOP_GROUPS = ("source_content", "source1_model", "source1_map", "source2_model", "source2_map", "source_workshop")
+SHARDS[-1].extend(g for g in WORKSHOP_GROUPS if os.path.isfile(os.path.join(ROOT, "tests", f"test_{g}.cpp")))
+
 # A pull request needs no native build when every changed path is documentation or agent metadata.
 # The changes job separately validates the known Codex configuration files.
 # Anything else builds - a path this list has never heard of included. Left out on purpose, because the unit tests or
@@ -59,7 +64,8 @@ def groups_in_source(path=TEST_MAIN):
     table = re.search(r"kTestGroups\[\]\s*=\s*\{(.*?)\n\};", text, re.S)
     if not table:
         sys.exit(f"test_shards: no kTestGroups table in {path}")
-    return re.findall(r'\{\s*"([a-z0-9_]+)"\s*,', table.group(1))
+    names = re.findall(r'\{\s*"([a-z0-9_]+)"\s*,', table.group(1))
+    return [g for g in names if g not in WORKSHOP_GROUPS or os.path.isfile(os.path.join(ROOT, "tests", f"test_{g}.cpp"))]
 
 
 def groups_in_binary(binary):
