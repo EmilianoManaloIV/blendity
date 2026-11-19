@@ -13614,6 +13614,27 @@ static void tests_round572() {
   });
 }
 
+static void tests_round582_surface() {
+  test("a baked surface map samples its outer texels and interpolates its scalar and position planes alike", [] {
+    SurfaceMaps maps;
+    maps.w = 3;
+    maps.h = 2;
+    for (int row = 0; row < maps.h; ++row)
+      for (int col = 0; col < maps.w; ++col) {
+        const float sample = (float)(row * maps.w + col);
+        maps.position.emplace_back((float)col, (float)row, sample);
+        maps.curvature.push_back(sample);
+      }
+    CHECK(maps.sample3(maps.position, -1.0f, -1.0f) == Vec3(0, 0, 0));
+    CHECK(maps.sample3(maps.position, 2.0f, 2.0f) == Vec3(2, 1, 5));
+    const Vec3 middle = maps.sample3(maps.position, 1.0f / 3.0f, 0.5f);
+    CHECK(length(middle - Vec3(0.5f, 0.5f, 2.0f)) < 1e-6f);
+    CHECK(std::fabs(maps.sample(maps.curvature, 1.0f / 3.0f, 0.5f) - middle.z) < 1e-6f);
+    maps.position.pop_back();
+    CHECK(maps.sample3(maps.position, 1.0f, 1.0f) == Vec3(0.5f));
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13673,4 +13694,5 @@ void run_render_tests() {
   tests_round554();
   tests_round556();
   tests_round572();
+  tests_round582_surface();
 }

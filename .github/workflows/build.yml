@@ -1,40 +1,13 @@
-name: Windows toolset verification
-on:
-  workflow_dispatch:
-    inputs:
-      source_sha:
-        description: Full commit SHA to build and test
-        default: 4f880bb3bdcc4fdb9e5b79a000334598644ab6bd
-        required: true
-      symbols:
-        description: Retain matching PDBs
-        type: boolean
-        default: true
-      full:
-        description: Unfiltered Windows unit and quick stress suites
-        type: boolean
-        default: false
-      artifact_run_id:
-        description: Reuse a matching symbolized baseline artifact from this workflow run
-        type: string
-        default: ''
-      artifact_suite:
-        description: Suite to run with an existing artifact
-        type: choice
-        options: [unit, stress]
-        default: unit
+name: Windows release compatibility
+on: workflow_dispatch
 permissions:
   contents: read
-  actions: read
 jobs:
   build:
-    if: inputs.artifact_run_id == ''
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_sha }}
       - name: Provision the original MSVC toolset if absent
         run: |
           $finder = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
@@ -53,106 +26,50 @@ jobs:
           $process = Start-Process $package -WindowStyle Hidden -Wait -PassThru -ArgumentList '--quiet','--wait','--norestart','--nocache','--installPath','C:\blendity-buildtools','--add','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','--add','Microsoft.VisualStudio.Component.Windows11SDK.26100'
           if ($process.ExitCode -notin 0,3010) { throw "Build Tools installer exited $($process.ExitCode)" }
           if (!(Test-Path 'C:/blendity-buildtools/VC/Tools/MSVC/14.52.37025/bin/Hostx64/x64/cl.exe')) { throw 'The original compiler is missing after provisioning' }
-      - name: Compile on the selected 14.52 toolset
+      - name: Build with precise floating-point semantics
         env:
           BLENDITY_VCVARS_VER: '14.52.37025'
           BLENDITY_VCVARS_STRICT: '1'
-          BLENDITY_PDB: ${{ inputs.symbols && '1' || '0' }}
-          BLENDITY_FETCH_OPTIX: '1'
           BLENDITY_NO_LIBS: '1'
+          BLENDITY_FETCH_OPTIX: '1'
+          _CL_: '/fp:precise'
         run: |
-          Write-Host "Runner $env:ImageOS $env:ImageVersion"
-          git rev-parse HEAD
-          cmd /d /c "build.bat release all" 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/build.log"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (!(Select-String -Path "$env:RUNNER_TEMP/build.log" -Pattern '^\[blendity\] Toolset: 14\.52\.')) {
-            throw 'The build did not record MSVC 14.52.'
-          }
-          foreach ($name in 'blendity_tests','blendity_stress') {
-            $extensions = @('exe')
-            if ($env:BLENDITY_PDB -eq '1') { $extensions += 'pdb' }
-            foreach ($ext in $extensions) {
-              if (!(Test-Path "dist/windows/$name.$ext")) { throw "Missing $name.$ext" }
-            }
-          }
+          Write-Host "Compiler option override: $env:_CL_"
+          cmd /d /c "build.bat release all"
+          exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-14.52-binaries
-          retention-days: 7
-          path: |
-            dist/windows/*.exe
-            dist/windows/*.pdb
-            dist/windows/shaders
-            dist/windows/licenses
-  test:
-    if: always() && (needs.build.result == 'success' || (inputs.artifact_run_id != '' && needs.build.result == 'skipped'))
+          name: compatibility-build
+          retention-days: 3
+          path: dist/windows/
+  validate:
     runs-on: windows-latest
     needs: build
-    timeout-minutes: 25
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ fromJSON(inputs.artifact_run_id && format('["{0}"]', inputs.artifact_suite) || '["unit","stress"]') }}
+        suite: [unit, stress]
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_sha }}
       - uses: actions/download-artifact@v4
-        if: inputs.artifact_run_id == ''
         with:
-          name: windows-14.52-binaries
+          name: compatibility-build
           path: dist/windows
-      - uses: actions/download-artifact@v4
-        if: inputs.artifact_run_id != ''
-        with:
-          name: windows-14.52-with-symbols
-          run-id: ${{ inputs.artifact_run_id }}
-          github-token: ${{ github.token }}
-          path: dist/windows
-      - name: Run existing tests with matching symbols
+      - name: Run release checks
         env:
           SUITE: ${{ matrix.suite }}
-          FULL_SUITE: ${{ inputs.full && '1' || '0' }}
-          REUSE_ARTIFACT: ${{ inputs.artifact_run_id }}
         run: |
-          $scratch = Join-Path $env:RUNNER_TEMP $env:SUITE
+          $scratch = Join-Path $env:RUNNER_TEMP "verification-$env:SUITE"
           New-Item -ItemType Directory -Path $scratch | Out-Null
           $env:BLENDITY_PROJECT = "$scratch/project"
           $env:BLENDITY_TRASH = "$scratch/trash"
-          $env:BLENDITY_TEST_DIR = "$scratch/test"
+          $env:BLENDITY_TEST_DIR = "$scratch/tests"
           $env:BLENDITY_CACHE_DIR = "$scratch/cache"
-          $env:_NT_SYMBOL_PATH = "$pwd/dist/windows"
+          $env:BLENDITY_PREFS_DIR = "$scratch/prefs"
           if ($env:SUITE -eq 'unit') {
-            if ($env:FULL_SUITE -ne '1') { $env:BLENDITY_TEST_RANGE = '1-650' }
-            $program = "$pwd/dist/windows/blendity_tests.exe"
-            $arguments = @()
+            & dist/windows/blendity_tests.exe
           } else {
-            $program = "$pwd/dist/windows/blendity_stress.exe"
-            $arguments = @('--quick','--out',"$scratch/results")
-            if ($env:FULL_SUITE -ne '1') { $arguments += '--only','modifiers_ngon' }
+            & dist/windows/blendity_stress.exe --quick --out "$scratch/results"
           }
-          $debugger = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
-          if ($env:REUSE_ARTIFACT -and $env:SUITE -eq 'unit' -and (Test-Path $debugger)) {
-            & $debugger -lines -G -c 'sxd -c2 "knL;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
-            if (!(Select-String -Path "$scratch/stack.log" -Pattern '^\d+ checks, 0 failed')) { exit 1 }
-            exit 0
-          }
-          & $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/test.log"
-          $code = $LASTEXITCODE
-          if ($code -ne 0) {
-            if (Test-Path $debugger) {
-              & $debugger -lines -G -c 'sxe -c "knL;.frame /c 2;dv /t head;dv /t he;dv /t f;dv /t g;dx this->np;dx this->nf;dx this->arity;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
-            } elseif (Get-Command lldb -ErrorAction SilentlyContinue) {
-              & lldb --batch --one-line 'run' --one-line-on-crash 'thread backtrace' -- $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
-            } else {
-              Write-Warning 'No CDB or LLDB on this test runner. Matching PDBs are in the build artifact.'
-            }
-          }
-          exit $code
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: windows-14.52-${{ matrix.suite }}
-          path: |
-            ${{ runner.temp }}/${{ matrix.suite }}/*.log
-            ${{ runner.temp }}/${{ matrix.suite }}/results/*.md
+          exit $LASTEXITCODE

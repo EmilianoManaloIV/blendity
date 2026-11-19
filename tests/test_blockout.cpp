@@ -26842,6 +26842,22 @@ static void tests_round500_te() {
 }
 // r500te-end
 
+static void tests_round582_borders() {
+  test("two offset Blockout boxes keep a closed L-shaped outline and faces from both pieces", [] {
+    const std::vector<Piece> pieces = {box_piece(1, {2, 2, 2}, {0, 0, 0}), box_piece(2, {2, 2, 2}, {1, 0, 1})};
+    for (Path path : r476_paths()) {
+      const R476Built result = r476_build(pieces, path);
+      CHECK(result.ok);
+      if (!result.ok) continue;
+      CHECK(r476_sound(result.mesh, r476_name(path)));
+      CHECK(std::fabs(r476_volume(result.mesh) - 14.0) < 0.01);
+      CHECK(result.faces.piece.size() == result.mesh.face_count());
+      for (uint64_t id : {1u, 2u})
+        CHECK(std::find(result.faces.piece.begin(), result.faces.piece.end(), id) != result.faces.piece.end());
+    }
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -26895,4 +26911,5 @@ void run_blockout_tests() {
   tests_round515_te();
   tests_round503();
   tests_round547();
+  tests_round582_borders();
 }
