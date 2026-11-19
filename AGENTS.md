@@ -144,9 +144,9 @@ exception the owner asked for, 2026-11-10 and 2026-11-14; within a round the rol
 task and still run the review.
 
 ### The three roles
-The hub dispatches [`implementer`](.codex/agents/implementer.toml),
+Each routine round uses [`implementer`](.codex/agents/implementer.toml),
 [`test-engineer`](.codex/agents/test-engineer.toml) and
-[`code-reviewer`](.codex/agents/code-reviewer.toml) as separate workers in sequence for routine rounds.
+[`code-reviewer`](.codex/agents/code-reviewer.toml) as separate workers in sequence.
 The tests are decided from the spec before the diff is read. The reviewer discloses any prior contribution.
 The planning task handles difficult architecture, geometry or cross-cutting implementation after the owner's
 approval, then passes the work to independent testing and review. See [worker dispatch](docs/handoff/METHOD.md#codex-worker-dispatch)
@@ -201,7 +201,8 @@ for named selection and explicit dispatch, and [the Claude role files](.claude/a
   soften findings to reach 'approve'."
 
 ### One coordinating task and parallel tasks
-The parent Codex chat is the hub for approvals, stale-worker checks, machine slots, timed windows and PR monitoring.
+The parent Codex chat is the hub. For every approved plan, independent task chats report directly to it by default.
+See [direct task chats](docs/handoff/METHOD.md#direct-task-chats-for-independent-work) for when to assign a workstream lead and how candidates return to the hub.
 - **One coordinating task** talks to the owner, writes the pass's plan, starts the parallel tasks, keeps the
   list of open PRs and what waits on the owner, grants the graphics card and timed windows, rebuilds the owner's
   exe at each publish, and runs one changelog fold at a time. Routine round work goes to the workers.
