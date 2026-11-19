@@ -126,7 +126,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Done:** the `gpu` group is clean in the libraries build on a card, or each remaining difference has a
   justified tolerance written in the test.
 
-### 19. Programs built by MSVC 14.52 crash in mesh code (M; CI builds with 14.51 or not at all meanwhile)
+### 19. Programs built by MSVC 14.52 crash in mesh code (M; hosted builds use 14.51 meanwhile)
 - **What happened:** GitHub Actions run 44354841677 (PR #472's tree `36dd42af`, the dependency-free Windows build) crashed
   in two programs built by one `windows-build`: `blendity_tests.exe`, run as CI runs it - the whole suite in one process -
   with a segmentation fault as test 645 ran ("smart materials (ADR 0082): Worn Steel on a subdivided cube's baked maps
@@ -143,13 +143,12 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   on either crash site's path, and nothing reached before test 645 differs between #468 and #472 (round 562 / 572's);
   every branch Pass 26 added runs only for a skinned mesh. The built-in job pool was suspected before the compiler was
   noticed; the stress crash is on the main thread in a section that runs no bake.
-- **What is in place (task 0561):** `build.bat` prints its compiler in every build and takes `BLENDITY_VCVARS_VER`;
-  CI's `windows-build` and the release's Windows job ask for `14.51` with `BLENDITY_VCVARS_STRICT=1`: on a runner whose
-  image has no 14.51 (the new image) the build stops with a line saying so, and the job is run again until it lands on
-  one that has it. So CI and the installer are never built by 14.52 - at the price of red Windows jobs to re-run, more
-  of them as the new image rolls out, and none passing once the old image is gone. The image's other toolset, 14.44,
-  is no way out: it stops at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` (C2026, a string literal too long
-  for that compiler). The fault itself is still there for anyone who builds with 14.52.
+- **Hosted 14.51 setup (task 0591).** `windows-build` and the release's Windows job select the newest usable x64
+  14.51 patch in the Visual Studio instance chosen by `vswhere`. On a runner that lacks it, the helper adds the
+  versioned component with Visual Studio Installer. Each build activates that exact patch and checks the first compiler
+  and linker on PATH along with `VCToolsVersion`. Setup or activation failures stop the job. The run log records the image,
+  revision, inventory, installer result and tool paths. See [task 0591](../tasks/0591-hosted-msvc.md) for hosted evidence.
+  MSVC 14.44 previously stopped at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` with C2026 (string literal too long).
 - **Round 582 compatibility status (2026-11-19).** The 14.52 candidate compiled and passed quick stress under
   release defaults, with precise floating-point mode, and with link-time code generation disabled. The full
   Windows unit suite failed in all three runs. The cause remains unresolved. [Task 0564 and CI results](../tasks/0564-msvc-1452.md)
