@@ -1,18 +1,224 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""The inventory sweep's command list (round 411, ADR 0105): one real invocation of every console verb, taken from the
-unit tests (the first `command("<verb> ...")` with arguments that a test runs; the bare verb where no test passes any),
-written as a C++ table the stress section `operations` includes.
+"""Generate the operations stress sweep's console command table (ADR 0105).
 
-    python tools/sweep_commands.py            # writes stress/sweep_commands.inc
-    python tools/sweep_commands.py --check    # fails when the committed table differs (a new verb, a changed example)
+Use --check to verify the committed table. Each registered verb needs either
+one maintained invocation in EXAMPLES or a reason to leave it out in SKIP.
+"""
+import argparse
+import difflib
+import json
+from pathlib import Path
+import re
+import sys
 
-Verbs the sweep must not run headless on a fresh machine are listed in SKIP with the reason; the sweep prints them as
-"not run here". The table holds every verb of src/editor/editor_commands.cpp's kConsoleCommands."""
-import os, re, sys
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLES = """
+activecamera Cube
+aimlight -1 0 3
+alignview
+alltools on
+anim new
+animemat Nope
+applymods
+armature reset Hips
+assignmat Assets/Materials/MA.mat
+assist on ai
+autopose on
+autorig build
+autosmooth off
+avatar eyes
+bakedialog textures
+bevelprofile 0.9
+blockout new
+board fit
+body show on
+bone add Bone 1
+boolean difference
+brush save
+budget pc
+camera 0 0 6
+camerapreview lock
+clearguides
+colorattr add
+component Outline
+create Cube
+curve select Path 0
+customnormals clear
+delete Cube
+deletemat Orange
+develop undo
+device cpu
+dock bringback
+draw guide
+drawfillet 0
+drawmode perp off
+drawpoint 0 0 0
+drawproject view
+droponsurface 450 300
+duplicate
+edit on
+editop fill
+edittool array
+engine path
+esel 48 49 49 50 50 61 61 72 72 71 71 70 70 59 59 48
+exportoptions glb
+facemat Assets/Materials/Red.mat
+facenormals cube
+favorite No Such Command
+feel Maya
+filter remove 0
+filters 0
+fk add Bone
+flatten 1
+focus 0 0 0 2.8
+fps 60
+fsel 0
+gpu list
+guide 0.37 0 -3 0 0 1
+guides off
+guidesfromedges
+hair rig
+hs grid 3 2
+ik fitsizes
+insetmode region 0.1
+inspector lock
+jobs cancel Building Hall
+join
+keymap Maya
+layout 2 by 3
+layoutguide reset
+lesson 1
+libs
+lighting seed
+loopcuts 3 0.25
+matdelete R80 Oak, No Such Material, R80Pine
+material Toon
+matset Name Renamed
+meshdeform bind
+meshop flip
+motioncheck
+navbuttons always
+newmat Red
+newscene
+newslotmat 1
+newtex Fresh
+ngon on
+origin bounds
+overlaps merge
+overlay all
+paint on
+palette run create cube
+panel new Favs
+paper new
+perf clip
+pickfocus
+pilot
+play
+pointcloud degree 1
+points merge Path 0 99
+pose copy
+position 0 1 0
+preferences
+preview
+probes show
+proportional off
+pushpull individual on
+quality low
+quickmenu pick Delete
+raster simd on
+redo clamp 1
+redraw always
+refimage
+removeslot 1
+removeunusedslots
+report stats
+research
+rig humanoid
+rotate 0 90 0
+samples 8
+scale 2
+scatter on
+sculpt on
+seam 0 1
+select P
+selectadd Q
+selectall
+separate loose
+seq new
+set Light.Mode 2
+set_extrude_individual 1
+settex Fresh Width 128
+shading solid
+shape filter
+shortcut clear stats
+sketch on
+sketchbuild box
+sketchcanvas 1
+sketchcircle -2 0 0 0.5
+sketchguide off
+sketchlift
+sketchline 0 0 0 0 0 1
+sketchproject
+sketchstroke 300 300 400 320
+sketchtrace edge
+skin bind
+smat apply MyMetal
+smooth
+snap bogus
+splat stats
+spring find
+stats
+strokeobj on
+subdivide 3
+surface list
+surfacealign on
+tabletmode on
+tabs all on
+texlayer Fresh reset 1
+texlist
+texture uvgrid
+theme Neon
+threads 2
+toast a toast by hand
+tool move
+toonstyle Nope
+ui save
+undo
+uv pack
+uvsel all
+uvxf fit
+vgroup add A
+viewport status
+views rtshadows
+viewscale 50
+viewshape remove 1
+visemes
+vpaint on
+vpautomask none
+vpblend bogus
+vpbrush blur
+vpcolor a b c
+vpset front on
+vpstroke 5
+vsel 0
+walk cycle walk
+weightpaint on
+wheel open
+where
+window Game
+world sky
+wpautomask none
+wpbrush add
+wpclean 0.6
+wpfalloff smooth
+wpfront off
+wpmirror on
+wpnormalize
+wpstroke
+zfight fix
+""".strip().splitlines()
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "stress", "sweep_commands.inc")
 SKIP = {
     "new": "replaces the scene the sweep measures", "open": "replaces the scene", "save": "writes the scene (the files rows have it)",
     "stress": "builds scenes", "bench": "a benchmark of its own", "benchscene": "builds scenes", "update": "the updater (network)",
@@ -20,66 +226,73 @@ SKIP = {
     "stop": "ends Play", "help": "prints the list", "clear": "clears the log", "screenshot": "writes a file", "saverender": "writes a file",
     "render": "the responsiveness rows", "renderanim": "the responsiveness rows", "rendersequence": "the responsiveness rows",
     "bake": "the responsiveness rows", "meshmaps": "the responsiveness rows", "baketex": "the responsiveness rows",
-    "import": "the files rows", "export": "the files rows", "quit": "ends the program", "deleteasset": "deletes a project file",
+    "import": "the files rows", "export": "the files rows", "deleteasset": "deletes a project file",
     "texdelete": "deletes a project file", "moveasset": "moves a project file", "renameasset": "renames a project file",
-    "mkfolder": "makes a project folder", "blender": "the installed Blender",
+    "mkfolder": "makes a project folder",
     "manual": "opens the manual in the system browser", "references": "opens the Learn window on the References lesson (the window rows have it)",
 }
 
 
-def verbs():
-    src = open(os.path.join(ROOT, "src", "editor", "editor_commands.cpp"), encoding="utf-8").read()
-    m = re.search(r"kConsoleCommands\[\] = \{([^}]*)\}", src, re.S)
-    return sorted(set(re.findall(r'"([^"]+)"', m.group(1))))
+def registered_verbs(root):
+    registry = root / "src" / "editor" / "editor_commands.cpp"
+    source = registry.read_text(encoding="utf-8")
+    match = re.search(r"kConsoleCommands\[\] = \{([^}]*)\}", source, re.S)
+    if not match:
+        raise ValueError(f"Cannot find kConsoleCommands in {registry}")
+    return set(re.findall(r'"([^"]+)"', match[1]))
 
 
-def examples():
-    """verb -> the example line: the shortest invocation with arguments the tests run, else the bare verb."""
-    best = {}
-    for f in sorted(os.listdir(os.path.join(ROOT, "tests"))):
-        if not f.endswith(".cpp"):
-            continue
-        text = open(os.path.join(ROOT, "tests", f), encoding="utf-8", errors="replace").read()
-        for m in re.finditer(r'command\("([a-z_]+)((?: [^"\\]*)?)"\)', text):
-            verb, args = m.group(1), m.group(2).strip()
-            if not args or "\\" in args or len(args) > 80:
-                continue
-            line = verb + " " + args
-            if verb not in best or len(line) < len(best[verb]):
-                best[verb] = line
-    return best
+def table(verbs, examples, skips):
+    rows = {verb: ("", reason) for verb, reason in skips.items()}
+    for line in examples:
+        verb = line.split()[0]
+        if verb in rows:
+            raise ValueError(f"Duplicate sweep entry: {verb}")
+        rows[verb] = (line, "")
 
+    errors = []
+    for verb in sorted(verbs - rows.keys()):
+        errors.append(f"Missing sweep entry for registered verb: {verb}")
+    for verb in sorted(rows.keys() - verbs):
+        errors.append(f"Stale sweep entry for removed verb: {verb}")
+    if errors:
+        raise ValueError("\n".join(errors))
 
-def table():
-    ex = examples()
-    rows = []
-    for v in verbs():
-        if v in SKIP:
-            rows.append((v, "", SKIP[v]))
-        else:
-            rows.append((v, ex.get(v, v), ""))
     out = ["// GENERATED by tools/sweep_commands.py (round 411): one invocation per console verb for the inventory sweep.",
            "// {verb, the line to run (empty: not run), why not}", "static const SweepCommand kSweepCommands[] = {"]
-    for v, line, why in rows:
-        out.append('  {"%s", "%s", "%s"},' % (v, line.replace('"', '\\"'), why.replace('"', '\\"')))
+    for verb in sorted(rows):
+        line, reason = rows[verb]
+        fields = ", ".join(json.dumps(field, ensure_ascii=False) for field in (verb, line, reason))
+        out.append("  {" + fields + "},")
     out.append("};")
     return "\n".join(out) + "\n"
 
 
-def main():
-    text = table()
-    if "--check" in sys.argv:
-        old = open(OUT, encoding="utf-8").read() if os.path.exists(OUT) else ""
-        if old != text:
-            print("stress/sweep_commands.inc is out of date: run tools/sweep_commands.py")
-            return 1
-        print("sweep_commands.inc: current (%d verbs)" % text.count("\n  {"))
+def run(root, examples, skips, check):
+    path = root / "stress" / "sweep_commands.inc"
+    try:
+        verbs = registered_verbs(root)
+        expected = table(verbs, examples, skips)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    if current == expected:
+        print(f"sweep_commands.inc: current ({len(verbs)} verbs)")
         return 0
-    with open(OUT, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    print("wrote stress/sweep_commands.inc (%d verbs)" % text.count("\n  {"))
+    if check:
+        print("stress/sweep_commands.inc is out of date: run tools/sweep_commands.py")
+        sys.stdout.writelines(difflib.unified_diff(current.splitlines(True), expected.splitlines(True),
+                                                   fromfile="committed", tofile="expected", n=0))
+        return 1
+    with path.open("w", encoding="utf-8", newline="\n") as out:
+        out.write(expected)
+    print(f"wrote stress/sweep_commands.inc ({len(verbs)} verbs)")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="report stale entries without writing the table")
+    sys.exit(run(ROOT, EXAMPLES, SKIP, parser.parse_args().check))

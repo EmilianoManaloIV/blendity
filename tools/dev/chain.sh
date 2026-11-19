@@ -79,7 +79,8 @@ py tools/hci_consistency_audit.py --check 2>&1 | tail -2
 py tools/hci_klm.py --check 2>&1 | tail -1
 py tools/unity_meta.py --check 2>&1 | tail -1
 py tools/make_books.py --check-cited 2>&1 | tail -1
-py tools/sweep_commands.py --check 2>&1 | tail -1
+py tools/test_sweep_commands.py || exit 1
+py tools/sweep_commands.py --check || exit 1
 py tools/test_perf_suite.py 2>&1 | tail -1
 py tools/bench_world.py --self-test 2>&1 | tail -1
 echo AUDITS DONE
