@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Print compact evidence from one native test log or GitHub Actions run."""
 
 import argparse
@@ -76,7 +77,12 @@ def main():
     try:
         report = native(args) if args.kind == "native" else ci(args)
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as error:
-        print(json.dumps(dict(status="unavailable", error=str(error))), file=sys.stderr)
+        receipt = dict(status="unavailable", error=str(error), revision=args.revision)
+        if args.kind == "native":
+            receipt.update(group=args.group, log=str(args.log))
+        else:
+            receipt.update(repo=args.repo, run=args.run)
+        print(json.dumps(receipt), file=sys.stderr)
         return 2
     print(json.dumps(report, sort_keys=True))
     return 0 if report["status"] == "passed" else 1

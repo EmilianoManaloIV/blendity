@@ -1,6 +1,6 @@
 # 0589 Parallel verification and evidence collection
 
-- **Status:** implemented and locally verified, awaiting independent review
+- **Status:** independently tested and reviewed; the Hub publishes the verified candidate
 - **Decision:** extend the compact handoffs of task 0581
 - **Files:** project handoff method, Codex handoff, evidence helper and round 607 fragment
 

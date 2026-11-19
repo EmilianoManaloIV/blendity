@@ -207,8 +207,9 @@ Follow the [parallel verification procedure](#parallel-verification-and-evidence
 
 - **Route a change once.** In each pass with shared dependencies, record producer, consumer,
   public interface or fixture, candidate revision and evidence link in a shared scratch index.
-  The producer updates its entry and alerts the affected consumer. Resource owners hand a released
-  slot directly to the next scheduled worker. Escalate to the Hub when ownership or order changes,
+  The producer updates its entry and alerts the affected consumer. Resource owners notify the next
+  scheduled worker after release. That worker acquires the machine lock or waits for the Hub's explicit
+  GPU grant before starting. Escalate to the Hub when ownership or order changes,
   another team is blocked, an owner decision is required, or the candidate is ready for review.
   Routine acknowledgments and duplicate status reports add no evidence.
 - **Exercise the first connected path early.** As soon as one representative input can traverse a
