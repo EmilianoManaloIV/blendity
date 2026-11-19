@@ -40,6 +40,19 @@ loss is in `PITFALLS.md`.
 Work is pipelined: while one round's checks run, the next round's spec and patches are written. Nothing waits
 on a merge.
 
+## Codex worker dispatch
+
+The parent chat remains the hub. In a project-aware Codex session, dispatch the named
+`implementer`, `test-engineer` and `code-reviewer` from [`.codex/agents/`](../../.codex/agents/)
+separately and in that order. On a surface with task and model fields but no named-agent selector,
+use a fresh worker for each role. Pass its role name, developer instructions, assigned worktree
+and spec in the task, and set its listed model and reasoning effort where the fields are available.
+For testing, pass the spec before sharing the diff. For review, pass the final diff and test results.
+The hub forwards the owner's approval, schedules shared resources and handles publishing. For
+an in-scope review fix, the hub restores the spec's status to `approved` under the existing
+approval and hands the fix back to the implementer. The implementer returns the spec to
+`in review`. The hub repeats the affected verification and independent review before publishing.
+
 ## Changelog fragments, folded at a pass's end
 A round never edits `CHANGELOG.md`, `README.md` or the four shared docs (`docs/USABILITY.md`, `tools/README.md`,
 `docs/ARCHITECTURE.md`, `docs/PERFORMANCE.md`). It adds `changelog.d/<round>-<slug>.md`: the entry as it will
