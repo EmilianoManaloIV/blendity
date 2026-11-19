@@ -1,6 +1,6 @@
 # 0579 — Isolate the toon distance energy measurement (round 597)
 
-- **Status:** in review
+- **Status:** done (round 597)
 - **Decisions:** ADR 0108 and the existing round 184 sampling contract where applicable. No new architectural decision.
 - **Implementation:** implementer in C:/blwt597 from PR #485 head f04dad30.
 
@@ -35,6 +35,26 @@ and energies. They do not identify the pixels or any toast that was present.
 At both distances, the regression introduces a visible toast between the away and present frames
 of both the composited and cached captures. It counts false coverage inside the toast's recorded
 rectangle in the composited capture and checks that the shared mapped-material capture returns
-identical colors and coverage in the clean and toasted runs. It also changes the surface to a checker while the toast is visible and verifies that
-the same interior samples register more detail. Focused, render and editor runs on Windows
-and Linux are pending independent verification.
+identical colors and coverage in the clean and toasted runs. It also changes the surface to a checker while the toast is visible and verifies that the same
+interior samples register more detail.
+
+## Verification
+
+On the corrected sanitizer shard, the toast added 10,586 pixels to each composited mask.
+The cached colors and masks matched the clean captures at both distances. Adding a checker
+raised interior energy from 0.95 to 5.55 at 2 m and from 0.00 to 65.88 at 20 m. The face-shadow
+sphere returned to 50,912 and 295 pixels with reference/far energy 18.18/36.38. All 49,030
+checks passed. [Shard 4 log](https://github.com/EmilianoManaloIV/blendity/actions/runs/44584505699/job/135794014141)
+
+| Build | Focused checks | Render checks | Editor checks |
+|---|---:|---:|---:|
+| Windows release, dependency-free | 50 | 40,419 | 3,846 |
+| Windows release, Blender libraries | 72 | 40,540 | 3,865 |
+
+All listed checks passed with MSVC 14.51. The card's sphere covered 50,220 and 292 pixels with
+reference/far energy 18.26/36.04. The hosted Linux and macOS full suites passed 125,283 and
+125,274 checks respectively. The hosted Windows diagnostic lacked the pinned toolset.
+After WSL failed again, the hub selected hosted Linux verification. Run 44584505699 built
+candidate 9cc83b6586f5e78de50a77fd872ada93e78f8b9c and ran the full unfiltered unit binary,
+including the render and editor groups and all three focused toon cases. All six sanitizer shards
+also passed. [Linux unit log](https://github.com/EmilianoManaloIV/blendity/actions/runs/44584505699/job/135781975902)
