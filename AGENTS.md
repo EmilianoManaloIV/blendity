@@ -206,6 +206,7 @@ their reports. The same shape under Codex:
   exe at each publish, and runs one changelog fold at a time. It does no round work itself and reports in a
   line or two unless the owner asks to plan.
 - **Parallel tasks** each do rounds in their own worktree and publish on the current single top of the stack.
+- Coordinate candidate revisions, build reuse and timed batches through the [parallel verification procedure](docs/handoff/METHOD.md#parallel-verification).
 - Every plan carries a **file-ownership table**: each piece mapped to the source, test and doc files it may
   touch, and an overlap check against the work already running. Pieces that share no file run in parallel;
   pieces that share a file go to one task, in sequence; if everything meets in one file, don't parallelize and

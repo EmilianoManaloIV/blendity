@@ -74,6 +74,35 @@ Parallel tasks conflict where they share files, so the plan decides the split be
   joined top catches.
 Pass 28's table (eight tasks, rounds 562 to 570) is the model; Pass 27 ran ten.
 
+## Parallel verification
+
+The coordinator keeps one scratch ledger for the pass. Each round's row names its worker, owned files, candidate
+revision (including any uncommitted diff), checks due or completed, artifact and report paths, and pending build,
+card or timing reservations. Mark the next round ready to publish. Workers prepare scratch fixtures, commands
+and expected results before requesting a reservation.
+
+1. **Develop and review.** Run focused checks as the code changes. Once the code and regression tests settle,
+   identify the candidate for independent review and final verification. A review fix gets a second review.
+   Mark affected builds and check results stale, rebuild affected targets and run their checks on the new candidate.
+2. **Choose the executable.** Record its source revision or hashes and establish that all inputs to that target
+   match, including test or stress source, generated files, compiler and linker versions and options, libraries,
+   and the runtime DLLs and shaders deployed with it. Record the binary hash or equivalent build provenance.
+   Rebuild when an input differs or its equivalence is unknown. Run each changed tool's or document's own checks.
+3. **Choose the measurement.** Compare binary and runtime configuration, backend, workload and scale, input
+   data, process context, cache state and timing conditions. Record the original report, section coverage and
+   exit status. Reuse only a successful run matching every condition of the required measurement, including
+   before/after pairing when required. A quick run, another backend, a different process context or a tainted
+   window requires a fresh measurement for the requested configuration.
+4. **Batch ready workloads.** Workers give the coordinator a runnable scratch script for each workload.
+   The coordinator alone schedules compatible scripts together in a quiet window using the procedure below.
+   Record each child's exit status and verify its expected report and sections. Resume at the first missing or
+   failed workload and repeat any affected pair. A tainted window invalidates every timing in it. Release the
+   hardware promptly, then let waiting workers resume. [Machine limits and helpers](MACHINE.md) govern reservations.
+5. **Publish the verified top.** The coordinator checks the current top and the actual combined candidate.
+   Run the required checks for that combined tree as specified in the round and stack procedures. Each reviewed,
+   verified round can publish on the current single top while unrelated work continues. Read the PR's checks
+   and review comments. The owner merges.
+
 ## The machine's shared resources
 One 32-core machine with 32 GB ran up to thirteen sessions. Four things are shared and each has a rule
 (`MACHINE.md` has the commands, `tools/dev/machine/` the scripts):
