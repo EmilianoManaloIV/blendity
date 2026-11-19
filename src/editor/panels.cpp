@@ -2850,12 +2850,18 @@ void Editor::draw_lighting_window(const Recti &r) {
     u.tooltip("A rough bake while you edit, refining 32 -> 64 -> 256 samples half a second after changes stop;\n"
               "shown instead of the bake and never saved (like Bakery's Realtime Preview).");
     if (flip_preview) command(pv ? "lighting preview off" : "lighting preview on");
-    std::string mode = lighting_manual() ? "Lighting Updates: Manual (lighting stays as last computed until you update)"
-                                         : "Lighting Updates: Automatic (Realtime GI follows every change)";
-    if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 32 : preview_stage_ == 1 ? 64 : 256,
-                                                  preview_baker_.progress() * 100.0)
-                                     : preview_samples_ ? strprintf("  -  Preview: %d samples", preview_samples_) : std::string("  -  Preview: waiting");
-    u.label(lay.row(), mode, u.theme.text_dim);
+    std::string status = lighting_manual() ? "Manual lighting updates (lighting stays as last computed until you update)"
+                                           : "Automatic lighting updates (Realtime GI follows every change)";
+    const bool preview_baking = pv && preview_running_;
+    if (pv) {
+      if (preview_baking) status += strprintf("  -  Preview: baking %d samples", preview_stage_ <= 0 ? 32 : preview_stage_ == 1 ? 64 : 256);
+      else if (preview_samples_) status += strprintf("  -  Preview: %d samples", preview_samples_);
+      else status += "  -  Preview: waiting";
+    }
+    // The tooltip's dwell timer keys off its text. Keep the changing percentage on the row.
+    u.label(lay.row(), preview_baking ? status + strprintf(" (%.0f%%)", preview_baker_.progress() * 100.0) : status,
+            u.theme.text_dim);
+    u.tooltip(status);
   }
   if (!bake_status_.empty()) u.label(lay.row(), bake_status_, baking_ ? u.theme.accent : u.theme.text_dim);
   if (!baking_ && lighting_out_of_date())
@@ -2880,9 +2886,10 @@ void Editor::draw_lighting_window(const Recti &r) {
         if (mr->enabled && mr->contribute_gi && g.active_in_hierarchy()) contributing++;
     });
     int side = lighting_data_.pages.empty() ? 0 : lighting_data_.pages[0].width;
-    u.label(lay.row(), strprintf("Contribute GI: %zu objects   Lightmaps: %zu x %d px   Baked: %zu objects", contributing,
-                                 lighting_data_.pages.size(), side, lighting_data_.entries.size()),
-            u.theme.text_dim);
+    const std::string summary = strprintf("Contribute GI: %zu objects   Lightmaps: %zu x %d px   Baked: %zu objects", contributing,
+                                          lighting_data_.pages.size(), side, lighting_data_.entries.size());
+    u.label(lay.row(), summary, u.theme.text_dim);
+    u.tooltip(summary);
   }
   lay.space(u.px(6));
   header("Lightmapping Settings");

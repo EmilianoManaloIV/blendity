@@ -5,6 +5,11 @@
 # stack: it would join them all, so it is listed apart.
 # GH names the gh to call (the self-test puts a stand-in there, so no test ever reaches GitHub); REPO the repository.
 REPO=${REPO:-EmilianoManaloIV/blendity}
+# Set BL_AI_COAUTHOR to the Name <email> of the tool that assisted this invocation.
+STACK_AI_TRAILER=
+if [ -n "$BL_AI_COAUTHOR" ]; then
+  STACK_AI_TRAILER=$'\n\n'"Co-Authored-By: $BL_AI_COAUTHOR"
+fi
 if [ -z "$GH" ]; then
   GH=gh
   command -v gh >/dev/null 2>&1 || GH="/c/Program Files/GitHub CLI/gh.exe"

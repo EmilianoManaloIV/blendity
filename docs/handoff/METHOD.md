@@ -10,17 +10,19 @@ loss is in `PITFALLS.md`.
   numbers. A PR's title names both ("... (round 565, task 0547)").
 - A **pass** is a group of rounds the owner approved as one plan: a goal, the rounds with their specs, a
   file-ownership table and the budgets to meet. It ends with a **write-up round** that measures the result
-  against the plan, folds the fragments and lists follow-ups. Approving the plan approves its specs; a choice
-  the plan did not foresee goes back to the owner.
+  against the plan, folds the fragments and lists follow-ups. An owner assignment or approved plan authorizes
+  the round's routine implementation decisions and in-scope follow-ups through completion.
 - Each round's times were logged (started, checks started, checks done, published). A typical round took 1.3 to
   1.6 hours; the log is how the workflow changes below were judged.
 
 ## One round: spec, implement, test, review, PR
 1. **Spec.** From `docs/tasks/TEMPLATE.md`: what was asked, what is in and out, numbered acceptance criteria
    each of which a test can check, the files to touch, the stress sections to run, a responsiveness criterion
-   where the feature does work per frame. An ADR beside it when the choice is architectural.
-2. **Implement** (the implementer role). Only the spec's files. Build both ways (Blender's libraries and
-   dependency-free), then the round's own test group in **both** builds before anything long runs.
+   where the feature does work per frame. Write it before implementation, record the assignment or plan
+   that authorizes it and mark it approved for dispatch. Add an ADR for architectural decisions.
+2. **Implement** (the implementer role). Only the spec's files. For app changes, build both ways (Blender's
+   libraries and dependency-free), then run the round's own test group in **both** builds before anything long
+   runs. For project metadata, run the spec's lightweight checks.
 3. **Test** (the test-engineer role). Tests decided from the acceptance criteria before reading the diff; UI
    behaviour through real events; edge cases the spec implies. A bug found is left as a failing test and
    reported, not fixed by the tester.
@@ -31,11 +33,13 @@ loss is in `PITFALLS.md`.
    (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
    for geometry changes; the audits (`tools/test_coverage_map.py --check`, `tools/sweep_commands.py --check`,
    `py tools/dev/changelog.py check`). The whole suite, macOS and the sanitizers are CI's.
-6. **Publish.** Merge the stack's current top into the round's branch (build the tests again if the merge
+6. **Publish.** The hub merges the stack's current top into the round's branch (build the tests again if the merge
    touched test files), commit, push `task/NNNN-slug`, open the PR against `main` with the template, run
    `bash tools/dev/stack_check.sh`, read the checks, tell the coordinating task the PR number and head.
-7. **After.** Read CI once it has run; a red is fixed on the top of the stack, never on a lower PR. Read review
-   comments. The owner merges.
+7. **After.** The hub monitors the published head, addresses review comments, fixes red checks on the top
+   of the stack and verifies CI through completion. The owner conducts final review and alone merges the PR.
+   For a blocked round or rejected candidate, record the criterion, observed result and evidence, along
+   with any dependency needed to resume.
 
 Work is pipelined: while one round's checks run, the next round's spec and patches are written. Nothing waits
 on a merge.
@@ -48,10 +52,44 @@ separately and in that order. On a surface with task and model fields but no nam
 use a fresh worker for each role. Pass its role name, developer instructions, assigned worktree
 and spec in the task, and set its listed model and reasoning effort where the fields are available.
 For testing, pass the spec before sharing the diff. For review, pass the final diff and test results.
-The hub forwards the owner's approval, schedules shared resources and handles publishing. For
+The hub records the owner assignment or approved plan, schedules shared resources and handles publishing. For
 an in-scope review fix, the hub restores the spec's status to `approved` under the existing
 approval and hands the fix back to the implementer. The implementer returns the spec to
 `in review`. The hub repeats the affected verification and independent review before publishing.
+
+### Direct task chats for independent work
+
+For every approved plan, the parent hub records each deliverable, file owner, dependencies, acceptance
+checks and shared resource needs on the board. By default each independent deliverable gets a task
+chat and worktree and reports directly to the hub. Assign rounds that edit the same file to one
+owner in sequence. Use a temporary workstream lead only when several tasks need material coordination.
+Record what the lead must coordinate. For example, file-import and export-validation changes with
+disjoint files and acceptance checks can report directly. In a UI plan, keyboard navigation and
+accessibility may depend on a common focus contract. A lead can sequence that contract and coordinate
+joint acceptance while each file keeps one owner.
+
+Schedule roles as runtime capacity becomes available. Within each round, implementation finishes
+before a separate test engineer derives checks from the spec and then sees the diff. An independent
+reviewer receives the final candidate and results. The task chat or lead dispatches these roles
+where supported, or asks the hub to dispatch them. Record assignments on the board and release
+workers and reservations after handoff.
+
+Child chats forward material scope changes and owner-reserved decisions with their rationale to the parent hub. Only the hub consolidates the questions and asks the owner once.
+
+Use the [compact handoff format](CODEX.md#compact-handoffs) for dispatch, progress and results.
+
+In every Claude and Codex handoff, workers, leads and the hub attach the references they actually used to
+each consequential claim. Identify repository evidence by path and symbol or revision. Link upstream claims
+to the primary source and give the version when relevant. For a measured or reproduced result, identify the
+fixture, command, run or scratch evidence that demonstrates it. Label any unverified assumption explicitly.
+The reviewer checks that each cited source supports the specific claim. The hub carries those references
+into the task spec, ADR or PR wherever it records the claim.
+
+The task chat or workstream lead sends the parent hub the candidate revision, verification evidence,
+review verdict, blockers and resource requests. The hub owns the review gate and re-review, the
+shared stack and its commits and publication, and all build, GPU and timed reservations. It monitors
+worker progress, stale reservations, CI and PR feedback, routes fixes and keeps the owner's executable
+current under the publish procedure. The owner approves plans and merges PRs.
 
 ## Changelog fragments, folded at a pass's end
 A round never edits `CHANGELOG.md`, `README.md` or the four shared docs (`docs/USABILITY.md`, `tools/README.md`,
@@ -69,9 +107,9 @@ every pair of parallel PRs conflicted in the same six files.
   them merged.
 - `bash tools/dev/stack_check.sh` lists each stack and fails when one has more than one top; `FIX=1` merges
   stray heads into the newest PR. It runs after every publish and every push, and as the `stack` CI job.
-- With several tasks publishing, the rule is: whoever is ready publishes on the **current** single top
-  (`stack_check.sh` names it), merging that head first. Two publishing at once make two tops for a few minutes;
-  the later one merges the other in.
+- Workers hand verified rounds to the hub for publication. The hub checks the **current** single top with
+  `stack_check.sh`, brings the candidate onto that head and publishes it. The hub checks the resulting stack
+  after each push.
 - The PR body's "Merging this also merges" line names what it carries. The owner then needs one merge per pass.
 - A stack is never rebased or squashed, and a fix never lands on a lower PR (it would sit outside the stack).
 
@@ -157,7 +195,19 @@ The owner tries finished work at once, so `dist\windows\Blendity.exe` in the mai
 It is rebuilt at publish, not at CI green (that reaches the owner one to three hours sooner) and not after a
 merge (the exe already has that work). Never during a timed window.
 
+## Standing Hub workflow changes
+
+When the owner changes how Blendity work is conducted, the hub records the new default in the owning project
+instruction and reconciles any older conflicting guidance. Record the scope and any explicit exceptions.
+Carry the change into active worker briefs and applicable tooling. Keep task-specific choices and one-time
+permissions scoped to their task. On a new session, read the current project instructions and handoff.
+
+For shared dependencies, early smoke tests and verification of a specific revision, follow
+[Parallel verification and evidence](#parallel-verification-and-evidence).
+
 ## The hourly check and the board
+
+Follow the [parallel verification procedure](#parallel-verification-and-evidence) for evidence routing.
 - **Hourly**, while parallel tasks run, the coordinator looks for stalls (a worktree that has not changed, a
   build queued behind a dead slot holder), reads CI on the open PRs with `gh pr checks`, routes each red to the
   task that owns the file, and frees stale locks whose owners have nothing running.
@@ -171,9 +221,37 @@ merge (the exe already has that work). Never during a timed window.
   between options, a stack ready to review) and otherwise answers when asked.
 
 ## Long tasks
-- A fresh task per pass, started after the previous pass's write-up; before stopping, a task writes a short
-  resume note (what is published, what is in the worktree, what is next). Switching mid-batch costs more than
-  finishing it.
-- A task that reports to another puts the result first (the PR link, the head commit), then the detail.
+- The hub assigns task chats from each approved plan. Before stopping, each chat records what is published,
+  what remains in its worktree and what comes next.
+- Before publication, report the candidate revision and review verdict first. After publication, lead with the PR link and head commit.
 - Helper scripts that prove useful go into `tools/dev/`, with their paths as settings at the top; scratch
   folders are never uploaded.
+
+## Parallel verification and evidence
+
+- **Route a change once.** In each pass with shared dependencies, record producer, consumer,
+  public interface or fixture, candidate revision and evidence link in a shared scratch index.
+  The producer updates its entry and alerts the affected consumer. Resource owners notify the next
+  scheduled worker after release. That worker acquires the machine lock or waits for the Hub's explicit
+  GPU grant before starting. Escalate to the Hub when ownership or order changes,
+  another team is blocked, an owner decision is required, or the candidate is ready for review.
+  Routine acknowledgments and duplicate status reports add no evidence.
+- **Exercise the first connected path early.** As soon as one representative input can traverse a
+  new subsystem, run a small test through its normal entry point. For an importer, load one textured
+  model into a scratch project, save it and reopen in a fresh process with its sources detached.
+  Record the revision and result while independent readers continue.
+- **Freeze the joined candidate for full verification.** Producers identify their exact ready
+  inputs. The verifier records one combined revision and runs required suites on that revision.
+  Rebuild the app and tests with fresh objects after a shared layout or ABI change. On later
+  edits, identify invalidated evidence and repeat the affected checks and required final gates.
+- **Give each role a fresh brief.** Supply its task, worktree, candidate, owned paths, acceptance
+  criteria and source/evidence pointers. The tester derives cases from the spec before reading the
+  diff. The reviewer receives the tested diff and evidence, including any gaps.
+- **Collect evidence mechanically.** The runner records the tested SHA and real process exit status
+  with one native log per invocation. Use the [evidence helper](../../tools/dev/verification_evidence.py)
+  with `native --revision SHA --group NAME --exit-code EXIT --log PATH` and add `--expected COUNT`
+  when the fixture has a known total. For a hosted run use `ci --revision SHA --repo OWNER/REPO --run ID`.
+  Keep the JSON receipt and logs in scratch. The native SHA comes from the build/run manifest.
+  Check the manifest when attributing a result to a candidate. Inspect the first failed step for
+  a causal diagnostic. Preserve the last verified result if evidence collection is unavailable.
+  Report changed outcomes with supporting links. The hourly health check remains the fallback.

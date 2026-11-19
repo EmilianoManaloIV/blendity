@@ -6,8 +6,8 @@ commit and a pull request the owner reviewed and merged. From here the work cont
 This folder is what a new agent, or a person, needs in order to carry on without the sessions' memory.
 
 ## Where to start
-1. `AGENTS.md` at the repository root: the standing rules (it restates `CLAUDE.md`, which stays in the tree as the
-   original). Nothing in this folder overrides it.
+1. [AGENTS.md](../../AGENTS.md) holds the standing rules. Open the Blendity project root and verify discovery
+   using the [Codex setup and migration inventory](CODEX.md).
 2. This file, then `METHOD.md` (how a change goes from a request to a merged PR) and `PITFALLS.md` (what cost
    time, so it need not cost it again).
 3. `OPEN-WORK.md`: the follow-ups nobody has taken, each with its files and evidence, ready to become tasks.
@@ -47,7 +47,7 @@ of the stack this handoff was published on, and by the Releases page; this folde
 ## Where each kind of knowledge lives
 | What | Where |
 |---|---|
-| The rules | `AGENTS.md` (`CLAUDE.md` is the same rules in Claude Code's terms) |
+| The rules | `AGENTS.md` (`CLAUDE.md` retains the Claude Code guide) |
 | What the program must do | `docs/requirements.md` |
 | How it is built; which function to build on | `docs/ARCHITECTURE.md`, `docs/Blendity-Architecture.pdf` |
 | Why it is built that way | `docs/decisions/` (ADRs up to 0153; its README lists them) |
@@ -61,7 +61,7 @@ of the stack this handoff was published on, and by the Releases page; this folde
 | The development machine's helpers | `tools/dev/machine/`, `MACHINE.md` here |
 | How AI was used | `docs/AI_DISCLOSURE.md` |
 | Licences of copied and linked code | `licenses/`, `CREDITS.md`, ADRs 0001 and 0002 |
-| The three roles' full text | `.claude/agents/*.md` (quoted in `AGENTS.md`) |
+| The three roles | `.codex/agents/*.toml` and the original `.claude/agents/*.md` contracts |
 | CI | `.github/workflows/` (`build.yml`, `docs.yml`, `stack.yml`, `release.yml`, `moonray.yml`); shards in `tools/dev/test_shards.py` |
 
 What is **not** in the repository and was not carried over: the sessions' private memory notes and scratch

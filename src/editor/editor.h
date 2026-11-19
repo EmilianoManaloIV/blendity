@@ -49,6 +49,7 @@
 #include "../scene/visemes.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
+#include "../scene/source_content.h"
 #include "../scene/scene.h"
 #include "../scene/blockout_object.h"  // (round 477)
 #include "blockout_pick.h"             // (round 496: DrawnPiece, the Draw Piece tool's preview)
@@ -1224,6 +1225,7 @@ class Editor {
   bool meshmaps_busy_for_test() const { return meshmaps_job_ != nullptr; }        // (task 0243)
   bool surface_busy_for_test() const { return surface_job_ != nullptr; }          // (task 0244)
   std::string resolve_asset_path_for_test(const std::string &rel) const { return resolve_asset_path(rel); }
+  bool source_import_files_for_test(const SourceEntry &entry, ImportResult &result, bool publish, std::string &error);
   bool mesh_maps_stale_for_test(const GameObject *g) const { return mesh_maps_stale(g); }
   bool sculpt_dyntopo_for_test() const { return sculpt_dyntopo_; }  // (task 0242)
   bool sculpt_mode_for_test() const { return sculpt_; }
@@ -1432,6 +1434,10 @@ class Editor {
   /* Runs a console command (also used by --headless-screenshot and tests). */
   void command(const std::string &c) { run_console_command(c); }
   Recti scene_view_rect() const { return scene_rect_; }  // tests drive the Scene view with mouse events
+  /* The headless Scene view's cached picture, before the UI draws toasts and other controls over it. */
+  const Image *scene_layer_image_for_test() const {
+    return scene_cache_.key != 0 && scene_cache_.card_slot < 0 ? &scene_cache_.img : nullptr;
+  }
   Recti game_rect_for_test() const { return game_rect_; }
   Recti cam_preview_rect_for_test() const { return cam_preview_rect_; }
   /* Tests: select an object, and record a change they made to the scene directly as one undo step. */
@@ -4821,6 +4827,7 @@ class Editor {
     bool again = false;
     std::string model;
     std::unordered_map<std::string, std::string> tex_map;
+    std::map<const Material *, std::string> source_material_paths;
   };
   void prepare_import_files(const std::string &path, bool copy_into_assets, const ImportResult &r, ImportFiles &out);
   void finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
@@ -4829,7 +4836,9 @@ class Editor {
   /* The draw items a view and the import preview share (task 0152): a mesh's, and its toon outline's hull. */
   DrawItem mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing);
   bool outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &out);
-  size_t import_material_assets(ImportResult &r, const std::string &model, bool rewrite);  // rewrite: existing .mat files take the import's fields (task 0152)
+  // rewrite: existing .mat files take the import's fields (task 0152).
+  size_t import_material_assets(ImportResult &r, const std::string &model, bool rewrite,
+                                const std::map<const Material *, std::string> *source_paths = nullptr);
   bool inside_assets(const std::string &path) const;
   void shape_command(const std::vector<std::string> &t);
   std::string copy_model_into_assets(const std::string &path);
@@ -4841,7 +4850,7 @@ class Editor {
   std::string import_folder(const std::vector<std::string> &sources, const std::string &stem);
   bool import_folder_matches(const std::string &dir, const std::vector<std::string> &sources) const;
   bool import_folder_reused(const std::vector<std::string> &sources, const std::string &stem) const;
-  void copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map);
+  void copy_import_textures(const std::vector<std::string> &textures, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map);
   void assign_texture_to_selection(const std::string &asset_path);
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);
@@ -6972,6 +6981,54 @@ class Editor {
   std::unique_ptr<ImportJob> import_job_;
   bool import_job_start(const std::string &path, bool copy_into_assets, bool preview, int shading);
   void import_job_poll();
+  struct SourceImportStage {
+    std::string project, directory;
+    struct Texture { std::string path, staged, id; };
+    std::vector<Texture> textures;
+    std::vector<std::string> files;
+    SourceImportStage() = default;
+    SourceImportStage(const SourceImportStage &) = delete;
+    SourceImportStage &operator=(const SourceImportStage &) = delete;
+    ~SourceImportStage();
+    bool open(std::string &error);
+    std::string next_file();
+  };
+  struct SourcePicker {
+    SourceContent content;
+    std::string project;
+    uint64_t scene_serial = 0;
+    std::vector<SourceEntry> entries;
+    std::vector<std::string> roots, diagnostics;
+    std::string primary_text, root_text;
+    int selected = -1;
+    bool ready = false;
+    ImportResult result;
+  } source_picker_;
+  struct SourcePickerJob {
+    enum Kind { Choose, AddRoot, Read, Prepare } kind;
+    SourceContent content;
+    std::string path, selected_path, error;
+    std::vector<SourceEntry> entries;
+    SourceEntry selected;
+    ImportResult result;
+    SourceImportStage stage;
+    bool ok = false;
+    bool discarded = false;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~SourcePickerJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<SourcePickerJob> source_picker_job_;
+  void source_import_dialog();
+  void draw_source_import_dialog(const std::function<void()> &close);
+  void source_picker_start(SourcePickerJob::Kind kind, const std::string &path);
+  void source_picker_poll();
+  void source_picker_cancel();
+  static bool stage_source_import_files(ImportResult &r, SourceImportStage &stage, std::string &error);
+  bool publish_source_import_files(const SourceEntry &entry, const ImportResult &r, SourceImportStage &stage,
+                                   ImportFiles &out, std::string &error);
   void import_landed(ImportJob &j);
   bool begin_import_preview_with(const std::string &path, bool copy_into_assets, ImportResult &r);
   struct FileExportJob {
@@ -7780,7 +7837,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig, Unbake } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig, Unbake, SourceImport } dialog_ = Dialog::None;
   int dialog_shown_ = 0;  // which dialog has had its popup opened (task 0290: this editor's own - a file static carried one editor's open dialog into the next)
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */

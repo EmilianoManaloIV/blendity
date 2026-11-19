@@ -5,7 +5,7 @@ rem (docs/handoff/MACHINE.md). Every path in it (C:\blab, C:\Program Files\Git) 
 rem before use elsewhere. Nothing here is built, shipped or run by CI.
 rem
 rem The hub's shared Windows build launcher (2026-11-16): below-normal priority, no quoting from Git Bash needed, and
-rem (with a 4th argument) the build slot taken and dropped HERE, inside the same cmd that runs the build - so a Claude
+rem (with a 4th argument) the build slot taken and dropped HERE, inside the same cmd that runs the build - so an agent
 rem shell that is stopped mid-build can no longer leave the slot held (the cmd and its build keep running and drop it).
 rem Usage from Git Bash:  cmd //c "C:\blab\build-low.bat C:\blwtNNN release tests <who>"
 rem   %1 = the worktree folder, %2 = release|debug, %3 = all|app|tests|stress, %4 = the lock owner (optional: without it

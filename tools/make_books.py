@@ -162,7 +162,7 @@ class Bib:
 # --- the lessons -------------------------------------------------------------------------------------------------
 
 PAPER_RE = re.compile(r"^(?P<authors>.+?)\s\((?P<year>\d{4}[a-z]?)\)\s(?P<title>[^.]+?)\.\s*(?P<venue>.*)$")
-MANUAL_RE = re.compile(r"^(?P<what>Unity Manual|Blender Manual|Godot Docs|Unreal Engine docs|Unreal Engine|VRChat Creator Docs|VRChat Creators|CATS Blender Plugin)[:,]\s*(?P<rest>.+)$")
+MANUAL_RE = re.compile(r"^(?P<what>Unity Manual|Blender Manual|Godot Docs|Unreal Engine docs|Unreal Engine|VRChat Creator Docs|VRChat Creators|CATS Blender Plugin|Steamworks documentation)[:,]\s*(?P<rest>.+)$")
 
 
 def lessons():
@@ -246,6 +246,7 @@ def add_lesson_refs(bib, title, refs):
                 fields["organization"] = {"Unity Manual": "Unity Technologies", "Blender Manual": "Blender Foundation",
                                           "Godot Docs": "Godot Engine contributors", "Unreal Engine docs": "Epic Games",
                                           "Unreal Engine": "Epic Games", "VRChat Creator Docs": "VRChat Inc.",
+                                          "Steamworks documentation": "Valve",
                                           "VRChat Creators": "VRChat Inc.", "CATS Blender Plugin": "absolute-quantum (MIT)"}.get(what, what)
                 k = re.sub(r"[^A-Za-z0-9]", "", full.split(":")[0].split()[0]) + re.sub(r"[^A-Za-z0-9]", "", full.split(":", 1)[-1])[:28]
                 keys.append(bib.add("online", k, fields, f"Learn: {title}", "websites"))

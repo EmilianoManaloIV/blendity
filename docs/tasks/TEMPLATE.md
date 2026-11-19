@@ -1,9 +1,10 @@
 # NNNN: <short title>
 
 - **Status:** draft
+- **Authorization:** owner assignment or approved plan (record scope before code and mark approved for dispatch)
 - **Requirements:** R-xx, Q-xx
 - **Decisions:** ADR NNNN (or "none needed")
-- **Model:** implementer (Sonnet) | main session (Opus)
+- **Implementation:** project `implementer` for routine work or planning task for difficult geometry, architecture or cross-cutting work
 - **PR:** (link when opened)
 
 ## Goal
@@ -36,3 +37,7 @@ what should happen.
 - `changelog.d/<round>-<slug>.md` entry, with its README line when user-facing and its ARCHITECTURE / USABILITY /
   PERFORMANCE / tools/README lines as sections (ADR 0123 - never those files or CHANGELOG.md directly), ADR (as
   applicable).
+
+## Outcome
+Record the verified result and published head with independent test, review and CI evidence for the owner's
+final review. For a blocker or rejected candidate, record the failed criterion, evidence and remaining dependency.

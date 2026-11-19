@@ -9,3 +9,5 @@
 # Round 484: a test's "unpacked Unity package", read as the importer reads one (the GUID table split on \n, a listing
 # compared as text) - checked out byte for byte, never with CRLF.
 tests/fixtures/unity_gloss/** -text
+# Keep the generated Workshop fixtures byte-identical across checkout platforms.
+tests/fixtures/source_workshop/layout/** -text
