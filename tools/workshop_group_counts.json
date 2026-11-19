@@ -2,7 +2,7 @@
   "source_content": {"cases": 18, "checks": 899},
   "source1_model": {"cases": 17, "checks": 528},
   "source1_map": {"cases": 10, "checks": 1846},
-  "source2_model": {"cases": 10, "checks": 362},
+  "source2_model": {"cases": 10, "checks": 436},
   "source2_map": {"cases": 8, "checks": 550},
   "source_workshop": {"cases": 7, "checks": 772},
   "source_workshop_cold": {"cases": 3, "checks": 224}
