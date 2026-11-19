@@ -95,8 +95,9 @@ non-trivial.
 
 ## Workflow and approval gates
 1. **Plan** (the main session on the strongest available model): write `docs/tasks/NNNN-slug.md` from the
-   task template and an ADR for architectural decisions. **The owner approves the spec and any ADR before
-   implementation.** An approved pass plan approves the specs inside it.
+   task template before implementation and an ADR for architectural decisions. Record the owner's assignment
+   or approved plan as authorization for in-scope work. Follow the [shared workflow](AGENTS.md#workflow-and-approval-gates)
+   through final review, including hub routing for material scope changes and owner-reserved decisions.
 2. **Implement**: use the `implementer` agent for routine, well-specified work. The planning session
    handles hard geometry, architecture or cross-cutting changes.
 3. **Test**: the independent `test-engineer` writes tests from the spec's acceptance criteria.
@@ -126,7 +127,7 @@ run the reviewer.
 ## Git and publishing
 - The git root is `blender-main/`; GitHub (EmilianoManaloIV/blendity) holds only `blendity/`, published
   through the `blendity-root` subtree branch.
-- Commit only when the owner asks or approves a plan that ends in a PR. Keep all four private folders
+- An assigned round or approved plan that ends in a PR authorizes the hub to commit. Keep all four private folders
   outside staging and commits.
 - Name the AI tool that helped write the change in the `Co-Authored-By` trailer and PR disclosure.
   See [AI disclosure](docs/AI_DISCLOSURE.md).
