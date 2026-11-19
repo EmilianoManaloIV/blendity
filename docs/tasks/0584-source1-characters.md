@@ -1,6 +1,6 @@
 # 0584 Classic SFM characters and materials
 
-- **Status:** independently approved candidate; joined verification and publication with Hub
+- **Status:** independently approved and verified in the joined Windows and Linux Workshop suites. [Cross-title results](0588-workshop-verification.md).
 - **Requirements:** R-6, [pass 0582](0582-workshop-import.md)
 - **Decisions:** [ADR 0154](../decisions/0154-steam-workshop-import.md)
 - **Implementation:** dedicated workstream, then independent testing and review
