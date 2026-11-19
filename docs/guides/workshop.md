@@ -40,11 +40,11 @@ create a separate snapshot.
 
 ## Compatibility evidence
 
-| Title | Redistributable layout check | Downloaded-item check |
+| Title | Redistributable layout check | Real-file check on Windows |
 | --- | --- | --- |
-| Classic Source Filmmaker | Windows passed, including offline reopen | Scout posed in The Warehouse and the scene rendered after removing the source copy. The Scout reference model loaded sideways. Place the unskinned copy upright before setting Humanoid markers. Available materials supplied base textures for 45 of 80 slots. [Workshop map](https://steamcommunity.com/sharedfiles/filedetails/?id=791304326) |
-| Half-Life: Alyx | Windows passed, including offline reopen | The AlyxMP avatar posed in the Bad Kitty map and the saved scene rendered after removing both source copies. The avatar and map lacked the base-game textures. A separate author-hosted foliage model retained its 2048 × 2048 cutout texture on offline reopen. |
-| Counter-Strike 2 | Windows passed, including offline reopen | On app build 26445667, the SAS agent posed using all four limbs and resolved a base texture for all five material slots. The downloaded map added 61 mesh objects. All 75 material slots in the combined scene resolved base textures and the posed scene rendered identically after detaching the game and Workshop copies. Baked map lightmaps were omitted. [crashz' Crosshair Generator v4](https://steamcommunity.com/sharedfiles/filedetails/?id=3070193546) |
+| Classic Source Filmmaker | Windows and Linux passed, including offline reopen | Scout posed in The Warehouse and the scene rendered after removing the source copy. The compiled Scout bind pose lies sideways after Source coordinate conversion. All 5,241 imported positions matched the original vertex data. Place the unskinned copy upright before setting Humanoid markers. Available materials supplied base textures for 45 of 80 slots. [Workshop map](https://steamcommunity.com/sharedfiles/filedetails/?id=791304326) |
+| Half-Life: Alyx | Windows and Linux passed, including offline reopen | The AlyxMP avatar posed in the Bad Kitty map and the saved scene rendered after removing both source copies. The avatar and map lacked the base-game textures. A separate author-hosted foliage model retained its 2048 × 2048 cutout texture on offline reopen. |
+| Counter-Strike 2 | Windows and Linux passed, including offline reopen | On app build 26445667, the SAS agent posed using all four limbs and resolved a base texture for all five material slots. The downloaded map added 61 mesh objects. All 75 material slots in the combined scene resolved base textures and the posed scene rendered identically after detaching the game and Workshop copies. Baked map lightmaps were omitted. [crashz' Crosshair Generator v4](https://steamcommunity.com/sharedfiles/filedetails/?id=3070193546) |
 
 Steam's installation documentation describes local Workshop item access. Valve's Source SDK headers define
 classic model and BSP records. The Source 2 resource implementation and world loader in ValveResourceFormat
