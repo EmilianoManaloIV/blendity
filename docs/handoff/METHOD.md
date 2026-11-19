@@ -19,8 +19,9 @@ loss is in `PITFALLS.md`.
 1. **Spec.** From `docs/tasks/TEMPLATE.md`: what was asked, what is in and out, numbered acceptance criteria
    each of which a test can check, the files to touch, the stress sections to run, a responsiveness criterion
    where the feature does work per frame. An ADR beside it when the choice is architectural.
-2. **Implement** (the implementer role). Only the spec's files. Build both ways (Blender's libraries and
-   dependency-free), then the round's own test group in **both** builds before anything long runs.
+2. **Implement** (the implementer role). Only the spec's files. For app changes, build both ways (Blender's
+   libraries and dependency-free), then run the round's own test group in **both** builds before anything long
+   runs. For project metadata, run the spec's lightweight checks.
 3. **Test** (the test-engineer role). Tests decided from the acceptance criteria before reading the diff; UI
    behaviour through real events; edge cases the spec implies. A bug found is left as a failing test and
    reported, not fixed by the tester.
@@ -31,7 +32,7 @@ loss is in `PITFALLS.md`.
    (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
    for geometry changes; the audits (`tools/test_coverage_map.py --check`, `tools/sweep_commands.py --check`,
    `py tools/dev/changelog.py check`). The whole suite, macOS and the sanitizers are CI's.
-6. **Publish.** Merge the stack's current top into the round's branch (build the tests again if the merge
+6. **Publish.** The hub merges the stack's current top into the round's branch (build the tests again if the merge
    touched test files), commit, push `task/NNNN-slug`, open the PR against `main` with the template, run
    `bash tools/dev/stack_check.sh`, read the checks, tell the coordinating task the PR number and head.
 7. **After.** Read CI once it has run; a red is fixed on the top of the stack, never on a lower PR. Read review
@@ -69,9 +70,9 @@ every pair of parallel PRs conflicted in the same six files.
   them merged.
 - `bash tools/dev/stack_check.sh` lists each stack and fails when one has more than one top; `FIX=1` merges
   stray heads into the newest PR. It runs after every publish and every push, and as the `stack` CI job.
-- With several tasks publishing, the rule is: whoever is ready publishes on the **current** single top
-  (`stack_check.sh` names it), merging that head first. Two publishing at once make two tops for a few minutes;
-  the later one merges the other in.
+- Workers hand verified rounds to the hub for publication. The hub checks the **current** single top with
+  `stack_check.sh`, brings the candidate onto that head and publishes it. The hub checks the resulting stack
+  after each push.
 - The PR body's "Merging this also merges" line names what it carries. The owner then needs one merge per pass.
 - A stack is never rebased or squashed, and a fix never lands on a lower PR (it would sit outside the stack).
 

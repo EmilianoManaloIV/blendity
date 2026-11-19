@@ -11,6 +11,11 @@ Screenshots/*.png
 Renders/
 Assets/**/*.bak
 
+# Claude machine-local state belongs outside the project history
+/.claude/settings.local.json
+/.claude/scheduled_tasks.lock
+/.claude/worktrees/
+
 # The inbetweening model's training environment and runs (task 0128): build-time only
 tools/inbetween/.venv/
 tools/inbetween/runs/

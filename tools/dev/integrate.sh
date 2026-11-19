@@ -34,9 +34,7 @@ try_merge() {
   local out rc=0
   out=$(git merge-tree --write-tree --name-only --no-messages "$tip" "$1") || rc=$?
   if [ $rc = 0 ]; then
-    tip=$(git commit-tree "$(echo "$out" | head -1)" -p "$tip" -p "$1" -m "$2
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
+    tip=$(git commit-tree "$(echo "$out" | head -1)" -p "$tip" -p "$1" -m "$2$STACK_AI_TRAILER")
     return 0
   fi
   [ $rc = 1 ] || { echo "integrate: git merge-tree failed on $1" >&2; exit 2; }
@@ -186,6 +184,11 @@ Left out:"
     body="$body
 - $l"
   done
+fi
+if [ -n "$BL_AI_COAUTHOR" ]; then
+  body="$body
+
+AI assistance for this run: ${BL_AI_COAUTHOR%% <*}."
 fi
 # Nothing new to push: the body is still rewritten, since what is left out and why may have changed.
 if [ "$tip" = "$start" ]; then

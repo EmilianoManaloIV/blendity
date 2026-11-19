@@ -36,12 +36,17 @@ SHARDS = [
     ["assets", "livelink", "input", "sculpt", "hci", "vr", "runner", "blockout_modifiers", "blockout_join", "blockout_piece_modifiers", "splats", "splats_raster", "blockout_opening_modifiers"],  # 8.9 (runner: new in round 492, seconds; blockout_modifiers: round 502; blockout_join: round 501; blockout_piece_modifiers: round 514; splats: round 530, seconds; splats_raster: round 532, seconds)
 ]
 
-# A pull request needs no build when every path it changes is one of these: text no program, test or CI check reads.
+# A pull request needs no native build when every changed path is documentation or agent metadata.
+# The changes job separately validates the known Codex configuration files.
 # Anything else builds - a path this list has never heard of included. Left out on purpose, because the unit tests or
 # the linux job's checks read them: README.md, CREDITS.md, docs/MANUAL.md, docs/guides/, docs/book/, the books' PDFs
 # (tests "docs: the manual ..." and "the books ..."), licenses/ (shipped beside the programs). The linux job's
 # make_books.py --check-cited reads only docs/book/, which builds.
-NO_BUILD_FILES = {"CLAUDE.md", "CHANGELOG.md", ".github/pull_request_template.md"}
+NO_BUILD_FILES = {
+    "AGENTS.md", "CLAUDE.md", "CHANGELOG.md", ".github/pull_request_template.md",
+    ".codex/agents/implementer.toml", ".codex/agents/test-engineer.toml",
+    ".codex/agents/code-reviewer.toml", ".codex/rules/blendity.rules",
+}
 NO_BUILD_FOLDERS = ("changelog.d/", "docs/decisions/", "docs/tasks/", "docs/hci/", ".claude/")
 NO_BUILD_DOCS = re.compile(r"docs/[A-Za-z0-9_.-]+\.md$")  # (docs/ARCHITECTURE.md, USABILITY.md, PERFORMANCE.md, ...)
 BUILD_DOCS = {"docs/MANUAL.md"}
@@ -85,7 +90,7 @@ def problems(groups, shards):
 
 
 def needs_build(paths):
-    """False only when every changed path is known to be text nothing builds, tests or checks."""
+    """False only when every changed path is known to require no native build."""
     paths = [p.strip().replace("\\", "/") for p in paths if p.strip()]
     if not paths or len(paths) >= GITHUB_FILE_LIMIT:
         return True
@@ -127,6 +132,18 @@ def self_test():
 
     expect("a changelog fragment and a spec", needs_build(["changelog.d/491-exe-rule.md", "docs/tasks/0467-x.md", "CLAUDE.md"]), False)
     expect("an ADR", needs_build(["docs/decisions/0133-x.md"]), False)
+    expect("Claude and Codex role and rule metadata", needs_build([
+        "AGENTS.md", ".claude/settings.json", ".codex/agents/implementer.toml",
+        ".codex/agents/test-engineer.toml", ".codex/agents/code-reviewer.toml",
+        ".codex/rules/blendity.rules",
+    ]), False)
+    expect("Codex metadata mixed with product code",
+           needs_build([".codex/rules/blendity.rules", "src/core/math.cpp"]), True)
+    expect("Codex metadata mixed with build config",
+           needs_build([".codex/agents/code-reviewer.toml", ".github/workflows/build.yml"]), True)
+    for path in [".codex/config.toml", ".codex/hooks.json", ".codex/agents/new.toml",
+                 ".codex/rules/new.rules", ".codex/agents/implementer.toml.bak"]:
+        expect(f"unregistered Codex path {path} builds", needs_build([path]), True)
     expect("a shared doc", needs_build(["docs/ARCHITECTURE.md", "docs/USABILITY.md"]), False)
     for p in ["src/core/math.cpp", "tests/test_editor.cpp", "stress/stress_main.cpp", "extern/ufbx/ufbx.c",
               "tools/dev/chain.sh", "build.bat", "build.sh", ".github/workflows/build.yml", "CMakeLists.txt",

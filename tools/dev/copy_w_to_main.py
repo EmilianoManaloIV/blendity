@@ -1,72 +1,140 @@
-"""The dependency-free tree's changes (against HEAD) into the Blender-libraries clone (tools/dev/README.md), retried when
-Windows refuses a file for a moment (an indexer or IDE holding it), every copy checked byte for byte; exits 1 if any
-file still differs. BL_W / BL_MAIN override the two trees."""
-import filecmp, os, shutil, subprocess, sys, time
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Copy the dependency-free tree's round changes into an explicit scratch libraries checkout."""
 
-W = os.environ.get('BL_W', 'W:/blendity')
-M = os.environ.get('BL_MAIN', 'C:/Users/trick/Downloads/blender-main/blendity')
-SKIP = ('Assets/', 'dist/', 'build/')
+import filecmp
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+SKIP = {"assets", "renders", "screenshots", "research", "dist", "build"}
 
 
-def git(*a):
-    return subprocess.run(['git', '-C', W] + list(a), capture_output=True, text=True, encoding='utf-8').stdout.splitlines()
+def git(tree, *args):
+    return subprocess.run(
+        ["git", "-C", tree, "--literal-pathspecs", *args],
+        capture_output=True, encoding="utf-8", check=True,
+    ).stdout
 
 
-def copy(src, dst):
-    last = None
+def diff_paths(tree, *args):
+    return git(
+        tree, "diff", "--relative", "--no-renames", "--name-only", "-z", *args,
+        "HEAD", "--", ".",
+    ).split("\0")[:-1]
+
+
+def in_scope(relative):
+    return relative.partition("/")[0].casefold() not in SKIP
+
+
+def checkout(setting, value):
+    if not value:
+        raise ValueError(f"{setting}: choose the appropriate scratch checkout")
+    tree = Path(value).resolve(strict=True)
+    if not tree.is_dir():
+        raise ValueError(f"{setting}: expected a checkout directory: {tree}")
+    root = Path(git(tree, "rev-parse", "--show-toplevel").strip()).resolve(strict=True)
+    if tree == root:
+        prefix = ""
+    elif tree == root / "blendity":
+        prefix = "blendity/"
+    else:
+        raise ValueError(f"{setting}: use the project root or the original checkout's blendity/ directory")
+    for marker in ("AGENTS.md", "build.sh"):
+        if not (tree / marker).is_file():
+            raise ValueError(f"{setting}: missing Blendity project file: {marker}")
+        git(tree, "cat-file", "-e", f"HEAD:{prefix}{marker}")
+    return tree
+
+
+def checkout_path(tree, relative):
+    path = tree / relative
+    resolved = path.resolve().relative_to(tree)
+    if not resolved.parts or resolved.parts[0].casefold() in SKIP:
+        raise ValueError(f"path resolves into a protected directory: {path}")
+    return path
+
+
+def copy_file(src, dst):
     for _ in range(20):
         try:
             shutil.copyfile(src, dst)
-            return True
-        except OSError as e:
-            last = e
+            return
+        except OSError as error:
+            last = error
             time.sleep(0.5)
-    print('FAILED', dst, last)
-    return False
-
-
-def strip(rel):
-    return rel[len('blendity/'):] if rel.startswith('blendity/') else rel
+    raise last
 
 
 def same(src, dst):
-    return os.path.exists(dst) and filecmp.cmp(src, dst, shallow=False)
+    return dst.exists() and filecmp.cmp(src, dst, shallow=False)
 
 
-changed = git('diff', '--name-only', 'HEAD', '--', '.')
-untracked = git('ls-files', '--others', '--exclude-standard', '--', '.')
-n, bad = 0, 0
-for rel in map(strip, changed + untracked):
-    if rel.startswith(SKIP):
-        continue
-    src, dst = os.path.join(W, rel).replace('\\', '/'), os.path.join(M, rel).replace('\\', '/')
-    if not os.path.exists(src):
-        if os.path.exists(dst):
-            os.remove(dst)
-            print('removed', rel)
-        continue
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if not same(src, dst):
-        if not copy(src, dst):
-            bad += 1
+def copy_round(source, target):
+    if diff_paths(target, "--cached"):
+        raise ValueError("BL_MAIN has staged changes. Choose a scratch checkout with a clean index.")
+    changed = diff_paths(source)
+    deleted = set(diff_paths(source, "--diff-filter=D"))
+    untracked = git(source, "ls-files", "--others", "--exclude-standard", "-z", "--", ".").split("\0")[:-1]
+    target_changed = diff_paths(target)
+    round_paths = {relative: None for relative in changed + untracked if in_scope(relative)}
+
+    # Validate paths before using the target, including paths that will be removed or restored.
+    copies = [
+        (relative, checkout_path(source, relative), checkout_path(target, relative))
+        for relative in round_paths
+    ]
+    restores = [
+        (relative, checkout_path(source, relative), checkout_path(target, relative))
+        for relative in target_changed if in_scope(relative) and relative not in round_paths
+    ]
+    for relative, src, _ in copies:
+        if src.is_file():
             continue
-        print('copied', rel)
-    if not same(src, dst):
-        print('DIFFERS', rel)
-        bad += 1
-    n += 1
+        if not src.exists() and relative in deleted:
+            continue
+        raise ValueError(f"source path is not a regular file or a tracked deletion: {src}")
 
-# Files the clone changed that W hasn't (W reverted an experiment): the clone takes HEAD's own copy.
-w_rels = set(map(strip, changed + untracked))
-main_changed = subprocess.run(['git', '-C', M, 'diff', '--name-only', 'HEAD', '--', '.'], capture_output=True, text=True, encoding='utf-8').stdout.splitlines()
-for rel in map(strip, main_changed):
-    if rel in w_rels or rel.startswith(SKIP) or not os.path.exists(os.path.join(W, rel)):
-        continue
-    r = subprocess.run(['git', '-C', M, 'checkout', '--', rel], capture_output=True, text=True)
-    if r.returncode == 0:
-        print('restored', rel)
-    else:
-        print('FAILED to restore', rel, r.stderr.strip())
-        bad += 1
-print(n, 'files', '(%d bad)' % bad if bad else '')
-sys.exit(1 if bad else 0)
+    count = 0
+    for relative, src, dst in copies:
+        if not src.exists():
+            if relative not in deleted:
+                raise ValueError(f"source path disappeared: {src}")
+            if dst.exists():
+                dst.unlink()
+                print("removed", relative)
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if not same(src, dst):
+            copy_file(src, dst)
+            print("copied", relative)
+        if not same(src, dst):
+            raise OSError(f"copy differs: {relative}")
+        count += 1
+
+    # If W reverted an experiment, the scratch clone takes its own HEAD copy.
+    for relative, src, _ in restores:
+        if src.exists():
+            git(target, "checkout", "--", relative)
+            print("restored", relative)
+    print(count, "files")
+
+
+def main():
+    source = checkout("BL_W", os.environ.get("BL_W", "W:/blendity"))
+    target = checkout("BL_MAIN", os.environ.get("BL_MAIN"))
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        raise ValueError("BL_W and BL_MAIN must be distinct, non-overlapping checkouts")
+    copy_round(source, target)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f"copy_w_to_main: {error.stderr.strip() or error}") from error
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"copy_w_to_main: {error}") from error

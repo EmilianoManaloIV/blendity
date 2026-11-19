@@ -105,7 +105,7 @@ inside them (`/c/blab/...`) are that PC's.
 
 The repository's own scripts for a round (`chain.sh`, `publish.sh`, `stack_check.sh`, `changelog.py`, ...) are
 in `tools/dev/` and described in `tools/dev/README.md`; their machine paths are settings at the top
-(`BL_W`, `BL_MAIN`, `BL_WSL_TREE`, ...).
+(`BL_W`, `BL_MAIN`, `BL_WSL_TREE`, ...). Select scratch trees explicitly for `BL_MAIN` and `BL_WSL_TREE` when running `chain.sh`.
 
 ## What an agent may not do here
 - Kill the owner's `Blendity.exe`, or any process that is not its own.
