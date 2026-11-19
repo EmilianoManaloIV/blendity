@@ -115,16 +115,31 @@ approved together, ending in a write-up round.
 - `docs/tasks/`: the task spec the work was done against; mark it done.
 
 ## Workflow and approval gates
+An explicit project workflow change from the owner in the Hub applies to current and future Blendity tasks
+and sessions unless the owner limits its scope or later supersedes it. The hub records the change here or in
+the [handoff method](docs/handoff/METHOD.md#standing-hub-workflow-changes) and updates affected role instructions,
+templates or scheduled checks. At session start, use these project rules and the latest explicit owner direction.
+
+Every role in Claude and Codex, including workstream leads and the hub, cites the references it actually used
+for each consequential claim in a handoff. For repository behavior, identify the path and symbol or relevant
+revision. For upstream behavior, link the primary source and identify its version when relevant. For observed
+results, cite the test fixture, command, run or scratch evidence. Mark unverified assumptions explicitly.
+The reviewer checks that each reference supports the claim. The hub retains the references with the claims
+in the task spec, ADR or PR as appropriate.
+
 1. **Plan** (the planning task, on the strongest model available): write `docs/tasks/NNNN-slug.md` (template in `docs/tasks/`) and an ADR if the decision is
-   architectural. **The owner approves the spec (and ADR) before code is written.** When the owner has approved
-   a pass's plan, the specs of that plan count as approved (the owner's standing instruction, 2026-11-10; not in
-   `CLAUDE.md`); anything that leaves the plan goes back to the owner.
+   architectural. Write the numbered spec before implementation and record the owner's assignment or approved
+   plan as its authorization. Mark it approved for dispatch. That authorization covers routine decisions and
+   in-scope follow-ups through verification and publication. Child chats send material scope changes and
+   owner-reserved decisions, with their rationale, to the hub. Only the hub asks the owner.
 2. **Implement**: the implementer role for routine, well-specified work; the planning task itself for hard
    geometry or cross-cutting changes.
 3. **Test**: the test-engineer role writes tests from the spec's acceptance criteria.
 4. **Review**: the code-reviewer role reviews the diff against the spec, the ADRs and this file.
 5. **Merge**: push a branch, open a PR (template in `.github/`), CI must pass. **The owner reviews and
-   merges on GitHub**. The hub publishes and verifies the PR, then hands it to the owner. The owner uses a merge
+   merges on GitHub**. The hub integrates and publishes the reviewed candidate, monitors CI, fixes failing
+   checks and verifies the published head for the owner's final review. If a candidate is rejected or a
+   blocker prevents completion, record the evidence, failed criterion and remaining dependency. The owner uses a merge
    commit for stacks so the top carries all lower PRs. Agents do not merge PRs, use `--admin` or enable auto-merge.
 6. **Every PR targets `main`** (`--base main`), never another PR's branch (the owner, 2026-11-08). A round's
    commit may build on the previous round's, but its PR's base is `main`. **Guarantee:** merging the top PR
@@ -205,7 +220,8 @@ for named selection and explicit dispatch, and [the Claude role files](.claude/a
   soften findings to reach 'approve'."
 
 ### One coordinating task and parallel tasks
-The parent Codex chat is the hub. For every approved plan, independent task chats report directly to it by default.
+The parent Codex chat is the hub. For every approved plan, independent task chats report directly to it
+using [compact handoffs](docs/handoff/CODEX.md#compact-handoffs).
 See [direct task chats](docs/handoff/METHOD.md#direct-task-chats-for-independent-work) for when to assign a workstream lead and how candidates return to the hub.
 - **One coordinating task** talks to the owner, writes the pass's plan, starts the parallel tasks, keeps the
   list of open PRs and what waits on the owner, grants the graphics card and timed windows, rebuilds the owner's
@@ -219,15 +235,15 @@ See [direct task chats](docs/handoff/METHOD.md#direct-task-chats-for-independent
   say so. A task that needs a file outside its row stops and asks the coordinating task.
 - Rounds that share files within one task may be built and verified together, but each still gets its own
   commit and its own PR.
-- An approved plan is the go-ahead for everything it needs (starting tasks, writing its specs); merges,
-  releases and the safety rules stay the owner's.
+- Task assignments and approved plans authorize work within their scope. Protected operations retain their
+  existing approval requirements, including release tags and system changes.
 
 ## Git and publishing
 - The development machine's git root is `blender-main/`; GitHub (EmilianoManaloIV/blendity) holds only
   `blendity/`, published through the `blendity-root` subtree branch. A clone of the GitHub repository has
   `blendity/`'s content at its root and needs no subtree step: branch from the stack's top (or `main`), commit, push.
-- Commit only when the owner asks. An approved plan that ends in a PR is such an ask (the owner's standing
-  instruction, 2026-11-10). Never stage or commit the owner's files from `Assets/`, `Renders/`, `Screenshots/`
+- An assigned round or approved plan that ends in a PR authorizes the hub to commit and publish its verified
+  changes. Never stage or commit the owner's files from `Assets/`, `Renders/`, `Screenshots/`
   or `research/`.
 - Commit messages end with a `Co-Authored-By:` trailer naming the AI tool that wrote the change (the history's
   commits name Claude; use your own tool's line), and PR bodies say they were written with it

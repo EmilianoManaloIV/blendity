@@ -150,6 +150,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   of them as the new image rolls out, and none passing once the old image is gone. The image's other toolset, 14.44,
   is no way out: it stops at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` (C2026, a string literal too long
   for that compiler). The fault itself is still there for anyone who builds with 14.52.
+- **Branch-only MSVC 14.44 trial (task 0562).** With the long strings split, the diagnostic build compiled and passed quick stress. Four bit-for-bit Catmull-Clark checks failed in the full Windows suite. [Trial run](https://github.com/EmilianoManaloIV/blendity/actions/runs/44380568201)
 - **Round 582 compatibility status (2026-11-19).** The 14.52 candidate compiled and passed quick stress under
   release defaults, with precise floating-point mode, and with link-time code generation disabled. The full
   Windows unit suite failed in all three runs. The cause remains unresolved. [Task 0564 and CI results](../tasks/0564-msvc-1452.md)
