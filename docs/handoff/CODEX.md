@@ -43,6 +43,39 @@ and [rules reference](https://learn.chatgpt.com/docs/agent-configuration/rules).
 | Original task and PR templates, attribution | [Task template](../tasks/TEMPLATE.md), [PR template](../../.github/pull_request_template.md), [AI disclosure](../AI_DISCLOSURE.md) and [credits](../../CREDITS.md). Existing rounds, commit trailers and PR disclosures retain their historical attribution. |
 | Project commands, skills, hooks and MCP | No tracked Claude slash-command, skill, hook or MCP definition was present. Blendity's console commands and workflow scripts remain the existing entry points. |
 
+## Compact handoffs
+
+The hub or assigned task lead sends a fresh brief for each role in the
+[dispatch sequence](METHOD.md#codex-worker-dispatch). Include what each worker needs to act.
+
+- Give the role, task ID and approved spec path, worktree and base revision, owned files and limits,
+  acceptance criteria or their section in the spec, relevant evidence links, and the next dependency.
+- Give the implementer the approval and any existing reproduction or constraints. After implementation,
+  give the test engineer the spec and scratch inputs first. The tester records expectations and cases
+  from the spec before opening the diff, then verifies the candidate and returns results tied to it.
+- Give a separate reviewer the tested candidate, final diff, test evidence and gaps. If the candidate
+  changes after testing, send it through the affected tests before asking for a new review.
+
+Keep the last consumed cursor and candidate head in the hub's task record. Keep each cursor with the
+chat or observation source that returned it. For an uncommitted candidate, save the complete diff,
+including new files, in scratch and use its digest and base revision as the identity. Poll from the
+stored cursor where supported and advance it after processing each observation, including duplicates.
+Compare each observation with the last report for its task.
+
+- On the same candidate, skip repeat reports. Surface new check results, a changed verdict or blocker,
+  and a new dependency, resource request or owner decision. A newer cursor alone is a repeat.
+- When the candidate changes, record the new identity and flag which verification must run again.
+  Tie results and verdicts to the candidate they actually cover. Keep late results for an earlier
+  identity with that candidate and leave the current candidate's verification state intact.
+- For a failed observation, report the first causal error and link to its scratch evidence. Keep the
+  last successful state if the observation itself could not be fetched. Repeat the alert only when
+  the error or required action changes, and report recovery when observed.
+
+Return the task and candidate identity, the verified changes and results, the role's verdict or state,
+and the next dependency or action. For failures include the first causal error and a scratch evidence
+link. Keep logs and transcripts in scratch. Add detail when correctness or an owner decision depends
+on it. The hub handles commits and publication. The owner merges.
+
 ## Command policy
 
 Each row gives the literal command prefix corresponding to one entry in the original Claude settings.
