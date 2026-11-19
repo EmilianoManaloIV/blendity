@@ -1,5 +1,19 @@
 name: Windows toolset verification
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA to build and test
+        default: 4f880bb3bdcc4fdb9e5b79a000334598644ab6bd
+        required: true
+      symbols:
+        description: Retain matching PDBs
+        type: boolean
+        default: true
+      full:
+        description: Unfiltered Windows unit and quick stress suites
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -9,12 +23,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4f880bb3bdcc4fdb9e5b79a000334598644ab6bd
-      - name: Compile the release baseline and keep symbols
+          ref: ${{ inputs.source_sha }}
+      - name: Provision the original MSVC toolset if absent
+        run: |
+          $finder = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $instances = & $finder -all -products '*' -property installationPath
+          foreach ($instance in $instances) {
+            if (Test-Path "$instance/VC/Tools/MSVC/14.52.37025/bin/Hostx64/x64/cl.exe") {
+              Write-Host "Preinstalled toolset at $instance"
+              return
+            }
+          }
+          $package = "$env:RUNNER_TEMP/vs_BuildTools.exe"
+          Invoke-WebRequest -Uri 'https://download.visualstudio.microsoft.com/download/pr/4aa37a90-1dc9-4507-9e7b-49134341b6c4/5e7c32e82c89b3d69a2c818f3b06679909729b05e94609e3367bbb554d627f55/vs_BuildTools.exe' -OutFile $package
+          if ((Get-FileHash $package).Hash -ne '5e7c32e82c89b3d69a2c818f3b06679909729b05e94609e3367bbb554d627f55') { throw 'Bootstrapper hash mismatch' }
+          $signature = Get-AuthenticodeSignature $package
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'Expected a Microsoft-signed bootstrapper' }
+          $process = Start-Process $package -WindowStyle Hidden -Wait -PassThru -ArgumentList '--quiet','--wait','--norestart','--nocache','--installPath','C:\blendity-buildtools','--add','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','--add','Microsoft.VisualStudio.Component.Windows11SDK.26100'
+          if ($process.ExitCode -notin 0,3010) { throw "Build Tools installer exited $($process.ExitCode)" }
+          if (!(Test-Path 'C:/blendity-buildtools/VC/Tools/MSVC/14.52.37025/bin/Hostx64/x64/cl.exe')) { throw 'The original compiler is missing after provisioning' }
+      - name: Compile on the selected 14.52 toolset
         env:
-          BLENDITY_VCVARS_VER: '14.52'
+          BLENDITY_VCVARS_VER: '14.52.37025'
           BLENDITY_VCVARS_STRICT: '1'
-          BLENDITY_PDB: '1'
+          BLENDITY_PDB: ${{ inputs.symbols && '1' || '0' }}
           BLENDITY_FETCH_OPTIX: '1'
           BLENDITY_NO_LIBS: '1'
         run: |
@@ -26,13 +58,15 @@ jobs:
             throw 'The build did not record MSVC 14.52.'
           }
           foreach ($name in 'blendity_tests','blendity_stress') {
-            foreach ($ext in 'exe','pdb') {
+            $extensions = @('exe')
+            if ($env:BLENDITY_PDB -eq '1') { $extensions += 'pdb' }
+            foreach ($ext in $extensions) {
               if (!(Test-Path "dist/windows/$name.$ext")) { throw "Missing $name.$ext" }
             }
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-14.52-with-symbols
+          name: windows-14.52-binaries
           retention-days: 7
           path: |
             dist/windows/*.exe
@@ -50,14 +84,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 4f880bb3bdcc4fdb9e5b79a000334598644ab6bd
+          ref: ${{ inputs.source_sha }}
       - uses: actions/download-artifact@v4
         with:
-          name: windows-14.52-with-symbols
+          name: windows-14.52-binaries
           path: dist/windows
       - name: Run existing tests with matching symbols
         env:
           SUITE: ${{ matrix.suite }}
+          FULL_SUITE: ${{ inputs.full && '1' || '0' }}
         run: |
           $scratch = Join-Path $env:RUNNER_TEMP $env:SUITE
           New-Item -ItemType Directory -Path $scratch | Out-Null
@@ -67,19 +102,24 @@ jobs:
           $env:BLENDITY_CACHE_DIR = "$scratch/cache"
           $env:_NT_SYMBOL_PATH = "$pwd/dist/windows"
           if ($env:SUITE -eq 'unit') {
-            $env:BLENDITY_TEST_RANGE = '1-650'
+            if ($env:FULL_SUITE -ne '1') { $env:BLENDITY_TEST_RANGE = '1-650' }
             $program = "$pwd/dist/windows/blendity_tests.exe"
             $arguments = @()
           } else {
             $program = "$pwd/dist/windows/blendity_stress.exe"
-            $arguments = @('--quick','--only','modifiers_ngon','--out',"$scratch/results")
+            $arguments = @('--quick','--out',"$scratch/results")
+            if ($env:FULL_SUITE -ne '1') { $arguments += '--only','modifiers_ngon' }
           }
           & $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/test.log"
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             $debugger = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
             if (Test-Path $debugger) {
-              & $debugger -g -G -o -c 'sxd av;g;kb;q' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
+              & $debugger -lines -G -c 'sxe -c "kb;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
+            } elseif (Get-Command lldb -ErrorAction SilentlyContinue) {
+              & lldb --batch --one-line 'run' --one-line-on-crash 'thread backtrace' -- $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
+            } else {
+              Write-Warning 'No CDB or LLDB on this test runner. Matching PDBs are in the build artifact.'
             }
           }
           exit $code
