@@ -54,6 +54,29 @@ an in-scope review fix, the hub restores the spec's status to `approved` under t
 approval and hands the fix back to the implementer. The implementer returns the spec to
 `in review`. The hub repeats the affected verification and independent review before publishing.
 
+### Direct task chats for independent work
+
+For every approved plan, the parent hub records each deliverable, file owner, dependencies, acceptance
+checks and shared resource needs on the board. By default each independent deliverable gets a task
+chat and worktree and reports directly to the hub. Assign rounds that edit the same file to one
+owner in sequence. Use a temporary workstream lead only when several tasks need material coordination.
+Record what the lead must coordinate. For example, file-import and export-validation changes with
+disjoint files and acceptance checks can report directly. In a UI plan, keyboard navigation and
+accessibility may depend on a common focus contract. A lead can sequence that contract and coordinate
+joint acceptance while each file keeps one owner.
+
+Schedule roles as runtime capacity becomes available. Within each round, implementation finishes
+before a separate test engineer derives checks from the spec and then sees the diff. An independent
+reviewer receives the final candidate and results. The task chat or lead dispatches these roles
+where supported, or asks the hub to dispatch them. Record assignments on the board and release
+workers and reservations after handoff.
+
+The task chat or workstream lead sends the parent hub the candidate revision, verification evidence,
+review verdict, blockers and resource requests. The hub owns the review gate and re-review, the
+shared stack and its commits and publication, and all build, GPU and timed reservations. It monitors
+worker progress, stale reservations, CI and PR feedback, routes fixes and keeps the owner's executable
+current under the publish procedure. The owner approves plans and merges PRs.
+
 ## Changelog fragments, folded at a pass's end
 A round never edits `CHANGELOG.md`, `README.md` or the four shared docs (`docs/USABILITY.md`, `tools/README.md`,
 `docs/ARCHITECTURE.md`, `docs/PERFORMANCE.md`). It adds `changelog.d/<round>-<slug>.md`: the entry as it will
@@ -159,6 +182,8 @@ It is rebuilt at publish, not at CI green (that reaches the owner one to three h
 merge (the exe already has that work). Never during a timed window.
 
 ## The hourly check and the board
+
+Follow the [parallel verification procedure](#parallel-verification-and-evidence) for evidence routing.
 - **Hourly**, while parallel tasks run, the coordinator looks for stalls (a worktree that has not changed, a
   build queued behind a dead slot holder), reads CI on the open PRs with `gh pr checks`, routes each red to the
   task that owns the file, and frees stale locks whose owners have nothing running.
@@ -172,9 +197,37 @@ merge (the exe already has that work). Never during a timed window.
   between options, a stack ready to review) and otherwise answers when asked.
 
 ## Long tasks
-- A fresh task per pass, started after the previous pass's write-up; before stopping, a task writes a short
-  resume note (what is published, what is in the worktree, what is next). Switching mid-batch costs more than
-  finishing it.
-- A task that reports to another puts the result first (the PR link, the head commit), then the detail.
+- The hub assigns task chats from each approved plan. Before stopping, each chat records what is published,
+  what remains in its worktree and what comes next.
+- Before publication, report the candidate revision and review verdict first. After publication, lead with the PR link and head commit.
 - Helper scripts that prove useful go into `tools/dev/`, with their paths as settings at the top; scratch
   folders are never uploaded.
+
+## Parallel verification and evidence
+
+- **Route a change once.** In each pass with shared dependencies, record producer, consumer,
+  public interface or fixture, candidate revision and evidence link in a shared scratch index.
+  The producer updates its entry and alerts the affected consumer. Resource owners notify the next
+  scheduled worker after release. That worker acquires the machine lock or waits for the Hub's explicit
+  GPU grant before starting. Escalate to the Hub when ownership or order changes,
+  another team is blocked, an owner decision is required, or the candidate is ready for review.
+  Routine acknowledgments and duplicate status reports add no evidence.
+- **Exercise the first connected path early.** As soon as one representative input can traverse a
+  new subsystem, run a small test through its normal entry point. For an importer, load one textured
+  model into a scratch project, save it and reopen in a fresh process with its sources detached.
+  Record the revision and result while independent readers continue.
+- **Freeze the joined candidate for full verification.** Producers identify their exact ready
+  inputs. The verifier records one combined revision and runs required suites on that revision.
+  Rebuild the app and tests with fresh objects after a shared layout or ABI change. On later
+  edits, identify invalidated evidence and repeat the affected checks and required final gates.
+- **Give each role a fresh brief.** Supply its task, worktree, candidate, owned paths, acceptance
+  criteria and source/evidence pointers. The tester derives cases from the spec before reading the
+  diff. The reviewer receives the tested diff and evidence, including any gaps.
+- **Collect evidence mechanically.** The runner records the tested SHA and real process exit status
+  with one native log per invocation. Use the [evidence helper](../../tools/dev/verification_evidence.py)
+  with `native --revision SHA --group NAME --exit-code EXIT --log PATH` and add `--expected COUNT`
+  when the fixture has a known total. For a hosted run use `ci --revision SHA --repo OWNER/REPO --run ID`.
+  Keep the JSON receipt and logs in scratch. The native SHA comes from the build/run manifest.
+  Check the manifest when attributing a result to a candidate. Inspect the first failed step for
+  a causal diagnostic. Preserve the last verified result if evidence collection is unavailable.
+  Report changed outcomes with supporting links. The hourly health check remains the fallback.

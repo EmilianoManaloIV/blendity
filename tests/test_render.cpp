@@ -10104,51 +10104,79 @@ static void tests_round168() {
 
 }
 
+/* The Scene view's crop of an object seen straight on. */
+struct R184 {
+  std::vector<uint32_t> px;
+  std::vector<uint8_t> mask;  // 1 where the view changes when the object is present
+  Recti rect;
+};
+
+/* Round 184 finds coverage by comparing views with the object away and present. */
+using R184Pixels = std::vector<uint32_t> (*)(const Editor &, const Recti &);
+static R184 r184_view(Editor &ed, GameObject *obj, float dist, int device, R184Pixels pixels,
+                     const std::function<void()> &between) {
+  ed.viewport_device_for_test(device);
+  ed.command(strprintf("camera 0 0 %g 0 1 0", dist));
+  obj->set_local_position({1000.0f, 1.0f, 0.0f});
+  r34_steps(ed, 2);
+  R184 r;
+  r.rect = ed.scene_view_rect();
+  const std::vector<uint32_t> empty = pixels(ed, r.rect);
+  if (between) between();
+  obj->set_local_position({0.0f, 1.0f, 0.0f});
+  r34_steps(ed, 2);
+  r.px = pixels(ed, r.rect);
+  if (empty.empty() || r.px.empty()) return {};
+  r.mask.assign(r.px.size(), 0);
+  for (size_t i = 0; i < r.px.size() && i < empty.size(); i++) r.mask[i] = r.px[i] != empty[i] ? 1 : 0;
+  return r;
+}
+
+static R184 r184_composited_view(Editor &ed, GameObject *obj, float dist, int device,
+                                 const std::function<void()> &between = {}) {
+  return r184_view(ed, obj, dist, device, r34_crop, between);
+}
+
+/* Read both mapped-material pictures before the UI draws toasts over the colors we sample. */
+static R184 r184_mapped_view(Editor &ed, GameObject *obj, float dist, int device,
+                            const std::function<void()> &between = {}) {
+  auto pixels = [](const Editor &ed, const Recti &rect) {
+    const Image *img = ed.scene_layer_image_for_test();
+    const bool ready = img && img->width == rect.w && img->height == rect.h &&
+                       img->pixels.size() == (size_t)rect.w * rect.h;
+    CHECK(ready);
+    return ready ? img->pixels : std::vector<uint32_t>{};
+  };
+  return r184_view(ed, obj, dist, device, pixels, between);
+}
+
+static float r184_luma(uint32_t p) {
+  return 0.2126f * ((p >> 16) & 255) + 0.7152f * ((p >> 8) & 255) + 0.0722f * (p & 255);
+}
+
+/* The mean absolute Laplacian over the object's interior pixels (those whose four neighbours are the object's too:
+ * the silhouette against the background is not the texture's doing). */
+static double r184_energy(const std::vector<float> &l, const std::vector<uint8_t> &mask, int w, int h) {
+  double sum = 0;
+  size_t n = 0;
+  for (int y = 1; y + 1 < h; y++)
+    for (int x = 1; x + 1 < w; x++) {
+      const size_t i = (size_t)y * w + x;
+      if (!mask[i] || !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) continue;
+      const float c = l[(size_t)y * w + x];
+      sum += std::fabs(4.0f * c - l[(size_t)y * w + x - 1] - l[(size_t)y * w + x + 1] - l[(size_t)(y - 1) * w + x] - l[(size_t)(y + 1) * w + x]);
+      n++;
+    }
+  return n ? sum / n : 0.0;
+}
+
+static std::vector<float> r184_lumas(const std::vector<uint32_t> &px) {
+  std::vector<float> l(px.size());
+  for (size_t i = 0; i < px.size(); i++) l[i] = r184_luma(px[i]);
+  return l;
+}
+
 static void tests_round184() {
-  /* The Scene view's crop of an object seen from `dist` metres, straight on, with the views on `device`. */
-  struct R184 {
-    std::vector<uint32_t> px;
-    std::vector<uint8_t> mask;  // 1 where the object is
-    Recti rect;
-  };
-  /* The picture, and which of its pixels are the object's: those that differ from the same view with the object
-   * moved away (a 1 m object at 60 m is nine pixels wide; the view's background would swamp any measure). */
-  auto r184_view = [](Editor &ed, GameObject *obj, float dist, int device) {
-    ed.viewport_device_for_test(device);
-    ed.command(strprintf("camera 0 0 %g 0 1 0", dist));  // (yaw, pitch, distance, the pivot: straight on from `dist` metres)
-    obj->set_local_position({1000.0f, 1.0f, 0.0f});
-    r34_steps(ed, 2);
-    R184 r;
-    r.rect = ed.scene_view_rect();
-    const std::vector<uint32_t> empty = r34_crop(ed, r.rect);
-    obj->set_local_position({0.0f, 1.0f, 0.0f});
-    r34_steps(ed, 2);
-    r.px = r34_crop(ed, r.rect);
-    r.mask.assign(r.px.size(), 0);
-    for (size_t i = 0; i < r.px.size() && i < empty.size(); i++) r.mask[i] = r.px[i] != empty[i] ? 1 : 0;
-    return r;
-  };
-  auto luma = [](uint32_t p) { return 0.2126f * ((p >> 16) & 255) + 0.7152f * ((p >> 8) & 255) + 0.0722f * (p & 255); };
-  /* The mean absolute Laplacian over the object's interior pixels (those whose four neighbours are the object's too:
-   * the silhouette against the background is not the texture's doing). */
-  auto energy = [&](const std::vector<float> &l, const std::vector<uint8_t> &mask, int w, int h) {
-    double sum = 0;
-    size_t n = 0;
-    for (int y = 1; y + 1 < h; y++)
-      for (int x = 1; x + 1 < w; x++) {
-        const size_t i = (size_t)y * w + x;
-        if (!mask[i] || !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) continue;
-        const float c = l[(size_t)y * w + x];
-        sum += std::fabs(4.0f * c - l[(size_t)y * w + x - 1] - l[(size_t)y * w + x + 1] - l[(size_t)(y - 1) * w + x] - l[(size_t)(y + 1) * w + x]);
-        n++;
-      }
-    return n ? sum / n : 0.0;
-  };
-  auto lumas = [&](const std::vector<uint32_t> &px) {
-    std::vector<float> l(px.size());
-    for (size_t i = 0; i < px.size(); i++) l[i] = luma(px[i]);
-    return l;
-  };
   /* The near picture box-filtered by `f` x `f`: the far picture's reference (what a filtered texture should give). */
   auto downsample = [](const std::vector<float> &l, const std::vector<uint8_t> &mask, int w, int h, int f, int &ow, int &oh, std::vector<uint8_t> &omask) {
     ow = w / f, oh = h / f;
@@ -10168,18 +10196,18 @@ static void tests_round184() {
       }
     return o;
   };
-  auto far_vs_near = [&](const char *what, Editor &ed, GameObject *obj, float near_m, float far_m, int device, double &e_far, double &e_ref) {
-    const R184 near = r184_view(ed, obj, near_m, device), far = r184_view(ed, obj, far_m, device);
+  auto far_vs_near = [&](const char *what, auto view, Editor &ed, GameObject *obj, float near_m, float far_m, int device, double &e_far, double &e_ref) {
+    const R184 near = view(ed, obj, near_m, device, {}), far = view(ed, obj, far_m, device, {});
     const int f = (int)std::lround(far_m / near_m);
-    const std::vector<float> ln = lumas(near.px), lf = lumas(far.px);
+    const std::vector<float> ln = r184_lumas(near.px), lf = r184_lumas(far.px);
     int ow, oh;
     std::vector<uint8_t> rmask;
     const std::vector<float> ref = downsample(ln, near.mask, near.rect.w, near.rect.h, f, ow, oh, rmask);
     size_t far_px = 0, near_px = 0;
     for (uint8_t m : far.mask) far_px += m;
     for (uint8_t m : near.mask) near_px += m;
-    e_far = energy(lf, far.mask, far.rect.w, far.rect.h);
-    e_ref = energy(ref, rmask, ow, oh);
+    e_far = r184_energy(lf, far.mask, far.rect.w, far.rect.h);
+    e_ref = r184_energy(ref, rmask, ow, oh);
     std::printf("    %s (%s): %zu object pixels at %g m, %zu at %g m; high-frequency energy at %g m %.2f, the %g m picture downsampled %d x %.2f\n", what,
                 device == 2 ? "the card" : "the CPU", near_px, near_m, far_px, far_m, far_m, e_far, near_m, f, e_ref);
     CHECK(far_px > 200 && near_px > 2000);  // (a 1 m object at 20 m: about 27 pixels wide)
@@ -10220,7 +10248,7 @@ static void tests_round184() {
       ed.command("set Directional Light.Transform.rotation 20 160 0");
       r34_steps(ed, 2);
       double e_far, e_ref;
-      far_vs_near("the hatched plane", ed, plane, 2.0f, 20.0f, device, e_far, e_ref);
+      far_vs_near("the hatched plane", r184_mapped_view, ed, plane, 2.0f, 20.0f, device, e_far, e_ref);
       CHECK(e_far <= 2.0 * e_ref + 2.0);
       /* The face shadow map at softness 0. */
       GameObject *head = ed.scene().create("Head");
@@ -10232,7 +10260,7 @@ static void tests_round184() {
       head->add<MeshRenderer>()->materials = {fm};
       head->set_local_position({0.0f, 1.0f, 0.0f});
       plane->set_local_position({100.0f, 1.0f, 0.0f});  // (out of the way)
-      far_vs_near("the face-shadow sphere", ed, head, 2.0f, 20.0f, device, e_far, e_ref);
+      far_vs_near("the face-shadow sphere", r184_mapped_view, ed, head, 2.0f, 20.0f, device, e_far, e_ref);
       CHECK(e_far <= 2.0 * e_ref + 2.0);
       /* Box mapping. */
       GameObject *box = ed.scene().create("Boxed");
@@ -10245,7 +10273,7 @@ static void tests_round184() {
       box->set_local_position({0.0f, 1.0f, 0.0f});
       box->set_local_rotation(Quat::euler({20, 30, 0}));
       head->set_local_position({100.0f, 1.0f, 0.0f});
-      far_vs_near("the box-mapped cube", ed, box, 2.0f, 20.0f, device, e_far, e_ref);
+      far_vs_near("the box-mapped cube", r184_mapped_view, ed, box, 2.0f, 20.0f, device, e_far, e_ref);
       CHECK(e_far <= 2.0 * e_ref + 2.0);
       ed.viewport_device_for_test(1);
     }
@@ -10271,11 +10299,11 @@ static void tests_round184() {
       ed.command("set Directional Light.Transform.rotation 30 -60 0");
       r34_steps(ed, 2);
       double e_far, e_ref;
-      far_vs_near("the two-tone sphere", ed, ball, 2.0f, 20.0f, device, e_far, e_ref);
+      far_vs_near("the two-tone sphere", r184_composited_view, ed, ball, 2.0f, 20.0f, device, e_far, e_ref);
       CHECK(e_far <= 2.0 * e_ref + 2.0);
       /* The edge is there: with softness 0 the sphere at 2 m is the two tones (a few edge pixels aside), and at 20 m
        * the band edge is one antialiased pixel - mid tones between the two, which a hard edge never gives. */
-      const R184 near = r184_view(ed, ball, 2.0f, device), far = r184_view(ed, ball, 20.0f, device);
+      const R184 near = r184_composited_view(ed, ball, 2.0f, device), far = r184_composited_view(ed, ball, 20.0f, device);
       if (const char *dir = std::getenv("BLENDITY_GPU_DIFF_DIR")) {  // (round 553: the 20 m picture and its object mask, to look at)
         fs::make_dirs(dir);
         std::vector<uint32_t> m(far.mask.size());
@@ -10328,7 +10356,7 @@ static void tests_round184() {
         int top = 1 << 30, bottom = -1;
         for (size_t i = 0; i < r.px.size(); i++)
           if (own[i]) {
-            l.push_back(luma(r.px[i]));
+            l.push_back(r184_luma(r.px[i]));
             const int y = r.rect.w > 0 ? (int)(i / (size_t)r.rect.w) : 0;
             top = std::min(top, y), bottom = std::max(bottom, y);
           }
@@ -10386,10 +10414,10 @@ static void tests_round184() {
     r34_steps(ed, 2);
     auto dark = [&](const R184 &r) {  // (the object's pixels that are the outline's black)
       size_t n = 0;
-      for (size_t i = 0; i < r.px.size(); i++) n += r.mask[i] && luma(r.px[i]) < 40.0f ? 1 : 0;
+      for (size_t i = 0; i < r.px.size(); i++) n += r.mask[i] && r184_luma(r.px[i]) < 40.0f ? 1 : 0;
       return n;
     };
-    const R184 near = r184_view(ed, ball, 2.0f, 1), far = r184_view(ed, ball, 60.0f, 1);
+    const R184 near = r184_composited_view(ed, ball, 2.0f, 1), far = r184_composited_view(ed, ball, 60.0f, 1);
     const size_t dn = dark(near), df = dark(far);
     size_t far_px = 0;
     for (uint8_t m : far.mask) far_px += m;
@@ -13614,6 +13642,70 @@ static void tests_round572() {
   });
 }
 
+/* ---------------------------------------------------------------- round 597 (task 0579): measuring toon detail through editor notifications */
+static void tests_round597() {
+  test("toon at a distance: a visible toast leaves the measured Scene view pixels and coverage alone at 2 m and 20 m", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(1);
+    ed.command("select Cube");
+    ed.command("delete");
+    GameObject *plane = ed.scene().create("Toon reference");
+    plane->add<MeshFilter>()->mesh = primitives::plane(1.0f, 1);
+    plane->set_local_rotation(Quat::euler({-90, 0, 0}));
+    MaterialPtr material = cf_unlit({0.85f, 0.85f, 0.85f});
+    plane->add<MeshRenderer>()->materials = {material};
+    ed.set_clock_for_test(ed.clock_for_test());
+    ed.record_buttons_for_test(true);
+    const std::string toast = "Scene view notice while measuring painted surface detail";
+    auto show_toast = [&] { ed.command("toast " + toast); };
+
+    for (float dist : {2.0f, 20.0f}) {
+      material->procedural = 0;
+      material->touch();
+      ed.clear_toasts_for_test();
+      const R184 old_clean = r184_composited_view(ed, plane, dist, 1);
+      const R184 old_toasted = r184_composited_view(ed, plane, dist, 1, show_toast);
+      Recti toast_rect;
+      CHECK(ed.button_rect_for_test("toast:" + toast, toast_rect));
+
+      ed.clear_toasts_for_test();
+      const R184 clean = r184_mapped_view(ed, plane, dist, 1);
+      const R184 toasted = r184_mapped_view(ed, plane, dist, 1, show_toast);
+      CHECK(!ed.toast_frames_for_test().empty());
+      CHECK(clean.rect == toasted.rect && clean.px == toasted.px && clean.mask == toasted.mask);
+      const bool same_size = !clean.mask.empty() && old_clean.rect == clean.rect && old_toasted.rect == clean.rect &&
+                             old_clean.mask.size() == clean.mask.size() && old_toasted.mask.size() == clean.mask.size();
+      CHECK(same_size);
+      if (!same_size) return;
+
+      /* Count false coverage only where the injected toast was drawn. */
+      const Recti area = toast_rect.intersect(clean.rect);
+      size_t added = 0;
+      for (int y = area.y; y < area.bottom(); y++)
+        for (int x = area.x; x < area.right(); x++) {
+          const size_t i = (size_t)(y - clean.rect.y) * clean.rect.w + (x - clean.rect.x);
+          added += !clean.mask[i] && !old_clean.mask[i] && old_toasted.mask[i];
+        }
+      std::printf("    at %g m: %zu pixels under the toast added to the composited comparison's coverage\n", dist, added);
+      CHECK(added > 0);
+
+      /* Paint a checker on the same surface with the warning still visible. The energy should
+       * respond to the new detail while sampling the same interior as the unpainted surface. */
+      material->procedural = (int)Procedural::Checker;
+      material->procedural_scale = 4.0f;
+      material->touch();
+      const R184 detailed = r184_mapped_view(ed, plane, dist, 1);
+      CHECK(detailed.px.size() == clean.px.size());
+      if (detailed.px.size() != clean.px.size()) return;
+      const double flat = r184_energy(r184_lumas(clean.px), clean.mask, clean.rect.w, clean.rect.h);
+      const double checkered = r184_energy(r184_lumas(detailed.px), clean.mask, clean.rect.w, clean.rect.h);
+      std::printf("    at %g m: mean absolute Laplacian %.2f plain, %.2f checkered\n", dist, flat, checkered);
+      CHECK(checkered > flat);
+    }
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13673,4 +13765,5 @@ void run_render_tests() {
   tests_round554();
   tests_round556();
   tests_round572();
+  tests_round597();
 }

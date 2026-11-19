@@ -1432,6 +1432,10 @@ class Editor {
   /* Runs a console command (also used by --headless-screenshot and tests). */
   void command(const std::string &c) { run_console_command(c); }
   Recti scene_view_rect() const { return scene_rect_; }  // tests drive the Scene view with mouse events
+  /* The headless Scene view's cached picture, before the UI draws toasts and other controls over it. */
+  const Image *scene_layer_image_for_test() const {
+    return scene_cache_.key != 0 && scene_cache_.card_slot < 0 ? &scene_cache_.img : nullptr;
+  }
   Recti game_rect_for_test() const { return game_rect_; }
   Recti cam_preview_rect_for_test() const { return cam_preview_rect_; }
   /* Tests: select an object, and record a change they made to the scene directly as one undo step. */
