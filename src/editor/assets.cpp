@@ -10,6 +10,19 @@
 #include "../scene/import.h"
 
 #include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <filesystem>
+#if defined(_WIN32)
+#  include <windows.h>
+#elif defined(__APPLE__)
+#  include <stdio.h>
+#elif defined(__linux__)
+#  include <fcntl.h>
+#  include <linux/fs.h>
+#  include <sys/syscall.h>
+#  include <unistd.h>
+#endif
 #include <unordered_map>
 #include <unordered_set>
 
@@ -198,8 +211,601 @@ void Editor::prepare_import_files(const std::string &path, bool copy_into_assets
   out.again = import_folder_reused(sources, fs::stem(path));
   out.model = import_folder(sources, fs::stem(path));
   out.tex_map.clear();
-  copy_import_textures(r, out.model, out.again, out.tex_map);
+  copy_import_textures(r.textures, out.model, out.again, out.tex_map);
   out.ready = true;
+}
+
+static std::array<TextureRef *, 13> import_texture_refs(Material &m) {
+  return {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map, &m.toon_ramp_map, &m.shade_map,
+          &m.toon_shadow_bias_map, &m.toon_specular_map, &m.toon_rim_map, &m.face_shadow_map, &m.line_map, &m.hatch_map};
+}
+
+static std::string import_material_path(const Material &m, const std::string &model, std::unordered_set<std::string> &names) {
+  const std::string base = safe_file_name(m.name.empty() ? model : m.name);
+  std::string name = base;
+  for (int k = 2; names.count(to_lower(name)); k++) name = base + " " + std::to_string(k);
+  names.insert(to_lower(name));
+  return "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
+}
+
+namespace {
+namespace disk = std::filesystem;
+
+bool source_files_error(std::string &error, const std::string &message) {
+  error = message;
+  return false;
+}
+
+std::string source_texture_path(const std::string &path, const std::string &project) {
+  return disk::u8path(path).is_absolute() ? path : fs::join(project, path);
+}
+
+/* Unlike a lexical prefix, this rejects redirects that would put the files outside the project. */
+bool source_owned_path(const std::string &root, const std::string &path) {
+  std::error_code ec;
+  const auto canonical = disk::weakly_canonical(disk::u8path(path), ec);
+  if (ec) return false;
+  const auto relative = canonical.lexically_relative(disk::u8path(root));
+  return !relative.empty() && !relative.is_absolute() && *relative.begin() != "..";
+}
+
+bool source_rename_exclusive(const disk::path &from, const disk::path &to) {
+#ifdef _WIN32
+  return MoveFileExW(from.c_str(), to.c_str(), 0) != 0;
+#elif defined(__APPLE__)
+  return renamex_np(from.c_str(), to.c_str(), RENAME_EXCL) == 0;
+#elif defined(__linux__) && defined(SYS_renameat2)
+  return syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE) == 0;
+#else
+  return false;
+#endif
+}
+
+struct SourcePublication {
+  std::vector<std::string> files, folders;
+  bool committed = false;
+
+  ~SourcePublication() {
+    if (committed) return;
+    for (auto i = files.rbegin(); i != files.rend(); ++i) fs::remove_file(*i);
+    for (auto i = folders.rbegin(); i != folders.rend(); ++i) fs::remove_file(*i);
+  }
+
+  bool folder(const std::string &path) {
+    if (fs::is_dir(path)) return true;
+    const std::string parent = fs::parent(path);
+    if (parent.empty() || parent == path || fs::exists(path) || !folder(parent)) return false;
+    std::error_code ec;
+    if (!disk::create_directory(disk::u8path(path), ec)) return !ec && fs::is_dir(path);
+    folders.push_back(path);
+    return true;
+  }
+
+  bool publish(const std::string &staged, const std::string &path) {
+    if (!folder(fs::parent(path))) return false;
+    const auto from = disk::u8path(staged), to = disk::u8path(path);
+    std::error_code ec;
+    disk::create_hard_link(from, to, ec);
+    // The stage shares the project volume. On filesystems without links, rename
+    // without replacing any existing file and without a main-thread copy.
+    if (ec && (ec == std::errc::file_exists || !source_rename_exclusive(from, to))) return false;
+    files.push_back(path);
+    return true;
+  }
+};
+
+bool source_record_fields(const std::string &text, std::string &key, std::string &value) {
+  const auto split = text.find('\n');
+  if (split == std::string::npos || !split || split + 1 >= text.size()) return false;
+  key = text.substr(0, split);
+  value = text.substr(split + 1);
+  return key.find_first_of("\r\0", 0, 2) == std::string::npos && value.find_first_of("\r\n\0", 0, 3) == std::string::npos;
+}
+
+std::string source_record_name(char kind, const std::string &id) {
+  return strprintf("%c_%016llx", kind, (unsigned long long)fnv1a(id.data(), id.size()));
+}
+
+bool source_asset_name(const std::string &name) {
+  return !name.empty() && name != "." && name != ".." && fs::filename(name) == name &&
+         name.find_first_of("/\\:*?\"<>|\r\n\0", 0, 12) == std::string::npos;
+}
+
+std::string physical_provider(const std::string &provider) {
+  return provider.substr(0, provider.find(" > "));
+}
+
+std::string provider_chain(const std::string &provider) {
+  const std::string file = physical_provider(provider);
+  if (fs::extension(file) != ".vpk") return {};
+  return to_lower(fs::filename(file) + provider.substr(file.size()));
+}
+
+struct WorkshopProvider {
+  std::string item, chain;
+};
+
+WorkshopProvider workshop_provider(const std::string &provider) {
+  const std::string physical = physical_provider(provider);
+  std::vector<std::string> parts;
+  for (const auto &part : disk::u8path(physical).relative_path()) parts.push_back(to_lower(part.u8string()));
+  auto id = [](const std::string &part) {
+    return !part.empty() && part.size() <= 20 &&
+           std::all_of(part.begin(), part.end(), [](char c) { return c >= '0' && c <= '9'; });
+  };
+  for (size_t i = 0; i + 5 < parts.size(); ++i) {
+    if (parts[i] != "steamapps" || parts[i + 1] != "workshop" || parts[i + 2] != "content" ||
+        !id(parts[i + 3]) || !id(parts[i + 4])) continue;
+    WorkshopProvider found;
+    found.item = parts[i + 3] + "/" + parts[i + 4];
+    for (size_t j = i + 5; j < parts.size(); ++j) found.chain += "/" + parts[j];
+    found.chain += to_lower(provider.substr(physical.size()));
+    return found;
+  }
+  return {};
+}
+
+bool source_provider_live(const std::string &provider, bool legacy) {
+  const std::string path = physical_provider(provider);
+  if (fs::exists(path)) return true;
+  if (!legacy) return false;
+  // Earlier markers case-folded the whole path, including native directory names.
+  const auto target = disk::u8path(path);
+  auto current = target.root_path();
+  for (const auto &part : target.relative_path()) {
+    std::error_code ec;
+    if (disk::exists(current / part, ec)) {
+      current /= part;
+      continue;
+    }
+    bool match = false;
+    for (disk::directory_iterator it(current, ec), end; !ec && it != end; it.increment(ec)) {
+      if (to_lower(it->path().filename().u8string()) != part.u8string()) continue;
+      if (match) return true;  // several case variants: don't guess that the source moved
+      current = it->path();
+      match = true;
+    }
+    if (!match) return false;
+  }
+  return !current.empty();
+}
+
+struct SourceOrigins {
+  std::vector<std::string> providers;
+  std::map<std::string, std::unordered_set<std::string>> fingerprints;
+  bool legacy = false;
+};
+
+SourceOrigins source_origins(const std::string &materials, const std::string &virtual_path) {
+  SourceOrigins out;
+  const std::string metadata = fs::join(materials, ".source-assets");
+  for (const auto &entry : fs::list(metadata)) {
+    if (entry.is_dir || (!starts_with(entry.name, "p_") && !starts_with(entry.name, "f_"))) continue;
+    std::string text, key, path;
+    if (!fs::read_file(fs::join(metadata, entry.name), text) || !source_record_fields(text, key, path) || path != virtual_path ||
+        source_record_name(entry.name[0], key) != entry.name) continue;
+    if (entry.name[0] == 'p') out.providers.push_back(std::move(key));
+    else {
+      const auto split = key.rfind('\t');
+      if (split != std::string::npos && split + 1 < key.size())
+        out.fingerprints[key.substr(0, split)].insert(key.substr(split + 1));
+    }
+  }
+  if (fs::is_dir(metadata)) return out;
+
+  out.legacy = true;
+  std::string text;
+  if (!fs::read_file(fs::join(materials, ".import-source"), text)) return out;
+  const std::string suffix = "/" + to_lower(virtual_path);
+  std::istringstream lines(text);
+  for (std::string line; std::getline(lines, line);) {
+    if (line.size() <= suffix.size() || line.compare(line.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+    const std::string provider = line.substr(0, line.size() - suffix.size());
+    if (disk::u8path(physical_provider(provider)).is_absolute()) out.providers.push_back(provider);
+  }
+  return out;
+}
+
+bool source_snapshot_name(const std::string &name, const std::string &stem) {
+  if (name == stem) return true;
+  const std::string prefix = stem + " ";
+  return starts_with(name, prefix) && name.size() > prefix.size() &&
+         std::all_of(name.begin() + prefix.size(), name.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+std::string source_snapshot_folder(const std::string &assets, const SourceEntry &entry, bool &again, std::string &error) {
+  const std::string stem = safe_file_name(fs::stem(entry.virtual_path));
+  const std::string materials = fs::join(assets, "Materials"), textures = fs::join(assets, "Textures");
+  const std::string old_key = to_lower(fs::normalize(entry.provider + "/" + entry.virtual_path));
+  const std::string chain = provider_chain(entry.provider);
+  const auto workshop = workshop_provider(entry.provider);
+  std::vector<std::string> exact, same_workshop, relocated;
+  for (const auto &dir : fs::list(materials)) {
+    if (!dir.is_dir || !source_snapshot_name(dir.name, stem)) continue;
+    const std::string root = fs::join(materials, dir.name);
+    const auto origins = source_origins(root, entry.virtual_path);
+    bool match = false, live = false, workshop_match = false, verified_move = false;
+    for (const std::string &provider : origins.providers) {
+#ifdef _WIN32
+      match |= to_lower(provider) == to_lower(entry.provider);
+#else
+      match |= provider == entry.provider;
+#endif
+      const auto previous_workshop = workshop_provider(provider);
+      if (!workshop.item.empty() || !previous_workshop.item.empty()) {
+        workshop_match |= workshop.item == previous_workshop.item && workshop.chain == previous_workshop.chain;
+        continue;
+      }
+      live |= source_provider_live(provider, origins.legacy);
+      if (entry.fingerprint.empty() || provider_chain(provider) != chain) continue;
+      const auto prior = origins.fingerprints.find(provider);
+      verified_move |= prior != origins.fingerprints.end() && prior->second.count(entry.fingerprint);
+    }
+    if (!match && (origins.legacy || origins.providers.empty())) {
+      std::string marker;
+      match = fs::read_file(fs::join(root, ".import-source"), marker) &&
+              ("\n" + marker).find("\n" + old_key + "\n") != std::string::npos;
+    }
+    if (match) exact.push_back(dir.name);
+    else if (workshop_match) same_workshop.push_back(dir.name);
+    else if (verified_move && !live) relocated.push_back(dir.name);
+  }
+
+  const auto &identified = exact.empty() ? same_workshop : exact;
+  if (identified.size() > 1) {
+    error = "Several prior Source snapshots match " + entry.virtual_path + ". Select the original provider to keep its edits.";
+    return {};
+  }
+  again = !identified.empty() || relocated.size() == 1;
+  if (again) return identified.empty() ? relocated.front() : identified.front();
+
+  for (int k = 1; k < 1000; ++k) {
+    const std::string name = k == 1 ? stem : stem + " " + std::to_string(k);
+    if (!fs::exists(fs::join(materials, name)) && !fs::exists(fs::join(textures, name))) return name;
+  }
+  error = "Cannot choose a project asset folder for " + entry.virtual_path;
+  return {};
+}
+
+std::string source_name_family(std::string name, bool texture) {
+  const std::string ext = fs::extension(name);
+  name = to_lower(fs::stem(name));
+  const auto number = name.rfind(' ');
+  if (number != std::string::npos && number + 1 < name.size() &&
+      std::all_of(name.begin() + number + 1, name.end(), [](char c) { return c >= '0' && c <= '9'; }))
+    name.resize(number);
+  // Source 2 used content-dependent staging basenames before their identity was recorded.
+  if (texture && name.size() > 17 && name[name.size() - 17] == '-' &&
+      std::all_of(name.end() - 16, name.end(), [](char c) { return std::isxdigit((unsigned char)c); }))
+    name.resize(name.size() - 17);
+  return name + ext;
+}
+
+struct SourceBindings {
+  std::string directory;
+  char kind;
+  bool legacy;
+  std::map<std::string, std::string> filenames;
+  std::unordered_set<std::string> taken;
+  std::map<std::string, std::vector<std::string>> old_families;
+  std::unordered_map<std::string, std::string> legacy_claims;
+  std::vector<std::string> legacy_inventory;
+
+  std::string inventory_path(const std::string &metadata) const {
+    return fs::join(metadata, kind == 'm' ? "legacy-materials" : "legacy-textures");
+  }
+
+  std::string inventory_text() const {
+    std::string result;
+    for (const auto &file : legacy_inventory) result += file + "\n";
+    return result;
+  }
+
+  bool load(const std::string &metadata, std::string &error) {
+    for (const auto &entry : fs::list(metadata)) {
+      if (entry.is_dir || entry.name.size() != 18 || entry.name[0] != kind || entry.name[1] != '_') continue;
+      std::string text, key, file;
+      if (!fs::read_file(fs::join(metadata, entry.name), text) || !source_record_fields(text, key, file) ||
+          !source_asset_name(file) || source_record_name(kind, key) != entry.name ||
+          !taken.insert(to_lower(file)).second || !filenames.emplace(key, file).second)
+        return source_files_error(error, "Invalid Source asset identity record: " + fs::join(metadata, entry.name));
+    }
+    const std::string inventory = inventory_path(metadata);
+    if (legacy) {
+      for (const auto &entry : fs::list(directory)) {
+        if (entry.is_dir || !source_asset_name(entry.name)) continue;
+        const std::string ext = fs::extension(entry.name);
+        if (kind == 'm' ? ext != ".mat" : !image_extension_supported(ext)) continue;
+        std::error_code ec;
+        const auto type = disk::symlink_status(disk::u8path(fs::join(directory, entry.name)), ec);
+        if (!ec && disk::is_regular_file(type)) legacy_inventory.push_back(entry.name);
+      }
+    }
+    else if (fs::exists(inventory)) {
+      std::string text;
+      if (!fs::read_file(inventory, text)) return source_files_error(error, "Cannot read legacy Source inventory: " + inventory);
+      std::unordered_set<std::string> seen;
+      std::istringstream lines(text);
+      for (std::string file; std::getline(lines, file);) {
+        if (!source_asset_name(file) || !seen.insert(file).second)
+          return source_files_error(error, "Invalid legacy Source inventory: " + inventory);
+        legacy_inventory.push_back(std::move(file));
+      }
+    }
+    for (const auto &file : legacy_inventory) old_families[source_name_family(file, kind == 't')].push_back(file);
+    return true;
+  }
+
+  bool choose(const std::string &id, const std::string &preferred, std::string &filename, std::string &error) {
+    if (auto identified = filenames.find(id); identified != filenames.end()) {
+      filename = identified->second;
+      return true;
+    }
+
+    const std::string family = source_name_family(preferred, kind == 't');
+    const auto prior = old_families.find(family);
+    const auto claimed = legacy_claims.find(family);
+    if (claimed != legacy_claims.end() && claimed->second != id)
+      return source_files_error(error, "Several legacy Source assets match " + preferred + " in " + directory +
+                                        ". Their earlier assignments must be identified before reimport.");
+    std::string available;
+    size_t unclaimed = 0;
+    if (prior != old_families.end()) {
+      for (const auto &file : prior->second) {
+        if (taken.count(to_lower(file))) continue;
+        ++unclaimed;
+        std::error_code ec;
+        const auto type = disk::symlink_status(disk::u8path(fs::join(directory, file)), ec);
+        if (!ec && disk::is_regular_file(type)) available = file;
+      }
+    }
+    if (!available.empty() && unclaimed > 1)
+      return source_files_error(error, "Several legacy Source assets match " + preferred + " in " + directory +
+                                        ". Their earlier assignments must be identified before reimport.");
+    if (!available.empty()) {
+      filename = std::move(available);
+      legacy_claims.emplace(family, id);
+    }
+    else {
+      filename = preferred;
+      for (int k = 2; taken.count(to_lower(filename)) || fs::exists(fs::join(directory, filename)); ++k)
+        filename = fs::stem(preferred) + " " + std::to_string(k) + fs::extension(preferred);
+    }
+    taken.insert(to_lower(filename));
+    filenames.emplace(id, filename);
+    return true;
+  }
+};
+
+std::string source_asset_id(const std::string &id, const std::string &preferred) {
+  return id.empty() ? "name:" + to_lower(preferred) : "virtual:" + id;
+}
+
+bool valid_source_asset_id(const std::string &id) {
+  return id.size() <= 4096 && id.find_first_of("\r\n\0", 0, 3) == std::string::npos;
+}
+
+}  // namespace
+
+Editor::SourceImportStage::~SourceImportStage() {
+  for (const std::string &file : files) fs::remove_file(file);
+  if (!directory.empty()) fs::remove_file(directory);
+}
+
+bool Editor::SourceImportStage::open(std::string &error) {
+  static std::atomic<uint64_t> sequence{0};
+  for (int i = 0; i < 32; ++i) {
+    const std::string path = fs::join(project, strprintf(".blendity-source-import-%llu",
+        (unsigned long long)sequence.fetch_add(1, std::memory_order_relaxed)));
+    std::error_code ec;
+    if (disk::create_directory(disk::u8path(path), ec)) {
+      directory = path;
+      return true;
+    }
+    if (ec && ec != std::errc::file_exists) break;
+  }
+  return source_files_error(error, "Cannot stage Source import in " + project);
+}
+
+std::string Editor::SourceImportStage::next_file() {
+  files.push_back(fs::join(directory, std::to_string(files.size())));
+  return files.back();
+}
+
+bool Editor::stage_source_import_files(ImportResult &r, SourceImportStage &stage, std::string &error) {
+  if (!stage.open(error)) return false;
+
+  // Include every assigned material, even when a reader only attached it to a node.
+  std::unordered_set<const Material *> seen;
+  for (const MaterialPtr &material : r.materials) seen.insert(material.get());
+  for (const ImportedNode &node : r.nodes)
+    for (const MaterialPtr &material : node.materials)
+      if (material && seen.insert(material.get()).second) r.materials.push_back(material);
+
+  std::vector<std::string> textures = r.textures;
+  for (const MaterialPtr &material : r.materials) {
+    if (!material) continue;
+    for (TextureRef *ref : import_texture_refs(*material))
+      if (!ref->empty()) textures.push_back(ref->path);
+  }
+
+  std::unordered_set<std::string> seen_textures;
+  const std::string assets = fs::join(stage.project, "Assets");
+  for (const std::string &texture : textures) {
+    const std::string path = source_texture_path(texture, stage.project);
+    if (!seen_textures.insert(path).second) continue;
+    std::error_code ec;
+    if (!disk::is_regular_file(disk::u8path(path), ec))
+      return source_files_error(error, "Cannot read Source texture: " + path);
+    std::string staged;
+    if (!source_owned_path(assets, path)) {
+      staged = stage.next_file();
+      if (!fs::copy_file(path, staged)) return source_files_error(error, "Cannot stage Source texture: " + path);
+    }
+    auto known = r.source_texture_ids.find(texture);
+    if (known == r.source_texture_ids.end()) known = r.source_texture_ids.find(path);
+    stage.textures.push_back({path, std::move(staged), known == r.source_texture_ids.end() ? std::string{} : known->second});
+  }
+  return true;
+}
+
+/* Snapshot publication runs on the editor thread. The marker is written last. A retry can
+ * recognize a prior successful import and keep its edits without adopting canceled files. */
+bool Editor::publish_source_import_files(const SourceEntry &entry, const ImportResult &r, SourceImportStage &stage,
+                                         ImportFiles &out, std::string &error) {
+  if (stage.project != project_root_) return source_files_error(error, "The project changed during Source import.");
+  out.model = source_snapshot_folder(assets_dir_, entry, out.again, error);
+  if (out.model.empty()) return false;
+  const std::string materials = fs::join(assets_dir_, "Materials/" + out.model);
+  const std::string textures = fs::join(assets_dir_, "Textures/" + out.model);
+  const std::string metadata = fs::join(materials, ".source-assets");
+  if (!source_owned_path(project_root_, metadata) || !source_owned_path(project_root_, textures))
+    return source_files_error(error, "Cannot use the project assets for " + entry.virtual_path);
+
+  const bool legacy = out.again && !fs::is_dir(metadata);
+  SourceBindings material_bindings{materials, 'm', legacy}, texture_bindings{textures, 't', legacy};
+  if (!material_bindings.load(metadata, error) || !texture_bindings.load(metadata, error)) return false;
+
+  SourcePublication publication;
+  auto write_new = [&](const std::string &path, const std::string &bytes) {
+    const std::string file = stage.next_file();
+    return fs::write_file(file, bytes) && publication.publish(file, path);
+  };
+  std::map<std::string, std::string> records;
+  auto record = [&](char kind, const std::string &id, const std::string &value) {
+    const std::string path = fs::join(metadata, source_record_name(kind, id));
+    const std::string bytes = id + "\n" + value;
+    std::string existing;
+    if (fs::exists(path)) return fs::read_file(path, existing) && existing == bytes;
+    const auto inserted = records.emplace(path, bytes);
+    return inserted.second || inserted.first->second == bytes;
+  };
+
+  struct SourceMaterial {
+    MaterialPtr material;
+    std::string id, filename, relative;
+    bool exists;
+  };
+  std::vector<SourceMaterial> planned_materials;
+  std::unordered_set<std::string> claimed_materials, new_texture_paths, used_texture_paths;
+  for (const MaterialPtr &material : r.materials) {
+    if (!material || out.source_material_paths.count(material.get())) continue;
+    const auto known = r.source_material_ids.find(material.get());
+    const std::string preferred = safe_file_name(material->name.empty() ? out.model : material->name) + ".mat";
+    const std::string id = source_asset_id(known == r.source_material_ids.end() ? std::string{} : known->second, preferred);
+    std::string filename;
+    if (!valid_source_asset_id(id)) return source_files_error(error, "Invalid Source material identity for " + preferred);
+    if (!material_bindings.choose(id, preferred, filename, error)) return false;
+    const std::string relative = "Assets/Materials/" + out.model + "/" + filename;
+    const std::string destination = fs::join(project_root_, relative);
+    if (!source_owned_path(project_root_, destination)) return source_files_error(error, "Invalid Source material path: " + destination);
+    out.source_material_paths.emplace(material.get(), relative);
+    if (!claimed_materials.insert(id).second) {
+      if (known == r.source_material_ids.end() || known->second.empty())
+        return source_files_error(error, "Source materials named " + preferred + " need distinct virtual identities.");
+      continue;
+    }
+    const bool exists = fs::exists(destination);
+    MaterialPtr asset = exists ? material_asset(relative) : material;
+    if (!asset) return source_files_error(error, "Cannot use existing project material: " + destination);
+    for (TextureRef *ref : import_texture_refs(*asset)) {
+      if (ref->empty()) continue;
+      const std::string path = source_texture_path(ref->path, stage.project);
+      (exists ? used_texture_paths : new_texture_paths).insert(path);
+    }
+    planned_materials.push_back({material, id, filename, relative, exists});
+  }
+
+  std::unordered_map<std::string, std::string> claimed_textures;
+  for (const auto &[path, staged, known] : stage.textures) {
+    const bool required = planned_materials.empty() || new_texture_paths.count(path);
+    if (staged.empty()) {
+      if (required) out.tex_map.emplace(path, make_asset_relative(path));
+      continue;
+    }
+
+    const std::string preferred = fs::filename(path);
+    const std::string id = source_asset_id(known, preferred);
+    if (!source_asset_name(preferred) || !valid_source_asset_id(id))
+      return source_files_error(error, "Invalid Source texture identity or filename: " + preferred);
+    if (!required) {
+      const auto pinned = texture_bindings.filenames.find(id);
+      const auto prior = texture_bindings.old_families.find(source_name_family(preferred, true));
+      bool used = pinned != texture_bindings.filenames.end() && used_texture_paths.count(fs::join(textures, pinned->second));
+      if (prior != texture_bindings.old_families.end()) {
+        for (const auto &file : prior->second)
+          used |= !texture_bindings.taken.count(to_lower(file)) && used_texture_paths.count(fs::join(textures, file));
+      }
+      if (!used) continue;
+    }
+    const auto claimed = claimed_textures.emplace(id, path);
+    if (!claimed.second && known.empty() && claimed.first->second != path)
+      return source_files_error(error, "Source textures named " + preferred + " need distinct virtual identities.");
+
+    std::string filename;
+    if (!texture_bindings.choose(id, preferred, filename, error)) return false;
+    const std::string destination = fs::join(textures, filename);
+    std::error_code ec;
+    if (!source_owned_path(project_root_, destination) ||
+        (!disk::is_regular_file(disk::u8path(destination), ec) && !publication.publish(staged, destination)))
+      return source_files_error(error, "Cannot publish Source texture: " + destination);
+    // A texture record is required even when a legacy file was adopted.
+    if (!record('t', id, filename)) return source_files_error(error, "Cannot record Source texture: " + destination);
+    out.tex_map.emplace(path, make_asset_relative(destination));
+  }
+
+  for (const SourceMaterial &item : planned_materials) {
+    if (!item.exists) {
+      Material copy = *item.material;
+      copy.asset_path = item.relative;
+      copy.foreign = false;
+      copy.import_outline = 0.0f;
+      for (TextureRef *ref : import_texture_refs(copy)) {
+        if (ref->empty()) continue;
+        const auto mapped = out.tex_map.find(source_texture_path(ref->path, stage.project));
+        if (mapped == out.tex_map.end()) return source_files_error(error, "Missing staged Source texture: " + ref->path);
+        ref->path = mapped->second;
+      }
+      if (!write_new(fs::join(project_root_, item.relative), save_material_text(copy)))
+        return source_files_error(error, "Cannot publish Source material: " + item.relative);
+    }
+    if (!record('m', item.id, item.filename)) return source_files_error(error, "Cannot record Source material: " + item.relative);
+  }
+
+  if (!valid_source_asset_id(entry.provider) || !valid_source_asset_id(entry.virtual_path) ||
+      !valid_source_asset_id(entry.fingerprint) || !record('p', entry.provider, entry.virtual_path) ||
+      (!entry.fingerprint.empty() && !record('f', entry.provider + "\t" + entry.fingerprint, entry.virtual_path)))
+    return source_files_error(error, "Cannot record Source import provider for " + entry.virtual_path);
+  if (legacy) {
+    records.emplace(material_bindings.inventory_path(metadata), material_bindings.inventory_text());
+    records.emplace(texture_bindings.inventory_path(metadata), texture_bindings.inventory_text());
+  }
+  for (const auto &[path, bytes] : records)
+    if (!write_new(path, bytes)) return source_files_error(error, "Cannot publish Source asset identity: " + path);
+  if (!out.again) {
+    const std::string marker = fs::join(materials, ".import-source");
+    const std::string old_key = to_lower(fs::normalize(entry.provider + "/" + entry.virtual_path));
+    if (!write_new(marker, old_key + "\n")) return source_files_error(error, "Cannot record Source import in " + materials);
+  }
+  publication.committed = true;
+  out.ready = true;
+  return true;
+}
+
+
+bool Editor::source_import_files_for_test(const SourceEntry &entry, ImportResult &result, bool publish, std::string &error) {
+  error.clear();
+  SourceImportStage stage;
+  stage.project = project_root_;
+  ImportFiles files;
+  if (!stage_source_import_files(result, stage, error)) return false;
+  if (!publish) return true;
+  SourceEntry selected = entry;
+  if (selected.fingerprint.empty() && fs::extension(physical_provider(selected.provider)) != ".vpk")
+    selected.fingerprint = source_loose_fingerprint(selected.provider);
+  if (!publish_source_import_files(selected, result, stage, files, error)) return false;
+  import_material_assets(result, files.model, false, &files.source_material_paths);
+  return true;
 }
 
 /* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets
@@ -215,17 +821,19 @@ void Editor::finish_import(const std::string &path, bool copy_into_assets, Impor
   auto fix = [&](TextureRef &ref) {
     if (ref.empty()) return;
     auto it = tex_map.find(ref.path);
+    if (it == tex_map.end()) it = tex_map.find(resolve_asset_path(ref.path));
     ref.path = it != tex_map.end() ? it->second : make_asset_relative(ref.path);
   };
   size_t missing = 0;
   for (auto &m : r.materials) {
-    for (TextureRef *ref : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
-                            &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map, &m->face_shadow_map, &m->line_map, &m->hatch_map}) {
+    if (!m) continue;
+    for (TextureRef *ref : import_texture_refs(*m)) {
       if (!ref->empty() && !fs::exists(resolve_asset_path(ref->path)) && !fs::exists(ref->path)) missing++;
       fix(*ref);
     }
   }
-  const size_t made = import_material_assets(r, model, rewrite_materials);
+  const auto *source_paths = files.source_material_paths.empty() ? nullptr : &files.source_material_paths;
+  const size_t made = import_material_assets(r, model, rewrite_materials, source_paths);
   std::vector<GameObject *> objects;
   GameObject *root = instantiate_import(*scene_, r, fs::stem(path), nullptr, &objects);
   if (root) {
@@ -854,10 +1462,11 @@ bool Editor::import_folder_reused(const std::vector<std::string> &sources, const
 
 /* Textures outside the project into Assets/Textures/<folder>/: two of one name get two files ("body 2.png"); a texture
  * from an earlier import of this model is kept (it may have been edited, as the .mat files are). */
-void Editor::copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map) {
+void Editor::copy_import_textures(const std::vector<std::string> &textures, const std::string &folder, bool again,
+                                  std::unordered_map<std::string, std::string> &tex_map) {
   const std::string tex_dir = fs::join(fs::join(assets_dir_, "Textures"), folder);
   std::vector<std::string> taken;
-  for (const std::string &tp : r.textures) {
+  for (const std::string &tp : textures) {
     if (!fs::exists(tp) || tex_map.count(tp) || inside_assets(tp)) continue;
     fs::make_dirs(tex_dir);
     const std::string same = fs::join(tex_dir, fs::filename(tp));
@@ -872,22 +1481,26 @@ void Editor::copy_import_textures(const ImportResult &r, const std::string &fold
 /* Unity's Extract Materials, on import (task 0134): every material of the model as Assets/Materials/<model>/<name>.mat,
  * the model's renderers using those assets. A .mat already there (an earlier import, maybe edited since) is used as it
  * is, never overwritten. The count made or reused. */
-size_t Editor::import_material_assets(ImportResult &r, const std::string &model, bool rewrite) {
+size_t Editor::import_material_assets(ImportResult &r, const std::string &model, bool rewrite,
+                                       const std::map<const Material *, std::string> *source_paths) {
   std::unordered_map<const Material *, MaterialPtr> asset_of;
   std::unordered_set<std::string> names;
   for (const MaterialPtr &m : r.materials) {
     if (!m || asset_of.count(m.get())) continue;
-    std::string base = safe_file_name(m->name.empty() ? model : m->name), name = base;
-    for (int k = 2; names.count(to_lower(name)); k++) name = base + " " + std::to_string(k);  // (two of one name)
-    names.insert(to_lower(name));
-    const std::string rel = "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
+    std::string rel;
+    if (source_paths) {
+      const auto path = source_paths->find(m.get());
+      if (path == source_paths->end()) continue;
+      rel = path->second;
+    }
+    else rel = import_material_path(*m, model, names);
     MaterialPtr a = fs::exists(resolve_asset_path(rel)) ? material_asset(rel) : nullptr;
     if (a && rewrite) {
       /* A look chosen at import (task 0152) lands in the existing file too; As Imported keeps what was edited. */
       load_material_text(save_material_text(*m), *a);
       a->touch();
     }
-    if (!a) {
+    if (!a && !source_paths) {
       fs::make_dirs(fs::parent(resolve_asset_path(rel)));
       a = create_material_asset(*m, rel);
     }

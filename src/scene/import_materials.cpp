@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 
 namespace bl {
@@ -316,11 +317,13 @@ void apply_set(const Set &s, Material &m, ImportResult &r, std::vector<std::stri
 
 }  // namespace
 
-/* ~/.blendity/cache/import/<model>-<hash of its full path>: two models called scene.gltf never share one. */
+/* Import cache under BLENDITY_CACHE_DIR or ~/.blendity/cache, separated by model path. */
 std::string import_cache_dir(const ImportResult &r) {
   const std::string path = lower(fs::normalize(r.source));
   const uint64_t h = fnv1a(path.data(), path.size());
-  return fs::join(fs::join(fs::join(fs::home_dir(), ".blendity"), fs::join("cache", "import")), strprintf("%s-%08x", fs::stem(r.source).c_str(), (unsigned)(h ^ h >> 32)));
+  const char *override_dir = std::getenv("BLENDITY_CACHE_DIR");
+  const std::string cache = override_dir && *override_dir ? override_dir : fs::join(fs::home_dir(), ".blendity/cache");
+  return fs::join(fs::join(cache, "import"), strprintf("%s-%08x", fs::stem(r.source).c_str(), (unsigned)(h ^ h >> 32)));
 }
 
 std::string find_texture(ImportResult &r, const std::string &file) {
