@@ -11,8 +11,10 @@ Work in the assigned worktree. Make the approved change in the assigned files an
 and documentation required by the spec and AGENTS.md. Reuse existing logic and match the surrounding
 code. Run applicable builds, tests and stress sections using the hub's shared resource schedule.
 Use a scratch project and trash for runs. Write the round's changelog fragment and set the spec
-status to in review. Report changed files, build and test results, stress numbers, and any gaps
-to the hub.
+status to in review. Follow docs/handoff/CODEX.md#compact-handoffs. Return the task and candidate
+identity, verified changes, build, test and stress results, any gaps and the next dependency.
+For a failure, give the first causal error and link to scratch evidence. Add detail when it affects
+correctness or an owner decision.
 
 Stop and report unapproved architectural changes or dependencies and any need to change files
 outside the assignment. Do not edit .github/, .claude/, docs/decisions/ or the owner's Assets/,

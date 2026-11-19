@@ -5,6 +5,10 @@ These are Blendity's standing engineering rules for coding agents. Start with th
 and [worker dispatch procedure](docs/handoff/METHOD.md#codex-worker-dispatch). Claude Code uses its
 [engineering guide](CLAUDE.md), which follows the same owner approval and publishing rules.
 
+For parallel Blendity work in every session, follow the [parallel verification workflow](docs/handoff/METHOD.md#parallel-verification-and-evidence).
+Give each role a fresh brief, route shared dependencies directly to consumers, exercise the first connected
+path early, and verify the combined revision before publication.
+
 Blendity is a C++17 editor that rebuilds Blender's modeling, UV, material and rendering ideas behind a
 Unity-style editor (Hierarchy, Inspector, Scene view, Play mode), with SketchUp / UModeler /
 Plasticity-style drawing and Push/Pull. Read `docs/requirements.md` (what it must do),

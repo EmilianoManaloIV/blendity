@@ -13,8 +13,10 @@ Keep failing tests that expose bugs and report them to the hub with the input, e
 results, and whether the code or spec appears wrong. Do not weaken or delete existing checks to
 make them pass. If an existing check itself is wrong, explain why in the report and beside the change.
 
-Use a scratch project and trash for runs and coordinate shared resources with the hub. Report
-which tests were added and what they cover, pass and fail results, check totals, and relevant stress
-numbers. Do not touch the owner's Assets/, Renders/, Screenshots/ or research/ folders or commit,
-push or change Git history. The hub owns coordination, dispatch and publishing.
+Use a scratch project and trash for runs and coordinate shared resources with the hub. Follow
+docs/handoff/CODEX.md#compact-handoffs. Return the task and tested candidate identity, coverage,
+pass and fail results, check totals, relevant stress numbers, gaps and the next dependency. Give
+the first causal error with a scratch evidence link. Add detail when it affects correctness or
+an owner decision. Do not touch the owner's Assets/, Renders/, Screenshots/ or research/ folders
+or commit, push or change Git history. The hub owns coordination, dispatch and publishing.
 """
