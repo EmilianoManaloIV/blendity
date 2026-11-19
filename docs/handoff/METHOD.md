@@ -54,6 +54,29 @@ an in-scope review fix, the hub restores the spec's status to `approved` under t
 approval and hands the fix back to the implementer. The implementer returns the spec to
 `in review`. The hub repeats the affected verification and independent review before publishing.
 
+### Direct task chats for independent work
+
+For every approved plan, the parent hub records each deliverable, file owner, dependencies, acceptance
+checks and shared resource needs on the board. By default each independent deliverable gets a task
+chat and worktree and reports directly to the hub. Assign rounds that edit the same file to one
+owner in sequence. Use a temporary workstream lead only when several tasks need material coordination.
+Record what the lead must coordinate. For example, file-import and export-validation changes with
+disjoint files and acceptance checks can report directly. In a UI plan, keyboard navigation and
+accessibility may depend on a common focus contract. A lead can sequence that contract and coordinate
+joint acceptance while each file keeps one owner.
+
+Schedule roles as runtime capacity becomes available. Within each round, implementation finishes
+before a separate test engineer derives checks from the spec and then sees the diff. An independent
+reviewer receives the final candidate and results. The task chat or lead dispatches these roles
+where supported, or asks the hub to dispatch them. Record assignments on the board and release
+workers and reservations after handoff.
+
+The task chat or workstream lead sends the parent hub the candidate revision, verification evidence,
+review verdict, blockers and resource requests. The hub owns the review gate and re-review, the
+shared stack and its commits and publication, and all build, GPU and timed reservations. It monitors
+worker progress, stale reservations, CI and PR feedback, routes fixes and keeps the owner's executable
+current under the publish procedure. The owner approves plans and merges PRs.
+
 ## Changelog fragments, folded at a pass's end
 A round never edits `CHANGELOG.md`, `README.md` or the four shared docs (`docs/USABILITY.md`, `tools/README.md`,
 `docs/ARCHITECTURE.md`, `docs/PERFORMANCE.md`). It adds `changelog.d/<round>-<slug>.md`: the entry as it will
@@ -172,9 +195,8 @@ merge (the exe already has that work). Never during a timed window.
   between options, a stack ready to review) and otherwise answers when asked.
 
 ## Long tasks
-- A fresh task per pass, started after the previous pass's write-up; before stopping, a task writes a short
-  resume note (what is published, what is in the worktree, what is next). Switching mid-batch costs more than
-  finishing it.
-- A task that reports to another puts the result first (the PR link, the head commit), then the detail.
+- The hub assigns task chats from each approved plan. Before stopping, each chat records what is published,
+  what remains in its worktree and what comes next.
+- Before publication, report the candidate revision and review verdict first. After publication, lead with the PR link and head commit.
 - Helper scripts that prove useful go into `tools/dev/`, with their paths as settings at the top; scratch
   folders are never uploaded.
