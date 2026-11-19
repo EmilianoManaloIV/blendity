@@ -43,10 +43,11 @@ jobs:
             file "$obj"
           done
           dpkg-query -W libx11-dev libx11-6 || true
-          if ! test -r /usr/include/X11/Xlib.h; then
-            echo 'Missing X11/Xlib.h on the base runner.' >&2
-            exit 1
-          fi
+      - name: Install the approved X11 headers on this disposable runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx11-dev
+          test -r /usr/include/X11/Xlib.h
       - name: Build with the repository release script
         run: bash build.sh release all
       - name: Verify the executable and render a 720p CPU frame
