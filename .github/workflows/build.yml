@@ -18,6 +18,11 @@ on:
         description: Reuse a matching symbolized baseline artifact from this workflow run
         type: string
         default: ''
+      artifact_suite:
+        description: Suite to run with an existing artifact
+        type: choice
+        options: [unit, stress]
+        default: unit
 permissions:
   contents: read
   actions: read
@@ -87,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ fromJSON(inputs.artifact_run_id && '["stress"]' || '["unit","stress"]') }}
+        suite: ${{ fromJSON(inputs.artifact_run_id && format('["{0}"]', inputs.artifact_suite) || '["unit","stress"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,6 +113,7 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
           FULL_SUITE: ${{ inputs.full && '1' || '0' }}
+          REUSE_ARTIFACT: ${{ inputs.artifact_run_id }}
         run: |
           $scratch = Join-Path $env:RUNNER_TEMP $env:SUITE
           New-Item -ItemType Directory -Path $scratch | Out-Null
@@ -125,10 +131,15 @@ jobs:
             $arguments = @('--quick','--out',"$scratch/results")
             if ($env:FULL_SUITE -ne '1') { $arguments += '--only','modifiers_ngon' }
           }
+          $debugger = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
+          if ($env:REUSE_ARTIFACT -and $env:SUITE -eq 'unit' -and (Test-Path $debugger)) {
+            & $debugger -lines -G -c 'sxd -c2 "knL;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
+            if (!(Select-String -Path "$scratch/stack.log" -Pattern '^\d+ checks, 0 failed')) { exit 1 }
+            exit 0
+          }
           & $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/test.log"
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            $debugger = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
             if (Test-Path $debugger) {
               & $debugger -lines -G -c 'sxe -c "knL;.frame /c 2;dv /t head;dv /t he;dv /t f;dv /t g;dx this->np;dx this->nf;dx this->arity;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
             } elseif (Get-Command lldb -ErrorAction SilentlyContinue) {
