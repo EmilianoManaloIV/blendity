@@ -26,15 +26,15 @@ jobs:
           $process = Start-Process $package -WindowStyle Hidden -Wait -PassThru -ArgumentList '--quiet','--wait','--norestart','--nocache','--installPath','C:\blendity-buildtools','--add','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','--add','Microsoft.VisualStudio.Component.Windows11SDK.26100'
           if ($process.ExitCode -notin 0,3010) { throw "Build Tools installer exited $($process.ExitCode)" }
           if (!(Test-Path 'C:/blendity-buildtools/VC/Tools/MSVC/14.52.37025/bin/Hostx64/x64/cl.exe')) { throw 'The original compiler is missing after provisioning' }
-      - name: Build with precise floating-point semantics
+      - name: Build without link-time code generation
         env:
           BLENDITY_VCVARS_VER: '14.52.37025'
           BLENDITY_VCVARS_STRICT: '1'
           BLENDITY_NO_LIBS: '1'
           BLENDITY_FETCH_OPTIX: '1'
-          _CL_: '/fp:precise'
+          BLENDITY_NO_LTCG: '1'
         run: |
-          Write-Host "Compiler option override: $env:_CL_"
+          Write-Host "Link-time code generation disabled: $env:BLENDITY_NO_LTCG"
           cmd /d /c "build.bat release all"
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
