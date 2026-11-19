@@ -23,7 +23,24 @@ jobs:
           c++ --version
           test "$(uname -m)" = aarch64
           test "$(c++ -dumpmachine)" = aarch64-linux-gnu
-          test -r /usr/include/X11/Xlib.h
+          c++ -dumpmachine
+          cat > "$RUNNER_TEMP/cpu-check.cpp" <<'CPP'
+          #include "cpu.h"
+          #include <iostream>
+          int main() {
+            const auto &f = bl::cpu::features();
+            std::cout << bl::cpu::describe() << '\n';
+            return f.neon && !f.avx2 && !f.sse42 ? 0 : 1;
+          }
+          CPP
+          c++ -std=c++17 -Isrc/core src/core/cpu.cpp "$RUNNER_TEMP/cpu-check.cpp" -o "$RUNNER_TEMP/cpu-check"
+          file "$RUNNER_TEMP/cpu-check"
+          "$RUNNER_TEMP/cpu-check"
+          dpkg-query -W libx11-dev libx11-6 || true
+          if ! test -r /usr/include/X11/Xlib.h; then
+            echo 'Missing X11/Xlib.h on the base runner.' >&2
+            exit 1
+          fi
       - name: Build with the repository release script
         run: bash build.sh release all
       - name: Verify the executable and render a 720p CPU frame
