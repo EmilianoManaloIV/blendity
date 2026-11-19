@@ -62,9 +62,7 @@ for ((root = 0; root < COUNT; root++)); do
   git worktree add -q --detach "$T" "origin/${B[newest]}"
   for t in "${TOPS[@]}"; do
     [ "$t" = "$newest" ] && continue
-    git -C "$T" merge --no-ff --no-edit -m "Merge ${B[t]} so #${N[newest]} carries every PR of its stack
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" "origin/${B[t]}" || {
+    git -C "$T" merge --no-ff --no-edit -m "Merge ${B[t]} so #${N[newest]} carries every PR of its stack$STACK_AI_TRAILER" "origin/${B[t]}" || {
       echo "CONFLICT merging ${B[t]} - resolve by hand in $T"; exit 1; }
   done
   git -C "$T" push -q origin "HEAD:refs/heads/${B[newest]}"

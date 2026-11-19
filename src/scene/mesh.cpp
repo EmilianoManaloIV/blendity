@@ -2509,6 +2509,26 @@ static Mesh subdivide_impl(const Mesh &in, bool smooth) {
     }
   });
   out.face_offsets[0] = 0;
+  for (size_t index : valid_corner_layers(in)) {
+    const auto &layer = in.color_attributes[index];
+    auto child = out.make_color(layer.name, layer.domain, {});
+    for (size_t f = 0; f < nf; ++f) {
+      const uint32_t first = in.face_offsets[f], n = in.face_size(f);
+      Vec4 center;
+      for (uint32_t k = 0; k < n; ++k) center = center + layer.rgba[first + k];
+      if (n) center = center * (1.0f / float(n));
+      for (uint32_t k = 0; k < n; ++k) {
+        const uint32_t corner = first + k;
+        auto *rgba = &child.rgba[(size_t)corner * 4];
+        rgba[0] = layer.rgba[corner];
+        rgba[1] = (rgba[0] + layer.rgba[first + (k + 1) % n]) * 0.5f;
+        rgba[2] = center;
+        rgba[3] = (rgba[0] + layer.rgba[first + (k + n - 1) % n]) * 0.5f;
+      }
+    }
+    out.color_attributes.push_back(std::move(child));
+  }
+  restore_color_choices(in, out);
   /* Seams and sharp edges split along with their edge. */
   auto split = [&](const std::vector<uint64_t> &src, std::vector<uint64_t> &dst) {
     for (uint64_t k : src) {
@@ -2546,7 +2566,7 @@ void triangulate(Mesh &m) {
       Vec2 tt[3];
       if (fb.has_uv)
         for (int k = 0; k < 3; k++) tt[k] = m.uvs[m.face_offsets[f] + local[i + k]];
-      fb.add(tv, 3, fb.has_uv ? tt : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.add(tv, 3, fb.has_uv ? tt : nullptr, m.material_of(f), m.smooth_of(f), f);
     }
   }
   fb.commit(m);
@@ -2626,7 +2646,7 @@ void cleanup_faces(Mesh &m) {
       v.pop_back();
       if (fb.has_uv) t.pop_back();
     }
-    if (v.size() >= 3) fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    if (v.size() >= 3) fb.add(v.data(), v.size(), fb.has_uv ? t.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
   }
   fb.commit(m);
 }
@@ -2634,6 +2654,8 @@ void cleanup_faces(Mesh &m) {
 static size_t finish_merge(Mesh &m, const std::vector<uint32_t> &target) {
   size_t merged = 0;
   for (size_t i = 0; i < target.size(); i++) merged += target[i] != i;
+  for (size_t i : valid_corner_layers(m))
+    for (uint32_t &v : m.color_attributes[i].corners) v = target[v];
   for (uint32_t &v : m.corner_verts) v = target[v];
   remap_seams(m, target);
   cleanup_faces(m);
@@ -2800,8 +2822,10 @@ void extrude_faces(Mesh &m, std::vector<uint8_t> &face_sel, float distance) {
     uint32_t v[4];
     Vec2 t[4];
     int mat;
+    uint32_t corners[4];
   };
   std::vector<Side> sides;
+  const auto layers = valid_corner_layers(m);
   const bool uv = m.has_uvs();
   for (size_t f = 0; f < nf; f++) {
     if (!face_sel[f]) continue;
@@ -2809,7 +2833,7 @@ void extrude_faces(Mesh &m, std::vector<uint8_t> &face_sel, float distance) {
     for (uint32_t i = 0; i < n; i++) {
       uint32_t a = m.corner_verts[b + i], c = m.corner_verts[b + (i + 1) % n];
       if (count[Mesh::edge_key(a, c)] == 1) {
-        Side s{{a, c, newc(b + (i + 1) % n), newc(b + i)}, {}, m.material_of(f)};
+        Side s{{a, c, newc(b + (i + 1) % n), newc(b + i)}, {}, m.material_of(f), {b+i, b+(i+1)%n, b+(i+1)%n, b+i}};
         if (uv) {
           /* Side walls get a strip along the boundary edge's UVs, offset
            * perpendicular by the extrusion length (keeps texel density). */
@@ -2826,7 +2850,11 @@ void extrude_faces(Mesh &m, std::vector<uint8_t> &face_sel, float distance) {
     }
     for (uint32_t i = 0; i < n; i++) m.corner_verts[b + i] = newc(b + i);
   }
-  for (auto &s : sides) m.add_face(s.v, 4, uv ? s.t : nullptr, s.mat);
+  for (size_t i : layers) m.color_attributes[i].corners = m.corner_verts;
+  for (auto &side : sides) {
+    m.add_face(side.v, 4, uv ? side.t : nullptr, side.mat);
+    append_corner_copies(m, layers, side.corners, 4);
+  }
   face_sel.resize(m.face_count(), 0);
   /* Fully-enclosed regions leave the old vertices unused. */
   std::vector<uint8_t> used(m.vert_count(), 0);
@@ -2845,7 +2873,7 @@ void inset_faces(Mesh &m, std::vector<uint8_t> &face_sel, float amount) {
     uint32_t b = m.face_offsets[f], n = m.face_size(f);
     const Vec2 *t = fb.has_uv ? &m.uvs[b] : nullptr;
     if (!face_sel[f]) {
-      fb.add(v, n, t, m.material_of(f), m.smooth_of(f));
+      fb.add(v, n, t, m.material_of(f), m.smooth_of(f), f);
       sel.push_back(0);
       continue;
     }
@@ -2866,10 +2894,14 @@ void inset_faces(Mesh &m, std::vector<uint8_t> &face_sel, float amount) {
       uint32_t q[4] = {v[i], v[j], inner[j], inner[i]};
       Vec2 tq[4];
       if (t) { tq[0] = t[i]; tq[1] = t[j]; tq[2] = tin[j]; tq[3] = tin[i]; }
-      fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f), f);
+      fb.face_point(f,fb.cv.size()-2,b+j,amount);
+      fb.face_point(f,fb.cv.size()-1,b+i,amount);
       sel.push_back(0);
     }
-    fb.add(inner.data(), n, t ? tin.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(inner.data(), n, t ? tin.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
+    if (!fb.layers.empty())
+      for (uint32_t i = 0; i < n; ++i) fb.face_point(f,fb.cv.size()-n+i,b+i,amount);
     sel.push_back(1);
   }
   fb.commit(m);
@@ -2881,7 +2913,7 @@ void delete_faces(Mesh &m, const std::vector<uint8_t> &face_sel) {
   FaceBuilder fb(m);
   for (size_t f = 0; f < m.face_count(); f++) {
     if (f < face_sel.size() && face_sel[f]) continue;
-    fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f), f);
   }
   fb.commit(m);
   remove_loose_verts(m);
@@ -3103,7 +3135,7 @@ std::vector<uint32_t> loop_cut(Mesh &m, uint32_t a, uint32_t b, int cuts, float 
       for (size_t k = 0; k + 1 < side0.size(); k++) {
         uint32_t q[4] = {side0[k], side0[k + 1], side1[k + 1], side1[k]};
         Vec2 qt[4] = {uv0[k], uv0[k + 1], uv1[k + 1], uv1[k]};
-        fb.add(q, 4, has_uv ? qt : nullptr, m.material_of(f), m.smooth_of(f));
+        fb.add(q, 4, has_uv ? qt : nullptr, m.material_of(f), m.smooth_of(f), f);
       }
       continue;
     }
@@ -3117,7 +3149,7 @@ std::vector<uint32_t> loop_cut(Mesh &m, uint32_t a, uint32_t b, int cuts, float 
       uint32_t w = v[(i + 1) % n];
       if (split.count(Mesh::edge_key(v[i], w))) points(v[i], w, uv(i), uv(i + 1), fv, ft);
     }
-    fb.add(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
   }
   fb.commit(m);
   m.touch();
@@ -3213,7 +3245,9 @@ bool fill(Mesh &m, const std::vector<uint8_t> &vert_sel) {
     FaceList fs = ef.at(order[i], order[(i + 1) % order.size()]);
     if (!fs.empty()) { mat = m.material_of(fs[0]); break; }
   }
+  BoundaryColors boundary(m);
   m.add_face(order.data(), order.size(), nullptr, mat);
+  boundary.fill(m, order);
   m.touch();
   return true;
 }
@@ -3315,6 +3349,8 @@ void recalc_normals_outside(Mesh &m) {
 /* ------------------------------------------------- generative modifiers */
 
 void mirror(Mesh &m, bool x, bool y, bool z, float merge_dist) {
+  const auto layers = valid_corner_layers(m);
+  std::vector<uint32_t> source_corners;
   const bool axes[3] = {x, y, z};
   for (int ax = 0; ax < 3; ax++) {
     if (!axes[ax]) continue;
@@ -3339,15 +3375,18 @@ void mirror(Mesh &m, bool x, bool y, bool z, float merge_dist) {
     for (size_t f = 0; f < nfaces; f++) {
       const uint32_t base = m.face_offsets[f], n = m.face_size(f);
       fv.clear();
+      source_corners.clear();
       ft.clear();
       bool in_plane = true;
       for (uint32_t i = 0; i < n; i++) in_plane = in_plane && twin[m.corner_verts[base + i]] == m.corner_verts[base + i];
       if (in_plane) continue;  // its mirror image is the same face, back-facing
       for (uint32_t i = n; i-- > 0;) {  // reversed: mirroring flips winding
+        if (!layers.empty()) source_corners.push_back(base + i);
         fv.push_back(twin[m.corner_verts[base + i]]);
         if (has_uv) ft.push_back(m.uvs[base + i]);
       }
       m.add_face(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f));
+      append_corner_copies(m, layers, source_corners.data(), fv.size());
     }
     std::vector<uint64_t> seams = m.seams;
     for (uint64_t k : seams) m.set_seam(twin[(size_t)(k >> 32)], twin[(size_t)(k & 0xFFFFFFFF)], true);
@@ -3383,6 +3422,7 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
   if (has_smooth) m.face_smooth.reserve(nf * (size_t)count);
   if (has_group) m.face_group.reserve(nf * (size_t)count);  // (task 0238: a copy keeps its groups and hidden faces)
   m.seams.reserve(seams.size() * (size_t)count);
+  const auto layers = valid_corner_layers(m);
   for (int c = 1; c < count; c++) {
     const uint32_t off = nv * (uint32_t)c, corner_off = (uint32_t)(nc * (size_t)c);
     const Vec3 shift = step * (float)c;
@@ -3391,6 +3431,12 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
       m.copy_vertex_weights(i);
     }
     for (size_t i = 0; i < nc; i++) m.corner_verts.push_back(m.corner_verts[i] + off);
+    for (size_t index : layers) {
+      auto &layer = m.color_attributes[index];
+      layer.rgba.resize(nc * (size_t)(c + 1));
+      std::copy_n(layer.rgba.begin(), nc, layer.rgba.begin() + corner_off);
+      layer.corners.insert(layer.corners.end(), m.corner_verts.begin() + corner_off, m.corner_verts.end());
+    }
     for (size_t f = 1; f <= nf; f++) m.face_offsets.push_back(m.face_offsets[f] + corner_off);
     for (size_t i = 0; has_uv && i < nc; i++) m.uvs.push_back(m.uvs[i]);
     for (size_t f = 0; has_mat && f < nf; f++) m.face_material.push_back(m.face_material[f]);
@@ -3411,6 +3457,8 @@ void make_array(Mesh &m, int count, Vec3 relative, Vec3 constant, float merge_di
 void solidify(Mesh &m, float thickness, float offset, bool even, bool rim) {
   if (m.face_count() == 0 || thickness == 0.0f) return;
   std::vector<Vec3> vn = vertex_normals(m);
+  const auto layers = valid_corner_layers(m);
+  std::vector<uint32_t> source_corners;
   const uint32_t nv = (uint32_t)m.vert_count();
   const size_t nfaces = m.face_count();
   /* Even thickness: divide by the cosine to the most tilted adjacent face
@@ -3438,12 +3486,15 @@ void solidify(Mesh &m, float thickness, float offset, bool even, bool rim) {
   for (size_t f = 0; f < nfaces; f++) {
     const uint32_t base = m.face_offsets[f], n = m.face_size(f);
     fv.clear();
+    source_corners.clear();
     ft.clear();
     for (uint32_t i = n; i-- > 0;) {
+      if (!layers.empty()) source_corners.push_back(base + i);
       fv.push_back(m.corner_verts[base + i] + nv);
       if (has_uv) ft.push_back(m.uvs[base + i]);
     }
     m.add_face(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f));
+    append_corner_copies(m, layers, source_corners.data(), fv.size());
   }
   if (rim) {
     for (size_t f = 0; f < nfaces; f++) {
@@ -3453,6 +3504,8 @@ void solidify(Mesh &m, float thickness, float offset, bool even, bool rim) {
         if (ef->at(a, b).size() != 1) continue;
         uint32_t q[4] = {b, a, a + nv, b + nv};
         m.add_face(q, 4, nullptr, m.material_of(f));
+        const uint32_t corners[]{base+(i+1)%n, base+i, base+i, base+(i+1)%n};
+        append_corner_copies(m, layers, corners, 4);
       }
     }
   }

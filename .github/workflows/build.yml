@@ -28,9 +28,8 @@ permissions:
   pull-requests: read
 
 jobs:
-  # What this run has to do. A pull request that changes only text nothing builds, tests or checks (specs, ADRs,
-  # changelog fragments, CLAUDE.md: the list is in tools/dev/test_shards.py) skips every build; the four required jobs
-  # then pass at once. Not `paths-ignore`: a workflow that never starts leaves required checks waiting for ever.
+  # Always run the lightweight checks. A PR limited to documentation and recognized agent metadata skips
+  # native builds using tools/dev/test_shards.py. The four required jobs still report the changes job's result.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -42,6 +41,12 @@ jobs:
         run: |
           python3 tools/dev/test_shards.py --self-test
           python3 tools/dev/test_shards.py --check
+      - name: Check the project Codex agents and command rules
+        run: python3 tools/dev/check_codex_config.py
+      - name: Test publishing and merged task cleanup on local remotes
+        run: |
+          python3 tools/dev/test_cleanup_task_branch.py
+          python3 tools/dev/test_subtree_publish.py
       - name: Build, or nothing to build
         id: decide
         env:
@@ -65,7 +70,7 @@ jobs:
           if [ "$build" = true ]; then
             echo "::notice::This run builds and tests."
           else
-            echo "::notice::Only documents that nothing builds or tests changed: no build, the required jobs pass at once."
+            echo "::notice::Only documentation or recognized agent metadata changed. Native builds are skipped."
           fi
 
   # ------------------------------------------------------------------------------------------------ Windows

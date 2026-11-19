@@ -3,7 +3,7 @@
 - **Status:** draft
 - **Requirements:** R-xx, Q-xx
 - **Decisions:** ADR NNNN (or "none needed")
-- **Model:** implementer (Sonnet) | main session (Opus)
+- **Implementation:** project `implementer` for routine work or planning task for difficult geometry, architecture or cross-cutting work
 - **PR:** (link when opened)
 
 ## Goal

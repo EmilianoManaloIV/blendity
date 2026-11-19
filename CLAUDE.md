@@ -1,5 +1,9 @@
 # Blendity - engineering standards
 
+Claude Code uses this guide and the [original worker contracts](.claude/agents/). For Codex, start
+with [AGENTS.md](AGENTS.md) and the [project setup and workflow inventory](docs/handoff/CODEX.md).
+Both guides follow the same owner's approval, publishing and machine rules.
+
 Blendity is a C++17 editor that rebuilds Blender's modeling, UV, material and rendering ideas behind a
 Unity-style editor (Hierarchy, Inspector, Scene view, Play mode), with SketchUp / UModeler /
 Plasticity-style drawing and Push/Pull. Read `docs/requirements.md` (what it must do),
@@ -15,7 +19,7 @@ non-trivial.
 - `tests/test_<group>.cpp` unit checks (one file a subsystem, `test_common.h` shared; `test_main.cpp` runs them);
   `stress/stress_main.cpp` stress / robustness sections
 - `extern/` code copied from Blender's tree; `licenses/` notices; `docs/` design documentation
-- Not ours to edit without asking: `Assets/` (the user's project), `Renders/`, `Screenshots/`, `research/`
+- Keep the user's `Assets/`, `Renders/`, `Screenshots/` and `research/` outside round edits, staging and verification.
 
 ## Build and run
 - Windows (from Bash, absolute path): `cmd //c "C:\\...\\blendity\\build.bat release all|app|tests|stress"`.
@@ -50,8 +54,8 @@ non-trivial.
   groups are those whose tests it changed and those that test the code it changed (code behind a `BL_WITH_*`
   switch included: CI builds without the libraries); a round that cannot name them runs the whole suite
   locally (the chain without `TEST_GROUPS`).
-- A timed run (a measurement, a timed bake, a chain with `POSING=1`) takes a slot from the hub's
-  `machine-slots.md` first: one holder at a time, nothing else builds or runs meanwhile.
+- A timed run (a measurement, a timed bake, a chain with `POSING=1`) takes a slot from the hub first:
+  one holder at a time, nothing else builds or runs meanwhile. See [the machine's limits](docs/handoff/MACHINE.md).
 - Geometry changes also run the matching stress sections (`blendity_stress --only pushpull |
   modifiers_ngon | curved | editor`). Problem counts and "faces newly on top of each other" counts must
   not rise without an explanation in the round's changelog entry. Delete the report files a run creates and restore
@@ -90,15 +94,15 @@ non-trivial.
 - `docs/tasks/`: the task spec the work was done against; mark it done.
 
 ## Workflow and approval gates
-1. **Plan** (main session, Opus): write `docs/tasks/NNNN-slug.md` (template in `docs/tasks/`) and an ADR
-   if the decision is architectural. **The human approves the spec (and ADR) before code is written.**
-2. **Implement**: the `implementer` agent (Sonnet) for routine, well-specified work; the main Opus
-   session for hard geometry or cross-cutting changes.
-3. **Test**: the `test-engineer` agent (Sonnet) writes tests from the spec's acceptance criteria.
-4. **Review**: the `code-reviewer` agent (Opus) reviews the diff against the spec, ADRs and this file.
-5. **Merge**: push a branch, open a PR (template in `.github/`), CI must pass. **The human reviews and
-   merges on GitHub**, unless the user asks an agent to merge: then only after CI passes on all four jobs,
-   with a merge commit (`gh pr merge N --merge`), never squash or rebase of a stack.
+1. **Plan** (the main session on the strongest available model): write `docs/tasks/NNNN-slug.md` from the
+   task template and an ADR for architectural decisions. **The owner approves the spec and any ADR before
+   implementation.** An approved pass plan approves the specs inside it.
+2. **Implement**: use the `implementer` agent for routine, well-specified work. The planning session
+   handles hard geometry, architecture or cross-cutting changes.
+3. **Test**: the independent `test-engineer` writes tests from the spec's acceptance criteria.
+4. **Review**: the independent `code-reviewer` reviews the diff against the spec, ADRs and project rules.
+5. **Merge**: the hub publishes the branch and checks CI. **The owner reviews and merges on GitHub.**
+   The owner uses a merge commit for stacks. Agents do not merge PRs, use `--admin` or enable auto-merge.
 6. **Every PR targets `main`** (`--base main`), never another PR's branch (the user, 2026-11-08). A round's
    commit may build on the previous round's, but its PR's base is `main`. **Guarantee:** merging the top PR
    of a stack merges every PR below it (GitHub marks them merged; use a merge commit). Several stacks may be
@@ -122,9 +126,10 @@ run the reviewer.
 ## Git and publishing
 - The git root is `blender-main/`; GitHub (EmilianoManaloIV/blendity) holds only `blendity/`, published
   through the `blendity-root` subtree branch.
-- Commit only when the user asks. Never commit the user's `Assets/Scenes/SampleScene.scene`,
-  `Assets/Materials/` or `Assets/Exports/`.
-- Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Commit only when the owner asks or approves a plan that ends in a PR. Keep all four private folders
+  outside staging and commits.
+- Name the AI tool that helped write the change in the `Co-Authored-By` trailer and PR disclosure.
+  See [AI disclosure](docs/AI_DISCLOSURE.md).
 - Publish a task to a PR branch, never to `main` or `blendity`:
   ```
   git commit -m "$msg"                                   # on the local blendity branch
@@ -138,4 +143,9 @@ run the reviewer.
 - `main` is protected: PRs only, `windows` / `linux` / `macos` / `linux-sanitizers` must pass on a branch
   up to date with `main`, no force pushes.
 - After a merge: `git fetch origin main && git update-ref refs/heads/blendity-root origin/main`.
-- No force pushes, no history rewrites. Branches are deleted only once merged into `main` (the user asked, 2026-10-13: `git push origin --delete` the merged `task/*` branches after each merge).
+- Agents do not force-push, rewrite history or run `git reset --hard`. The owner authorizes only the hub to
+  delete verified merged `task/*` refs through the [cleanup helper](tools/dev/cleanup_task_branch.py).
+  Role workers and direct branch-deletion commands remain restricted. See the
+  [project command policy](docs/handoff/CODEX.md#command-policy).
+- Get the owner's explicit consent for the specific release tag or release action. Follow the
+  [release procedure](AGENTS.md#git-and-publishing).

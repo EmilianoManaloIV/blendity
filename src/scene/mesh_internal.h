@@ -11,19 +11,84 @@
 
 namespace bl::meshops {
 
+// Retained endpoints keep their exact float bits, including very small channels.
+inline Vec4 blend_corner(Vec4 a, Vec4 b, float t) {
+  if (t == 0) return a;
+  if (t == 1) return b;
+  return lerp(a, b, t);
+}
+
+// A sampled corner uses indices into a source face, independent of the UV layout.
+struct CornerSample {
+  uint32_t a = UINT32_MAX, b = UINT32_MAX, c = UINT32_MAX;
+  Vec3 weight = {1, 0, 0};
+  Vec4 read(const ColorAttribute &layer) const {
+    if (a == UINT32_MAX) return {1, 1, 1, 1};
+    if (b == UINT32_MAX) return layer.rgba[a];
+    return layer.rgba[a] * weight.x + layer.rgba[b] * weight.y + layer.rgba[c] * weight.z;
+  }
+};
+CornerSample sample_face_corner(const Mesh &mesh, size_t face, uint32_t vertex, Vec3 point, const std::vector<uint32_t> &triangles);
+std::vector<size_t> valid_corner_layers(const Mesh &mesh);
+void append_corner_copies(Mesh &mesh, const std::vector<size_t> &layers, const uint32_t *corners, size_t count);
+void append_colors_on_surface(Mesh &mesh, const std::vector<size_t> &layers, const std::vector<uint32_t> &hosts, const std::vector<uint32_t> &vertices);
+void restore_color_choices(const Mesh &from, Mesh &to);
+
+// Boundary loops on generated walls and fills use the face attached to each edge.
+struct BoundaryColors {
+  std::vector<size_t> layers;
+  std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> edges;
+  explicit BoundaryColors(const Mesh &mesh, const std::vector<uint8_t> *faces = nullptr) : layers(valid_corner_layers(mesh)) {
+    if (layers.empty()) return;
+    for (size_t f = 0; f < mesh.face_count(); ++f) {
+      if (faces && (f >= faces->size() || !(*faces)[f])) continue;
+      const uint32_t first = mesh.face_offsets[f], n = mesh.face_size(f);
+      for (uint32_t i = 0; i < n; ++i) {
+        uint32_t a = first+i, b = first+(i+1)%n;
+        const uint64_t key = Mesh::edge_key(mesh.corner_verts[a], mesh.corner_verts[b]);
+        if (mesh.corner_verts[a] > mesh.corner_verts[b]) std::swap(a, b);
+        edges.emplace(key, std::make_pair(a, b));
+      }
+    }
+  }
+  uint32_t corner(uint32_t a, uint32_t b) const {
+    auto it = edges.find(Mesh::edge_key(a,b));
+    return it == edges.end() ? UINT32_MAX : (a < b ? it->second.first : it->second.second);
+  }
+  void fill(Mesh &m, const std::vector<uint32_t> &v) const {
+    if (layers.empty()) return;
+    std::vector<uint32_t> corners;
+    for (size_t i = 0; i < v.size(); ++i) corners.push_back(corner(v[i], v[(i+1)%v.size()]));
+    append_corner_copies(m, layers, corners.data(), corners.size());
+  }
+  void strip(Mesh &m, uint32_t a, uint32_t b) const {
+    if (layers.empty()) return;
+    const uint32_t ca = corner(a, b), cb = corner(b, a), src[]{ca, cb, cb, ca};
+    append_corner_copies(m, layers, src, 4);
+  }
+};
+
 /* Rebuilds the face arrays through a callback that emits faces; keeps attributes. */
 struct FaceBuilder {
   std::vector<uint32_t> offs{0}, cv;
   std::vector<Vec2> uv;
   std::vector<int32_t> mat;
   std::vector<uint8_t> sm;  // per-face smooth shading, when the mesh has it
+  const Mesh &source;
+  std::vector<size_t> layers;
+  std::vector<std::vector<Vec4>> colors;
+  std::vector<uint32_t> triangles;
+  std::vector<Vec4> means;
+  size_t averaged = SIZE_MAX;
+  size_t triangulated = SIZE_MAX;
   bool has_uv, has_mat, has_smooth, default_smooth;
   FaceBuilder(const Mesh &m)
-      : has_uv(m.has_uvs()), has_mat(!m.face_material.empty()), has_smooth(!m.face_smooth.empty()), default_smooth(m.smooth) {
+      : source(m), layers(valid_corner_layers(m)), colors(layers.size()), has_uv(m.has_uvs()), has_mat(!m.face_material.empty()), has_smooth(!m.face_smooth.empty()), default_smooth(m.smooth) {
     cv.reserve(m.corner_count());
   }
   /* smooth: the shading of the face this one comes from (-1: the mesh default). */
-  void add(const uint32_t *v, size_t n, const Vec2 *t, int material, int smooth = -1) {
+  void add(const uint32_t *v, size_t n, const Vec2 *t, int material, int smooth = -1, size_t face = SIZE_MAX, const uint32_t *source_corners = nullptr) {
+    if (!layers.empty()) add_colors(v, n, face, source_corners);
     if (has_smooth) sm.push_back(smooth < 0 ? default_smooth : smooth != 0);
     cv.insert(cv.end(), v, v + n);
     offs.push_back((uint32_t)cv.size());
@@ -33,9 +98,48 @@ struct FaceBuilder {
     }
     if (has_mat) mat.push_back(material);
   }
+  void add_colors(const uint32_t *v, size_t n, size_t face, const uint32_t *source_corners) {
+    const bool direct = face < source.face_count() && n == source.face_size(face) &&
+                        (v == source.face_verts(face) || std::equal(v, v+n, source.face_verts(face)));
+    for (size_t i = 0; i < n; ++i) {
+      CornerSample sample;
+      if (source_corners) sample.a = source_corners[i];
+      else if (direct) sample.a = source.face_offsets[face] + (uint32_t)i;
+      else if (face < source.face_count()) {
+        if (triangulated != face) {
+          triangulate_face_local(source, face, triangles);
+          triangulated = face;
+        }
+        sample = sample_face_corner(source, face, v[i], source.positions[v[i]], triangles);
+      }
+      for (size_t j = 0; j < layers.size(); ++j) colors[j].push_back(sample.read(source.color_attributes[layers[j]]));
+    }
+  }
+  // Corners that move towards a face point (Poke, Inset, Wireframe) share its exact arithmetic mean.
+  void face_point(size_t face, size_t output, uint32_t source_corner, float fraction) {
+    if (layers.empty()) return;
+    if (averaged != face) {
+      means.assign(layers.size(), {});
+      for (size_t j = 0; j < layers.size(); ++j) {
+        const auto &rgba = source.color_attributes[layers[j]].rgba;
+        for (uint32_t k = source.face_offsets[face]; k < source.face_offsets[face+1]; ++k) means[j] = means[j] + rgba[k];
+        means[j] = means[j] * (1.0f / float(source.face_size(face)));
+      }
+      averaged = face;
+    }
+    for (size_t j = 0; j < layers.size(); ++j) {
+      const Vec4 v = source.color_attributes[layers[j]].rgba[source_corner];
+      colors[j][output] = fraction == 1.0f ? means[j] : lerp(v, means[j], fraction);
+    }
+  }
   void commit(Mesh &m) {
     m.face_offsets = std::move(offs);
     m.corner_verts = std::move(cv);
+    for (size_t i = 0; i < layers.size(); ++i) {
+      auto &layer = m.color_attributes[layers[i]];
+      layer.corners = m.corner_verts;
+      layer.rgba = std::move(colors[i]);
+    }
     if (has_uv) m.uvs = std::move(uv);
     if (has_mat) m.face_material = std::move(mat);
     if (has_smooth) m.face_smooth = std::move(sm);

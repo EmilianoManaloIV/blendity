@@ -9,7 +9,7 @@
 #endif
 #include <cmath>
 
-#include "mesh.h"
+#include "mesh_internal.h"
 
 #include <memory>
 #include <unordered_map>
@@ -174,6 +174,42 @@ bool refine(const Mesh &in, int levels, bool smooth, Mesh &out) {
     }
     if (has_mat) out.face_material[f] = msrc[f].index;
   }
+  // Use the refiner's child topology. Face-varying UV smoothing is configurable and would soften a colour seam.
+  for (size_t index : valid_corner_layers(in)) {
+    const auto &layer = in.color_attributes[index];
+    std::vector<uint32_t> offsets = in.face_offsets;
+    std::vector<Vec4> colors = layer.rgba;
+    for (int level = 0; level < levels; ++level) {
+      const auto &parent = refiner->GetLevel(level), &child = refiner->GetLevel(level+1);
+      std::vector<uint32_t> next_offsets((size_t)child.GetNumFaces()+1);
+      for (int f = 0; f < child.GetNumFaces(); ++f)
+        next_offsets[(size_t)f+1] = next_offsets[(size_t)f] + (uint32_t)child.GetFaceVertices(f).size();
+      std::vector<Vec4> next(next_offsets.back()), samples((size_t)child.GetNumVertices());
+      for (int f = 0; f < parent.GetNumFaces(); ++f) {
+        const auto verts = parent.GetFaceVertices(f), edges = parent.GetFaceEdges(f);
+        const auto *rgba = colors.data()+offsets[(size_t)f];
+        Vec4 mean;
+        for (int i = 0; i < verts.size(); ++i) {
+          mean = mean + rgba[i];
+          samples[(size_t)parent.GetVertexChildVertex(verts[i])] = rgba[i];
+          samples[(size_t)parent.GetEdgeChildVertex(edges[i])] = (rgba[i]+rgba[(i+1)%verts.size()])*0.5f;
+        }
+        samples[(size_t)parent.GetFaceChildVertex(f)] = mean * (1.0f / float(verts.size()));
+        const auto faces = parent.GetFaceChildFaces(f);
+        for (int i = 0; i < faces.size(); ++i) {
+          const auto corners = child.GetFaceVertices(faces[i]);
+          for (int j = 0; j < corners.size(); ++j)
+            next[next_offsets[(size_t)faces[i]]+j] = samples[(size_t)corners[j]];
+        }
+      }
+      offsets.swap(next_offsets);
+      colors.swap(next);
+    }
+    auto result = out.make_color(layer.name, layer.domain, {});
+    result.rgba = std::move(colors);
+    out.color_attributes.push_back(std::move(result));
+  }
+  restore_color_choices(in, out);
   out.touch();
   return true;
 }

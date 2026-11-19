@@ -19,8 +19,9 @@ loss is in `PITFALLS.md`.
 1. **Spec.** From `docs/tasks/TEMPLATE.md`: what was asked, what is in and out, numbered acceptance criteria
    each of which a test can check, the files to touch, the stress sections to run, a responsiveness criterion
    where the feature does work per frame. An ADR beside it when the choice is architectural.
-2. **Implement** (the implementer role). Only the spec's files. Build both ways (Blender's libraries and
-   dependency-free), then the round's own test group in **both** builds before anything long runs.
+2. **Implement** (the implementer role). Only the spec's files. For app changes, build both ways (Blender's
+   libraries and dependency-free), then run the round's own test group in **both** builds before anything long
+   runs. For project metadata, run the spec's lightweight checks.
 3. **Test** (the test-engineer role). Tests decided from the acceptance criteria before reading the diff; UI
    behaviour through real events; edge cases the spec implies. A bug found is left as a failing test and
    reported, not fixed by the tester.
@@ -31,7 +32,7 @@ loss is in `PITFALLS.md`.
    (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
    for geometry changes; the audits (`tools/test_coverage_map.py --check`, `tools/sweep_commands.py --check`,
    `py tools/dev/changelog.py check`). The whole suite, macOS and the sanitizers are CI's.
-6. **Publish.** Merge the stack's current top into the round's branch (build the tests again if the merge
+6. **Publish.** The hub merges the stack's current top into the round's branch (build the tests again if the merge
    touched test files), commit, push `task/NNNN-slug`, open the PR against `main` with the template, run
    `bash tools/dev/stack_check.sh`, read the checks, tell the coordinating task the PR number and head.
 7. **After.** Read CI once it has run; a red is fixed on the top of the stack, never on a lower PR. Read review
@@ -39,6 +40,42 @@ loss is in `PITFALLS.md`.
 
 Work is pipelined: while one round's checks run, the next round's spec and patches are written. Nothing waits
 on a merge.
+
+## Codex worker dispatch
+
+The parent chat remains the hub. In a project-aware Codex session, dispatch the named
+`implementer`, `test-engineer` and `code-reviewer` from [`.codex/agents/`](../../.codex/agents/)
+separately and in that order. On a surface with task and model fields but no named-agent selector,
+use a fresh worker for each role. Pass its role name, developer instructions, assigned worktree
+and spec in the task, and set its listed model and reasoning effort where the fields are available.
+For testing, pass the spec before sharing the diff. For review, pass the final diff and test results.
+The hub forwards the owner's approval, schedules shared resources and handles publishing. For
+an in-scope review fix, the hub restores the spec's status to `approved` under the existing
+approval and hands the fix back to the implementer. The implementer returns the spec to
+`in review`. The hub repeats the affected verification and independent review before publishing.
+
+### Direct task chats for independent work
+
+For every approved plan, the parent hub records each deliverable, file owner, dependencies, acceptance
+checks and shared resource needs on the board. By default each independent deliverable gets a task
+chat and worktree and reports directly to the hub. Assign rounds that edit the same file to one
+owner in sequence. Use a temporary workstream lead only when several tasks need material coordination.
+Record what the lead must coordinate. For example, file-import and export-validation changes with
+disjoint files and acceptance checks can report directly. In a UI plan, keyboard navigation and
+accessibility may depend on a common focus contract. A lead can sequence that contract and coordinate
+joint acceptance while each file keeps one owner.
+
+Schedule roles as runtime capacity becomes available. Within each round, implementation finishes
+before a separate test engineer derives checks from the spec and then sees the diff. An independent
+reviewer receives the final candidate and results. The task chat or lead dispatches these roles
+where supported, or asks the hub to dispatch them. Record assignments on the board and release
+workers and reservations after handoff.
+
+The task chat or workstream lead sends the parent hub the candidate revision, verification evidence,
+review verdict, blockers and resource requests. The hub owns the review gate and re-review, the
+shared stack and its commits and publication, and all build, GPU and timed reservations. It monitors
+worker progress, stale reservations, CI and PR feedback, routes fixes and keeps the owner's executable
+current under the publish procedure. The owner approves plans and merges PRs.
 
 ## Changelog fragments, folded at a pass's end
 A round never edits `CHANGELOG.md`, `README.md` or the four shared docs (`docs/USABILITY.md`, `tools/README.md`,
@@ -56,9 +93,9 @@ every pair of parallel PRs conflicted in the same six files.
   them merged.
 - `bash tools/dev/stack_check.sh` lists each stack and fails when one has more than one top; `FIX=1` merges
   stray heads into the newest PR. It runs after every publish and every push, and as the `stack` CI job.
-- With several tasks publishing, the rule is: whoever is ready publishes on the **current** single top
-  (`stack_check.sh` names it), merging that head first. Two publishing at once make two tops for a few minutes;
-  the later one merges the other in.
+- Workers hand verified rounds to the hub for publication. The hub checks the **current** single top with
+  `stack_check.sh`, brings the candidate onto that head and publishes it. The hub checks the resulting stack
+  after each push.
 - The PR body's "Merging this also merges" line names what it carries. The owner then needs one merge per pass.
 - A stack is never rebased or squashed, and a fix never lands on a lower PR (it would sit outside the stack).
 
@@ -73,6 +110,35 @@ Parallel tasks conflict where they share files, so the plan decides the split be
   before doing one); predictions can be wrong; file-disjoint pieces can still break each other, which CI on the
   joined top catches.
 Pass 28's table (eight tasks, rounds 562 to 570) is the model; Pass 27 ran ten.
+
+## Parallel verification
+
+The coordinator keeps one scratch ledger for the pass. Each round's row names its worker, owned files, candidate
+revision (including any uncommitted diff), checks due or completed, artifact and report paths, and pending build,
+card or timing reservations. Mark the next round ready to publish. Workers prepare scratch fixtures, commands
+and expected results before requesting a reservation.
+
+1. **Develop and review.** Run focused checks as the code changes. Once the code and regression tests settle,
+   identify the candidate for independent review and final verification. A review fix gets a second review.
+   Mark affected builds and check results stale, rebuild affected targets and run their checks on the new candidate.
+2. **Choose the executable.** Record its source revision or hashes and establish that all inputs to that target
+   match, including test or stress source, generated files, compiler and linker versions and options, libraries,
+   and the runtime DLLs and shaders deployed with it. Record the binary hash or equivalent build provenance.
+   Rebuild when an input differs or its equivalence is unknown. Run each changed tool's or document's own checks.
+3. **Choose the measurement.** Compare binary and runtime configuration, backend, workload and scale, input
+   data, process context, cache state and timing conditions. Record the original report, section coverage and
+   exit status. Reuse only a successful run matching every condition of the required measurement, including
+   before/after pairing when required. A quick run, another backend, a different process context or a tainted
+   window requires a fresh measurement for the requested configuration.
+4. **Batch ready workloads.** Workers give the coordinator a runnable scratch script for each workload.
+   The coordinator alone schedules compatible scripts together in a quiet window using the procedure below.
+   Record each child's exit status and verify its expected report and sections. Resume at the first missing or
+   failed workload and repeat any affected pair. A tainted window invalidates every timing in it. Release the
+   hardware promptly, then let waiting workers resume. [Machine limits and helpers](MACHINE.md) govern reservations.
+5. **Publish the verified top.** The coordinator checks the current top and the actual combined candidate.
+   Run the required checks for that combined tree as specified in the round and stack procedures. Each reviewed,
+   verified round can publish on the current single top while unrelated work continues. Read the PR's checks
+   and review comments. The owner merges.
 
 ## The machine's shared resources
 One 32-core machine with 32 GB ran up to thirteen sessions. Four things are shared and each has a rule
@@ -129,9 +195,8 @@ merge (the exe already has that work). Never during a timed window.
   between options, a stack ready to review) and otherwise answers when asked.
 
 ## Long tasks
-- A fresh task per pass, started after the previous pass's write-up; before stopping, a task writes a short
-  resume note (what is published, what is in the worktree, what is next). Switching mid-batch costs more than
-  finishing it.
-- A task that reports to another puts the result first (the PR link, the head commit), then the detail.
+- The hub assigns task chats from each approved plan. Before stopping, each chat records what is published,
+  what remains in its worktree and what comes next.
+- Before publication, report the candidate revision and review verdict first. After publication, lead with the PR link and head commit.
 - Helper scripts that prove useful go into `tools/dev/`, with their paths as settings at the top; scratch
   folders are never uploaded.

@@ -3249,8 +3249,9 @@ static const meshops::GroupTransferMap &modifier_map(const Component &c, const M
 }
 
 /* Task 0525 (ADR 0152): Point colour layers a modifier lost or left the wrong size come back from the mesh before it,
- * through the groups' map; Corner layers that no longer match the corners go. */
+ * through the groups' map. Topology writers carry Corner layers from their source faces. */
 static void carry_modifier_colors(const Component &c, const Mesh &before, Mesh &m) {
+  meshops::transfer_corner_colors(before, m);
   if (!meshops::point_colors_need_carry(before, m, true)) {
     m.prune_colors();
     m.dropped_colors.clear();  // (an evaluated mesh: nothing for the editor to report)
@@ -3279,24 +3280,24 @@ void run_modifier(const Component &c, Mesh &m) {
     return;
   }
   /* Task 0525 (ADR 0152): Point colour layers come along the groups' way, through the same map. */
-  bool point_colors = false;
-  for (const ColorAttribute &ca : m.color_attributes) point_colors = point_colors || (ca.domain == ColorAttribute::Domain::Point && ca.rgba.size() == m.vert_count());
-  if (!c.is_deform_only() && (!m.vertex_groups.empty() || point_colors)) {
+  bool colors = false;
+  for (const ColorAttribute &ca : m.color_attributes) colors = colors || m.color_fits(ca);
+  if (!c.is_deform_only() && (!m.vertex_groups.empty() || colors)) {
     /* What the transfer reads, not a whole copy (no render caches, UVs or flags). */
     Mesh before;
     before.positions = m.positions;
     before.face_offsets = m.face_offsets;
     before.corner_verts = m.corner_verts;
     before.vertex_groups = m.vertex_groups;
-    if (point_colors) {  // (only what the carry reads: the Point layers that fit, and the choices by name)
+    if (colors) {  // Save the valid layers and choices for topology-changing modifiers.
       for (const ColorAttribute &ca : m.color_attributes)
-        if (ca.domain == ColorAttribute::Domain::Point && ca.rgba.size() == m.vert_count()) before.color_attributes.push_back(ca);
+        if (m.color_fits(ca)) before.color_attributes.push_back(ca);
       auto name_of = [&](int i) { return i >= 0 && i < (int)m.color_attributes.size() ? m.color_attributes[(size_t)i].name : std::string(); };
       before.active_color = before.find_color(name_of(m.active_color));
       before.render_color = before.find_color(name_of(m.render_color));
     }
     c.modify(m);
-    if (point_colors) carry_modifier_colors(c, before, m);
+    if (colors) carry_modifier_colors(c, before, m);
     /* Mirror, Array and Join copy the groups themselves; a modifier that made a new mesh, or renumbered without
      * them, gets them from the mesh before it, by position, through a map kept while the topology stays. */
     if (m.groups_fit() && m.vertex_groups.size() == before.vertex_groups.size()) return;
@@ -3555,7 +3556,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
       eval_chain_[kind] = meshops::SubdivChain::build(in, chain_sub->levels, chain_sub->smooth, *h);
       if (eval_chain_[kind] && chain_sub->smooth) h->smooth = true;                                   // (as the modifier sets it)
       if (eval_chain_[kind] && !in.vertex_groups.empty()) meshops::transfer_vertex_groups(in, *h);  // (as run_modifier carries them, by position)
-      if (eval_chain_[kind] && !in.color_attributes.empty()) {  // (task 0525: Point colours likewise; Corner ones go)
+      if (eval_chain_[kind] && !in.color_attributes.empty()) {  // The subdivision chain has already interpolated its Corner layers.
         meshops::transfer_point_colors(in, *h, true);
         h->dropped_colors.clear();
       }

@@ -4,7 +4,7 @@
 // mesh_boolean_manifold.cc). Faces are triangulated going in; triangles that
 // still form one hole-free piece of an original face come back out as that
 // n-gon (Blender rebuilds faces the same way, by face id).
-#include "mesh.h"
+#include "mesh_internal.h"
 
 #include <algorithm>
 
@@ -105,7 +105,7 @@ bool group_loop(const manifold::MeshGL &g, const std::vector<uint32_t> &vert_of,
 }
 
 /* Output triangles back into a Mesh, rebuilding n-gons per source face. */
-Mesh from_meshgl(const manifold::MeshGL &g, const std::vector<int> &face_material) {
+Mesh from_meshgl(const manifold::MeshGL &g, const std::vector<int> &face_material, std::vector<uint32_t> *source_faces) {
   Mesh out;
   const size_t nprop = g.NumVert(), ntri = g.NumTri();
   /* Mesh vertex of each property vertex (merge duplicates). */
@@ -170,6 +170,7 @@ Mesh from_meshgl(const manifold::MeshGL &g, const std::vector<int> &face_materia
         auto it = std::upper_bound(prop_at.begin(), prop_at.end(), v, [](uint32_t x, const auto &e) { return x < e.first; });
         ft.push_back(uv_of(std::prev(it)->second));
       }
+      if (source_faces) source_faces->push_back(fid);
       out.add_face(fv.data(), fv.size(), ft.data(), mat);
       continue;
     }
@@ -180,6 +181,7 @@ Mesh from_meshgl(const manifold::MeshGL &g, const std::vector<int> &face_materia
         tv[j] = vert_of[g.triVerts[gt[i] * 3 + j]];
         tt[j] = uv_of(g.triVerts[gt[i] * 3 + j]);
       }
+      if (source_faces) source_faces->push_back(fid);
       out.add_face(tv, 3, tt, mat);
     }
   }
@@ -204,7 +206,30 @@ bool boolean_op(Mesh &a, const Mesh &b, const Mat4 &b_to_a, BooleanOp op, std::s
       return false;
     }
     manifold::Manifold r = op == BooleanOp::Union ? ma + mb : op == BooleanOp::Intersect ? (ma ^ mb) : ma - mb;
-    Mesh out = from_meshgl(r.GetMeshGL(), mats);
+    const bool painted = !valid_corner_layers(a).empty() || !valid_corner_layers(b).empty();
+    std::vector<uint32_t> source_faces;
+    Mesh out = from_meshgl(r.GetMeshGL(), mats, painted ? &source_faces : nullptr);
+    if (painted) {
+      Mesh sources = a;
+      append_mesh(sources, b, b_to_a);
+      auto layers = valid_corner_layers(sources);
+      for (size_t index : layers) {
+        const auto &layer = sources.color_attributes[index];
+        out.color_attributes.push_back(out.make_color(layer.name, layer.domain, {}));
+      }
+      std::vector<uint32_t> triangles;
+      for (size_t f = 0; f < out.face_count(); ++f) {
+        const size_t face = source_faces[f];
+        if (face >= sources.face_count()) continue;
+        triangulate_face_local(sources, face, triangles);
+        for (uint32_t k = out.face_offsets[f]; k < out.face_offsets[f+1]; ++k) {
+          const auto sample = sample_face_corner(sources, face, UINT32_MAX, out.positions[out.corner_verts[k]], triangles);
+          for (size_t j = 0; j < layers.size(); ++j)
+            out.color_attributes[j].rgba[k] = sample.read(sources.color_attributes[layers[j]]);
+        }
+      }
+      restore_color_choices(a, out);
+    }
     out.name = a.name;
     out.smooth = a.smooth;
     out.smooth_angle = a.smooth_angle;

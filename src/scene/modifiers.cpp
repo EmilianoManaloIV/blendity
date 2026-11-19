@@ -97,7 +97,9 @@ void wireframe(Mesh &m, float thickness, bool even, bool keep_original) {
       const uint32_t q[4] = {v[i], v[j], inner[j], inner[i]};
       Vec2 tq[4];
       if (t) tq[0] = t[i], tq[1] = t[j], tq[2] = tin[j], tq[3] = tin[i];
-      fb.add(q, 4, t ? tq : nullptr, original.material_of(f), original.smooth_of(f));
+      fb.add(q, 4, t ? tq : nullptr, original.material_of(f), original.smooth_of(f), f);
+      fb.face_point(f,fb.cv.size()-2,b+j,k);
+      fb.face_point(f,fb.cv.size()-1,b+i,k);
     }
   }
   fb.commit(m);
@@ -299,6 +301,9 @@ void screw(Mesh &m, float angle_deg, int steps, float screw_offset, int axis, in
     const Vec3 lift = ax * (screw_offset * t);
     for (uint32_t v = 0; v < nv; v++) out.add_vert(q.rotate(profile.positions[v]) + lift);
   }
+  const BoundaryColors boundary(profile);
+  for (size_t i : boundary.layers) out.color_attributes.push_back(out.make_color(profile.color_attributes[i].name, ColorAttribute::Domain::Corner, {}));
+  restore_color_choices(profile, out);
   const int bands = full ? rings : rings - 1;
   for (int r = 0; r < bands; r++) {
     const uint32_t a0 = (uint32_t)r * nv, a1 = (uint32_t)((r + 1) % rings) * nv;
@@ -306,6 +311,18 @@ void screw(Mesh &m, float angle_deg, int steps, float screw_offset, int axis, in
       uint32_t q[4] = {a0 + e.first, a0 + e.second, a1 + e.second, a1 + e.first};
       if (flip) std::swap(q[1], q[3]);
       out.add_face(q, 4);
+      if (!boundary.layers.empty()) {
+        uint32_t ca = boundary.corner(e.first, e.second), cb = boundary.corner(e.second, e.first);
+        uint32_t source[]{ca, cb, cb, ca};
+        if (flip) std::swap(source[1], source[3]);
+        for (size_t i = 0; i < boundary.layers.size(); ++i) {
+          auto &layer = out.color_attributes[i];
+          for (int k = 0; k < 4; ++k) {
+            layer.rgba.push_back(source[k] == UINT32_MAX ? Vec4(1,1,1,1) : profile.color_attributes[boundary.layers[i]].rgba[source[k]]);
+            layer.corners.push_back(q[k]);
+          }
+        }
+      }
     }
   }
   if (merge) merge_by_distance(out, 1e-4f);  // vertices on the axis meet themselves

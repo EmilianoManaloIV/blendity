@@ -1,6 +1,6 @@
 {
  "title": "Blendity test checklist",
- "about": "Every feature, as an artist reaches it. Time each task from your first move to the result; a task over 1.5x its target is marked slow. Targets are an expert's times from the keystroke-level model (docs/hci/klm.md) or estimates on the same rules; the first time through, expect to be slower.",
+ "about": "Every feature, as an artist reaches it. Time each task from your first move to the result; a task over 1.5x its target is marked slow. Targets are an expert's times from the keystroke-level model (docs/hci/klm.md) or estimates on the same rules; the first time through, expect to be slower. A fresh profile uses the Unity keymap. For another preset or a customized shortcut, open Preferences > Keymap and search for the action name to see or assign its binding.",
  "areas": [
   {"id": "A", "name": "Getting around and Preferences", "items": [
    {"id": "A1", "task": "Switch to the Animation layout and back to Default", "steps": "Layout dropdown (top right) > Animation; then > Default", "expect": "Windows rearrange; the guide strip says the layout's purpose", "target": 4, "source": "walkthrough", "ui": ["Default"]},
@@ -14,7 +14,7 @@
    {"id": "A9", "task": "Undo and redo three edits", "steps": "Move a cube three times; Ctrl+Z x3; Ctrl+Y x3", "expect": "Each step back and forward; Edit > History lists them", "target": 6, "source": "estimate", "ui": []}
   ]},
   {"id": "B", "name": "Navigation and selection", "items": [
-   {"id": "B1", "task": "Frame the selected object", "steps": "Select Cube, F", "expect": "The Scene view centres and fits the cube", "target": 2, "source": "klm", "ui": []},
+   {"id": "B1", "task": "Frame the selected object", "steps": "Select Cube in the Scene view and use Frame Selected (F in Unity).", "expect": "The Scene view centres and fits the cube", "target": 2, "source": "klm", "ui": ["Frame Selected"]},
    {"id": "B2", "task": "Orbit, pan and zoom with the mouse (Unity feel)", "steps": "Alt+LMB orbit, MMB pan, wheel zoom", "expect": "Smooth, no jumps", "target": 5, "source": "estimate", "ui": []},
    {"id": "B3", "task": "Orbit with the pen only", "steps": "Drag the Scene Gizmo; drag the hand below it to pan", "expect": "The view follows the pen", "target": 5, "source": "estimate", "ui": []},
    {"id": "B4", "task": "Box-select three objects", "steps": "Drag a rectangle over Cube, Sphere and Cylinder", "expect": "Three selected; the Inspector shows multi-edit", "target": 3, "source": "estimate", "ui": []},
@@ -31,9 +31,9 @@
    {"id": "C7", "task": "Add and remove a shape key", "steps": "Inspector > MeshRenderer > Add Shape Key; Remove... > Key 1", "expect": "BlendShape/Key 1 appears, then goes", "target": 6, "source": "reach", "ui": ["Add Shape Key", "Remove..."]}
   ]},
   {"id": "D", "name": "Modeling and Edit Mode", "items": [
-   {"id": "D1", "task": "Add a cube and bevel its edges", "steps": "GameObject > 3D Object > Cube; Tab; 2 (edges); select all; Bevel", "expect": "Rounded edges; F9 adjusts the last operation", "target": 10, "source": "walkthrough", "ui": []},
-   {"id": "D2", "task": "Extrude a face", "steps": "Edit Mode, 3 (faces), click a face, E, drag", "expect": "A new face pulled out", "target": 5, "source": "estimate", "ui": []},
-   {"id": "D3", "task": "Loop cut", "steps": "Edit Mode, Ctrl+R over an edge ring, click", "expect": "A loop across the ring", "target": 4, "source": "estimate", "ui": []},
+   {"id": "D1", "task": "Add a cube and bevel its edges", "steps": "GameObject > 3D Object > Cube. In the Scene view, use Edit Mode On / Off (Tab in Unity), then Edge Select Mode (2 in Unity). Select All, then Bevel.", "expect": "Rounded edges; F9 adjusts the last operation", "target": 10, "source": "walkthrough", "ui": ["Edit Mode On / Off", "Edge Select Mode", "Select All", "Bevel"]},
+   {"id": "D2", "task": "Extrude a face", "steps": "In the Scene view, enter Edit Mode and use Face Select Mode (3 in Unity). Click a face, invoke Extrude (Ctrl+E in Unity), move the pointer, then click or press Enter to confirm.", "expect": "A new face pulled out", "target": 5, "source": "estimate", "ui": ["Edit Mode On / Off", "Face Select Mode", "Extrude"]},
+   {"id": "D3", "task": "Loop cut", "steps": "In the Scene view, enter Edit Mode and use Edge Select Mode (2 in Unity). Point at an edge of a quad ring and invoke Loop Cut (Ctrl+R in Unity) to cut it. If Loop Cut is unbound, assign it in Preferences > Keymap first.", "expect": "A loop across the ring", "target": 4, "source": "estimate", "ui": ["Edit Mode On / Off", "Edge Select Mode", "Loop Cut"]},
    {"id": "D4", "task": "Mirror a half model along Y", "steps": "Modeling Tools > Mirror Y", "expect": "The mirrored half added, faces doubled", "target": 3, "source": "reach", "ui": ["Mirror Y"]},
    {"id": "D5", "task": "Add a Subdivision Surface modifier", "steps": "Add Component > Subdivision Surface, Levels 2", "expect": "Smooth surface, cage kept", "target": 6, "source": "estimate", "ui": []},
    {"id": "D6", "task": "Boolean difference", "steps": "Select cutter then target; Modeling Tools > Difference", "expect": "The cutter's shape removed", "target": 5, "source": "estimate", "ui": ["Difference"]},
@@ -110,7 +110,7 @@
    {"id": "J6", "task": "Add spring bones (jiggle)", "steps": "Select bones; Add Component > Spring Bones", "expect": "Bones sway in Play", "target": 6, "source": "estimate", "ui": []}
   ]},
   {"id": "K", "name": "Animation, Puppet Posing, physics and AI", "items": [
-   {"id": "K1", "task": "Key a position at frame 0 and 30", "steps": "Animation window > New clip; move; Shift+K at 0 and 30", "expect": "Two keys; the object moves between them", "target": 8, "source": "estimate", "ui": []},
+   {"id": "K1", "task": "Key a position at frame 0 and 30", "steps": "Animation window > New clip. Move the object and use Set Key (Shift+K in Unity) at frames 0 and 30.", "expect": "Two keys; the object moves between them", "target": 8, "source": "estimate", "ui": ["Set Key (every track, at the playhead)"]},
    {"id": "K2", "task": "Pose a reach by the hand (Puppet Posing)", "steps": "AutoPosing on; drag the hand's dot", "expect": "The body follows, feet planted", "target": 3.75, "source": "klm", "ui": ["AutoPosing"]},
    {"id": "K3", "task": "Pose with the learned prior (local AI install)", "steps": "Puppet > Use the Pose Prior; drag the hand toward the knee", "expect": "The spine bends naturally; the hand reaches exactly", "target": 4, "source": "estimate", "ui": ["Use the Pose Prior"]},
    {"id": "K4", "task": "Lock a foot", "steps": "Select the foot bone; Puppet > Lock the Selected Bone", "expect": "It stays put while the body moves", "target": 3, "source": "reach", "ui": ["Lock the Selected Bone"]},
@@ -161,7 +161,7 @@
   ]},
   {"id": "Q", "name": "Performance", "items": [
    {"id": "Q1", "task": "Orbit a 1M-triangle scene", "steps": "Benchmark scene million; orbit", "expect": "Smooth (the status bar's fps at 30 or more on the GPU)", "target": 5, "source": "estimate", "ui": []},
-   {"id": "Q2", "task": "Edit Mode on a 200k-face mesh", "steps": "Tab on a big mesh; select and move a face", "expect": "No pause over a fraction of a second", "target": 5, "source": "estimate", "ui": []},
+   {"id": "Q2", "task": "Edit Mode on a 200k-face mesh", "steps": "Select a big mesh in the Scene view and use Edit Mode On / Off (Tab in Unity). Select and move a face.", "expect": "No pause over a fraction of a second", "target": 5, "source": "estimate", "ui": ["Edit Mode On / Off"]},
    {"id": "Q3", "task": "First render after start", "steps": "Start Blendity; F12", "expect": "The first render as fast as the second (no long cold start)", "target": 5, "source": "estimate", "ui": []},
    {"id": "Q4", "task": "Resize a window to 1024 x 640", "steps": "Shrink the window", "expect": "Nothing overlaps; long labels end in ...", "target": 3, "source": "sweep", "ui": []}
   ]},
@@ -177,7 +177,7 @@
    {"id": "R9", "task": "Round the joins", "steps": "Select a piece; Inspector > Blend Radius 0.2", "expect": "The piece meets its neighbours with a fillet", "target": 4, "source": "estimate", "ui": ["Blend Radius"]},
    {"id": "R10", "task": "Scale a Blockout without shear", "steps": "Scale the Blockout 2 along X; read its Scale; Apply Scale to Pieces on an old scene", "expect": "Scale reads 1 1 1; turned pieces grow along their own axes", "target": 6, "source": "estimate", "ui": ["Apply Scale to Pieces"]},
    {"id": "R11", "task": "Bake to a mesh and back", "steps": "Inspector > Bake to Mesh; then Unbake", "expect": "An ordinary mesh that Edit Mode takes; Unbake brings the pieces back", "target": 6, "source": "estimate", "ui": ["Bake to Mesh", "Unbake"]},
-   {"id": "R12", "task": "Try Edit Mode on a Blockout", "steps": "Select the Blockout; Tab", "expect": "Refused, with the reason and what to do instead", "target": 2, "source": "estimate", "ui": []}
+   {"id": "R12", "task": "Try Edit Mode on a Blockout", "steps": "Select the Blockout in the Scene view and use Edit Mode On / Off (Tab in Unity).", "expect": "Refused, with the reason and what to do instead", "target": 2, "source": "estimate", "ui": ["Edit Mode On / Off"]}
   ]}
  ]
 }

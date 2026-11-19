@@ -1,9 +1,9 @@
 # Blendity - engineering standards for agents
 
-This file is for any coding agent working on Blendity (ChatGPT Codex reads it by this name). It restates
-`CLAUDE.md`, the file the project was built under, without the parts that only one tool understands; where the
-two differ on a rule, tell the owner and fix the file that is wrong. The handoff that goes with it is in
-`docs/handoff/` (start at `docs/handoff/README.md`).
+These are Blendity's standing engineering rules for coding agents. Start with the
+[handoff](docs/handoff/README.md), then use the [Codex setup and policy inventory](docs/handoff/CODEX.md)
+and [worker dispatch procedure](docs/handoff/METHOD.md#codex-worker-dispatch). Claude Code uses its
+[engineering guide](CLAUDE.md), which follows the same owner approval and publishing rules.
 
 Blendity is a C++17 editor that rebuilds Blender's modeling, UV, material and rendering ideas behind a
 Unity-style editor (Hierarchy, Inspector, Scene view, Play mode), with SketchUp / UModeler /
@@ -25,7 +25,8 @@ approved together, ending in a write-up round.
   `stress/stress_main.cpp` stress / robustness sections
 - `extern/` code copied from Blender's tree; `licenses/` notices; `docs/` design documentation
 - `tools/` audits, benchmarks and the round workflow's scripts (`tools/dev/`, `tools/dev/README.md`)
-- Not ours to edit without asking: `Assets/` (the owner's project), `Renders/`, `Screenshots/`, `research/`
+- Treat `Assets/`, `Renders/`, `Screenshots/` and `research/` as the owner's private folders. Leave them
+  outside round edits, staging and verification. Use a scratch project and trash for tests and stress.
 
 ## Build and run
 - Windows (from Git Bash, absolute path): `cmd //c "C:\\...\\blendity\\build.bat release all|app|tests|stress"`.
@@ -119,9 +120,8 @@ approved together, ending in a write-up round.
 3. **Test**: the test-engineer role writes tests from the spec's acceptance criteria.
 4. **Review**: the code-reviewer role reviews the diff against the spec, the ADRs and this file.
 5. **Merge**: push a branch, open a PR (template in `.github/`), CI must pass. **The owner reviews and
-   merges on GitHub**, unless the owner asks an agent to merge: then only after CI passes on all four jobs,
-   with a merge commit (`gh pr merge N --merge`), never squash or rebase of a stack. A go-ahead to merge is for
-   that one time. Never use `--admin`, never turn on auto-merge.
+   merges on GitHub**. The hub publishes and verifies the PR, then hands it to the owner. The owner uses a merge
+   commit for stacks so the top carries all lower PRs. Agents do not merge PRs, use `--admin` or enable auto-merge.
 6. **Every PR targets `main`** (`--base main`), never another PR's branch (the owner, 2026-11-08). A round's
    commit may build on the previous round's, but its PR's base is `main`. **Guarantee:** merging the top PR
    of a stack merges every PR below it (GitHub marks them merged; use a merge commit). Several stacks may be
@@ -144,12 +144,13 @@ exception the owner asked for, 2026-11-10 and 2026-11-14; within a round the rol
 task and still run the review.
 
 ### The three roles
-Under Claude Code these were three sub-agents (`.claude/agents/implementer.md`, `test-engineer.md`,
-`code-reviewer.md`: the full text is there). Under Codex one task plays them in turn, or a separate task plays
-one; either way the role's rules hold while it is being played. The point of the split is independence: the
-tests are decided from the spec before the diff is read, and the review is not written by the mind that is
-defending the change. If one task plays all three, start each role by re-reading the spec, and say in the PR
-that the review was not independent.
+Each routine round uses [`implementer`](.codex/agents/implementer.toml),
+[`test-engineer`](.codex/agents/test-engineer.toml) and
+[`code-reviewer`](.codex/agents/code-reviewer.toml) as separate workers in sequence.
+The tests are decided from the spec before the diff is read. The reviewer discloses any prior contribution.
+The planning task handles difficult architecture, geometry or cross-cutting implementation after the owner's
+approval, then passes the work to independent testing and review. See [worker dispatch](docs/handoff/METHOD.md#codex-worker-dispatch)
+for named selection and explicit dispatch, and [the Claude role files](.claude/agents/) for their original contracts.
 
 **Implementer** - implements exactly one approved spec.
 - Input: `docs/tasks/NNNN-slug.md` with status approved. "If the status is not approved, stop and say so."
@@ -159,7 +160,8 @@ that the review was not independent.
   writes the changelog fragment; sets the task's status to "in review".
 - Boundaries: "No architectural changes the spec doesn't ask for: no new subsystems, data-model changes, new
   dependencies or changes to documented conventions. If the spec turns out to need one, stop and report."
-  Does not edit `.github/`, `.claude/`, `docs/decisions/` or the owner's folders. "Don't commit, push, open PRs
+  Leaves `.github/`, `.claude/`, `docs/decisions/` and the owner's folders untouched. The hub or planning task
+  handles approved changes to project workflow and ADR files. "Don't commit, push, open PRs
   or touch git history. Don't kill processes." "Don't weaken or delete existing tests to make them pass; report
   the conflict instead." "If the same approach fails twice, stop and report what you learned rather than trying
   variations blindly."
@@ -199,13 +201,14 @@ that the review was not independent.
   soften findings to reach 'approve'."
 
 ### One coordinating task and parallel tasks
-Under Claude Code a long-lived "hub" session took the owner's requests, started "worker" sessions and relayed
-their reports. The same shape under Codex:
+The parent Codex chat is the hub. For every approved plan, independent task chats report directly to it by default.
+See [direct task chats](docs/handoff/METHOD.md#direct-task-chats-for-independent-work) for when to assign a workstream lead and how candidates return to the hub.
 - **One coordinating task** talks to the owner, writes the pass's plan, starts the parallel tasks, keeps the
   list of open PRs and what waits on the owner, grants the graphics card and timed windows, rebuilds the owner's
-  exe at each publish, and runs one changelog fold at a time. It does no round work itself and reports in a
-  line or two unless the owner asks to plan.
-- **Parallel tasks** each do rounds in their own worktree and publish on the current single top of the stack.
+  exe at each publish, and runs one changelog fold at a time. Routine round work goes to the workers.
+- **Parallel tasks** each do rounds in their own worktree and return reviewed candidates to the hub. The hub
+  publishes on the current single top of the stack.
+- Coordinate candidate revisions, build reuse and timed batches through the [parallel verification procedure](docs/handoff/METHOD.md#parallel-verification).
 - Every plan carries a **file-ownership table**: each piece mapped to the source, test and doc files it may
   touch, and an overlap check against the work already running. Pieces that share no file run in parallel;
   pieces that share a file go to one task, in sequence; if everything meets in one file, don't parallelize and
@@ -219,9 +222,9 @@ their reports. The same shape under Codex:
 - The development machine's git root is `blender-main/`; GitHub (EmilianoManaloIV/blendity) holds only
   `blendity/`, published through the `blendity-root` subtree branch. A clone of the GitHub repository has
   `blendity/`'s content at its root and needs no subtree step: branch from the stack's top (or `main`), commit, push.
-- Commit only when the owner asks (an approved plan that ends in a PR is such an ask: the owner's standing
-  instruction, 2026-11-10; not in `CLAUDE.md`). Never commit the owner's
-  `Assets/Scenes/SampleScene.scene`, `Assets/Materials/` or `Assets/Exports/`.
+- Commit only when the owner asks. An approved plan that ends in a PR is such an ask (the owner's standing
+  instruction, 2026-11-10). Never stage or commit the owner's files from `Assets/`, `Renders/`, `Screenshots/`
+  or `research/`.
 - Commit messages end with a `Co-Authored-By:` trailer naming the AI tool that wrote the change (the history's
   commits name Claude; use your own tool's line), and PR bodies say they were written with it
   (`docs/AI_DISCLOSURE.md`).
@@ -243,10 +246,15 @@ their reports. The same shape under Codex:
 - `main` is protected: PRs only, `windows` / `linux` / `macos` / `linux-sanitizers` must pass on a branch
   up to date with `main`, no force pushes.
 - After a merge: `git fetch origin main && git update-ref refs/heads/blendity-root origin/main`.
-- No force pushes, no history rewrites. Branches are deleted only once merged into `main` (the owner asked,
-  2026-10-13: `git push origin --delete` the merged `task/*` branches after each merge). Never push a fix onto a
-  lower PR of a stack: it goes on the top.
-- **Releases are the owner's.** Never push a `v*` tag, delete or republish a release unasked. When asked: bump
-  `VERSION` in a PR that is on `main` before the tag (the app reads it), tag `main`'s merge commit, let
-  `release.yml` publish, and do not set GitHub's pre-release flag (the README's `releases/latest/download/...`
-  links skip flagged releases).
+- Agents must not force-push, rewrite history, run `git reset --hard` or push directly to `main` or `blendity`.
+  Put a stacked PR's fix on its top branch. Role workers may not delete remote branches.
+- The owner authorizes the hub to delete verified merged `task/*` refs through the
+  [cleanup helper](tools/dev/cleanup_task_branch.py). Check the PR's recorded head against the current remote
+  tip and freshly fetched `main`. Leave advanced or uncertain branches alone. The raw command denials
+  remain in effect for direct branch deletion outside this helper. The [project Git rules](.codex/rules/blendity.rules) cover literal command prefixes.
+  These instructions govern equivalent actions across tools and shells. GitHub branch protection enforces
+  the server-side checks for `main`.
+- **Releases are the owner's.** Get the owner's explicit consent for the specific release tag before creating
+  or pushing it, and for any release deletion or republication. First land the `VERSION` bump on `main`, then
+  tag its merge commit and let `release.yml` publish. Leave GitHub's pre-release flag clear so the README's
+  `releases/latest/download/...` links can find it.
