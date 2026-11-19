@@ -1,6 +1,10 @@
 # 0582 Steam Workshop asset import pass
 
-**Status** Approved pass specification. [ADR 0154](../decisions/0154-steam-workshop-import.md) records the architecture for owner review before implementation.
+**Status** Implemented and independently reviewed. The six rounds below ship together so the picker, readers and title fixtures are available in the same build. [ADR 0154](../decisions/0154-steam-workshop-import.md) records the approved architecture.
+
+## Results
+
+Windows and hosted Ubuntu each passed 6,160 focused checks, including detached reopen and two relocations with existing project PNGs preserved byte-for-byte. Real SFM, Alyx and CS2 scenes were posed, saved and reopened on Windows. The [user guide](../guides/workshop.md) gives the steps and title-specific limitations. The [verification record](0588-workshop-verification.md) identifies the real assets, missing dependencies and fixture coverage. [Hosted verification](https://github.com/EmilianoManaloIV/blendity/actions/runs/44608047654)
 
 ## Round specifications
 
