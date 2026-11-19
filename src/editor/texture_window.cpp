@@ -10,13 +10,70 @@
 #include "../texture/smart_material.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <unordered_set>
-#include <functional>
 #include <unordered_map>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
 
 namespace bl {
 
 namespace {
+
+namespace stdfs = std::filesystem;
+
+bool ordinary_texture_file(const stdfs::directory_entry &entry) {
+#ifdef _WIN32
+  // MSVC's symlink_status reports some reparse points as regular files.
+  const DWORD attrs = GetFileAttributesW(entry.path().c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE));
+#else
+  std::error_code ec;
+  return stdfs::is_regular_file(entry.symlink_status(ec));
+#endif
+}
+
+void collect_texture_paths(const stdfs::path &dir, const std::string &root_lower, int depth, std::vector<std::string> &paths) {
+  if (depth > 12) return;
+  std::error_code canonical_error, scan_error;
+  stdfs::path canonical_dir;
+  bool canonical_tried = false;
+  for (stdfs::directory_iterator it(dir, scan_error), end; !scan_error && it != end; it.increment(scan_error)) {
+    const stdfs::path leaf = it->path().filename();
+    const std::string name = leaf.generic_u8string();
+    if (name.empty() || name[0] == '.') continue;
+    std::error_code type_error;
+    if (it->is_directory(type_error)) {
+      collect_texture_paths(it->path(), root_lower, depth + 1, paths);
+      continue;
+    }
+    if (to_lower(leaf.extension().generic_u8string()) != ".ptex") continue;
+    const bool ordinary = !canonical_error && !type_error && ordinary_texture_file(*it);
+    if (ordinary && !canonical_tried) {
+      canonical_dir = stdfs::weakly_canonical(dir, canonical_error);
+      canonical_tried = true;
+    }
+    if (!ordinary || canonical_error) {
+      paths.push_back(make_asset_relative(it->path().generic_u8string()));
+      continue;
+    }
+    // Use the directory's canonical path once for its ordinary files. Keep the original path
+    // when the canonical path is outside the project, as make_asset_relative does for aliases.
+    const std::string canonical = (canonical_dir / leaf).generic_u8string();
+    if (!root_lower.empty() && canonical.size() > root_lower.size() + 1 && to_lower(canonical.substr(0, root_lower.size())) == root_lower)
+      paths.push_back(canonical.substr(root_lower.size() + 1));
+    else
+      paths.push_back(it->path().generic_u8string());
+  }
+}
 
 /* A small picture of one output, re-made when the texture's hash changes. */
 struct TexThumb {
@@ -67,15 +124,7 @@ const std::vector<std::string> &Editor::texture_asset_paths() {
   if (ui_.time - texture_paths_listed_ < 2.0 && texture_paths_listed_ > 0) return texture_paths_;
   texture_paths_listed_ = std::max(1e-3, ui_.time);
   texture_paths_.clear();
-  std::function<void(const std::string &, int)> walk = [&](const std::string &dir, int depth) {
-    if (depth > 12) return;
-    for (const DirEntry &de : fs::list(dir)) {
-      const std::string p = fs::join(dir, de.name);
-      if (de.is_dir) walk(p, depth + 1);
-      else if (fs::extension(de.name) == ".ptex") texture_paths_.push_back(make_asset_relative(p));
-    }
-  };
-  walk(assets_dir_, 0);
+  collect_texture_paths(stdfs::u8path(assets_dir_), to_lower(fs::normalize(asset_root())), 0, texture_paths_);
   for (std::string &p : texture_paths_) std::replace(p.begin(), p.end(), '\\', '/');
   std::sort(texture_paths_.begin(), texture_paths_.end());
   return texture_paths_;
