@@ -12,8 +12,8 @@
 **Checked:** The Windows map tests passed 1,846 checks, including repeated import of same-named props, materials and textures from different virtual directories. Offline reopen retained all 47 placements from the SFM Warehouse item and all 40 displacement grids from Valve's Lockdown map. A generated map retained the expected packed texture over a conflicting mounted file. Task 0585 records the fixtures and commands.
 
 <!-- README -->
-after: The full list, stage by stage,
-Classic Source BSP import brings in editable world geometry, terrain, brush models and static props.
+after: Pose classic SFM characters
+  Import classic BSP maps with terrain, brush models and placed props.
 
 <!-- docs/USABILITY.md -->
 after: | A .blend or an Unreal level couldn't be brought in without exporting by hand.

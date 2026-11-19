@@ -11,8 +11,8 @@
 **Checked:** Independent Windows tests passed 899 checks in 18 cases, including failed or canceled preparation, offline native scene reload, reordered same-name assets, distinct Steam items, provider relocation and returning legacy assets. The GCC resolver read the nested map and outer material from CS2 Workshop item 3070193546, matching independent CRCs. The hosted Linux group and joined editor stress remain pending after two local WSL service failures.
 
 <!-- README -->
-replace: MikuMikuDance characters; **Live Link** to Blender, Unity, Godot and Unreal.
-with: MikuMikuDance characters, and Source Engine assets from locally installed Workshop content; **Live Link** to Blender, Unity, Godot and Unreal.
+after: MikuMikuDance characters;
+- **Steam Workshop**: [import installed characters and maps](docs/guides/workshop.md) from loose files or VPKs.
 
 <!-- docs/USABILITY.md -->
 after: | A Godot project's scenes couldn't be opened here

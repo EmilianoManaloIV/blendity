@@ -13,8 +13,8 @@
 **Checked:** 436 focused Windows checks, real CS2 SAS and SWAT characters, two Alyx add-on humanoids, the Alyx ApertureVR cutout prop, a CS2 Workshop prop with 64-bit mesh masks, and two genuine VTEX resources with embedded images. Task 0586 records measured bind drift, texture checks and reimport identity coverage. Pass 0588 tracks joined editor verification.
 
 <!-- README -->
-replace: MikuMikuDance characters; **Live Link** to Blender, Unity, Godot and Unreal.
-with: MikuMikuDance characters, and compiled Source 2 characters and materials from mounted Half-Life: Alyx and Counter-Strike 2 content; **Live Link** to Blender, Unity, Godot and Unreal.
+after: Import classic BSP maps
+  Half-Life: Alyx and CS2 characters retain supported skins, materials and textures.
 
 <!-- docs/USABILITY.md -->
 after: | Rigged characters imported as statues

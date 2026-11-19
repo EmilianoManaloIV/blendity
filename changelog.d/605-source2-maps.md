@@ -11,8 +11,8 @@
 **Checked:** Eight map cases passed 550 checks on a fresh Windows release build. They cover material assignments and pixels, tint, repeated rotated props, aggregate LOD and draw selection, missing and unsupported dependencies, and stable source IDs across cache moves, placement reordering and changed pixels. With meshoptimizer enabled, the real Alyx map *Bad Kitty* imported all 84 placements and 111,182 faces. The installed CS2 graphics settings map imported all 70 placements and 147,105 faces, with 206 texture paths from the mounted game archives.
 
 <!-- README -->
-after: MikuMikuDance characters;
-Import compiled Source 2 world geometry and placed props from mounted content.
+after: Half-Life: Alyx and CS2 characters
+  Their compiled maps bring in world geometry and placed props.
 
 <!-- docs/ARCHITECTURE.md -->
 after: | `find_texture`, `save_embedded`, `derive_channel`, `complete_materials`

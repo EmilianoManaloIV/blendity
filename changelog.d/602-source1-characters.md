@@ -14,8 +14,8 @@
 **Checked** The focused Linux suite passed 204 checks, including a native asymmetric cutout render, weighted posing, ValveBiped Auto IK and marker Auto-Rig. The SFM Scout demo imported 7,814 faces, 78 joints, four material slots and four converted textures. Neutral bind displacement stayed under `0.6 µm`. EyeRefract used native fallback materials and reported its unsupported maps.
 
 <!-- README -->
-replace: MikuMikuDance characters; **Live Link** to Blender, Unity, Godot and Unreal.
-with: MikuMikuDance characters; classic Source Filmmaker models with materials and bones; **Live Link** to Blender, Unity, Godot and Unreal.
+after: - **Steam Workshop**:
+  Pose classic SFM characters with their bones and materials.
 
 <!-- docs/ARCHITECTURE.md -->
 after: | `import_pmx_file`, `mmd_bone_name`
