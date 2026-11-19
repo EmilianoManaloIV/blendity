@@ -1,6 +1,6 @@
 # 0574: Keep the Lighting update mode and bake counts readable in a narrow pane (round 592)
 
-- **Status:** independent review approved; Windows verified; hosted Linux checks pending
+- **Status:** independent review approved; Windows and hosted Linux verified
 - **Requirements:** U-05, U-07
 - **Decisions:** ADR 0085, ADR 0123
 - **Implementation:** implementer; hub owns dispatch and publication
@@ -38,4 +38,4 @@ All listed checks passed. The Windows live sweep covered all twelve configuratio
 
 The regression compares the painted mode with the expected text before hovering and checks the full explanation with real mouse movement. A populated fixture contributes one mesh, two 64 px lightmaps and one baked object. Stationary hover covers a transition from waiting to completed preview. Review confirmed that changing the in-progress percentage leaves the tooltip text stable within each stage.
 
-Hosted Linux verification is pending for the dependency-free release build. Run the focused Lighting regression and the full `hci` and `editor` groups. The local WSL service failed before producing a test binary.
+The [hosted Linux unit run](https://github.com/EmilianoManaloIV/blendity/actions/runs/44599534140/job/135832743715) built the dependency-free candidate `7d738315` and passed 125,311 checks. The log includes the focused Lighting regression, all 113 named HCI cases and all 343 named editor cases. The local WSL service failed before producing a test binary.
