@@ -608,6 +608,7 @@ MaterialPtr resolve_material(const SourceContent &content, const std::string &pa
   if (!material) {
     out.notes.push_back("Missing Source material " + path);
     material = make_material(path, {1.0f, 0.0f, 1.0f});
+    out.source_material_ids.emplace(material.get(), path + "#missing");
   }
   out.materials.push_back(material);
   found.first->second = material;
@@ -645,6 +646,8 @@ void append_brushes(const SourceContent &content, const Bsp &bsp, const std::vec
 void prop_assets(const ImportResult &model, ImportResult &out) {
   out.materials.insert(out.materials.end(), model.materials.begin(), model.materials.end());
   out.textures.insert(out.textures.end(), model.textures.begin(), model.textures.end());
+  out.source_material_ids.insert(model.source_material_ids.begin(), model.source_material_ids.end());
+  out.source_texture_ids.insert(model.source_texture_ids.begin(), model.source_texture_ids.end());
   out.written.insert(out.written.end(), model.written.begin(), model.written.end());
   out.notes.insert(out.notes.end(), model.notes.begin(), model.notes.end());
 }
@@ -691,6 +694,7 @@ bool append_props(const SourceContent &content, const std::vector<StaticProp> &p
     if (!missing_mesh) {
       missing_mesh = primitives::cube(0.3f);
       missing_material = make_material("Missing Source prop", {1.0f, 0.0f, 1.0f});
+      out.source_material_ids.emplace(missing_material.get(), virtual_name(out.source) + "#missing-static-prop");
       out.materials.push_back(missing_material);
     }
     node.mesh = missing_mesh;

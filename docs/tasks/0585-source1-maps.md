@@ -1,6 +1,6 @@
 # 0585 Classic SFM maps
 
-- **Status:** independently approved candidate, joined Linux verification and PR pending
+- **Status:** stable import identity follow-up in review, joined Linux verification and PR pending
 - **Requirements:** R-6, [pass 0582](0582-workshop-import.md)
 - **Decisions:** [ADR 0154](../decisions/0154-steam-workshop-import.md)
 - **Implementation:** dedicated workstream, then independent testing and review
@@ -14,8 +14,11 @@ Owned paths or surfaces: src/scene/source1_map*, dedicated BSP tests. Coordinate
 ## Acceptance and verification
 A map with a displacement and two differently transformed instances retains geometry, material assignments and both transforms after reopening. Derive independent tests from these criteria. Use scratch projects, run the Windows and Linux suites and relevant import/editor stress checks, and record exact commands and results. Cite repository revisions, primary format references and fixture provenance for consequential claims.
 
+The map reader must carry the classic material and texture identities supplied by task 0584 into the combined map import, including assets of static props. Task 0583 maps those identities to stable project destinations. Task 0588 verifies preservation of material edits and assignments across reimport, resource reordering and cache relocation.
+
 ## Implementation and evidence
 
+- The combined map import carries the material and texture identities recorded by the classic reader, including identities from each model used by static props. All missing-prop markers share one material with its own map-relative identity. Joined reimport and cache-relocation verification is tracked in task 0588.
 - The reader records native world geometry, placed brush models and full-resolution displacement geometry. BSP surface texture vectors supply per-corner UVs. Map-packed dependencies take precedence over other mounted content. Static props sharing a model path share its imported meshes. A prop whose geometry cannot load keeps its placement as a magenta marker, with its virtual path in the import diagnostics.
 - Brush entity placement accepts ASCII case-insensitive keys and fills omitted trailing origin or angle components with zero. The parser rejects malformed, nonfinite or extra components. [Valve entity lookup](https://github.com/ValveSoftware/source-sdk-2013/blob/e1f1fd42271805072f052051c26c21caa2c87b04/src/utils/common/bsplib.cpp#L2940-L2945), [Valve vector conversion](https://github.com/ValveSoftware/source-sdk-2013/blob/e1f1fd42271805072f052051c26c21caa2c87b04/src/game/shared/util_shared.cpp#L844-L878).
 - Initial implementation is against Blendity `f83be355`. The dedicated synthetic BSP in `tests/test_source1_map.cpp` is built in memory from authored data and contains no game assets. It uses signed surfedges, an oriented odd plane, a partly raised power-2 displacement with a hole, and a brush model placed twice. It checks the mesh, UVs, materials and transforms before and after moving the source mount and reopening the native scene.
@@ -34,6 +37,12 @@ A map with a displacement and two differently transformed instances retains geom
 
 - Independent code review approved reader `20c0cfab` and tests `ae755c2c` after the abbreviated-transform and mixed-case entity-key regressions passed. The reviewer contributed no implementation or tests and reported no remaining findings.
 - The local Linux build stopped before GCC started with `Wsl/Service/E_UNEXPECTED`. The Hub owns hosted verification on the joined candidate and editor stress. The focused command after `./build.sh release tests` is `dist/linux/blendity_tests --group source1_map`, with `BLENDITY_TEST_DIR`, `BLENDITY_PROJECT`, `BLENDITY_TRASH`, `BLENDITY_PREFS_DIR` and `BLENDITY_CACHE_DIR` set to disposable scratch directories.
+
+### Stable resource identity follow-up
+
+With the identity-aware `ImportResult`, the map reader carries child material and decoded-texture identities into the combined result. The associations use the canonical virtual identifiers supplied by the classic material reader. The shared missing-prop marker uses the canonical map path and its marker role. No lookup key from the process is stored in the native scene.
+
+A full MSVC dependency-free rebuild against the updated header passed **1,846 checks in ten cases** using map reader `88095c82` and test `1684a6b5`. The new fixture imports same-basename MDL, VMT and VTF resources from distinct virtual directories. It compares nested material and color/normal texture IDs with standalone imports across three reads and reversed placement order. `win_cases.ps1 -Label win-identity` and `py run_acceptance_win.py` both returned 0. All three offline map comparisons passed. The identity-aware Warehouse run reports 13 texture entries and matches all 47 placements. Independent re-review approved the identity propagation. The build inputs, group output and comparison logs are under `C:/blab/0585-verify-603/win-identity-20261119114244`. The hosted Linux group is expected to run 1,846 checks. Task 0588 verifies destination paths, material edits, changed texture content, cache relocation and duplicate artifacts on the integrated import workflow.
 
 ## Documentation
 Own `changelog.d/603-source1-maps.md`. Include verified outcomes and applicable shared-document sections under ADR 0123. Supply user-facing changes to the Learn lesson and guide owners. Mark this spec done with test, review and PR evidence at closeout.

@@ -7,8 +7,9 @@
 - Keep compiled brush surfaces with retraced edges and use the BSP's indexed triangles where provided.
 - Brush entities retain their placements with mixed-case property names or shortened origin and angle vectors.
 - Resolve materials and props against the BSP pakfile and the mounted content roots. A missing prop keeps its placement as a magenta marker and reports its path.
+- Map surfaces and static props carry their source material and texture identities into the project import so reimport can find existing edited assets.
 
-**Checked:** The Windows map tests passed 1,703 checks. Offline reopen retained all 47 placements from the SFM Warehouse item and all 40 displacement grids from Valve's Lockdown map. A generated map retained the expected packed texture over a conflicting mounted file. Task 0585 records the fixtures and commands.
+**Checked:** The Windows map tests passed 1,846 checks, including repeated import of same-named props, materials and textures from different virtual directories. Offline reopen retained all 47 placements from the SFM Warehouse item and all 40 displacement grids from Valve's Lockdown map. A generated map retained the expected packed texture over a conflicting mounted file. Task 0585 records the fixtures and commands.
 
 <!-- README -->
 after: The full list, stage by stage,
