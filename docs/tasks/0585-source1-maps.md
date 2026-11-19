@@ -1,6 +1,6 @@
 # 0585 Classic SFM maps
 
-- **Status:** stable import identity follow-up in review, joined Linux verification and PR pending
+- **Status:** independently reviewed and approved, joined Linux verification and PR pending
 - **Requirements:** R-6, [pass 0582](0582-workshop-import.md)
 - **Decisions:** [ADR 0154](../decisions/0154-steam-workshop-import.md)
 - **Implementation:** dedicated workstream, then independent testing and review
