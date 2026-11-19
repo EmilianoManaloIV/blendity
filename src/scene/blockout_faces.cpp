@@ -245,7 +245,8 @@ void Maker::mark_borders() {
     const uint32_t rf = find(f), rg = find(g);
     if (rf == rg) continue;
     border[he] = 1;
-    const uint32_t head = soup.verts[next_edge((uint32_t)he)];
+    // The twin runs in the opposite direction and starts at this edge's head.
+    const uint32_t head = soup.verts[soup.twin[he]];
     seen(head, rf), seen(head, rg);
     if (nedge[head] < 0xFFFF) nedge[head]++;
   }
