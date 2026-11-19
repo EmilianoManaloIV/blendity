@@ -37,6 +37,21 @@ and tested only on CI (no Mac here).
 A build runs from where it lands: `dist/windows/Blendity.exe`, `dist/linux/Blendity` (with `dist/linux/lib/` beside
 it) or `dist/macos/Blendity.app`.
 
+## Incremental Windows developer builds
+
+For repeated local release builds, use an x64 Visual Studio installation with MSVC 14.51 and Python 3.11 or later. Set the following variables in a local command prompt, then build the editor. An external worktree also needs `BLENDITY_LIBDIR` set to the same Blender library directory as the clean reference.
+
+```bat
+set BLENDITY_VCVARS_VER=14.51
+set BLENDITY_VCVARS_STRICT=1
+set BLENDITY_INCREMENTAL=1
+build.bat release app
+```
+
+Use `tests` for the unit-test program or `app-tests` to stage both programs together. The last `[blendity] Package:` line names the directory containing the requested executables, runtime libraries, licenses and applicable shaders. Launch the executable in that directory. Build failures leave the previous successful package available.
+
+The cache defaults to `build\incremental` inside the worktree. Set `BLENDITY_INCREMENTAL_DIR` to a dedicated scratch directory for a different location. Reuse the same worktree and cache across revisions. Builds serialize writes to the cache. Old executable packages can stay open while a new package is prepared. After all programs using a retired cache have closed, its owner can remove that dedicated cache directory. Clear `BLENDITY_INCREMENTAL` with `set BLENDITY_INCREMENTAL=` to use the stock build.
+
 ## Why not a Blender fork?
 
 Blender's full build needs about 40 external libraries and a large build system. Blendity re-implements the parts it

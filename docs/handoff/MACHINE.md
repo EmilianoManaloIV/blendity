@@ -71,6 +71,32 @@ task that runs on the owner's PC does. Paths are that PC's.
 - Builds, tests and stress start at below-normal priority so the owner's own use of the PC stays smooth; timed
   runs are the exception (normal priority, inside a window).
 
+### Repeated local editor builds
+
+Use the Hub's existing below-normal build launcher and the same published-revision scratch worktree for successive builds. Scope the incremental variables to this build process. For example, from a fresh PowerShell process on this machine:
+
+```powershell
+$scratch = 'C:\blab\hub-local-editor'
+foreach ($folder in 'project', 'prefs', 'cache', 'trash') {
+    New-Item -ItemType Directory -Force (Join-Path $scratch $folder) | Out-Null
+}
+$env:BLENDITY_PROJECT = Join-Path $scratch 'project'
+$env:BLENDITY_PREFS_DIR = Join-Path $scratch 'prefs'
+$env:BLENDITY_CACHE_DIR = Join-Path $scratch 'cache'
+$env:BLENDITY_TRASH = Join-Path $scratch 'trash'
+$env:BLENDITY_INCREMENTAL = '1'
+$env:BLENDITY_VCVARS_VER = '14.51'
+$env:BLENDITY_VCVARS_STRICT = '1'
+$env:BLENDITY_LIBDIR = 'C:\Users\trick\Downloads\blender-main\blender\lib\windows_x64'
+& C:\blab\build-low.bat C:\blwtexe release app hub-owner-editor
+if ($LASTEXITCODE) { throw 'Editor build failed; inspect C:\blwtexe\hub_build.log' }
+Select-String -LiteralPath C:\blwtexe\hub_build.log -SimpleMatch '[blendity] Package:'
+```
+
+Set the normal scratch project, preferences, cache and trash before shader warming or launching a smoke test. Use `app-tests` when both programs are needed. Read the package path from the successful invocation's log while the Hub owns the worktree. The incremental worker writes the package under the scratch cache; the deployment source is this reported package. The default location is `build\incremental` within the worktree. For a project-wide include path such as `CL=/I.`, put `BLENDITY_INCREMENTAL_DIR` outside all compiler search roots. Distinct worktrees need separate caches.
+
+Check the resolved toolset, enabled libraries and shader inventory before deploying. Only the Hub updates the owner's application from a verified published revision. Existing programs may continue using older package directories. Release and CI use the stock clean command in an environment with `BLENDITY_INCREMENTAL` unset. [Build options](../BUILDING.md#incremental-windows-developer-builds) and [task evidence](../tasks/0590-local-incremental-builds.md).
+
 ## The graphics card and timed windows
 - Card work is one task at a time, granted by the coordinating task. Sub-tasks never touch the card without it.
 - Timed runs go through `bash /c/blab/timed-window.sh <log-name> <script>...` (see `METHOD.md`): each task prepares a folder

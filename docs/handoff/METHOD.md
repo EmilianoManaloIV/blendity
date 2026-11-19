@@ -102,6 +102,10 @@ CI job rejects any other commit that edits those files. One fold runs at a time.
 every pair of parallel PRs conflicted in the same six files.
 
 ## One stack, one top
+
+- Group supporting specs, tests, findings and documentation with the deliverable or the pass write-up.
+  Give an independently reviewable change its own round PR in the stack. Present the cumulative top to the
+  owner for final review and merge.
 - Every PR's base is `main`. A round's commit is built on the previous open round's, so the newest PR's branch
   contains all of them: merging that **top** PR with a merge commit merges every PR below it, and GitHub marks
   them merged.
@@ -186,10 +190,11 @@ The owner tries finished work at once, so `dist\windows\Blendity.exe` in the mai
 `origin/main` plus the newest published branch of every open pass:
 1. in a scratch worktree (`C:/blwtexe`), check out `origin/main` and merge each open top (`git merge --no-edit`);
    a conflict between passes is resolved locally and never pushed, or that pass is left out and the owner told;
-2. build the app there with a build slot, with Blender's libraries (and build the tests too after a keep-both
-   merge);
-3. copy the exe and `dist/windows/shaders/` into the main checkout; if Blendity is running, rename the running
-   exe aside first, never kill it; delete the old copies once nothing runs them;
+2. build the release app there with a Windows slot, MSVC 14.51 and the owner's Blender libraries.
+   Use the [incremental local build](MACHINE.md#repeated-local-editor-builds) and its persistent cache.
+   After a keep-both merge, request `app-tests` and verify both executables from the reported package;
+3. use the verified package's executable, shaders and runtime assets as deployment inputs. Protect the running
+   owner's executable using the existing rename-aside procedure. Keep the previous executable until it closes;
 4. smoke-test headless in a scratch project;
 5. tell the owner in one line what the exe contains and which rounds in it are not green on CI yet.
 It is rebuilt at publish, not at CI green (that reaches the owner one to three hours sooner) and not after a

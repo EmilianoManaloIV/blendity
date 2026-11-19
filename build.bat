@@ -10,6 +10,7 @@ rem   BLENDITY_VCVARS_STRICT=1: when that toolset is not installed, stop instead
 rem   BLENDITY_PDB=1: a release build with its symbols beside each program (.pdb), so a crash report names its frames.
 rem   BLENDITY_NO_LTCG=1: no whole-program optimization (/GL, /LTCG) - a faster build for quick local runs, not for checks:
 rem   with /fp:fast, MSVC then compiles two code paths differently that some tests compare bit for bit.
+rem   BLENDITY_INCREMENTAL=1: local release app, tests, or app-tests, in a separate scratch package.
 rem   installer: the app, then dist\installers\Blendity-Setup-<VERSION>.exe with Inno Setup 6 (task 0076).
 setlocal enabledelayedexpansion
 
@@ -17,6 +18,10 @@ set CONFIG=%1
 if "%CONFIG%"=="" set CONFIG=release
 set TARGET=%2
 if "%TARGET%"=="" set TARGET=all
+if "%BLENDITY_INCREMENTAL%"=="1" if not defined _BLENDITY_INCREMENTAL_PLAN (
+  py -3 "%~dp0tools\dev\incremental_windows.py" "%CONFIG%" "%TARGET%"
+  exit /b !errorlevel!
+)
 
 where cl >nul 2>nul
 if errorlevel 1 (
@@ -57,18 +62,24 @@ if errorlevel 1 (
   call "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" !VCVER_ARG! >nul
   if not "!VCVER_FOUND!"=="" if not "!VCToolsVersion!"=="!VCVER_FOUND!" echo [blendity] WARNING: asked for toolset !VCVER_FOUND! but the environment has !VCToolsVersion!
 ) else (
-  if not "%BLENDITY_VCVARS_VER%"=="" echo [blendity] BLENDITY_VCVARS_VER=%BLENDITY_VCVARS_VER% is ignored: a compiler is already on the PATH - this prompt's toolset builds.
+  if defined _BLENDITY_INCREMENTAL_PLAN (
+    echo [blendity] Checking active tools against requested MSVC %BLENDITY_VCVARS_VER%.
+  ) else if not "%BLENDITY_VCVARS_VER%"=="" (
+    echo [blendity] BLENDITY_VCVARS_VER=%BLENDITY_VCVARS_VER% is ignored: a compiler is already on the PATH - this prompt's toolset builds.
+  )
 )
 rem Every log states its compiler (round 579: one runner image's newer compiler was found only by comparing logs).
 for /f "delims=" %%b in ('cl 2^>^&1 ^| findstr /i /c:"version"') do echo [blendity] Compiler: %%b
 echo [blendity] Toolset: %VCToolsVersion%
 
 cd /d "%~dp0"
+if defined _BLENDITY_INCREMENTAL_PLAN goto resolve_libraries
 if not exist build\obj_%CONFIG% mkdir build\obj_%CONFIG%
 if not exist dist\windows mkdir dist\windows
 rem License texts and notices travel with the binaries (licenses\README.md).
 xcopy /e /i /y /q licenses dist\windows\licenses >nul
 
+:resolve_libraries
 rem --- Blender's prebuilt libraries (optional) ---------------------------------
 rem Blendity uses them when blender\lib\windows_x64 exists (Blender's own layout,
 rem fetched from projects.blender.org/blender/lib-windows_x64). Without them it
@@ -186,6 +197,7 @@ if /i "%CONFIG%"=="debug" (
 )
 if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS% - the allocator: %BLENDITY_ALLOCATOR%) else if "%BLENDITY_NO_LIBS%"=="1" (echo [blendity] Dependency-free build ^(BLENDITY_NO_LIBS^)) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
 set OBJ=build\obj_%CONFIG%
+if defined _BLENDITY_INCREMENTAL_PLAN set "OBJ=%_BLENDITY_INCREMENTAL_PLAN%"
 rem The sources in a response file: listed on the command line they passed cmd's 8191-character limit.
 set SRCRSP=%OBJ%\sources.rsp
 > "%SRCRSP%" (
@@ -203,6 +215,10 @@ set SRCRSP=%OBJ%\sources.rsp
   if "%USE_QUADRIFLOW%"=="1" echo extern\quadriflow\3rd\lemon-1.3.1\lemon\bits\windows.cc
 )
 set LIBSRC=@%SRCRSP%
+set "APP_SRC=src\app\main.cpp"
+set "TEST_SRC=tests\*.cpp"
+set "APP_LINK=/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup"
+set "CONSOLE_LINK=/SUBSYSTEM:CONSOLE"
 set LINKFLAGS=/link /LTCG /INCREMENTAL:NO user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%BLENDITY_NO_LTCG%"=="1" set FLAGS=!FLAGS:/GL=!
 if "%BLENDITY_NO_LTCG%"=="1" set LINKFLAGS=!LINKFLAGS:/LTCG=!
@@ -212,6 +228,7 @@ rem its frames instead of printing ? for them.
 if "%BLENDITY_PDB%"=="1" if /i not "%CONFIG%"=="debug" set FLAGS=!FLAGS! /Z7
 if "%BLENDITY_PDB%"=="1" if /i not "%CONFIG%"=="debug" set LINKFLAGS=!LINKFLAGS! /DEBUG /OPT:REF /OPT:ICF
 if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
+if defined _BLENDITY_INCREMENTAL_PLAN goto incremental_plan
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
 if /i "%TARGET%"=="all" goto all
@@ -221,11 +238,27 @@ if /i "%TARGET%"=="stress" goto stress
 if /i "%TARGET%"=="tests" goto tests
 if /i "%TARGET%"=="check" goto check
 
+goto app
+
+:incremental_plan
+rem Record the existing source, linker and deployment choices for the local build worker.
+> "%OBJ%\app.rsp" (
+  echo %APP_SRC%
+)
+> "%OBJ%\tests.rsp" (
+  for %%f in (%TEST_SRC%) do echo %%f
+)
+> "%OBJ%\deploy.txt" (
+  if "%USE_LIBS%"=="1" call :deploy_dlls
+)
+py -3 "%~dp0tools\dev\incremental_windows.py" --resolve
+exit /b %errorlevel%
+
 :app
 echo [blendity] Building editor (%CONFIG%)...
 rem BLENDITY_OUT lets you build while a copy of the editor is still running.
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
-cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% src\app\main.cpp %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
+cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% %APP_SRC% %LINKFLAGS% %APP_LINK%
 if errorlevel 1 exit /b 1
 call :warm_shaders
 if /i "%TARGET%"=="installer" goto installer
@@ -233,24 +266,24 @@ goto done
 
 :stress
 echo [blendity] Building stress tests (%CONFIG%)...
-cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_stress.exe %LIBSRC% stress\stress_main.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_stress.exe %LIBSRC% stress\stress_main.cpp %LINKFLAGS% %CONSOLE_LINK%
 if errorlevel 1 exit /b 1
 goto done
 
 :tests
 echo [blendity] Building unit tests (%CONFIG%)...
-cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% tests\*.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_tests.exe %LIBSRC% %TEST_SRC% %LINKFLAGS% %CONSOLE_LINK%
 if errorlevel 1 exit /b 1
 goto done
 
 :check
 echo [blendity] Building unit and stress tests (%CONFIG%, one compile)...
-cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% stress\stress_main.cpp tests\*.cpp
+cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% stress\stress_main.cpp %TEST_SRC%
 if errorlevel 1 exit /b 1
 call :object_lists
-cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% %CONSOLE_LINK%
 if errorlevel 1 exit /b 1
-cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% %CONSOLE_LINK%
 if errorlevel 1 exit /b 1
 goto done
 
@@ -260,18 +293,18 @@ rem sources three times, a third of the build each; now they differ only in thei
 rem A source that does not compile stops the build before any program is written, the editor included.
 echo [blendity] Building editor, stress tests and unit tests (%CONFIG%, one compile)...
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
-cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% src\app\main.cpp stress\stress_main.cpp tests\*.cpp
+cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% %APP_SRC% stress\stress_main.cpp %TEST_SRC%
 if errorlevel 1 exit /b 1
 call :object_lists
 echo [blendity] Linking editor...
-cl %FLAGS% /Fe:%BLENDITY_OUT% @%APPRSP% %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
+cl %FLAGS% /Fe:%BLENDITY_OUT% @%APPRSP% %LINKFLAGS% %APP_LINK%
 if errorlevel 1 exit /b 1
 call :warm_shaders
 echo [blendity] Linking stress tests...
-cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% %CONSOLE_LINK%
 if errorlevel 1 exit /b 1
 echo [blendity] Linking unit tests...
-cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% %CONSOLE_LINK%
 if errorlevel 1 exit /b 1
 goto done
 
@@ -304,11 +337,11 @@ set TESTRSP=%OBJ%\tests_objects.rsp
 set STRESSRSP=%OBJ%\stress_objects.rsp
 > "%APPRSP%" (
   for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
-  echo %OBJ%\main.obj
+  for %%f in ("%APP_SRC%") do echo %OBJ%\%%~nf.obj
 )
 > "%TESTRSP%" (
   for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
-  for %%f in (tests\*.cpp) do echo %OBJ%\%%~nf.obj
+  for %%f in (%TEST_SRC%) do echo %OBJ%\%%~nf.obj
 )
 > "%STRESSRSP%" (
   for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
@@ -351,23 +384,41 @@ rem openjph (OpenEXR), dpcpp's SYCL runtime (Embree) and aom (FFmpeg's AV1) are 
 for %%d in (%LIBDIRS% imath openjph dpcpp aom) do (
   if exist "%L%\%%d\bin" (
     for %%f in ("%L%\%%d\bin\*.dll") do (
-      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _sycl eigen_" >nul || if %%~zf GTR 4096 copy /y "%%f" dist\windows\ >nul
+      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _sycl eigen_" >nul || if %%~zf GTR 4096 call :deploy_file "%%f"
     )
   )
 )
 rem FFmpeg keeps its DLLs in lib\, beside the import libraries (not ffmpeg.exe: Blendity encodes in-process).
-if exist "%L%\ffmpeg\lib" for %%n in (avcodec avformat avutil swscale swresample) do copy /y "%L%\ffmpeg\lib\%%n-*.dll" dist\windows\ >nul
+if exist "%L%\ffmpeg\lib" for %%n in (avcodec avformat avutil swscale swresample) do for %%f in ("%L%\ffmpeg\lib\%%n-*.dll") do call :deploy_file "%%f"
 rem Blender's colour management config (OpenColorIO views: AgX, Filmic, ...).
 set "OCIO_CFG=%~dp0..\blender\release\datafiles\colormanagement"
-if exist "%L%\opencolorio" if exist "%OCIO_CFG%\config.ocio" xcopy /e /i /y /q "%OCIO_CFG%" dist\windows\datafiles\colormanagement >nul
+if exist "%L%\opencolorio" if exist "%OCIO_CFG%\config.ocio" call :deploy_ocio
 if defined VCToolsRedistDir (
-  for /d %%c in ("%VCToolsRedistDir%x64\Microsoft.VC*.CRT") do copy /y "%%c\*.dll" dist\windows\ >nul
+  for /d %%c in ("%VCToolsRedistDir%x64\Microsoft.VC*.CRT") do for %%f in ("%%c\*.dll") do call :deploy_file "%%f"
 )
+if defined _BLENDITY_INCREMENTAL_PLAN exit /b 0
 rem Round 512: Embree's DLL needs dpcpp's SYCL runtime (sycl*.dll - sycl9.dll today -, ur_loader.dll, ur_win_proxy_loader.dll, xptifw.dll);
 rem without it every executable here exits at once, with no message. A library tree with no dpcpp folder is said so.
 if exist dist\windows\embree4.dll if not exist dist\windows\sycl*.dll (
   echo [blendity] WARNING: embree4.dll needs dpcpp's SYCL runtime ^(sycl*.dll and the ur_ / xptifw DLLs^) and dist\windows has none.
   if not exist "%L%\dpcpp\bin\sycl*.dll" echo [blendity]          "%L%\dpcpp\bin" has none either: fetch Blender's dpcpp library.
   echo [blendity]          Without them the programs here exit at once, without a word.
+)
+exit /b 0
+
+:deploy_file
+if not exist "%~1" exit /b 0
+if defined _BLENDITY_INCREMENTAL_PLAN (
+  echo dll^|"%~f1"
+) else (
+  copy /y "%~1" dist\windows\ >nul
+)
+exit /b 0
+
+:deploy_ocio
+if defined _BLENDITY_INCREMENTAL_PLAN (
+  echo ocio^|"%OCIO_CFG%"
+) else (
+  xcopy /e /i /y /q "%OCIO_CFG%" dist\windows\datafiles\colormanagement >nul
 )
 exit /b 0

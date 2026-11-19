@@ -49,6 +49,10 @@ approved together, ending in a write-up round.
   not before review, not from uncommitted code. Each time, one line to the owner on what the exe contains and
   which rounds in it are not yet green on CI; a fault CI finds later means a rebuild after the fix. Not while a
   timed stage runs.
+- For the Hub's routine local Windows editor refresh, use the dependency-aware release app build in the persistent scratch
+  worktree. Use `app-tests` when the joined revision needs both programs. Read the package path from the successful build log
+  and use its runtime files for verification and deployment. Scope `BLENDITY_INCREMENTAL=1` to these local builds.
+  See [the machine commands](docs/handoff/MACHINE.md#repeated-local-editor-builds) and [ADR 0155](docs/decisions/0155-local-incremental-builds.md).
 - Headless runs: `Blendity.exe --headless-screenshot out.png --cmd "..."` with `BLENDITY_PROJECT` and
   `BLENDITY_TRASH` pointing at a scratch copy, never the real `Assets/`.
 - The development machine's limits and helper scripts (build slots, the WSL lock, timed windows) are in
@@ -147,6 +151,9 @@ in the task spec, ADR or PR as appropriate.
    open at once, one per pass; each must have exactly one top. After every publish and every push to a PR
    branch run `bash tools/dev/stack_check.sh` (`FIX=1` merges a stack's stray heads into its newest PR);
    the `stack` CI job runs the same check. The body's "Merging this also merges" line names the PRs it carries.
+   Group supporting specs, test evidence, findings and documentation with the deliverable or pass write-up.
+   Open a separate round PR for an independently reviewable change. Present the cumulative top of the pass to the
+   owner for final review and merge. Every PR still targets `main`, and the owner performs the merge.
    **The integration PR** (ADR 0132): when several stacks are open, `bash tools/dev/integrate.sh` merges the top of
    every stack whose four required jobs are green into `integration/<n>` (from `main`, merge commits only) and opens
    one PR on `main` that carries them all - the one the owner merges; `CHECK=1` only reports what it would merge and
