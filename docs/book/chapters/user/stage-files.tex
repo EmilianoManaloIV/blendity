@@ -17,6 +17,18 @@ its shading switchable (As Imported, PBR, or a toon style) and an Outline switch
 The texture finder reads the folders around the model and pairs each bare material with the texture set its name is
 likeliest to own.
 
+\section{Steam Workshop characters and maps}
+After Steam finishes downloading the item, choose \menu{File > Import > Source Engine Assets} and select the
+installed item folder, compiled file or VPK. Pick a character or map by its relative path. For a multipart VPK,
+select the \code{\_dir.vpk} beside the numbered parts. If the import lists a missing file, add the game content
+or Workshop item that supplies that path and retry. See \code{docs/guides/workshop.md} for locations and
+compatibility for classic Source Filmmaker, Half-Life: Alyx and Counter-Strike 2.
+
+The project keeps a snapshot of the imported assets. For a skinned character, select the armature and use
+\menu{GameObject > Rig > Auto IK on Selected Skeleton} to find limb controls by bone name. On an unskinned
+mesh, bind to a fitted skeleton or add a marker rig (chapter~\ref{ch:animate}). Place the character in the
+map, set the camera and lighting, then save and render.
+
 \section{Export}
 \menu{File > Export}: every mesh format Blender 5.2 exports (OBJ, FBX binary or ASCII, glTF \code{.glb} or
 \code{.gltf}, STL, PLY, USD) with Blender's options (Selected Only, Apply Modifiers, Scale, Up Axis, Triangulate, Keep
