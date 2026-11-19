@@ -16,7 +16,7 @@ PHASES = (
     ("seed", "v1", "Installed-A", "WorkshopIdentity.vpk"),
     ("offline-v1", None, None, None),
     ("reimport-v2", "v2", "Installed-B", "WorkshopIdentity.vpk"),
-    ("repeat-v2", "v2", "Installed-C", "MovedCopy.vpk"),
+    ("repeat-v2", "v2", "Installed-C", "WorkshopIdentity.vpk"),
     ("offline-v2", None, None, None),
 )
 FIXTURE_SHA256 = {

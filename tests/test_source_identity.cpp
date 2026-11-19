@@ -198,7 +198,7 @@ bool relocation_record(const std::string &project, const std::string &path) {
 
   const std::string provider = fs::normalize(key.substr(0, separator));
   const std::string root = fs::parent(project);
-  for (const char *relative : {"Installed-A/WorkshopIdentity.vpk", "Installed-B/WorkshopIdentity.vpk", "Installed-C/MovedCopy.vpk"})
+  for (const char *relative : {"Installed-A/WorkshopIdentity.vpk", "Installed-B/WorkshopIdentity.vpk", "Installed-C/WorkshopIdentity.vpk"})
     if (provider == fs::normalize(fs::join(root, relative))) return true;
   return false;
 }

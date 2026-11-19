@@ -38,7 +38,7 @@ SHARDS = [
 
 # These suites arrive on separate branches of the Workshop pass. A source is
 # registered as soon as its test file is present in the current checkout.
-WORKSHOP_GROUPS = ("source_content", "source1_model", "source1_map", "source2_model", "source2_map", "source_workshop")
+WORKSHOP_GROUPS = ("source_content", "source1_model", "source1_map", "source2_model", "source2_map", "source_workshop", "source_identity")
 SHARDS[-1].extend(g for g in WORKSHOP_GROUPS if os.path.isfile(os.path.join(ROOT, "tests", f"test_{g}.cpp")))
 
 # A pull request needs no native build when every changed path is documentation or agent metadata.

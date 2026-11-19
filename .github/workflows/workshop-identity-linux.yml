@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Verify diagnostic test group registration
+        run: python3 tools/dev/test_shards.py --self-test
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core
       - name: Build app and tests from a clean object directory
