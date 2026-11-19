@@ -14,6 +14,15 @@ Owned paths or surfaces: src/scene/source_content.*, editor import picker and im
 ## Acceptance and verification
 A two-model folder lists both paths. Reimport keeps same-named material and texture identities when their order or cached bytes change. Moving an item retains edits when its Workshop IDs and provider chain match, or when a non-Workshop source has unique selected-entry evidence. Separate Workshop items stay separate even when their virtual paths and entry bytes match. Legacy migration retains dormant filename candidates across restarts and leaves ambiguous files intact. Duplicate paths resolve by mount order. Adding a second root satisfies a named missing dependency. Cancel leaves the scene intact. An item may contain a map VPK inside a multipart outer VPK. Discover and read it using bounded indexes and lazy payload reads, keeping outer material dependencies available. Exercise duplicate names and actionable diagnostics on a corrupt or unsupported child. Verify Workshop item 3070193546 alongside synthetic fixtures. Derive independent tests from these criteria. Use scratch projects, run the Windows and Linux suites and relevant import/editor stress checks, and record exact commands and results. Cite repository revisions, primary format references and fixture provenance for consequential claims.
 
+## CI regression verification
+
+The first joined Linux unit run completed 130,480 checks. Its sole failure was the
+round 154 material test expecting every converted image under the scratch home.
+Task 0583 gives a configured import cache precedence. Update the test to check both
+the split image and embedded files beneath the selected cache's model folder.
+Verify the configured cache and scratch-home fallback with independent invocations.
+[Linux unit job](https://github.com/EmilianoManaloIV/blendity/actions/runs/44613001688/job/135884506300)
+
 ## Documentation
 Own `changelog.d/601-workshop-content.md`. Include verified outcomes and applicable shared-document sections under ADR 0123. Supply user-facing changes to the Learn lesson and guide owners. Mark this spec done with test, review and PR evidence at closeout.
 

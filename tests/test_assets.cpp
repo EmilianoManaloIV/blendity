@@ -3348,7 +3348,7 @@ static void tests_round145_to_round163() {
 
 static void tests_round154() {
   /* ---------------------------------------------------------------- round 154: materials made on import (task 0134) */
-  /* Imports write extracted and split images under ~/.blendity/cache: a scratch home from here on, never the user's. */
+  /* Give imports a scratch home for the default cache when BLENDITY_CACHE_DIR is empty. */
   set_env("USERPROFILE", fs::join(test_dir(), "home"));
   set_env("HOME", fs::join(test_dir(), "home"));
   /* A 4 x 4 PNG of one colour (0xAARRGGBB), and the red of an image's first pixel (0..255; -1 if it can't be read). */
@@ -3520,7 +3520,11 @@ static void tests_round154() {
     std::printf("    split twice: one file (%s), %zu note(s); embedded: %s, %s, the first again %s\n", fs::filename(g1).c_str(), r.notes.size(),
                 fs::filename(x).c_str(), fs::filename(y).c_str(), fs::filename(z).c_str());
     CHECK(!g1.empty() && g1 == g2 && r.notes.size() == 1 && r154_red(g1) == 0xC0 && x != y && x == z && !x.empty() && !y.empty());
-    CHECK(fs::parent(g1).find(fs::join(test_dir(), "home")) == 0);  // (the scratch home, never the user's)
+    const char *override_dir = std::getenv("BLENDITY_CACHE_DIR");
+    const std::string cache = override_dir && *override_dir ? override_dir : fs::join(test_dir(), "home/.blendity/cache");
+    const std::string model_dir = fs::parent(g1);
+    CHECK(fs::normalize(fs::parent(model_dir)) == fs::normalize(fs::join(cache, "import")));
+    CHECK(fs::parent(x) == model_dir && fs::parent(y) == model_dir);
   });
 }
 
