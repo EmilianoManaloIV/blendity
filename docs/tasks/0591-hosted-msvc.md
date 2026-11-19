@@ -67,5 +67,6 @@ edit to `build.bat` with round 608 before changing the shared file.
 ## Verification
 
 Run `pwsh -NoProfile -File tools/dev/test_hosted_msvc.ps1` on Windows. The fixture uses a scratch Visual Studio
-layout, stand-ins for `vswhere`, the installer and the compiler, and a stub build. Hosted installation and
-both workflows need evidence from the reviewed revision.
+layout, stand-ins for `vswhere`, the installer and the compiler, and a stub build. PowerShell 7 and Windows
+PowerShell 5.1 passed eight setup and eleven build scenarios, including negative exit codes from activation
+and verification. Hosted installation and both workflows need evidence from the reviewed revision.

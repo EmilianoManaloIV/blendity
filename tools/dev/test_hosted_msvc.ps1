@@ -114,6 +114,7 @@ if "%FIXTURE_ACTIVATION%"=="version" set "VCToolsVersion=14.52.37025"
 if "%FIXTURE_ACTIVATION%"=="compiler" exit /b 0
 set "PATH=%FIXTURE_VS%\VC\Tools\MSVC\%BLENDITY_VCVARS_VER%\bin\Hostx64\x64;%PATH%"
 if "%FIXTURE_ACTIVATION%"=="linker" set "PATH=%FIXTURE_WRONG_LINK%;%PATH%"
+if "%FIXTURE_ACTIVATION%"=="negative" exit /b -1
 exit /b 0
 '@ | Set-Content -LiteralPath "$activation\vcvars64.bat"
 @'
@@ -185,6 +186,7 @@ try {
 
     $activationFailures = @{
         fail = 'vcvars64 failed with exit 92'
+        negative = 'vcvars64 failed with exit -1'
         version = "VCToolsVersion '14\.52\.37025', expected '14\.51\.10'"
         compiler = 'First cl on PATH'
         linker = 'First link on PATH'
@@ -194,6 +196,13 @@ try {
         Invoke-FixtureBuild "activation-$failure" 'release all' 1 $activationFailures[$failure]
     }
     $env:FIXTURE_ACTIVATION = $null
+    # Exercise a native process failure even when vcvars64 activated the exact expected tools.
+    @('param([string]$Mode)', 'exit -1') | Set-Content -LiteralPath "$dev\hosted_msvc.ps1"
+    try {
+        Invoke-FixtureBuild 'verification-negative' 'release all' 1 'Toolset verification failed with exit -1'
+    } finally {
+        Copy-Item -LiteralPath "$PSScriptRoot\hosted_msvc.ps1" -Destination $dev -Force
+    }
     $buildCalls = @(Select-String -LiteralPath $transcript -Pattern '^build ' | ForEach-Object { $_.Line.TrimEnd() })
     Assert-Case ($buildCalls.Count -eq 3) 'An activation failure reached the build or a successful activation did not.'
     Assert-Case ($buildCalls[0] -eq 'build release all strict=1 version=14.51.10 no_libs= out=' -and
@@ -236,7 +245,7 @@ try {
     Invoke-FixtureBuild 'after-setup' 'release all' 0 'Active VCToolsVersion: 14\.51\.47'
 
     $passed = $true
-    Write-Host 'Hosted MSVC fixture checks passed (8 setup paths, 9 build paths).'
+    Write-Host 'Hosted MSVC fixture checks passed (8 setup paths, 11 build paths).'
 } finally {
     foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
     $env:Path = $oldPath
