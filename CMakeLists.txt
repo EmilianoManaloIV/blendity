@@ -255,6 +255,17 @@ target_link_libraries(blendity_stress PRIVATE blendity_engine)
 
 file(GLOB BLENDITY_TEST_SOURCES CONFIGURE_DEPENDS tests/*.cpp)
 add_executable(blendity_tests ${BLENDITY_TEST_SOURCES})
+# Tie the two conditional dispatch tables to the available Workshop rounds
+# so incremental builds recompile them when a companion arrives.
+set(BL_WORKSHOP_ROUNDS)
+foreach(source IN LISTS BLENDITY_SOURCES BLENDITY_TEST_SOURCES)
+  if(source MATCHES "/(source[12]_(model|map)|test_source([12]_(model|map)|_content|_workshop))\\.cpp$")
+    string(APPEND BL_WORKSHOP_ROUNDS "${source}\n")
+  endif()
+endforeach()
+string(MD5 BL_WORKSHOP_ROUNDS_KEY "${BL_WORKSHOP_ROUNDS}")
+set_property(SOURCE src/scene/source_content.cpp tests/test_main.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS "BL_WORKSHOP_ROUNDS_${BL_WORKSHOP_ROUNDS_KEY}=1")
 target_link_libraries(blendity_tests PRIVATE blendity_engine)
 
 enable_testing()

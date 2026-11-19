@@ -1,0 +1,1 @@
+"VertexLitGeneric" { "$basetexture" "workshop_fixture/enamel" "$alphatest" "1" "$alphatestreference" "0.5" "$bumpmap" "workshop_fixture/enamel_normal" }
