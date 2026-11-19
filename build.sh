@@ -35,8 +35,16 @@ fi
 # Used when ../blender/lib/<platform> exists (Blender's own layout, from
 # projects.blender.org/blender/lib-linux_x64 or lib-macos_arm64). Otherwise the
 # dependency-free versions are built. BLENDITY_NO_LIBS=1 forces that build.
-if [ "$OS" = "Darwin" ]; then LIBPLAT=macos_arm64; SOEXT=dylib; else LIBPLAT=linux_x64; SOEXT=so; fi
-LIBDIR="${BLENDITY_LIBDIR:-../blender/lib/$LIBPLAT}"
+# Select by compiler target so a cross compiler does not inherit its host's bundle.
+TARGET_TRIPLE="$($CXX ${EXTRA_FLAGS:-} -dumpmachine)"
+case "$TARGET_TRIPLE" in
+  x86_64-*-linux*|x86_64-linux*) LIBPLAT=linux_x64 ;;
+  arm64-apple-darwin*|aarch64-apple-darwin*) LIBPLAT=macos_arm64 ;;
+  *) LIBPLAT="" ;;  # No pinned Blender bundle for this target.
+esac
+if [ "$OS" = "Darwin" ]; then SOEXT=dylib; else SOEXT=so; fi
+LIBDIR="${BLENDITY_LIBDIR:-}"
+if [ -z "$LIBDIR" ] && [ -n "$LIBPLAT" ]; then LIBDIR="../blender/lib/$LIBPLAT"; fi
 USE_LIBS=0
 USE_QUADRIFLOW=0
 EXTRA_C_SRC=""
@@ -51,7 +59,7 @@ addlib() {  # folder define "include dirs" "libraries (lib/ relative files)"
   for l in $4; do LIBLINK="$LIBLINK $LIBDIR/$l"; done
   LIBDIRS="$LIBDIRS $1"
 }
-if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
+if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -n "$LIBDIR" ] && [ -d "$LIBDIR/tbb/include" ]; then
   USE_LIBS=1
   # zlib: Blender's static one (Linux); macOS's own where Blender's lib folder has none.
   ZLIB_A="zlib/lib/libz.a"
@@ -125,7 +133,7 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   # mismatch makes its version check abort at start-up - see JoltConfig.cmake.)
   LIBFLAGS="$LIBFLAGS -DMANIFOLD_PAR=1 -DJPH_SHARED_LIBRARY -DJPH_DOUBLE_PRECISION"
   LIBFLAGS="$LIBFLAGS -DJPH_CROSS_PLATFORM_DETERMINISTIC -DJPH_USE_CPU_COMPUTE -DJPH_OBJECT_STREAM"
-  [ "$OS" = "Darwin" ] || LIBFLAGS="$LIBFLAGS -DJPH_USE_SSE4_1 -DJPH_USE_SSE4_2 -msse4.2 -mpopcnt"
+  [ "$LIBPLAT" != linux_x64 ] || LIBFLAGS="$LIBFLAGS -DJPH_USE_SSE4_1 -DJPH_USE_SSE4_2 -msse4.2 -mpopcnt"
   FLAGS="$FLAGS $LIBFLAGS"
   # The libraries link the shared C++ runtime, so the executables must too; they
   # find the libraries in ./lib next to themselves.
@@ -135,7 +143,7 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   [ "$OS" = "Darwin" ] || LIBS="$LIBS -Wl,-rpath-link,$LIBDIR/openjph/lib:$LIBDIR/dpcpp/lib:$LIBDIR/tbb/lib:$LIBDIR/imath/lib"
   echo "[blendity] Using Blender libraries from $LIBDIR:$LIBDIRS - the allocator: $ALLOC"
 else
-  echo "[blendity] Dependency-free build (no $LIBDIR: bash packaging/fetch_blender_libs.sh $LIBPLAT fetches them)"
+  echo "[blendity] Dependency-free build (target $TARGET_TRIPLE)"
 fi
 
 # --- NVIDIA OptiX (task 0169, ADR 0054) ----------------------------------------------------------------------
@@ -170,9 +178,9 @@ mkdir -p "$OBJ" "$OUT"
 rm -rf "$OUT/licenses" && cp -r licenses "$OUT/licenses"
 # Objects are only rebuilt when sources change, so a change of compiler flags
 # (e.g. a library's ABI defines) must start the object folder afresh.
-if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$CXX $FLAGS" ]; then
+if [ "$(cat "$OBJ/flags.txt" 2>/dev/null)" != "$TARGET_TRIPLE $CXX $FLAGS" ]; then
   rm -f "$OBJ"/*.o
-  echo "$CXX $FLAGS" > "$OBJ/flags.txt"
+  echo "$TARGET_TRIPLE $CXX $FLAGS" > "$OBJ/flags.txt"
 fi
 
 QUADRIFLOW_SRC=""
