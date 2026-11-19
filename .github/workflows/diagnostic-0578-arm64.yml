@@ -36,6 +36,12 @@ jobs:
           c++ -std=c++17 -Isrc/core src/core/cpu.cpp "$RUNNER_TEMP/cpu-check.cpp" -o "$RUNNER_TEMP/cpu-check"
           file "$RUNNER_TEMP/cpu-check"
           "$RUNNER_TEMP/cpu-check"
+          docker image ls --format '{{.Repository}}:{{.Tag}}' || true
+          for src in src/render/raster.cpp src/render/display.cpp src/image/image.cpp; do
+            obj="$RUNNER_TEMP/$(basename "$src" .cpp).o"
+            c++ -O2 -DNDEBUG -std=c++17 -pthread -Iextern/sky/include -c "$src" -o "$obj"
+            file "$obj"
+          done
           dpkg-query -W libx11-dev libx11-6 || true
           if ! test -r /usr/include/X11/Xlib.h; then
             echo 'Missing X11/Xlib.h on the base runner.' >&2
