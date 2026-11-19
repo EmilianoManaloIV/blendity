@@ -43,7 +43,7 @@ def native(args):
 def ci(args):
     fields = "headSha,attempt,status,conclusion,url,jobs"
     raw = subprocess.check_output(["gh", "run", "view", args.run, "--repo", args.repo,
-                                   "--json", fields], text=True, encoding="utf-8")
+                                   "--json", fields], text=True, encoding="utf-8", stderr=subprocess.PIPE)
     run = json.loads(raw)
     report = {key: run[key] for key in ("headSha", "attempt", "status", "conclusion", "url")}
     report["failed_jobs"] = []
@@ -77,7 +77,8 @@ def main():
     try:
         report = native(args) if args.kind == "native" else ci(args)
     except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as error:
-        receipt = dict(status="unavailable", error=str(error), revision=args.revision)
+        diagnostic = error.stderr if isinstance(error, subprocess.CalledProcessError) else None
+        receipt = dict(status="unavailable", error=(diagnostic or str(error)).strip(), revision=args.revision)
         if args.kind == "native":
             receipt.update(group=args.group, log=str(args.log))
         else:
