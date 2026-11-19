@@ -114,8 +114,10 @@ void test_source2_map();
 #if __has_include("test_source_workshop.cpp")
 void test_source_workshop();
 #endif
+void test_source_identity();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
+    {"source_identity", test_source_identity},
     {"modeling", run_modeling_tests},
     {"render", run_render_tests},
     {"lighting", run_lighting_tests},

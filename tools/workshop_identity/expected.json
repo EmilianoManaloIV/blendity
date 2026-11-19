@@ -1,0 +1,102 @@
+{
+  "map": "maps/workshop_fixture.vmap_c",
+  "mesh_slots": 3,
+  "project_materials": 2,
+  "project_base_textures": 2,
+  "pixel_coordinates": [
+    [
+      0,
+      0
+    ],
+    [
+      2,
+      0
+    ]
+  ],
+  "floor": {
+    "material": "materials/workshop_fixture/floor/enamel.vmat",
+    "texture": "materials/workshop_fixture/floor/enamel.vtex",
+    "saved_roughness": 0.37
+  },
+  "prop": {
+    "material": "materials/workshop_fixture/prop/enamel.vmat",
+    "texture": "materials/workshop_fixture/prop/enamel.vtex",
+    "saved_roughness": 0.73
+  },
+  "versions": {
+    "v1": {
+      "archive": "v1/WorkshopIdentity.vpk",
+      "sha256": "cfa8619cea2e6fc63c1f643c84bc9d719014fc7fbe691f5227600a697e5dbac6",
+      "placement_order": [
+        "floor",
+        "left",
+        "right"
+      ],
+      "floor_rgba": [
+        [
+          40,
+          80,
+          120,
+          255
+        ],
+        [
+          84,
+          124,
+          164,
+          255
+        ]
+      ],
+      "prop_rgba": [
+        [
+          40,
+          80,
+          120,
+          255
+        ],
+        [
+          84,
+          124,
+          164,
+          255
+        ]
+      ]
+    },
+    "v2": {
+      "archive": "v2/WorkshopIdentity.vpk",
+      "sha256": "938ee7bf83da8665d6c0f3eddc88d518c60dc910580364c2eb47c1a44c417803",
+      "placement_order": [
+        "right",
+        "left",
+        "floor"
+      ],
+      "floor_rgba": [
+        [
+          16,
+          102,
+          154,
+          255
+        ],
+        [
+          25,
+          117,
+          168,
+          255
+        ]
+      ],
+      "prop_rgba": [
+        [
+          160,
+          66,
+          27,
+          255
+        ],
+        [
+          179,
+          87,
+          43,
+          255
+        ]
+      ]
+    }
+  }
+}

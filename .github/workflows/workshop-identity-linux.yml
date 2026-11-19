@@ -1,0 +1,41 @@
+name: Workshop identity Linux verification
+on:
+  push:
+    branches: [diagnostics/0588-identity-linux]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  workshop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core
+      - name: Build app and tests from a clean object directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -d build/obj_release_linux
+          test ! -f dist/linux/Blendity
+          test ! -f dist/linux/blendity_tests
+          mkdir -p "$RUNNER_TEMP/workshop-reports"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/workshop-reports/revision.txt"
+          BLENDITY_NO_LIBS=1 BLENDITY_NO_OPTIX=1 bash build.sh release all > "$RUNNER_TEMP/workshop-reports/build.log" 2>&1 || { tail -100 "$RUNNER_TEMP/workshop-reports/build.log"; exit 1; }
+          test -x dist/linux/Blendity && test -x dist/linux/blendity_tests
+      - name: Run six registered groups and detached reopen
+        id: groups
+        run: python3 tools/verify_workshop_groups.py dist/linux/blendity_tests "$RUNNER_TEMP/workshop-reports"
+      - name: Run same-basename reimport verification across five editor processes
+        if: ${{ !cancelled() && (steps.groups.outcome == 'success' || steps.groups.outcome == 'failure') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/workshop_identity/make_inputs.py tests/fixtures/source_workshop/generate.py "$RUNNER_TEMP/identity-input"
+          cmp tools/workshop_identity/expected.json "$RUNNER_TEMP/identity-input/expected.json"
+          python3 tools/workshop_identity/run_identity.py --repo . --exe dist/linux/blendity_tests --texture-policy preserve --fixtures "$RUNNER_TEMP/identity-input" --scratch-parent "$RUNNER_TEMP" | tee "$RUNNER_TEMP/workshop-reports/identity.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workshop-identity-linux-results
+          path: ${{ runner.temp }}/workshop-reports/
