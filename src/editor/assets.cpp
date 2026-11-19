@@ -10,6 +10,8 @@
 #include "../scene/import.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -198,8 +200,243 @@ void Editor::prepare_import_files(const std::string &path, bool copy_into_assets
   out.again = import_folder_reused(sources, fs::stem(path));
   out.model = import_folder(sources, fs::stem(path));
   out.tex_map.clear();
-  copy_import_textures(r, out.model, out.again, out.tex_map);
+  copy_import_textures(r.textures, out.model, out.again, out.tex_map);
   out.ready = true;
+}
+
+static std::array<TextureRef *, 13> import_texture_refs(Material &m) {
+  return {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map, &m.toon_ramp_map, &m.shade_map,
+          &m.toon_shadow_bias_map, &m.toon_specular_map, &m.toon_rim_map, &m.face_shadow_map, &m.line_map, &m.hatch_map};
+}
+
+static std::string import_material_path(const Material &m, const std::string &model, std::unordered_set<std::string> &names) {
+  const std::string base = safe_file_name(m.name.empty() ? model : m.name);
+  std::string name = base;
+  for (int k = 2; names.count(to_lower(name)); k++) name = base + " " + std::to_string(k);
+  names.insert(to_lower(name));
+  return "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
+}
+
+namespace {
+namespace disk = std::filesystem;
+
+bool source_files_error(std::string &error, const std::string &message) {
+  error = message;
+  return false;
+}
+
+std::string source_texture_path(const std::string &path, const std::string &project) {
+  return disk::u8path(path).is_absolute() ? path : fs::join(project, path);
+}
+
+/* Unlike a lexical prefix, this rejects redirects that would put the files outside the project. */
+bool source_owned_path(const std::string &root, const std::string &path) {
+  std::error_code ec;
+  const auto canonical = disk::weakly_canonical(disk::u8path(path), ec);
+  if (ec) return false;
+  const auto relative = canonical.lexically_relative(disk::u8path(root));
+  return !relative.empty() && !relative.is_absolute() && *relative.begin() != "..";
+}
+
+struct SourcePublication {
+  std::vector<std::string> files, folders;
+  bool committed = false;
+
+  ~SourcePublication() {
+    if (committed) return;
+    for (auto i = files.rbegin(); i != files.rend(); ++i) fs::remove_file(*i);
+    for (auto i = folders.rbegin(); i != folders.rend(); ++i) fs::remove_file(*i);
+  }
+
+  bool folder(const std::string &path) {
+    if (fs::is_dir(path)) return true;
+    const std::string parent = fs::parent(path);
+    if (parent.empty() || parent == path || fs::exists(path) || !folder(parent)) return false;
+    std::error_code ec;
+    if (!disk::create_directory(disk::u8path(path), ec)) return !ec && fs::is_dir(path);
+    folders.push_back(path);
+    return true;
+  }
+
+  bool publish(const std::string &staged, const std::string &path) {
+    if (!folder(fs::parent(path))) return false;
+    const auto from = disk::u8path(staged), to = disk::u8path(path);
+    std::error_code ec;
+    disk::create_hard_link(from, to, ec);
+    if (!ec) {
+      files.push_back(path);
+      return true;
+    }
+    if (ec == std::errc::file_exists) return false;
+
+    // Some filesystems cannot hard-link. Exclusive creation also makes rollback safe on a short write.
+    std::ifstream input(from, std::ios::binary);
+    if (!input) return false;
+#ifdef _WIN32
+    std::FILE *output = _wfopen(to.c_str(), L"wbx");
+#else
+    std::FILE *output = std::fopen(to.c_str(), "wbx");
+#endif
+    if (!output) return false;
+    files.push_back(path);
+    std::array<char, 65536> buffer;
+    bool good = true;
+    while (input && good) {
+      input.read(buffer.data(), buffer.size());
+      const auto size = (size_t)input.gcount();
+      good = size == std::fwrite(buffer.data(), 1, size, output);
+    }
+    const int closed = std::fclose(output);
+    return good && input.eof() && !input.bad() && closed == 0;
+  }
+};
+}  // namespace
+
+Editor::SourceImportStage::~SourceImportStage() {
+  for (const std::string &file : files) fs::remove_file(file);
+  if (!directory.empty()) fs::remove_file(directory);
+}
+
+bool Editor::SourceImportStage::open(std::string &error) {
+  static std::atomic<uint64_t> sequence{0};
+  for (int i = 0; i < 32; ++i) {
+    const std::string path = fs::join(project, strprintf(".blendity-source-import-%llu",
+        (unsigned long long)sequence.fetch_add(1, std::memory_order_relaxed)));
+    std::error_code ec;
+    if (disk::create_directory(disk::u8path(path), ec)) {
+      directory = path;
+      return true;
+    }
+    if (ec && ec != std::errc::file_exists) break;
+  }
+  return source_files_error(error, "Cannot stage Source import in " + project);
+}
+
+std::string Editor::SourceImportStage::next_file() {
+  files.push_back(fs::join(directory, std::to_string(files.size())));
+  return files.back();
+}
+
+bool Editor::stage_source_import_files(ImportResult &r, SourceImportStage &stage, std::string &error) {
+  if (!stage.open(error)) return false;
+
+  // Include every assigned material, even when a reader only attached it to a node.
+  std::unordered_set<const Material *> seen;
+  for (const MaterialPtr &material : r.materials) seen.insert(material.get());
+  for (const ImportedNode &node : r.nodes)
+    for (const MaterialPtr &material : node.materials)
+      if (material && seen.insert(material.get()).second) r.materials.push_back(material);
+
+  std::vector<std::string> textures = r.textures;
+  for (const MaterialPtr &material : r.materials) {
+    if (!material) continue;
+    for (TextureRef *ref : import_texture_refs(*material))
+      if (!ref->empty()) textures.push_back(ref->path);
+  }
+
+  std::unordered_set<std::string> seen_textures;
+  const std::string assets = fs::join(stage.project, "Assets");
+  for (const std::string &texture : textures) {
+    const std::string path = source_texture_path(texture, stage.project);
+    if (!seen_textures.insert(path).second) continue;
+    std::error_code ec;
+    if (!disk::is_regular_file(disk::u8path(path), ec))
+      return source_files_error(error, "Cannot read Source texture: " + path);
+    std::string staged;
+    if (!source_owned_path(assets, path)) {
+      staged = stage.next_file();
+      if (!fs::copy_file(path, staged)) return source_files_error(error, "Cannot stage Source texture: " + path);
+    }
+    stage.textures.emplace_back(path, std::move(staged));
+  }
+  return true;
+}
+
+/* Snapshot publication runs on the editor thread. The marker is written last. A retry can
+ * recognize a prior successful import and keep its edits without adopting canceled files. */
+bool Editor::publish_source_import_files(const SourceEntry &entry, const ImportResult &r, SourceImportStage &stage,
+                                         ImportFiles &out, std::string &error) {
+  if (stage.project != project_root_) return source_files_error(error, "The project changed during Source import.");
+  const std::vector<std::string> sources{entry.provider + "/" + entry.virtual_path};
+  const std::string stem = safe_file_name(fs::stem(entry.virtual_path));
+  std::string materials, textures;
+  for (int k = 1; k < 1000; ++k) {
+    const std::string name = k == 1 ? stem : stem + " " + std::to_string(k);
+    materials = fs::join(assets_dir_, "Materials/" + name);
+    textures = fs::join(assets_dir_, "Textures/" + name);
+    out.again = import_folder_matches(materials, sources);
+    if (out.again || (!fs::exists(materials) && !fs::exists(textures))) {
+      out.model = name;
+      break;
+    }
+  }
+  if (out.model.empty() || !source_owned_path(project_root_, materials) || !source_owned_path(project_root_, textures))
+    return source_files_error(error, "Cannot choose a project asset folder for " + entry.virtual_path);
+
+  SourcePublication publication;
+  std::vector<std::string> used;
+  for (const auto &[path, staged] : stage.textures) {
+    std::string destination = path;
+    if (!staged.empty()) {
+      const std::string same = fs::join(textures, fs::filename(path));
+      std::error_code ec;
+      const bool reuse = out.again && std::find(used.begin(), used.end(), same) == used.end() &&
+                         disk::is_regular_file(disk::u8path(same), ec);
+      destination = reuse ? same : free_name(textures, fs::filename(path), used);
+      if (!source_owned_path(project_root_, destination) || (!reuse && !publication.publish(staged, destination)))
+        return source_files_error(error, "Cannot publish Source texture: " + destination);
+      used.push_back(destination);
+    }
+    std::error_code ec;
+    if (!source_owned_path(project_root_, destination) || !disk::is_regular_file(disk::u8path(destination), ec))
+      return source_files_error(error, "Cannot use project texture: " + destination);
+    out.tex_map.emplace(path, make_asset_relative(destination));
+  }
+
+  std::unordered_set<std::string> names;
+  std::unordered_set<const Material *> seen;
+  for (const MaterialPtr &material : r.materials) {
+    if (!material || !seen.insert(material.get()).second) continue;
+    const std::string rel = import_material_path(*material, out.model, names);
+    const std::string destination = fs::join(project_root_, rel);
+    if (!source_owned_path(project_root_, destination)) return source_files_error(error, "Invalid Source material path: " + destination);
+    if (fs::exists(destination)) {
+      if (!material_asset(rel)) return source_files_error(error, "Cannot use existing project material: " + destination);
+      continue;
+    }
+    Material copy = *material;
+    copy.asset_path = rel;
+    copy.foreign = false;
+    copy.import_outline = 0.0f;
+    for (TextureRef *ref : import_texture_refs(copy)) {
+      if (ref->empty()) continue;
+      const auto mapped = out.tex_map.find(source_texture_path(ref->path, stage.project));
+      if (mapped == out.tex_map.end()) return source_files_error(error, "Missing staged Source texture: " + ref->path);
+      ref->path = mapped->second;
+    }
+    const std::string file = stage.next_file();
+    if (!fs::write_file(file, save_material_text(copy)) || !publication.publish(file, destination))
+      return source_files_error(error, "Cannot publish Source material: " + destination);
+  }
+
+  if (!out.again) {
+    const std::string marker = fs::join(materials, ".import-source");
+    const std::string file = stage.next_file();
+    if (!fs::write_file(file, to_lower(fs::normalize(sources.front())) + "\n") || !publication.publish(file, marker))
+      return source_files_error(error, "Cannot record Source import in " + materials);
+  }
+  publication.committed = true;
+  out.ready = true;
+  return true;
+}
+
+bool Editor::source_import_files_for_test(const SourceEntry &entry, ImportResult &result, bool publish, std::string &error) {
+  error.clear();
+  SourceImportStage stage;
+  stage.project = project_root_;
+  ImportFiles files;
+  return stage_source_import_files(result, stage, error) &&
+         (!publish || publish_source_import_files(entry, result, stage, files, error));
 }
 
 /* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets
@@ -215,12 +452,13 @@ void Editor::finish_import(const std::string &path, bool copy_into_assets, Impor
   auto fix = [&](TextureRef &ref) {
     if (ref.empty()) return;
     auto it = tex_map.find(ref.path);
+    if (it == tex_map.end()) it = tex_map.find(resolve_asset_path(ref.path));
     ref.path = it != tex_map.end() ? it->second : make_asset_relative(ref.path);
   };
   size_t missing = 0;
   for (auto &m : r.materials) {
-    for (TextureRef *ref : {&m->base_map, &m->metallic_map, &m->roughness_map, &m->normal_map, &m->emission_map, &m->toon_ramp_map, &m->shade_map,
-                            &m->toon_shadow_bias_map, &m->toon_specular_map, &m->toon_rim_map, &m->face_shadow_map, &m->line_map, &m->hatch_map}) {
+    if (!m) continue;
+    for (TextureRef *ref : import_texture_refs(*m)) {
       if (!ref->empty() && !fs::exists(resolve_asset_path(ref->path)) && !fs::exists(ref->path)) missing++;
       fix(*ref);
     }
@@ -854,10 +1092,11 @@ bool Editor::import_folder_reused(const std::vector<std::string> &sources, const
 
 /* Textures outside the project into Assets/Textures/<folder>/: two of one name get two files ("body 2.png"); a texture
  * from an earlier import of this model is kept (it may have been edited, as the .mat files are). */
-void Editor::copy_import_textures(const ImportResult &r, const std::string &folder, bool again, std::unordered_map<std::string, std::string> &tex_map) {
+void Editor::copy_import_textures(const std::vector<std::string> &textures, const std::string &folder, bool again,
+                                  std::unordered_map<std::string, std::string> &tex_map) {
   const std::string tex_dir = fs::join(fs::join(assets_dir_, "Textures"), folder);
   std::vector<std::string> taken;
-  for (const std::string &tp : r.textures) {
+  for (const std::string &tp : textures) {
     if (!fs::exists(tp) || tex_map.count(tp) || inside_assets(tp)) continue;
     fs::make_dirs(tex_dir);
     const std::string same = fs::join(tex_dir, fs::filename(tp));
@@ -877,10 +1116,7 @@ size_t Editor::import_material_assets(ImportResult &r, const std::string &model,
   std::unordered_set<std::string> names;
   for (const MaterialPtr &m : r.materials) {
     if (!m || asset_of.count(m.get())) continue;
-    std::string base = safe_file_name(m->name.empty() ? model : m->name), name = base;
-    for (int k = 2; names.count(to_lower(name)); k++) name = base + " " + std::to_string(k);  // (two of one name)
-    names.insert(to_lower(name));
-    const std::string rel = "Assets/Materials/" + safe_file_name(model) + "/" + name + ".mat";
+    const std::string rel = import_material_path(*m, model, names);
     MaterialPtr a = fs::exists(resolve_asset_path(rel)) ? material_asset(rel) : nullptr;
     if (a && rewrite) {
       /* A look chosen at import (task 0152) lands in the existing file too; As Imported keeps what was edited. */

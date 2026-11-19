@@ -581,7 +581,8 @@ GameObject *create_rig(Scene &s, bool quadruped, Vec3 at, float height) {
 }
 
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L", plain
- * "UpperArm.R" / "Left Forearm"): side 0 left, 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm. */
+ * "UpperArm.R" / "Left Forearm", Source "ValveBiped.Bip01_L_Forearm" or "arm_lower_L"):
+ * side 0 left, 1 right; limb 0 upper leg, 1 lower leg, 2 upper arm, 3 lower arm. */
 /* A bone's name as lower-case words: split at anything not a letter or digit and where a lower-case letter meets an
  * upper-case one ("lThighBend" -> l, thigh, bend; "J_Bip_L_UpperLeg" -> j, bip, l, upper, leg), the namespace
  * (mixamorig:) dropped (task 0279). */
@@ -630,10 +631,15 @@ bool limb_of(const std::string &raw, int &side, int &limb) {
   auto has = [&](const char *w) { return core.find(w) != std::string::npos; };
   if (has("twist") || has("roll") || has("share") || has("helper") || has("support")) return false;  // (a twist or helper bone beside the limb's own)
   if (std::find(words.begin(), words.end(), "sup") != words.end()) return false;  // ("UpperArm_sup": a support bone)
-  if (has("upleg") || has("upperleg") || has("thigh")) limb = 0;
-  else if (has("lowerleg") || has("shin") || has("calf") || has("knee") || (has("leg") && !has("upleg"))) limb = 1;
-  else if (has("forearm") || has("lowerarm") || has("elbow")) limb = 3;
-  else if (has("upperarm") || has("shldr") || (has("arm") && !has("armature"))) limb = 2;
+  // Source's limb, qualifier and side are complete words. "Alarm_Lower_L" is a prop joint.
+  const bool source_side = words.size() == 3 && (words[2] == "l" || words[2] == "r");
+  const auto source_words = [&](const char *first, const char *second) {
+    return source_side && words[0] == first && words[1] == second;
+  };
+  if (has("upleg") || has("upperleg") || source_words("leg", "upper") || has("thigh") || source_words("bip", "hip")) limb = 0;
+  else if (has("lowerleg") || source_words("leg", "lower") || has("shin") || has("calf") || has("knee") || (has("leg") && !has("upleg"))) limb = 1;
+  else if (has("forearm") || has("lowerarm") || source_words("arm", "lower") || has("elbow")) limb = 3;
+  else if (has("upperarm") || source_words("arm", "upper") || has("shldr") || (has("arm") && !has("armature"))) limb = 2;
   else return false;
   return true;
 }
