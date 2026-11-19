@@ -1,6 +1,6 @@
 # 0580: Correct the released manual documentation
 
-- **Status:** verified documentation candidate (round 598); pass reconciliation pending
+- **Status:** verified documentation candidate (round 598) with performance and Workshop outcomes reconciled
 - **Authorization:** owner-assigned documentation closeout, including the hub clarification on standing workflow and owner review.
 - **Decisions:** ADR 0104 (books), ADR 0123 (documentation fragments)
 
@@ -41,13 +41,12 @@ Round 598 merged Workshop publication head `899fca32` in `f5dfb4ef`. The origina
 | Work | Verified outcome and limits |
 | --- | --- |
 | Handoff follow-ups | Items 9 (stable command inventory) and 14 (face-corner paint) met their acceptance checks. Item 19 remains open: MSVC 14.52 failed the full suite in all three tested configurations. [PR 477](https://github.com/EmilianoManaloIV/blendity/pull/477), [PR 480](https://github.com/EmilianoManaloIV/blendity/pull/480), [PR 485](https://github.com/EmilianoManaloIV/blendity/pull/485) |
+| Edit Mode first frame, 0571 | Cold entry on the 501,760-face sphere fell from 101.4 to 99.6 ms median across three paired runs. The 1.8 ms gain fell within the observed variation, so the parallel packing change was rejected. Hosted Linux quick stress passed all 48 sections in 628.4 seconds and peaked at 14.45 GiB resident. [Task 0571](0571-edit-mode-first-frame.md), [Linux stress receipt](https://github.com/EmilianoManaloIV/blendity/actions/runs/44609521187/job/135862079065) |
 | Lighting status, 0574 | Narrow panes show the update mode and hover reveals the complete status. The twelve Windows HCI configurations matched baseline. The hosted Linux suite passed 125,311 checks. [Task 0574](0574-lighting-status-labels.md) |
 | Textures first open, 0576 | In three paired Windows runs with 2,000 already-loaded procedural textures, first open went from 281.0, 291.7 and 294.7 ms to 77.7, 79.7 and 91.2 ms. All three met the 100 ms budget. [Measurement conditions and controls](0576-textures-window.md) |
 | Moving-object experiment, 0577 | The 50,000-cube drag median went from 221.7 to 214.5 ms. The 3.25% gain missed the 5% adoption threshold. The candidate was withdrawn. [Task 0577](0577-moving-object.md) |
 | Workshop, 0582–0588 | Fresh Windows and hosted Linux builds each passed 6,160 focused checks, including detached-source and repeated-import checks. The three real character-and-map scenes retained their renders on Windows after detachment. The verification record describes the missing Alyx base-game textures and other asset limits. [Task 0588](0588-workshop-verification.md), [Linux run 44608047654](https://github.com/EmilianoManaloIV/blendity/actions/runs/44608047654) |
 | Pi 5, 0578 | Windows journey timings and hosted ARM64 results have separate records. Physical Pi 5 responsiveness and memory headroom remain unmeasured. [Task 0578](0578-pi5-performance.md) |
-
-The Edit Mode first-frame outcome (0571) awaits its quick-stress receipt and reviewed report. [Run 44609521187](https://github.com/EmilianoManaloIV/blendity/actions/runs/44609521187)
 
 ### Final manual build
 
