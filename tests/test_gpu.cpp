@@ -9095,6 +9095,86 @@ static void tests_round564_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 589: Edit Mode's first flat mesh (task 0571) */
+static void tests_round589_gpu() {
+  test("gpu views: first Edit Mode frame shows the flat mesh with unchanged pixels, vertex attributes and slot order", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    for (bool multi : {false, true}) {
+      Editor ed;
+      r34_open(ed, false);
+      ed.viewport_device_for_test(2);
+      GameObject *obj = ed.scene().create("Packing sphere");
+      obj->set_local_position({0, 1.7f, 0});
+      MeshPtr mesh = primitives::uv_sphere(1.0f, 384, 192);
+      if (multi) {
+        mesh->face_material.resize(mesh->face_count());
+        for (size_t face = 0; face < mesh->face_count(); face++) mesh->face_material[face] = (int)(face % 2);
+      }
+      obj->add<MeshFilter>()->mesh = mesh;
+      obj->add<MeshRenderer>()->materials = {make_material("First", Vec3(0.4f)), make_material("Second", Vec3(0.6f))};
+      ed.command("select Packing sphere");
+      ed.command("camera 0 3.7 4 0 1.7 0");
+      r34_steps(ed, 3);
+      CHECK(!mesh->render_cache_warm(true));
+      ed.command("edit vertex");
+      ed.step_frame_headless();
+      const auto pixels = [&] { return r34_crop(ed, ed.scene_view_rect()); };
+      const std::vector<uint32_t> first = pixels();
+      CHECK(ed.in_edit_mode() && ed.scene_drawn_for_test() && !first.empty());
+
+      const Mesh &edited = *obj->get<MeshFilter>()->mesh;
+      CHECK(edited.render_cache_warm(true));
+      CHECK(ed.scene_on_gpu_for_test());
+      const RenderMesh &flat = edited.render_mesh(true);
+      CHECK(flat.positions.size() >= 262144);
+      std::vector<gpu::RasterVertex> vertices;
+      std::vector<uint32_t> indices;
+      CHECK(ed.gpu_mesh_for_test(flat, vertices, indices));
+      CHECK(vertices.size() == flat.positions.size() && !vertices.empty());
+      CHECK(flat.normals.size() == flat.positions.size() && flat.uvs.size() == flat.positions.size());
+      if (vertices.size() != flat.positions.size() || flat.normals.size() != flat.positions.size() ||
+          flat.uvs.size() != flat.positions.size()) continue;
+
+      bool attributes_match = true;
+      for (size_t i = 0; i < vertices.size(); i++) {
+        const Vec3 p = flat.positions[i], n = flat.normals[i];
+        const Vec2 uv = flat.uvs[i];
+        const gpu::RasterVertex expected{{p.x, p.y, p.z}, {n.x, n.y, n.z}, {uv.x, uv.y}};
+        if (std::memcmp(&vertices[i], &expected, sizeof(expected)) != 0) {
+          attributes_match = false;
+          break;
+        }
+      }
+      CHECK(attributes_match);
+      if (!multi) {
+        CHECK(indices == flat.indices);
+      }
+      else {
+        std::vector<uint32_t> expected;
+        for (uint16_t slot : {0, 1})
+          for (size_t triangle = 0; triangle < flat.tri_material.size(); triangle++)
+            if (flat.tri_material[triangle] == slot)
+              expected.insert(expected.end(), &flat.indices[triangle * 3], &flat.indices[triangle * 3] + 3);
+        CHECK(expected.size() == flat.indices.size());
+        CHECK(indices == expected && indices != flat.indices);
+      }
+
+      ed.step_frame_headless();
+      CHECK(ed.scene_on_gpu_for_test() && pixels() == first);
+      ed.command("edit off");
+      ed.command("meshop shade_flat");
+      ed.step_frame_headless();
+      CHECK(!obj->get<MeshFilter>()->mesh->any_smooth());
+      ed.command("edit vertex");
+      ed.step_frame_headless();
+      CHECK(ed.in_edit_mode() && ed.scene_on_gpu_for_test() && pixels() == first);
+    }
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -9146,4 +9226,5 @@ void run_gpu_tests() {
   tests_round565_gpu();
   tests_round563_gpu();
   tests_round564_gpu();
+  tests_round589_gpu();
 }

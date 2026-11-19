@@ -13614,6 +13614,122 @@ static void tests_round572() {
   });
 }
 
+/* Round 589 (task 0571): an Edit Mode frame has the authored-flat picture and keeps the source face and corner IDs. */
+static MeshPtr r589_folded_panel(bool smooth) {
+  auto mesh = std::make_shared<Mesh>();
+  mesh->positions = {{-1.0f, -0.7f, 0.0f}, {0.0f, -0.7f, 0.0f}, {0.0f, 0.7f, 0.0f}, {1.0f, -0.7f, -0.6f}};
+  mesh->add_face({0, 1, 2});
+  mesh->add_face({1, 3, 2});
+  mesh->smooth = smooth;
+  mesh->face_material = {1, 0};
+  mesh->uvs = {{0.0f, 0.0f}, {0.5f, 0.0f}, {0.5f, 1.0f}, {0.75f, 0.25f}, {1.0f, 0.0f}, {0.75f, 0.75f}};
+  ColorAttribute color = mesh->make_color("Seam", ColorAttribute::Domain::Corner, Vec4(1, 1, 1, 1));
+  color.rgba = {{1, 0, 0, 0.5f}, {1, 0.25f, 0, 0.625f}, {1, 0.5f, 0, 0.75f},
+                {0, 0.25f, 1, 0.875f}, {0, 0.5f, 1, 0.75f}, {0, 0, 1, 1}};
+  mesh->color_attributes.push_back(std::move(color));
+  mesh->active_color = mesh->render_color = 0;
+  mesh->touch();
+  return mesh;
+}
+
+static void tests_round589() {
+  test("Edit Mode first frame: a flat-shaded fold keeps faces, materials and both sides of its UV and RGBA seams", [] {
+    const MeshPtr smooth = r589_folded_panel(true), authored_flat = r589_folded_panel(false);
+    const RenderMesh &normal = smooth->render_mesh();
+    const RenderMesh &expected = authored_flat->render_mesh();
+    const RenderMesh &flat = smooth->render_mesh(true);
+    CHECK(normal.normals != expected.normals);  // A positive control for accidentally drawing the smooth cache.
+    CHECK(flat.positions == expected.positions && flat.normals == expected.normals);
+    CHECK(flat.indices == expected.indices && flat.tri_corner == expected.tri_corner);
+    CHECK(flat.tri_face == (std::vector<uint32_t>{0, 1}));
+    CHECK(flat.tri_material == (std::vector<uint16_t>{1, 0}));
+    CHECK(flat.uvs.size() == flat.positions.size());
+    const std::vector<Vec4> *colors = smooth->render_vertex_colors(flat);
+    CHECK(colors && colors->size() == flat.positions.size());
+    if (!colors || colors->size() != flat.positions.size() || flat.uvs.size() != flat.positions.size()) return;
+    CHECK(flat.indices.size() == 6 && flat.tri_corner.size() == 6);
+    if (flat.indices.size() != 6 || flat.tri_corner.size() != 6) return;
+    for (size_t k = 0; k < flat.indices.size(); k++) {
+      const uint32_t rv = flat.indices[k], corner = flat.tri_corner[k];
+      CHECK(rv < flat.positions.size() && corner < smooth->corner_count());
+      if (rv >= flat.positions.size() || corner >= smooth->corner_count()) return;
+      CHECK(flat.positions[rv] == smooth->positions[smooth->corner_verts[corner]]);
+      CHECK(flat.uvs[rv].x == smooth->uvs[corner].x && flat.uvs[rv].y == smooth->uvs[corner].y);
+      const Vec4 got = (*colors)[rv], want = smooth->color_attributes[0].rgba[corner];
+      CHECK(got.x == want.x && got.y == want.y && got.z == want.z && got.w == want.w);
+    }
+  });
+  test("Edit Mode first frame: CPU flat pixels and face picking survive an extrude, undo, re-entry and a visible modifier", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.viewport_device_for_test(1);
+    ed.command("camera 0 8 6 0 1.7 0");
+    ed.command("shading shaded");
+    ed.command("tool select");
+    GameObject *panel = ed.scene().create("Folded Panel");
+    panel->set_local_position({0, 1.7f, 0});
+    MeshFilter *filter = panel->add<MeshFilter>();
+    MeshRenderer *renderer = panel->add<MeshRenderer>();
+    renderer->materials = {make_material("Left", Vec3(0.9f, 0.8f, 0.8f)), make_material("Right", Vec3(0.8f, 0.8f, 0.9f))};
+    for (const MaterialPtr &mat : renderer->materials) mat->vertex_color = true;
+    filter->mesh = r589_folded_panel(false);
+    ed.command("select Folded Panel");
+    ed.step_frame_headless();
+    ed.command("edit face");
+    ed.step_frame_headless();
+    const auto pixels = [&] { return r34_crop(ed, ed.scene_view_rect()); };
+    const std::vector<uint32_t> reference = pixels();
+    CHECK(ed.in_edit_mode() && ed.scene_drawn_for_test() && !reference.empty());
+
+    ed.command("edit off");
+    filter->mesh = r589_folded_panel(true);
+    ed.commit_change("Set up folded panel");
+    ed.step_frame_headless();
+    const std::vector<uint32_t> object_pixels = pixels();
+    ed.command("edit face");
+    ed.step_frame_headless();
+    CHECK(ed.in_edit_mode() && !ed.scene_on_gpu_for_test());
+    const std::vector<uint32_t> first = pixels();
+    CHECK(first == reference && first != object_pixels);
+
+    int x = 0, y = 0;
+    const bool projected = ed.project_to_window(panel->world_matrix().point({-1.0f / 3.0f, -0.7f / 3.0f, 0.0f}), x, y);
+    CHECK(projected);
+    if (!projected) return;
+    const Recti view = ed.scene_view_rect();
+    CHECK(ed.scene_id_for_test(x - view.x, y - view.y) == (uint32_t)panel->id);
+    ed.step_frame_headless();
+    CHECK(pixels() == reference);
+    r34_click(ed, x, y);
+    const std::vector<uint8_t> picked = ed.face_sel_for_test();
+    CHECK(picked == (std::vector<uint8_t>{1, 0}));
+    ed.command("editop extrude");
+    ed.step_frame_headless();
+    CHECK(filter->mesh->face_count() > 2);
+    ed.command("undo");
+    ed.step_frame_headless();
+    panel = ed.scene().find_by_name("Folded Panel");
+    CHECK(panel && panel->get<MeshFilter>()->mesh->face_count() == 2 && ed.face_sel_for_test() == picked);
+    if (!panel) return;
+
+    ed.command("edit off");
+    r34_park_mouse(ed);
+    ed.command("edit face");
+    ed.step_frame_headless();
+    CHECK(pixels() == reference);
+    ArrayModifier *array = panel->add<ArrayModifier>();
+    array->count = 2;
+    array->relative_offset = {1.25f, 0, 0};
+    ed.step_frame_headless();
+    CHECK(pixels() != reference);  // Show in Edit Mode is enabled; the second panel is in the camera's view.
+    const Mesh *evaluated = panel->evaluated_mesh(2);
+    CHECK(evaluated && evaluated->face_count() == 4);
+    array->show_in_editmode = false;
+    ed.step_frame_headless();
+    CHECK(pixels() == reference);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13673,4 +13789,5 @@ void run_render_tests() {
   tests_round554();
   tests_round556();
   tests_round572();
+  tests_round589();
 }

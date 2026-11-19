@@ -726,7 +726,14 @@ gpu::RasterVertex raster_vertex(const RenderMesh &rm, size_t i) {
 
 std::vector<gpu::RasterVertex> raster_vertices(const RenderMesh &rm) {
   std::vector<gpu::RasterVertex> v(rm.positions.size());
-  for (size_t i = 0; i < v.size(); i++) v[i] = raster_vertex(rm, i);
+  const int64_t count = (int64_t)v.size();
+  auto pack = [&](int64_t first, int64_t last) {
+    for (int64_t i = first; i < last; i++) v[(size_t)i] = raster_vertex(rm, (size_t)i);
+  };
+  /* Large flat meshes can have four render vertices per face. Fill disjoint ranges
+   * of the same vertex array on workers and keep the small sends on the calling thread. */
+  if (count >= 262144) JobSystem::global().parallel_for(count, 16384, pack);
+  else pack(0, count);
   return v;
 }
 
