@@ -182,6 +182,8 @@ It is rebuilt at publish, not at CI green (that reaches the owner one to three h
 merge (the exe already has that work). Never during a timed window.
 
 ## The hourly check and the board
+
+Follow the [parallel verification procedure](#parallel-verification-and-evidence) for evidence routing.
 - **Hourly**, while parallel tasks run, the coordinator looks for stalls (a worktree that has not changed, a
   build queued behind a dead slot holder), reads CI on the open PRs with `gh pr checks`, routes each red to the
   task that owns the file, and frees stale locks whose owners have nothing running.
@@ -200,3 +202,31 @@ merge (the exe already has that work). Never during a timed window.
 - Before publication, report the candidate revision and review verdict first. After publication, lead with the PR link and head commit.
 - Helper scripts that prove useful go into `tools/dev/`, with their paths as settings at the top; scratch
   folders are never uploaded.
+
+## Parallel verification and evidence
+
+- **Route a change once.** In each pass with shared dependencies, record producer, consumer,
+  public interface or fixture, candidate revision and evidence link in a shared scratch index.
+  The producer updates its entry and alerts the affected consumer. Resource owners hand a released
+  slot directly to the next scheduled worker. Escalate to the Hub when ownership or order changes,
+  another team is blocked, an owner decision is required, or the candidate is ready for review.
+  Routine acknowledgments and duplicate status reports add no evidence.
+- **Exercise the first connected path early.** As soon as one representative input can traverse a
+  new subsystem, run a small test through its normal entry point. For an importer, load one textured
+  model into a scratch project, save it and reopen in a fresh process with its sources detached.
+  Record the revision and result while independent readers continue.
+- **Freeze the joined candidate for full verification.** Producers identify their exact ready
+  inputs. The verifier records one combined revision and runs required suites on that revision.
+  Rebuild the app and tests with fresh objects after a shared layout or ABI change. On later
+  edits, identify invalidated evidence and repeat the affected checks and required final gates.
+- **Give each role a fresh brief.** Supply its task, worktree, candidate, owned paths, acceptance
+  criteria and source/evidence pointers. The tester derives cases from the spec before reading the
+  diff. The reviewer receives the tested diff and evidence, including any gaps.
+- **Collect evidence mechanically.** The runner records the tested SHA and real process exit status
+  with one native log per invocation. Use the [evidence helper](../../tools/dev/verification_evidence.py)
+  with `native --revision SHA --group NAME --exit-code EXIT --log PATH` and add `--expected COUNT`
+  when the fixture has a known total. For a hosted run use `ci --revision SHA --repo OWNER/REPO --run ID`.
+  Keep the JSON receipt and logs in scratch. The native SHA comes from the build/run manifest.
+  Check the manifest when attributing a result to a candidate. Inspect the first failed step for
+  a causal diagnostic. Preserve the last verified result if evidence collection is unavailable.
+  Report changed outcomes with supporting links. The hourly health check remains the fallback.

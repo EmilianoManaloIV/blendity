@@ -45,6 +45,11 @@ and [rules reference](https://learn.chatgpt.com/docs/agent-configuration/rules).
 
 ## Compact handoffs
 
+Start each role with a fresh brief scoped to its round. Link the spec, candidate, owned paths,
+acceptance criteria and relevant evidence. Copy only the context needed for that role's decision.
+The producer handles ordinary dependency updates directly. Follow the [parallel verification
+procedure](METHOD.md#parallel-verification-and-evidence) for smoke tests, revision selection and receipts.
+
 The hub or assigned task lead sends a fresh brief for each role in the
 [dispatch sequence](METHOD.md#codex-worker-dispatch). Include what each worker needs to act.
 
