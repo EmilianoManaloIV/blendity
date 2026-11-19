@@ -14,10 +14,16 @@ on:
         description: Unfiltered Windows unit and quick stress suites
         type: boolean
         default: false
+      artifact_run_id:
+        description: Reuse a matching symbolized baseline artifact from this workflow run
+        type: string
+        default: ''
 permissions:
   contents: read
+  actions: read
 jobs:
   build:
+    if: inputs.artifact_run_id == ''
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -74,20 +80,29 @@ jobs:
             dist/windows/shaders
             dist/windows/licenses
   test:
+    if: always() && (needs.build.result == 'success' || (inputs.artifact_run_id != '' && needs.build.result == 'skipped'))
     runs-on: windows-latest
     needs: build
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, stress]
+        suite: ${{ fromJSON(inputs.artifact_run_id && '["stress"]' || '["unit","stress"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_sha }}
       - uses: actions/download-artifact@v4
+        if: inputs.artifact_run_id == ''
         with:
           name: windows-14.52-binaries
+          path: dist/windows
+      - uses: actions/download-artifact@v4
+        if: inputs.artifact_run_id != ''
+        with:
+          name: windows-14.52-with-symbols
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
           path: dist/windows
       - name: Run existing tests with matching symbols
         env:
@@ -115,7 +130,7 @@ jobs:
           if ($code -ne 0) {
             $debugger = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
             if (Test-Path $debugger) {
-              & $debugger -lines -G -c 'sxe -c "kb;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
+              & $debugger -lines -G -c 'sxe -c "knL;.frame /c 2;dv /t head;dv /t he;dv /t f;dv /t g;dx this->np;dx this->nf;dx this->arity;q" av;g' $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
             } elseif (Get-Command lldb -ErrorAction SilentlyContinue) {
               & lldb --batch --one-line 'run' --one-line-on-crash 'thread backtrace' -- $program @arguments 2>&1 | Tee-Object -FilePath "$scratch/stack.log"
             } else {
