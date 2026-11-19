@@ -79,12 +79,12 @@ untouched), native material contents, renderer pixels and each old/new placement
 that the native asset inventory stays fixed. The importer may add provider and fingerprint records to its
 existing metadata directory when a source moves.
 
-Windows passed all 5,255 registered-group checks, including the separate cold process, and 905 identity
+Windows and hosted Linux each passed all 5,255 registered-group checks, including the separate cold process, and 905 identity
 checks (114, 84, 238, 313 and 156). Each process exited zero. The initial six group totals were 899 for
 `source_content`, 528 for `source1_model`, 1,846 for `source1_map`, 436 for `source2_model`, 550 for
 `source2_map` and 772 for `source_workshop`, followed by 224 cold checks. The five-process probe preserved
 every native PNG byte and both material edits. See `C:/blab/0588-verification/identity-verified-win/summary.json`
-and `phases.log`. The same product sources also passed 224 cold checks against the earlier Windows fixture
+and `phases.log` for Windows. On Ubuntu, all seven registered group invocations and all five identity phases exited zero on `26e64222`. The [hosted results artifact](https://github.com/EmilianoManaloIV/blendity/actions/runs/44608047654/artifacts/14571548066) contains `build.log`, each group log, `summary.json`, and `identity.log` (artifact SHA-256 `6a8ab4d48e9acbec6b4fc7be2ae838b231fa8f2b556442f9f76188d39f658013`). The final clean builds therefore passed 6,160 focused checks on each OS. The same product sources also passed 224 cold checks against the earlier Windows fixture
 projects, copied without their source or import cache.
 
 A separate diagnostic renamed the anonymous VPK while moving it. The importer treated that renamed archive as
