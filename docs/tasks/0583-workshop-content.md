@@ -1,6 +1,6 @@
 # 0583 Workshop content selection and mounting
 
-- **Status:** independently approved candidate; hosted joined checks and publication pending
+- **Status:** independently approved and verified in the joined Windows and Linux Workshop suites. [Cross-title results](0588-workshop-verification.md).
 - **Requirements:** R-6, [pass 0582](0582-workshop-import.md)
 - **Decisions:** [ADR 0154](../decisions/0154-steam-workshop-import.md)
 - **Implementation:** planning task for the shared interface, then independent testing and review
