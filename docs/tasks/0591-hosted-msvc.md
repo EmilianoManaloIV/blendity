@@ -69,4 +69,18 @@ edit to `build.bat` with round 608 before changing the shared file.
 Run `pwsh -NoProfile -File tools/dev/test_hosted_msvc.ps1` on Windows. The fixture uses a scratch Visual Studio
 layout, stand-ins for `vswhere`, the installer and the compiler, and a stub build. PowerShell 7 and Windows
 PowerShell 5.1 passed eight setup and eleven build scenarios, including negative exit codes from activation
-and verification. Hosted installation and both workflows need evidence from the reviewed revision.
+and verification.
+
+Diagnostic revision `13137680`, attempt 1, exercised both hosted image configurations on 2026-11-19.
+
+- The regular build on image `20261103.298.1` already had toolset `14.51.36231`. Both setup
+  invocations skipped the installer. The build verified x64 compiler `19.51.36260.0` and linker
+  `14.51.36260.0`, then compiled the editor, tests and stress executable. [Build log](https://github.com/EmilianoManaloIV/blendity/actions/runs/44615390495/job/135883877438)
+- The release-validation VM on image `20261116.315.1` initially had only 14.29, 14.44 and 14.52.
+  The installer added `14.51.36231` in 651 seconds with exit 0. A second setup on that VM skipped
+  the installer. Both builds verified x64 compiler `19.51.36263.0` and linker `14.51.36263.0`.
+  The library probe, full and lite installation, headless screenshots, uninstall and artifact upload
+  passed. The tag-only publication job skipped. [Release validation log](https://github.com/EmilianoManaloIV/blendity/actions/runs/44615391184/job/135887129038) · [Workflow gates](https://github.com/EmilianoManaloIV/blendity/actions/runs/44615391184)
+
+The reviewed wrapper includes the signed-exit correction and hides the installer window. The
+combined PR runs the normal unit, quick stress and installer checks on its own revision. [PR 497 checks](https://github.com/EmilianoManaloIV/blendity/pull/497/checks)

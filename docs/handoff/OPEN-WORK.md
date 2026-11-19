@@ -148,7 +148,9 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   14.51 patch in the Visual Studio instance chosen by `vswhere`. On a runner that lacks it, the helper adds the
   versioned component with Visual Studio Installer. Each build activates that exact patch and checks the first compiler
   and linker on PATH along with `VCToolsVersion`. Setup or activation failures stop the job. The run log records the image,
-  revision, inventory, installer result and tool paths. See [task 0591](../tasks/0591-hosted-msvc.md) for hosted evidence.
+  revision, inventory, installer result and tool paths. Image `20261103.298.1` reused its installed
+  14.51 toolset. On `20261116.315.1`, the installer added `14.51.36231` in 651 seconds, repeat setup
+  reused it, and both installer modes passed. [Task 0591 evidence](../tasks/0591-hosted-msvc.md#verification)
   MSVC 14.44 previously stopped at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` with C2026 (string literal too long).
 - **Branch-only MSVC 14.44 trial (task 0562).** With the long strings split, the diagnostic build compiled and passed quick stress. Four bit-for-bit Catmull-Clark checks failed in the full Windows suite. [Trial run](https://github.com/EmilianoManaloIV/blendity/actions/runs/44380568201)
 - **Round 582 compatibility status (2026-11-19).** The 14.52 candidate compiled and passed quick stress under
