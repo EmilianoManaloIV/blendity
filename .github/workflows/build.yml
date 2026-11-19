@@ -229,6 +229,19 @@ jobs:
             dist/linux/blendity_stress
             dist/linux/blendity_tests
             dist/linux/licenses
+      - name: Verify import and detached project reopen in separate processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BLENDITY_TEST_DIR="$(mktemp -d)"
+          export BLENDITY_CACHE_DIR="$BLENDITY_TEST_DIR/cache" BLENDITY_PREFS_DIR="$BLENDITY_TEST_DIR/prefs"
+          export BLENDITY_PROJECT="$BLENDITY_TEST_DIR/project" BLENDITY_TRASH="$BLENDITY_TEST_DIR/trash"
+          mkdir -p "$BLENDITY_CACHE_DIR" "$BLENDITY_PREFS_DIR" "$BLENDITY_PROJECT" "$BLENDITY_TRASH"
+          dist/linux/blendity_tests --list-groups | grep -w source_workshop
+          dist/linux/blendity_tests --group source_workshop | tee "$RUNNER_TEMP/initial.log"
+          BLENDITY_TEST_FILTER='detached reopen' BLENDITY_WORKSHOP_COLD_REOPEN=1 dist/linux/blendity_tests --group source_workshop | tee "$RUNNER_TEMP/cold.log"
+          grep -Fx '772 checks, 0 failed' "$RUNNER_TEMP/initial.log"
+          grep -Fx '224 checks, 0 failed' "$RUNNER_TEMP/cold.log"
       - name: Headless screenshot
         run: ./dist/linux/Blendity --headless-screenshot screenshot-linux.png
       - uses: actions/upload-artifact@v4
