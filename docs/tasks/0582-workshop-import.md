@@ -21,6 +21,9 @@ Resolve companions in the selected item and search additional user-selected Work
 
 ## Acceptance and delivery
 
+- For each title, verify material slots on a character, map surfaces and placed props. Resolve classic VMT/VTF or compiled Source 2 VMAT/VTEX dependencies from the item, embedded content and mounted roots. Convert supported channels to editable project materials and project-owned textures. Check per-face assignment, UV orientation, base colour and cutout alpha using distinguishable texels; verify each additional supported channel against its fixture. Report missing paths and unsupported shader features in the import summary.
+- In a fresh editor process, reopen the scratch project with mounts and temporary import cache unavailable. Inspect saved material/texture references and render the same textured surfaces. Explicit reimport preserves user material edits. Record which real assets had all dependencies available; use redistributable fixtures to cover channels absent from the real samples.
+
 - For humanoids in each target title, exercise manual bone posing on the imported skin and Auto IK on Selected Skeleton through the editor. Move hand and foot targets on both sides and verify the intended weighted vertices follow. On a fresh unskinned copy of the imported humanoid mesh, use marker-based Humanoid Auto-Rig and verify binding and posing. Check undo and save/reopen, and confirm importing a generic prop adds no humanoid controls. Cite the fixture, naming convention and result per title. See the [Rigging window](../../src/editor/rigging_window.cpp), [marker tool](../../src/editor/auto_rig_tool.cpp) and [Auto IK decision and checks](0048-ik.md).
 
 - Exercise classic SFM, Half-Life: Alyx and Counter-Strike 2 separately, with a skinned character and textured compiled map containing placed props for each. Verify bind pose, joint movement, scale, orientation, material assignment, and offline reopen. Preserve edits on explicit reimport.
