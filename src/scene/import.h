@@ -97,6 +97,10 @@ struct ImportResult {
   std::string summary;
   std::string source;               // the model file (its folder is where textures are looked for)
   std::vector<std::string> notes;   // what the import did or couldn't (textures found by name, maps split, ...)
+  // Source readers identify assets by canonical virtual path and semantic variant. The
+  // map keys below only locate the imported objects/cache files during this import.
+  std::map<const Material *, std::string> source_material_ids;
+  std::map<std::string, std::string> source_texture_ids;
   /* Work kept for the rest of the import (task 0134): the texture folders' files listed once, each channel split once,
    * the images written to the cache (two embedded "diffuse.png" of different content get two names). */
   bool listed = false;

@@ -193,6 +193,21 @@ LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp sr
 [ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"
 LIB_SRC="$LIB_SRC $EXTRA_C_SRC"  # (round 419: Tracy's client, when asked for)
 
+# The Workshop rounds land their *.cpp providers separately. Recompile the
+# two dispatch tables when a provider appears or disappears in this tree.
+SOURCE_ROUNDS="$OBJ/source_rounds"
+for stem in source1_model source1_map source2_model source2_map; do
+  [ ! -f "src/scene/$stem.cpp" ] || echo "$stem"
+done > "$SOURCE_ROUNDS.new"
+for stem in test_source_content test_source1_model test_source1_map test_source2_model test_source2_map test_source_workshop; do
+  [ ! -f "tests/$stem.cpp" ] || echo "$stem" >> "$SOURCE_ROUNDS.new"
+done
+if cmp -s "$SOURCE_ROUNDS.new" "$SOURCE_ROUNDS"; then
+  rm "$SOURCE_ROUNDS.new"
+else
+  mv "$SOURCE_ROUNDS.new" "$SOURCE_ROUNDS"
+fi
+
 compile() {  # src -> object path (only rebuilds when the source or any header is newer)
   local src="$1"
   local obj="$OBJ/$(echo "$src" | tr '/' '_').o"
@@ -202,7 +217,9 @@ compile() {  # src -> object path (only rebuilds when the source or any header i
     tests/*) newest_header="$(ls -t "$newest_header" tests/*.h tests/fixtures/*.h 2>/dev/null | head -1)" ;;
     stress/*) newest_header="$(ls -t "$newest_header" stress/*.inc tests/fixtures/*.h 2>/dev/null | head -1)" ;;
   esac
-  if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ]; then
+  local dispatch_dependency=""
+  case "$src" in src/scene/source_content.cpp|tests/test_main.cpp) dispatch_dependency="$SOURCE_ROUNDS" ;; esac
+  if [ ! -f "$obj" ] || [ "$src" -nt "$obj" ] || [ "$newest_header" -nt "$obj" ] || [ "$dispatch_dependency" -nt "$obj" ]; then
     local extra=""
     case "$src" in *.mm) extra="-fobjc-arc" ;; esac
     echo "  compiling $src"
@@ -213,7 +230,7 @@ compile() {  # src -> object path (only rebuilds when the source or any header i
   fi
 }
 export -f compile
-export CXX FLAGS OBJ CEXTRA
+export CXX FLAGS OBJ CEXTRA SOURCE_ROUNDS
 
 echo "[blendity] Compiling ($CONFIG, $OS, $JOBS jobs)..."
 TEST_SRC="$(ls tests/*.cpp)"
