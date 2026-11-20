@@ -1,8 +1,25 @@
-# 0594. Retire completed worktrees and task branches
+# 0594: Retire completed worktrees and task branches
 
-**Status:** Completed in round 612 and verified against the closing inventory. The owner's workspace cleanup request authorizes ordinary removal of verified stale worktrees and merged branches. The Hub reviews the exact candidate manifest before removal.
+- **Status:** in review
+- **Authorization:** The owner's workspace cleanup request authorizes ordinary removal of verified stale worktrees and merged branches. The Hub reviews the exact candidate manifest before removal.
+- **Requirements:** AGENTS.md workspace protection and verified merged-branch cleanup.
+- **Decisions:** No new ADR. The existing Hub-only merged-task cleanup procedure applies.
+- **Implementation:** Hub-controlled cleanup in round 612, with an independent closing audit.
+- **PR:** [#498](https://github.com/EmilianoManaloIV/blendity/pull/498), carried by [#499](https://github.com/EmilianoManaloIV/blendity/pull/499)
 
-## Procedure and acceptance
+## Goal
+
+Retire verified stale worktrees and merged task branches and report the storage reclaimed.
+
+## Scope
+
+Inspect and retire only the verified candidates in the Hub's exact manifest. Retain active, parked and uncertain items.
+
+## Likely files
+
+`tools/dev/cleanup_task_branch.py` is the existing verification helper. The manifest, inventory and receipts stay in scratch.
+
+## Acceptance criteria
 
 1. Enumerate registered worktrees, local heads and remote heads against the current published main revision. Record each candidate path, exact head, ownership, reason and merge proof in scratch. Verify open PRs and active build, editor and dashboard locations before removal.
 2. Preserve the owner's checkout, parked tasks 0562 and 0563, protected folders, current rounds, active tools, retained evidence, changes and commits without verified ancestry. Recheck the worktree status including ignored entries immediately before removal.
@@ -11,7 +28,21 @@
 
 References: [machine handoff](../handoff/MACHINE.md), [project Git rules](../../AGENTS.md), [merged branch verification](../../tools/dev/cleanup_task_branch.py).
 
+## Tests and checks to run
+
+Compare exact tips, reachability and worktree status including ignored entries before removal. Audit the resulting inventory and each receipt.
+
+## Risks and edge cases
+
+Keep unique or unverified data, linked paths, retained evidence and active consumers. The helper can refuse merges whose parentage or recorded head fails validation.
+
+## Documentation to update
+
+Record the closing inventory and retained exceptions here and in `changelog.d/612-verified-cleanup.md`.
+
 ## Outcome
+
+Completed in round 612 and verified against the closing inventory.
 
 The initial manifest covered 153 worktrees, 162 local heads and 170 remote heads at `bf7e9c3f`. The Hub released seven clean checkouts and 24 checkouts whose extra files were verified compiler, linker or packaging outputs. The scan checked the disposable paths, protected directory contents against Git objects, filesystem links, actual tracked and ignored status, process references, and measured allocated file bytes before ordinary Git worktree removal.
 
@@ -20,3 +51,5 @@ The 31 retired checkouts released 61,712,774,408 allocated file bytes (57.47 GiB
 The remote helper declined 47 candidate branches. In 39 cases GitHub's recorded PR merge lacked the required two parents, and in eight cases the second-parent ancestry check failed. Ordinary local branch removal also declined two refs with upstream relationships. Those refs, parked tasks 0562/0563, and checkouts with unique data, historical test reports, links, or ongoing consumers were retained.
 
 The closing audit compared both inventories against every receipt and rechecked the merge ancestry of all 97 retired remote heads. It found every reported path and ref absent and no unexplained disappearance. The scratch evidence is in `C:/blab/cleanup612/`: `manifest.json`, `rebuildable.json`, the three receipt files, and `after.json`. The recovered allocation excludes shared files and Git object storage.
+
+The published task record is in [#498](https://github.com/EmilianoManaloIV/blendity/pull/498), carried by [#499](https://github.com/EmilianoManaloIV/blendity/pull/499). PR #498 was open at head `22d735b345c40947cbefd3455923bdc212cd2b82` when checked on November 20, 2026. The cumulative PR #499 was open at head `66feaeb3adee0f85c373f304a181c2ce0e23b6ce`.
