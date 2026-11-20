@@ -73,6 +73,10 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   dragging.
 - **Done:** each needs its own measurement round first; treat the document as the list, not as a plan.
 
+### Fresh-process Textures window still misses its 100 ms budget
+
+After round 617, opening 2,000 existing procedural textures in a fresh Windows CPU editor took a median 169.0 ms at the default worker limit and 244.7 ms with a two-worker cap. The following frame and same-process reopen took 3.5–3.9 ms. Profile directory discovery and visible thumbnails on the improved build before choosing the next change. Keep nested paths, aliases, case-sensitive filesystem identity, search and selection in the acceptance fixture. [Task 0599](../tasks/0599-cold-textures.md)
+
 ## Testability and flaky checks
 
 ### 8. `anim_tick` and playback read the real clock (M)
