@@ -2,6 +2,7 @@
 // blendity_tests: the gpu tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/core/view_perf.h"
+#include "../src/render/gpu_corner_arena.h"
 #include "../src/render/gpu_vk.h"
 #include <cstring>
 #include <numeric>
@@ -9250,6 +9251,165 @@ static void tests_round616_gpu() {
   });
 }
 
+/* Supply the actual triangle positions and a nonuniform lightmap coordinate on every corner. */
+static std::vector<float> r620_baked_corners(const RenderMesh &mesh, float u) {
+  std::vector<float> corners;
+  corners.reserve(mesh.indices.size() * 8);
+  for (uint32_t i : mesh.indices) {
+    const Vec3 p = mesh.positions[i];
+    corners.insert(corners.end(), {p.x, p.y, p.z, u + p.x * 0.1f, 0.5f, 0.0f, 0.0f, 0.0f});
+  }
+  return corners;
+}
+
+static void tests_round620_gpu() {
+  test("baked corner arena: a small request uses compact storage on constrained devices and keeps the large-card reserve (round 620)", [] {
+    constexpr uint64_t mib = 1ull << 20;
+    constexpr uint64_t triangle = 24 * sizeof(float);
+    CHECK(gpu::corner_arena_compact(true, 16384));
+    CHECK(gpu::corner_arena_compact(false, 4096));
+    CHECK(!gpu::corner_arena_compact(false, 4097));
+    CHECK(!gpu::corner_arena_compact(false, 0));
+    CHECK((gpu::corner_arena_sizes(triangle, 0, 128 * mib, true) == std::array<uint64_t, 3>{mib, triangle, triangle}));
+    CHECK((gpu::corner_arena_sizes(triangle, 0, 128 * mib, false) == std::array<uint64_t, 3>{64 * mib, 16 * mib, triangle}));
+
+    const uint64_t need = mib + triangle;
+    CHECK(gpu::corner_arena_sizes(need, mib, 128 * mib, true)[0] == 2 * mib);
+    CHECK(gpu::corner_arena_sizes(need, mib, 128 * mib, false)[0] == 64 * mib);
+    const uint64_t limit = need + triangle;
+    for (bool compact : {true, false}) {
+      const auto sizes = gpu::corner_arena_sizes(need, mib, limit, compact);
+      CHECK(sizes.front() == limit);
+      CHECK(sizes.back() == need);
+      CHECK(std::all_of(sizes.begin(), sizes.end(), [=](uint64_t size) { return size >= need && size <= limit; }));
+      const auto exact = gpu::corner_arena_sizes(need, mib, need, compact);
+      CHECK(std::all_of(exact.begin(), exact.end(), [=](uint64_t size) { return size == need; }));
+    }
+  });
+
+  test("baked corner arena: only requests through 4 MiB use compact growth (round 620)", [] {
+    constexpr uint64_t mib = 1ull << 20;
+    constexpr uint64_t boundary = 4 * mib;
+    constexpr uint64_t device_limit = 128 * mib;
+    /* An earlier exact-size retry can leave a capacity whose double exceeds the compact ceiling. */
+    for (uint64_t need : {boundary - 1, boundary}) {
+      const auto sizes = gpu::corner_arena_sizes(need, 3 * mib, device_limit, true);
+      CHECK((sizes == std::array<uint64_t, 3>{boundary, need, need}));
+    }
+
+    const uint64_t above = boundary + 1;
+    const auto transition = gpu::corner_arena_sizes(above, boundary, device_limit, true);
+    CHECK((transition == std::array<uint64_t, 3>{64 * mib, 16 * mib, above}));
+    const auto limited = gpu::corner_arena_sizes(above, boundary, 8 * mib, true);
+    CHECK((limited == std::array<uint64_t, 3>{8 * mib, 8 * mib, above}));
+
+    constexpr uint64_t large_first = 40 * mib;
+    const auto first = gpu::corner_arena_sizes(large_first, 4096, device_limit, true);
+    CHECK((first == std::array<uint64_t, 3>{80 * mib, 80 * mib, large_first}));
+    CHECK(first == gpu::corner_arena_sizes(large_first, 4096, device_limit, false));
+  });
+
+  test("baked corner arena: split blocks keep their own lightmap pixels while neighbours are reused and retired (round 620)", [] {
+    r565::Rig rig;
+    if (!rig.open()) return;
+    if (!rig.g->can_highlight_faces()) {
+      std::printf("    no fragment primitive IDs for baked lighting: skipped\n");
+      return;
+    }
+
+    std::string err;
+    Texture tex;
+    tex.srgb = false;
+    tex.is_float = true;
+    tex.width = 2;
+    tex.height = 1;
+    tex.levels.push_back({2, 1, {}, {{2.0f, 0.1f, 0.1f, 1.0f}, {0.1f, 0.1f, 2.0f, 1.0f}}});
+    const int page = rig.g->add_texture(tex, &err);
+    CHECK(page >= 0);
+    if (page < 0) return;
+
+    const MeshPtr cube = primitives::cube(1.0f);
+    const std::vector<float> red = r620_baked_corners(cube->render_mesh(), 0.25f);
+    const std::vector<float> blue = r620_baked_corners(cube->render_mesh(), 0.75f);
+    const int tris = (int)(red.size() / 24);
+    std::vector<float> hole = red;
+    hole.insert(hole.end(), blue.begin(), blue.end());
+    hole.insert(hole.end(), red.begin(), red.end());
+    const auto upload = [&](const std::vector<float> &corners) {
+      const int base = rig.g->add_corners(corners.data(), corners.size(), &err);
+      if (base < 0) std::printf("    add_corners failed: %s\n", err.c_str());
+      return base;
+    };
+
+    std::vector<gpu::RasterInstance> inst = {
+        rig.make(rig.cube, {-1, 0, 0}, {1, 1, 1}, 1),
+        rig.make(rig.cube, {1, 0, 0}, {1, 1, 1}, 2),
+    };
+    for (gpu::RasterInstance &in : inst) {
+      in.baked = true;
+      in.lightmap = page;
+    }
+    const gpu::RasterFrame frame = rig.frame({}, 0, false);
+    const auto draw = [&](int left, int right, r565::Pic &pic) {
+      inst[0].corner_base = left;
+      inst[1].corner_base = right;
+      return r565::draw(rig, inst, frame, pic);
+    };
+
+    const int first = upload(hole), last = upload(blue);
+    CHECK(first == 0 && last == 3 * tris);
+    if (first != 0 || last != 3 * tris) return;
+    r565::Pic reference, changed, reset, after;
+    const bool drew = draw(first, last, reference) && draw(first + tris, first, changed) && draw(last, last, reset);
+    CHECK(drew);
+    if (!drew) return;
+    /* Make sure a bad block changes both visible objects in this fixture. */
+    CHECK(reference.shows_objects() && reference.ids == changed.ids && reference.depth == changed.depth);
+    bool changed_left = false, changed_right = false;
+    for (size_t i = 0; i < reference.color.size(); i++) {
+      if (reference.color[i] == changed.color[i]) continue;
+      changed_left |= reference.ids[i] == 1;
+      changed_right |= reference.ids[i] == 2;
+    }
+    CHECK(changed_left && changed_right);
+
+    /* Rejected lengths must leave the live blocks readable. The oversize request must be rejected before reading data. */
+    const size_t beyond_limit = ((size_t{1} << 31) / sizeof(float) / 24 + 1) * 24;
+    for (size_t invalid : {size_t{23}, beyond_limit}) {
+      err.clear();
+      CHECK(rig.g->add_corners(red.data(), invalid, &err) < 0 && !err.empty());
+    }
+    CHECK(draw(first, last, after) && reference.same(after));
+
+    for (int pass = 0; pass < 6; pass++) {
+      rig.g->remove_corners(first, hole.size());
+      const int left = upload(red), neighbour = upload(blue), end = upload(red);
+      CHECK(left == first && neighbour == first + tris && end == first + 2 * tris);
+      if (left != first || neighbour != first + tris || end != first + 2 * tris) return;
+      const int extra = upload(red);
+      CHECK(extra == last + tris);
+      if (extra != last + tris) return;
+      CHECK(draw(left, last, after) && reference.same(after));
+      CHECK(draw(neighbour, end, after) && changed.same(after));
+      CHECK(draw(neighbour, extra, after) && changed.same(after));
+      /* Retire the split blocks in a different order from their allocation. */
+      rig.g->remove_corners(extra, red.size());
+      rig.g->remove_corners(neighbour, blue.size());
+      rig.g->remove_corners(left, red.size());
+      rig.g->remove_corners(end, red.size());
+      const int merged = upload(hole);
+      CHECK(merged == first);
+      if (merged != first) return;
+    }
+
+    rig.g->remove_corners(first, hole.size());
+    rig.g->remove_corners(last, blue.size());
+    const int again = upload(blue);
+    CHECK(again == first);
+    if (again == first) CHECK(draw(again, again, after) && reset.same(after));
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -9304,4 +9464,5 @@ void run_gpu_tests() {
   tests_round563_gpu();
   tests_round564_gpu();
   tests_round616_gpu();
+  tests_round620_gpu();
 }
