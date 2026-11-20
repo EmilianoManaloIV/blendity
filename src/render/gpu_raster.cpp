@@ -3033,6 +3033,7 @@ struct Slot {
    * sent yet, or a send that was not recorded); see_send: a send this frame's recording still owes. */
   Buf see, see_stage;
   size_t see_bytes = 0, see_send = 0;
+  uint64_t see_generation = 0;  // valid only with nonzero submitted see_bytes
   bool see_cached = false;  // (see_stage is in cached memory: it can be compared with)
 };
 
@@ -3941,7 +3942,7 @@ class VulkanRaster final : public Raster {
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, kStamps);
     stamp(kStampStart);
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
-    record_see(sl);    // (round 565: this view's see-through corners, when they are not the ones it holds)
+    record_see(sl, fr.see_generation);  // (round 565: this view's see-through corners, when they are not the ones it holds)
     record_skins();    // (round 519: the skinned meshes' posed vertices, one barrier after, before the first pass)
     bool traced = rt_wanted(fr);
     if (traced && !record_rt_shadows(sl, err)) traced = rt_give_up(err);  // (round 543: after the copies, before any set is bound)
@@ -4699,6 +4700,7 @@ class VulkanRaster final : public Raster {
   bool see_keep_ = true;                     // (round 565: a slot's see-through corners stay on the card while they are the same - write_see)
   int see_owed_slot_ = -1;                   // (the slot whose send the frame being recorded holds, until the frame is on the queue)
   size_t see_owed_bytes_ = 0;
+  uint64_t see_owed_generation_ = 0;
   bool fail_frame_once_ = false;             // (fail_next_frame_for_test)
   /* Round 532, 557: the Gaussian splats - bindings 40 the static splats and 42 their SH (device-local, kept while
    * splat_key_ holds), 41 the clouds' pick ids, 43 the frame's order, 44 the clouds' values (host-visible, written each frame). */
@@ -5574,8 +5576,8 @@ class VulkanRaster final : public Raster {
    * back to front for the view, and while the camera stands still - a pose dragged, a clip playing - they are the same
    * every frame. They were written whole into a buffer in the host's memory each frame (0.5 ms) for the card to fetch
    * across (0.6 ms of its frame at full clock, 3 ms in its lowest power state). Now each view's slot keeps its own on the
-   * card: the frame's corners are compared with the host's copy of what the slot last sent, and only a list that differs
-   * is copied there and sent (one buffer copy at the frame's start). Two views have different lists; each keeps its own.
+   * card. A known generation skips the read of both arrays. Other lists are compared with the host's cached copy when
+   * available, and a list that differs is copied and sent (one buffer copy at the frame's start).
    * A frame without see-through surfaces sends and draws none: the slot's stay for the next that has them. */
   bool make_see(Buf &b, size_t bytes) {
     return make_buffer(b, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -5601,16 +5603,26 @@ class VulkanRaster final : public Raster {
       sl.see_bytes = 0;
       const VkMemoryPropertyFlags cached = host_props() | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
       sl.see_cached = make_buffer(sl.see_stage, roomy, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, cached) || make_buffer(sl.see_stage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, cached);
-      /* (A card with no cached memory the host can write: its uncached kind is slow to read back, so nothing is compared
-       * and the corners go every frame, as before.) */
+      /* Uncached host memory is slow to read back. Only a known generation can be reused there. */
       if (!sl.see_cached && !make_buffer(sl.see_stage, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host_props()))
         return fail(err, "out of memory for the see-through surfaces");
     }
-    if (see_keep_ && sl.see_cached && sl.see_bytes == bytes && std::memcmp(sl.see_stage.mapped, fr.see_through.data(), bytes) == 0) {
-      detail_.see_kept++;
-      return true;
+    if (see_keep_ && sl.see_bytes == bytes) {
+      if (fr.see_generation && fr.see_generation == sl.see_generation) {
+        detail_.see_generation_hits++;
+        detail_.see_kept++;
+        return true;
+      }
+      if (sl.see_cached) {
+        detail_.see_compared++;
+        if (std::memcmp(sl.see_stage.mapped, fr.see_through.data(), bytes) == 0) {
+          if (fr.see_generation) sl.see_generation = fr.see_generation;
+          detail_.see_kept++;
+          return true;
+        }
+      }
     }
-    sl.see_bytes = 0;  // (until the send is recorded: a frame that fails before then sends again)
+    sl.see_bytes = 0;  // staging no longer matches the card until the copy is submitted
     std::memcpy(sl.see_stage.mapped, fr.see_through.data(), bytes);
     sl.see_send = bytes;
     detail_.see_sent++;
@@ -5619,16 +5631,21 @@ class VulkanRaster final : public Raster {
   /* (In the frame's command buffer, before anything draws. The slot holds the corners only once that frame is on the
    * queue - see_submitted: a frame that fails after this, its filters' targets or its submission, never runs the copy,
    * and the next frame must send again.) */
-  void record_see(Slot &sl) {
+  void record_see(Slot &sl, uint64_t generation) {
     if (!sl.see_send) return;
     const VkBufferCopy c{0, 0, sl.see_send};
     f_.vkCmdCopyBuffer(cmd_, sl.see_stage.buf, sl.see.buf, 1, &c);
     uploaded();
     see_owed_slot_ = (int)(&sl - slots_), see_owed_bytes_ = sl.see_send;
+    see_owed_generation_ = generation;
     sl.see_send = 0;
   }
   void see_submitted() {
-    if (see_owed_slot_ >= 0) slots_[see_owed_slot_].see_bytes = see_owed_bytes_;
+    if (see_owed_slot_ >= 0) {
+      Slot &sl = slots_[see_owed_slot_];
+      sl.see_bytes = see_owed_bytes_;
+      sl.see_generation = see_owed_generation_;
+    }
     see_owed_slot_ = -1;
   }
   /* The frame's constants and the instances, written into their host-visible buffers. */
