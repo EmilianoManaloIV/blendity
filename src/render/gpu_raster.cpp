@@ -16,6 +16,7 @@
 #include <map>
 
 #if defined(BL_WITH_VULKAN)
+#  include "gpu_corner_arena.h"
 #  include "gpu_vk.h"
 #  include "gpu_raster_rt.h"
 #  ifdef _WIN32
@@ -3128,6 +3129,7 @@ class VulkanRaster final : public Raster {
     f_.vkGetPhysicalDeviceProperties(pd_, &props);
     ts_period_ns_ = props.limits.timestampPeriod;
     max_storage_ = props.limits.maxStorageBufferRange;
+    compact_corners_ = corner_arena_compact(props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, info_.memory_mb);
     f_.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
     {
       const char *see = std::getenv("BLENDITY_CARD_SEE");  // (=resend: the see-through corners sent every frame, as before round 565 - write_see)
@@ -3662,17 +3664,20 @@ class VulkanRaster final : public Raster {
     for (size_t i = 0; i < corner_blocks_.size(); i++)  // (best fit over the freed blocks: the smallest that holds it)
       if (!corner_blocks_[i].live && corner_blocks_[i].n >= floats && (reuse < 0 || corner_blocks_[i].n < corner_blocks_[(size_t)reuse].n)) reuse = (int)i;
     if (reuse >= 0) at = corner_blocks_[(size_t)reuse].at;
+    const VkDeviceSize limit = std::min<VkDeviceSize>(max_storage_, 1ull << 31);
+    const VkDeviceSize limit_floats = limit / sizeof(float);
+    if (at > limit_floats || floats > limit_floats - at)
+      return fail(err, "the baked corners too large for the card's storage buffers"), -1;
     const size_t need = (at + floats) * sizeof(float);
     if (need > corner_buf_.size) {  // (grown with its contents: the other blocks stay where they are)
-      const VkDeviceSize limit = std::min<VkDeviceSize>(max_storage_, 1ull << 31);
-      if (need > limit) return fail(err, "the baked corners too large for the card's storage buffers"), -1;
       Buf bigger;
-      /* (Round 458: at least 64 MB at once - each growth waits for the card to go idle and copies the lot, which a scene's hundred
-       * first-use blocks paid again and again.) */
-      const VkDeviceSize want = std::min<VkDeviceSize>(limit, std::max<VkDeviceSize>(need * 2, 64ull << 20));
-      if (!make_buffer(bigger, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()) &&  // (no room for 64 MB: what the block needs, doubled, as before)
-          !make_buffer(bigger, std::min<VkDeviceSize>(limit, std::max<VkDeviceSize>(need * 2, 16ull << 20)), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
-        return fail(err, "out of memory for the baked corners"), -1;
+      VkDeviceSize attempted = 0;
+      for (VkDeviceSize want : corner_arena_sizes(need, corner_buf_.size, limit, compact_corners_)) {
+        if (want == attempted) continue;
+        attempted = want;
+        if (make_buffer(bigger, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) break;
+      }
+      if (!bigger.mapped) return fail(err, "out of memory for the baked corners"), -1;
       f_.vkDeviceWaitIdle(dev_);
       if (corner_used_) std::memcpy(bigger.mapped, corner_buf_.mapped, std::min<size_t>(corner_used_ * sizeof(float), corner_buf_.size));
       free_buffer(corner_buf_);
@@ -3681,9 +3686,9 @@ class VulkanRaster final : public Raster {
     }
     std::memcpy((uint8_t *)corner_buf_.mapped + at * sizeof(float), data, floats * sizeof(float));
     if (reuse >= 0) {
-      CornerBlock &b = corner_blocks_[(size_t)reuse];
-      if (b.n > floats) corner_blocks_.push_back({b.at + floats, b.n - floats, false});  // (the rest stays free)
-      b.n = floats, b.live = true;
+      const CornerBlock b = corner_blocks_[(size_t)reuse];
+      if (b.n > floats) corner_blocks_.push_back({b.at + floats, b.n - floats, false});
+      corner_blocks_[(size_t)reuse] = {at, floats, true};  // (the split can reallocate the block table)
     }
     else {
       corner_blocks_.push_back({at, floats, true});
@@ -4787,6 +4792,7 @@ class VulkanRaster final : public Raster {
   };
   std::vector<CornerBlock> corner_blocks_;
   size_t corner_used_ = 0;
+  bool compact_corners_ = false;
   bool corner_blocks_on_ = false;  // (a frame whose corners came as blocks: the frame's own array isn't written over them)
   std::vector<float> probe_volume_;          // (set_probe_volume's, written once)
   bool probe_dirty_ = true;
@@ -4836,7 +4842,10 @@ class VulkanRaster final : public Raster {
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bi.size = size;
     bi.usage = usage;
-    if (f_.vkCreateBuffer(dev_, &bi, nullptr, &b.buf) != VK_SUCCESS) return false;
+    if (f_.vkCreateBuffer(dev_, &bi, nullptr, &b.buf) != VK_SUCCESS) {
+      b = Buf{};
+      return false;
+    }
     VkMemoryRequirements req;
     f_.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
     if (!allocate(req, props, b.mem, (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0)) {
@@ -4844,10 +4853,15 @@ class VulkanRaster final : public Raster {
       b = Buf{};
       return false;
     }
-    f_.vkBindBufferMemory(dev_, b.buf, b.mem, 0);
+    void *mapped = nullptr;
+    if (f_.vkBindBufferMemory(dev_, b.buf, b.mem, 0) != VK_SUCCESS ||
+        ((props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && f_.vkMapMemory(dev_, b.mem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)) {
+      free_buffer(b);
+      return false;
+    }
     b.size = size;
     b.id = ++buffers_made_;
-    if (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) f_.vkMapMemory(dev_, b.mem, 0, VK_WHOLE_SIZE, 0, &b.mapped);
+    b.mapped = mapped;
     return true;
   }
   void free_mesh(Mesh &m) {
