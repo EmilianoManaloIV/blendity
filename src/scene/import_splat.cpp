@@ -624,7 +624,8 @@ void spz_sizes(SpzLayout &L) {
 
 PointCloudPtr spz_gzip(const std::string &bytes, SplatReadReport &report) {
   const double started = now_seconds();
-  std::string raw, why;
+  std::vector<uint8_t> raw;
+  std::string why;
   /* Deflate packs at most about 1032:1; a bigger promise is a damaged or hostile file. */
   const size_t limit = (size_t)std::min<uint64_t>((uint64_t)3 << 30, (uint64_t)bytes.size() * 1100 + 4096);
   if (!gunzip(bytes, raw, why, limit)) {
@@ -636,7 +637,7 @@ PointCloudPtr spz_gzip(const std::string &bytes, SplatReadReport &report) {
     report.error = "SPZ: the header is cut short";
     return nullptr;
   }
-  const uint8_t *h = (const uint8_t *)raw.data();
+  const uint8_t *h = raw.data();
   SpzLayout L;
   L.version = le32(h + 4), L.n = le32(h + 8), L.sh_degree = h[12], L.fractional_bits = h[13], L.flags = h[14];
   if (!spz_check(L, le32(h), 1, 3, report)) return nullptr;

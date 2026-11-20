@@ -7346,6 +7346,7 @@ class Editor {
     std::vector<SeeRel> see;
     std::vector<std::pair<std::weak_ptr<const Texture>, int>> deps;  // (for the whole keep made from a frame of copies)
     std::vector<gpu::SeeCorner> see_frame;  // the last frame's sorted corners, taken back after the render
+    uint64_t see_frame_generation = 0;  // gpu_calls_ when these sorted corners were packed
     bool see_frame_ok = false;
   };
   InstanceRows instance_rows_[gpu::Raster::kSlots];
