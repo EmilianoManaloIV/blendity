@@ -16,7 +16,7 @@ Plasticity-style drawing and Push/Pull. Read `docs/requirements.md` (what it mus
 non-trivial.
 
 Words used below: **the owner** is the human who owns the repository, approves plans and merges. A **round**
-is one change with one spec, one commit and one pull request. A **pass** is a group of rounds planned and
+is one change with one spec, one commit and one changelog fragment. A **pass** is a group of rounds planned and
 approved together, ending in a write-up round.
 
 ## Project map
@@ -68,7 +68,7 @@ approved together, ending in a write-up round.
   test goes when its ADR is written. `python tools/test_coverage_map.py --check` must find no console command,
   keymap action or window without a test.
 - Before a change is done: the round's test groups and `editor` pass locally on Windows and Linux
-  (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
+  (`BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
   groups are those whose tests it changed and those that test the code it changed (code behind a `BL_WITH_*`
   switch included: CI builds without the libraries); a round that cannot name them runs the whole suite
   locally (the chain without `TEST_GROUPS`).
@@ -104,6 +104,8 @@ approved together, ending in a write-up round.
   and questions).
 
 ## Documentation duties (every change)
+- Every subsystem and role, including the Hub, follows the repository formats for the documents it owns.
+  Use the [template audit](docs/handoff/METHOD.md#documentation-template-audit) before handing off or publishing.
 - `changelog.d/<round>-<slug>.md`: one entry per round (asked / fixed / changed / added / checked, stress numbers),
   plus a `<!-- README -->` section with the feature-paragraph line when user-facing behaviour changes, and a section
   for each shared doc the round adds to: `<!-- docs/USABILITY.md -->`, `<!-- tools/README.md -->`,
@@ -116,7 +118,7 @@ approved together, ending in a write-up round.
 - `docs/USABILITY.md`: a "fixed" row for user-facing problems solved - in the fragment's section.
 - `docs/decisions/`: an ADR for any architectural choice (new subsystem, data-model change, new
   dependency, change to a documented convention).
-- `docs/tasks/`: the task spec the work was done against; mark it done.
+- `docs/tasks/`: keep the spec's status and evidence current. Set it to `done` after the owner merges its PR.
 
 ## Workflow and approval gates
 An explicit project workflow change from the owner in the Hub applies to current and future Blendity tasks
@@ -240,8 +242,7 @@ See [direct task chats](docs/handoff/METHOD.md#direct-task-chats-for-independent
   touch, and an overlap check against the work already running. Pieces that share no file run in parallel;
   pieces that share a file go to one task, in sequence; if everything meets in one file, don't parallelize and
   say so. A task that needs a file outside its row stops and asks the coordinating task.
-- Rounds that share files within one task may be built and verified together, but each still gets its own
-  commit and its own PR.
+- Rounds that share files within one task may be built and verified together. Preserve each round's commit and evidence, and follow the publication rules in step 6.
 - Task assignments and approved plans authorize work within their scope. Protected operations retain their
   existing approval requirements, including release tags and system changes.
 
@@ -255,12 +256,14 @@ See [direct task chats](docs/handoff/METHOD.md#direct-task-chats-for-independent
 - Commit messages end with a `Co-Authored-By:` trailer naming the AI tool that wrote the change (the history's
   commits name Claude; use your own tool's line), and PR bodies say they were written with it
   (`docs/AI_DISCLOSURE.md`).
-- Publish a task to a PR branch, never to `main` or `blendity`. From the `blender-main/` checkout:
+- Publish a task to a PR branch, never to `main` or `blendity`.
+  Set `title` and prepare `pr.md` from the [PR template](.github/pull_request_template.md) before publishing.
+  From the `blender-main/` checkout:
   ```
   git commit -m "$msg"                                   # on the local blendity branch
   sub=$(git commit-tree "$(git rev-parse HEAD):blendity" -p blendity-root -m "$msg")
   git push origin "$sub:refs/heads/task/NNNN-slug"
-  gh pr create --repo EmilianoManaloIV/blendity --head task/NNNN-slug --base main --fill
+  gh pr create --repo EmilianoManaloIV/blendity --head task/NNNN-slug --base main --title "$title" --body-file pr.md
   ```
   With an open stack the parent is the stack's top, not `blendity-root` (`tools/dev/publish.sh` takes `BASE`);
   from a worktree of a published branch it is a plain commit and `git push origin HEAD:refs/heads/task/NNNN-slug`.

@@ -50,7 +50,7 @@ non-trivial.
   test goes when its ADR is written. `python tools/test_coverage_map.py --check` must find no console command,
   keymap action or window without a test.
 - Before a change is done: the round's test groups and `editor` pass locally on Windows and Linux
-  (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
+  (`BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
   groups are those whose tests it changed and those that test the code it changed (code behind a `BL_WITH_*`
   switch included: CI builds without the libraries); a round that cannot name them runs the whole suite
   locally (the chain without `TEST_GROUPS`).
@@ -79,6 +79,7 @@ non-trivial.
   inputs must leave a structurally valid mesh or refuse cleanly.
 
 ## Documentation duties (every change)
+- Every subsystem and role, including the Hub, follows the [shared template audit](docs/handoff/METHOD.md#documentation-template-audit).
 - `changelog.d/<round>-<slug>.md`: one entry per round (asked / fixed / changed / added / checked, stress numbers),
   plus a `<!-- README -->` section with the feature-paragraph line when user-facing behaviour changes, and a section
   for each shared doc the round adds to: `<!-- docs/USABILITY.md -->`, `<!-- tools/README.md -->`,
@@ -91,7 +92,7 @@ non-trivial.
 - `docs/USABILITY.md`: a "fixed" row for user-facing problems solved - in the fragment's section.
 - `docs/decisions/`: an ADR for any architectural choice (new subsystem, data-model change, new
   dependency, change to a documented convention).
-- `docs/tasks/`: the task spec the work was done against; mark it done.
+- `docs/tasks/`: keep the spec's status and evidence current. Set it to `done` after the owner merges its PR.
 
 ## Workflow and approval gates
 1. **Plan** (the main session on the strongest available model): write `docs/tasks/NNNN-slug.md` from the
@@ -131,12 +132,13 @@ run the reviewer.
   outside staging and commits.
 - Name the AI tool that helped write the change in the `Co-Authored-By` trailer and PR disclosure.
   See [AI disclosure](docs/AI_DISCLOSURE.md).
-- Publish a task to a PR branch, never to `main` or `blendity`:
+- Publish a task to a PR branch, never to `main` or `blendity`.
+  Set `title` and prepare `pr.md` from the [PR template](.github/pull_request_template.md) before publishing.
   ```
   git commit -m "$msg"                                   # on the local blendity branch
   sub=$(git commit-tree "$(git rev-parse HEAD):blendity" -p blendity-root -m "$msg")
   git push origin "$sub:refs/heads/task/NNNN-slug"
-  gh pr create --repo EmilianoManaloIV/blendity --head task/NNNN-slug --base main --fill
+  gh pr create --repo EmilianoManaloIV/blendity --head task/NNNN-slug --base main --title "$title" --body-file pr.md
   ```
   From the Bash tool, call `gh` as `"/c/Program Files/GitHub CLI/gh.exe"` (it isn't on Git Bash's PATH);
   in PowerShell it is on the PATH. Read CI with `gh run list` / `gh run view --log-failed`, not by

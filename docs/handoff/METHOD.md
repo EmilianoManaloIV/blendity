@@ -5,8 +5,7 @@ How Blendity's changes were made, in the order a change meets each step. The rul
 loss is in `PITFALLS.md`.
 
 ## Rounds and passes
-- A **round** is one request-sized change: one spec (`docs/tasks/NNNN-slug.md`), one commit, one pull request,
-  one changelog fragment. Rounds are numbered in the order they start (1 to 574 so far); specs have their own
+- A **round** is one request-sized change: one spec (`docs/tasks/NNNN-slug.md`), one commit, and one changelog fragment. Publish independently reviewable work as described in the owner's publication rules in AGENTS.md. Supporting work travels with its deliverable. Rounds are numbered in the order they start; specs have their own
   numbers. A PR's title names both ("... (round 565, task 0547)").
 - A **pass** is a group of rounds the owner approved as one plan: a goal, the rounds with their specs, a
   file-ownership table and the budgets to meet. It ends with a **write-up round** that measures the result
@@ -30,7 +29,7 @@ loss is in `PITFALLS.md`.
    real fault after a 50-minute chain costs a second chain. Read-only; findings ranked; approve only with no
    blockers or majors. Fixes go in, and a second review looks at the fixes.
 5. **Verify.** The round's test groups and `editor`, on Windows (both builds) and Linux
-   (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
+   (set the three path variables to the candidate's scratch Windows tree, full-library Windows tree, and WSL-visible Linux tree first; `BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
    for geometry changes; the audits (`tools/test_coverage_map.py --check`, `tools/sweep_commands.py --check`,
    `py tools/dev/changelog.py check`). The whole suite, macOS and the sanitizers are CI's.
 6. **Publish.** The hub merges the stack's current top into the round's branch (build the tests again if the merge
@@ -43,6 +42,37 @@ loss is in `PITFALLS.md`.
 
 Work is pipelined: while one round's checks run, the next round's spec and patches are written. Nothing waits
 on a merge.
+
+## Documentation template audit
+
+Use the applicable format from the start for each current deliverable, including Hub and subsystem work.
+Keep its required headings, metadata and applicable sections. Fill them with the actual scope, checks,
+evidence and outcome. Give a reason for an inapplicable field, and identify the remaining action for pending
+evidence. Keep accepted ADRs and released records as historical evidence.
+
+| Artifact | Authoritative format and what to check |
+|---|---|
+| Task spec | [Task template](../tasks/TEMPLATE.md) and [status lifecycle](../tasks/README.md#lifecycle). Check the numbered filename and title, all six metadata fields, and the section order from Goal through Outcome. Record approval in Authorization and use the lifecycle status for the current stage. Set `done` only after the owner merges. Keep detailed results under Outcome or in linked evidence. Add the PR link and published head when available. |
+| ADR when architectural | [ADR template and applicability](../decisions/README.md). Propose a numbered record and obtain owner approval before dependent code. Check status, date, requirements, Context, Decision and Consequences. Cite the ADR from the spec. A later numbered ADR supersedes an accepted decision. |
+| Round changelog fragment | [Fragment format](../../changelog.d/README.md#a-fragment). Check that the heading date and round, filename, task reference and verification agree. Include the README section for user-facing behavior and each relevant shared-doc section with its fold operation. Record why stress or other checks did not apply if the format calls for them. |
+| PR body | [PR template](../../.github/pull_request_template.md). Fill Task, What changed, Tests, Review and Documentation with evidence for the submitted candidate. State the AI tool and its role. For stacks, list each carried PR on the required “Merging this also merges” line. |
+| Pass plan and role handoff | Use the [pass file-ownership table](#file-ownership-for-parallel-work), with dependencies and acceptance evidence routed through the [compact handoff](CODEX.md#compact-handoffs). |
+| Subsystem records | Follow the referenced local format in addition to the round's formats. For example, use the [HCI artifact instructions](../hci/README.md) and [study protocol](../hci/study-protocol.md) for HCI records, or the test and report procedure named in the spec for performance evidence. |
+
+1. **Author:** Before handoff, compare each document you own against the format above. Where applicable, verify
+   that requirement and ADR references resolve, acceptance criteria have checkable outcomes, and measured
+   results and review receipts identify the candidate they cover.
+2. **Tester and reviewer:** The tester checks documentation criteria from the spec when applicable. The
+   reviewer compares changed docs with their templates and checks the content and cited evidence. Report
+   missing or inaccurate fields with their file and section in the normal review handoff.
+3. **Hub:** Audit your own docs and the joined candidate before publication. List the touched paths with
+   `git diff --name-only origin/main...HEAD` and, for an uncommitted candidate, also inspect `git status --short`.
+   Apply the checks above to the current task docs, related fragments and any ADRs or subsystem records.
+   Inspect the committed gate range with `git log --no-merges --oneline origin/main..HEAD` and run
+   `bash tools/dev/docs_check.sh origin/main HEAD` from the published-tree worktree. It checks that range
+   for protected shared-doc edits and checks the working tree's fragments. Template content needs human or
+   agent inspection. Draft the PR body from the template, then check the rendered body and head after
+   publication or a body regeneration. Update task status, PR links and verification outcomes as they change.
 
 ## Codex worker dispatch
 
