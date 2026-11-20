@@ -1,4 +1,4 @@
-## Round 612. Retire verified merged development work
+## 2026-11-19 (round 612): Retire verified merged development work
 
 **Asked:** Reclaim disk space and remove stale task branches while retaining unmerged work, verification evidence and the owner's active editor.
 
