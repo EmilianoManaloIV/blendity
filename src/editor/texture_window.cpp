@@ -269,8 +269,8 @@ void Editor::draw_textures_window(const Recti &r) {
   std::vector<ProceduralTexturePtr> list;
   const std::string f = to_lower(texture_search_);
   size_t all = 0;
-  for (const std::string &path : texture_asset_paths())
-    if (ProceduralTexturePtr t = texture_asset(path)) {
+  for (const ProceduralTexturePtr &t : texture_assets_for_browser(texture_asset_paths()))
+    if (t) {
       all++;
       if (f.empty() || to_lower(t->name).find(f) != std::string::npos) list.push_back(t);
     }

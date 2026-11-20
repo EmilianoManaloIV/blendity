@@ -56,6 +56,7 @@ A hint bar at the bottom of the Scene view lists the keys while any of these ope
 - The one real clash, R, is a single tick box.
 
 ## Interface conventions
+In the Lighting window, the update status starts with Manual or Automatic so the active mode remains visible at tablet scale. Hover over that row for its full explanation and preview status, or over Contribute GI for the full lightmap and object counts.
 
 Checked by `tools/hci_consistency_audit.py` (task 0292); the live sweep (`tests/test_hci.cpp`, task 0293) checks the
 screens themselves.
@@ -238,10 +239,13 @@ screens themselves.
 | Objects with a negative scale (mirrored) were drawn inside out in the views. | They cull their own back faces. |
 | New Material Asset (and New in the Textures window) seemed to do nothing when a search was left in the box: the new item was filtered out. | New clears the search; a search says how many items it hides. |
 | Textures could not be deleted from the Textures window. | Delete (button, right-click, Del) with a confirmation; it goes to the Recycle Bin. |
+| Opening the Textures window could pause in projects with thousands of procedural textures. | The browser reuses the resolved directory path for ordinary texture files (round 594). |
 | Rigged characters imported as statues: bones were plain empties and the mesh didn't follow them. | Skins: bones, an armature and a Skin modifier come in with the file; turn a bone and the mesh bends. |
+| Compiled Half-Life: Alyx and Counter-Strike 2 characters and textures needed conversion before import. | Import from mounted Source content to get the character's bones and skin, editable materials and project textures. |
 | Vertex groups could only be set a selection at a time with one weight. | Weight Paint: brush the weights on, seen as colours. |
 | Weight painting a sleeve or a collar spilled onto the arm or past the rim; the brush had no automasking. (round 539) | Weight Paint > Automasking: Topology, Mesh Boundary, Cavity, View Normal and Area Normal, as Blender 5.3. |
 | A mesh had no vertex colours: nothing to paint them with, and exports to games carried none. (round 545) | Colour attributes, Vertex Paint with Blender's brushes and automasking, glTF COLOR_0 and PLY colours. |
+| A mesh edit that rebuilt faces discarded their painted corners. (round 584) | Edit Mode tools, modifiers, Join and Separate carry colours with their source faces. |
 | Painted or imported vertex colours showed only in Vertex Paint, and PLY / glTF / FBX files lost theirs. (round 545b) | A material's Vertex Color shows them in the views and F12; the importers read them. |
 | A Displace or a bend affected the whole mesh: no way to keep part of it still. | Vertex groups (Assign in Edit Mode) and every deformer's Vertex Group / Invert. |
 | A box-shaped lattice can't follow a character's shape. | Mesh Deform: bind the mesh to any closed cage mesh and edit the cage. |
@@ -304,6 +308,7 @@ screens themselves.
 | A Blender FBX character's bone handles were metres long (its `_end` leaf bones under a x100 armature). | Leaf bones are sized in metres whatever the armature's scale, and Blender's `_end` leaves fold into their parents (task 0144). |
 | A Sketchfab download (`source/model.fbx` + `textures/Name_Base_color.png`, the FBX naming no textures) came in grey. | The texture finder looks through the folders around the model and pairs materials with sets by name likeness; the Console says what it did (task 0143). |
 | An imported FBX came in grey: textures inside the file or at another machine's path were lost, and the materials existed only in the scene. | Materials are made as `.mat` assets and applied, embedded textures extracted, links and texture sets found beside the model (task 0134). |
+| A compiled Source 2 map depends on props that may be in another local content root. (round 605) | Import follows the mounted references. A missing prop gets a magenta placeholder and its compiled path appears in the import notes. |
 | MMD characters (.pmx, .pmd) couldn't be opened at all. | They import rigged, toon-shaded, with leg IK, spring chains and their faces (task 0136). |
 | A Collada export (.dae) couldn't be opened. | It imports with its materials, skins and animation, the right way up and size (task 0141). |
 | Motion capture (.bvh) couldn't be opened. | It imports as a skeleton with its clip playing (task 0140). |
@@ -473,8 +478,10 @@ screens themselves.
 | A painted or procedural texture never reached the engines (they only knew files), and Unity kept a stale copy. | Live Link sends each texture's pixels as they change: a painted surface each stroke, a procedural texture a few times a second while dragged (round 377). |
 | Lighting in Blendity didn't reach the engines: their sky, fog and post-processing had to be set by hand. | Live Link's world, render and filters messages drive each engine's own (round 376). |
 | A .blend or an Unreal level couldn't be brought in without exporting by hand. | import <file>.blend reads it through Blender; Send to Blendity in the Blender and Unreal bridges lands in Blendity within a second (round 374). |
+| Classic Source maps had to be converted before use in Blendity. (round 603) | Import a classic BSP with its world, displaced terrain, brush models and placed static props. Mount the game or Workshop content to resolve the map's external assets. |
 | A shape drawn across a curved mesh (the teapot) was refused and added as a floating face facing the camera, or as wires off the surface. | Draw projects it onto the surface along the view (Tab: to the closest point) and cuts it in; its faces are selected for Push/Pull (round 461). |
 | A Godot project's scenes couldn't be opened here, or their layout changes taken back. | import <file>.tscn brings the nodes in (scripts kept as Engine Components); Export Godot Scene writes the moves into the nodes' own lines (round 373). |
+| A Workshop item can hold multiple models and maps, with dependencies in a separate item or game folder. (round 601) | File > Import > Source Engine Assets lists the item's virtual paths and providers and lets you add roots for missing dependencies. |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 | Opening a big imported scene froze the Scene view until every texture was decoded. (round 447) | The views draw the materials' colours at once and the textures stream in from a worker, a batch at a time, under a per-frame budget for the card; a file that won't load is tried once. |
 | Orbiting a scene of 50,000 objects spent 15-20 ms a frame on overlays that had not changed. (round 449) | The overlays only edits change are kept until the selection, a view switch, a bake or the scene changes: 1.7-2.6 ms. |

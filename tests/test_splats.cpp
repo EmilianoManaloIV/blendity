@@ -847,6 +847,34 @@ static void tests_round531() {
     if (pc4) CHECK(r531_diff(*pc4, r531_spz_expected(z4), kR531MirrorX) < 2e-4);
   });
 
+  test("splat import: byte gzip output is exact and survives rejected replacements", [] {
+    const std::string data("a\0b\xff", 4);
+    std::string packed = gzip(data), why;
+    std::vector<uint8_t> bytes{42};
+    CHECK(gunzip(packed, bytes, why, data.size()));
+    const std::vector<uint8_t> expected(data.begin(), data.end());
+    CHECK(bytes == expected);
+    CHECK(!gunzip(packed, bytes, why, data.size() - 1));
+    CHECK(bytes == expected && why == "too large to unpack");
+    packed[packed.size() - 4] = 3;
+    CHECK(!gunzip(packed, bytes, why));
+    CHECK(bytes == expected && why.find("length") != std::string::npos);
+    // A forged ISIZE within the limit still cannot make the inflater produce extra bytes.
+    CHECK(!gunzip(packed, bytes, why, 3));
+    CHECK(bytes == expected && !why.empty());
+    CHECK(gunzip(gzip(""), bytes, why, 0) && bytes.empty());
+  });
+
+  test("splat import: the gzip string caller keeps binary data and its previous output on failure", [] {
+    const std::string data("a\0b\xff", 4);
+    std::string out("previous"), why;
+    const std::string packed = gzip(data);
+    CHECK(gunzip(packed, out, why, data.size()) && out == data);
+    CHECK(!gunzip(packed, out, why, data.size() - 1));
+    CHECK(out == data && why == "too large to unpack");
+    CHECK(gunzip(gzip(""), out, why, 0) && out.empty());
+  });
+
   test("splat import: bad SPZ files refuse cleanly - wrong magic, version 9, degree 5, cut short, a count the data can't hold, not gzip", [] {
     const R531Spz z = r531_spz(2, 10, 1);
     std::string raw = r531_spz_raw(z, z.n);

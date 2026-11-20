@@ -396,6 +396,8 @@ class Context {
     int width = 200;
     int content_h = 0;
     int scroll = 0;  // (task 0264: a list taller than the room it has scrolls by the wheel)
+    int layout_clamp = 0;  // offset removed by layout alone this frame
+    bool scrolled_by_input = false;
     bool list = false;  // (a combo's list: fitted and scrolled; a dialog or a menu keeps its own placement)
     bool declared = false;
     std::function<void()> body;
@@ -405,6 +407,8 @@ class Context {
     Recti r;
     int content_h;
     int offset;
+    int layout_clamp;
+    bool scrolled_by_input;
   };
   void touch_scroll_update(Id i, const Recti &r, int &off);
   Id touch_candidate_ = 0, touch_scroll_id_ = 0, touch_glide_id_ = 0;
