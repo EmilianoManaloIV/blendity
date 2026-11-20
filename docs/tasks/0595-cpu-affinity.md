@@ -17,3 +17,9 @@ Ownership: core system and job sizing, automatic scene worker sizing, focused sc
 On Linux launch fresh processes unrestricted, with one CPU, and with a noncontiguous pair drawn from the process's allowed mask. Compare the selected count and real worker usage, exercise small parallel loops and explicit limits, and verify exact output. Measure matched workload latency or CPU/task counters before making a speed claim. Run existing job, animation and editor tests, compile both Windows dependency modes and verify the native ARM64 build where available. Record any hardware limits and link independently reviewed evidence before publication.
 
 Reference: [Linux affinity semantics](https://man7.org/linux/man-pages/man2/sched_getaffinity.2.html) and ADR 0106 for background jobs.
+
+## Verified hardware behavior
+
+On the 32-CPU x86-64 WSL host the baseline process peaked at 32 threads under each of the one-CPU, noncontiguous two-CPU, and unrestricted masks. The candidate peaked at 1, 2 and 32 respectively across three repetitions per binary and mask, 18 fresh processes in total. CPU limits applied to a child process only. Raw counts and executable hashes are in `C:/blab/affinity613/independent-peaks.jsonl`.
+
+The native four-vCPU Linux ARM64 runner passed foreground, background and explicit-worker checks under one, two and four allowed CPUs. The background loop used one, one and two participants respectively. The editor produced its 1280 × 720 CPU screenshot and passed 4,102 editor/input checks. These are scheduler and functional results. Physical Raspberry Pi frame rates remain unmeasured. [ARM64 build and artifacts](https://github.com/EmilianoManaloIV/blendity/actions/runs/44687303234)
