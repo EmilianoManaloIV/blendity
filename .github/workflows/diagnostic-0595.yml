@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: Native Linux ARM64 diagnostic
+on:
+  push:
+    branches: [diagnostics/0595-native-affinity]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      BLENDITY_NO_LIBS: '1'
+      BLENDITY_NO_OPTIX: '1'
+      BLENDITY_VIEWPORT_DEVICE: cpu
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check native toolchain and existing X11 headers
+        run: |
+          uname -a
+          lscpu
+          c++ --version
+          test "$(uname -m)" = aarch64
+          test "$(c++ -dumpmachine)" = aarch64-linux-gnu
+          c++ -dumpmachine
+          cat > "$RUNNER_TEMP/cpu-check.cpp" <<'CPP'
+          #include "cpu.h"
+          #include <iostream>
+          int main() {
+            const auto &f = bl::cpu::features();
+            std::cout << bl::cpu::describe() << '\n';
+            return f.neon && !f.avx2 && !f.sse42 ? 0 : 1;
+          }
+          CPP
+          c++ -std=c++17 -Isrc/core src/core/cpu.cpp "$RUNNER_TEMP/cpu-check.cpp" -o "$RUNNER_TEMP/cpu-check"
+          file "$RUNNER_TEMP/cpu-check"
+          "$RUNNER_TEMP/cpu-check"
+          docker image ls --format '{{.Repository}}:{{.Tag}}' || true
+          for src in src/render/raster.cpp src/render/display.cpp src/image/image.cpp; do
+            obj="$RUNNER_TEMP/$(basename "$src" .cpp).o"
+            c++ -O2 -DNDEBUG -std=c++17 -pthread -Iextern/sky/include -c "$src" -o "$obj"
+            file "$obj"
+          done
+          dpkg-query -W libx11-dev libx11-6 || true
+      - name: Install the approved X11 headers on this disposable runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx11-dev
+          test -r /usr/include/X11/Xlib.h
+      - name: Build with the repository release script
+        run: bash build.sh release all
+      - name: Verify the executable and render a 720p CPU frame
+        run: |
+          set -euo pipefail
+          readelf -h dist/linux/Blendity | tee "$RUNNER_TEMP/elf.txt"
+          grep -Eq 'Machine:[[:space:]]+AArch64' "$RUNNER_TEMP/elf.txt"
+          dest="$RUNNER_TEMP/pi-check"
+          mkdir -p "$dest"/{project/Assets,prefs,cache,trash,home}
+          for pair in "BLENDITY_PROJECT=project" "BLENDITY_PREFS_DIR=prefs" "BLENDITY_CACHE_DIR=cache" "BLENDITY_TRASH=trash"; do
+            export "${pair%%=*}=$dest/${pair#*=}"
+            echo "${pair%%=*}=$dest/${pair#*=}" >> "$GITHUB_ENV"
+          done
+          cd "$dest"
+          HOME="$dest/home" /usr/bin/time -v -o smoke.time "$GITHUB_WORKSPACE/dist/linux/Blendity" --no-libs --headless-screenshot smoke.png --size 1280x720 --cmd "viewport device cpu" --cmd "quality low" --cmd "stress 64 Cube" --cmd "perf frames 2" --cmd "viewport status" --cmd "stats" --cmd "perf memory" | tee smoke.log
+          file smoke.png | tee image.txt
+          grep -q '1280 x 720' image.txt
+          grep -q 'Spawned 64 Cube' smoke.log
+          grep -q 'Views: CPU' smoke.log
+      - name: Exercise automatic and explicit scheduling with restricted CPU sets
+        run: python3 tests/test_linux_cpu_affinity.py dist/linux/blendity_tests
+      - name: Run editor and input groups
+        run: ./dist/linux/blendity_tests --group editor,input
+      - name: Preserve smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-arm64-smoke
+          path: |
+            ${{ runner.temp }}/elf.txt
+            ${{ runner.temp }}/pi-check/smoke.log
+            ${{ runner.temp }}/pi-check/smoke.png
+            ${{ runner.temp }}/pi-check/smoke.time
+            ${{ runner.temp }}/pi-check/image.txt
