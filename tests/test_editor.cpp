@@ -7962,12 +7962,13 @@ static void tests_round412() {
       (void)a, (void)b;
     });
     t.join();
+    const int lanes = js.thread_count();
     js.set_backend(was);
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    std::printf("    %u hardware threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", hw, bg_ids.size(), main_ids.size(),
+    std::printf("    %d available threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", lanes, bg_ids.size(), main_ids.size(),
                 bg_flag ? "true" : "false", JobSystem::in_background() ? "true" : "false");
     CHECK(bg_flag && !JobSystem::in_background());
-    CHECK(hw < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
+    CHECK(bg_ids.size() <= (size_t)std::max(1, lanes - 2) && main_ids.size() <= (size_t)lanes);
+    CHECK(lanes < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
     for (const std::thread::id &id : bg_ids) CHECK(!main_ids.count(id));  // (the two pools share no thread)
   });
 }
