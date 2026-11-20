@@ -2,6 +2,7 @@
 // blendity_tests: the gpu tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/core/view_perf.h"
+#include "../src/render/gpu_vk.h"
 #include <cstring>
 #include <numeric>
 #include <thread>
@@ -9144,6 +9145,20 @@ static void tests_round564_gpu() {
   });
 }
 
+static void tests_round616_gpu() {
+  test("Vulkan device creation requests the advertised portability subset and preserves swapchain support (round 616)", [] {
+    using gpu::vk::base_device_extensions;
+    auto names = [](bool portability_subset, bool swapchain) {
+      const auto extensions = base_device_extensions(portability_subset, swapchain);
+      return std::vector<std::string>(extensions.begin(), extensions.end());
+    };
+    CHECK(names(false, false).empty());
+    CHECK((names(false, true) == std::vector<std::string>{"VK_KHR_swapchain"}));
+    CHECK((names(true, false) == std::vector<std::string>{"VK_KHR_portability_subset"}));
+    CHECK((names(true, true) == std::vector<std::string>{"VK_KHR_swapchain", "VK_KHR_portability_subset"}));
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -9196,4 +9211,5 @@ void run_gpu_tests() {
   tests_round610_gpu();
   tests_round563_gpu();
   tests_round564_gpu();
+  tests_round616_gpu();
 }
