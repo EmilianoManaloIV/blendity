@@ -1,6 +1,6 @@
 # 0599. Measure first open of an existing Textures library
 
-Round 617. Independent verification complete for the matched timings, cold UI behavior and focused Windows regression. The Hub owns final combined verification, integration and publication.
+Round 617. Independent verification complete for the matched timings, cold UI behavior and focused Windows regression. The Hub integrated this round with rounds 614–616 for owner review.
 
 ## Acceptance
 
@@ -53,3 +53,5 @@ The Hub's `texture617-candidate01` window completed with zero interference event
 At the default limit, the following-frame median fell from 3.8 to 3.7 ms, and the reopen median was 3.7 ms in both builds. With a ceiling of two, the following-frame median fell from 3.7 to 3.6 ms, and the reopen median was 3.5 ms in both builds. Across all runs, their intervals spanned 3.5–3.9 ms. The change preserves the repeatable first-open gain. All candidate first opens remain above the 100 ms budget. The 1,600 × 900 screenshots matched in the Textures panel. Whole-frame pixel differences were confined to a 5 × 8 region in the status bar. The raw timing and pixel audits are in the Hub's `cold617/independent` scratch folder.
 
 The focused regression is `Textures window: batch loading preserves row order, shared assets and edits, and retries repaired files` in `tests/test_assets.cpp`. Select it with `BLENDITY_TEST_FILTER='batch loading preserves row order'` and `blendity_tests --group assets`. The earlier Windows and Linux group totals predate this regression. The final combined Windows libraries binary passed all 68 focused checks. The Hub retains the receipt at `pass31-verify/final-focused-617/run.log` and is completing the full combined Windows and Linux checks.
+
+The combined Windows full-library build ran all 68 new batch assertions and passed 3,187 asset and 3,845 editor checks. The Windows dependency-free build passed 3,144 asset and 3,819 editor checks. Dependency-free Linux passed 3,154 asset and 3,819 editor checks. Its 2,000-asset fixture verified exact paths, thumbnail pixels, mixed-case search and stable selection on a case-sensitive filesystem. Both Windows editors rendered a 640 × 360 CPU smoke image. The Hub verified the 16 changed build inputs against the final Git blobs in all three builds.
