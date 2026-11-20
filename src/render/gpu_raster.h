@@ -358,6 +358,7 @@ struct RasterDetail {
   uint64_t draws = 0, pipeline_binds = 0, mesh_binds = 0, set_writes = 0;  // the instanced passes' calls; descriptor set rewrites (images or buffers)
   uint64_t instances = 0, lights = 0, outline_ids = 0, see_corners = 0, overlay_prims = 0, pixels = 0;  // what the frames held
   uint64_t see_sent = 0, see_kept = 0;  // frames that sent their see-through corners to the card / whose corners were the slot's last ones (nothing sent)
+  uint64_t lighting_draws = 0;  // full-screen lighting evaluations, including a separate linear-light pass
   static const char *gpu_name(int k) {
     static const char *n[kGpu] = {"skin and copies in", "shadow maps", "g-buffer", "toon planes", "baked planes", "lighting", "splats", "see-through", "overlays", "linear light", "filters", "copies out"};
     return n[k];
@@ -551,6 +552,7 @@ class Raster {
   virtual RtShadowStats rt_shadow_stats() const { return {}; }
   virtual void fail_rt_shadows_for_test() {}  // (the next traced frame's build fails: the map from then on)
   virtual void fail_next_frame_for_test() {}  // (round 565: the next frame fails after it is recorded, before it reaches the card - what it recorded never runs)
+  virtual void separate_lighting_for_test(bool, bool = false) {}  // compare both filtered-camera paths on the same card
 };
 
 /* Round 450: BLENDITY_VIEW_OFF=sh,lv,mask (any of them, comma-separated) compiles the views' shaders without round
