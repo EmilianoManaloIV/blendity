@@ -29,6 +29,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   `nvidia-smi` sampled beside the run (`PITFALLS.md`, "The card's power state").
 
 ### 2. The see-through corners are compared on the CPU every frame (S-M)
+- **Comparison removed for unchanged lists in round 614.** On the RTX 4070 SUPER, eligible posing workloads fell from one CPU comparison per card frame to 0.00–0.15. A changing camera still uploads its new list. Controlled replays covered dragging and Rigging playback. Live Link rendered the same frames, but asynchronous mesh traffic varied between trials, so its whole-frame timing remains inconclusive. [Task 0596](../tasks/0596-transparent-corner-reuse.md)
 - **Evidence:** round 565's fragment, "Named, not fixed": 7 MB read twice, 0.5 to 1 ms a card frame - as long
   as the copy it replaced. The editor already knows when its sorted list is last frame's (round 471).
 - **Files:** `src/editor/gpu_views.cpp`, `src/render/gpu_raster.cpp`.
