@@ -622,17 +622,24 @@ void spz_sizes(SpzLayout &L) {
   L.sh_coeffs = (size_t)(L.sh_degree == 0 ? 0 : L.sh_degree == 1 ? 3 : L.sh_degree == 2 ? 8 : L.sh_degree == 3 ? 15 : 24);
 }
 
-PointCloudPtr spz_gzip(const std::string &bytes, SplatReadReport &report) {
+bool spz_is_gzip(const std::string &bytes) {
+  return bytes.size() >= 2 && (uint8_t)bytes[0] == 0x1f && (uint8_t)bytes[1] == 0x8b;
+}
+
+bool spz_unpack_gzip(const std::string &bytes, std::vector<uint8_t> &raw, SplatReadReport &report) {
   const double started = now_seconds();
-  std::vector<uint8_t> raw;
   std::string why;
   /* Deflate packs at most about 1032:1; a bigger promise is a damaged or hostile file. */
   const size_t limit = (size_t)std::min<uint64_t>((uint64_t)3 << 30, (uint64_t)bytes.size() * 1100 + 4096);
   if (!gunzip(bytes, raw, why, limit)) {
     report.error = "SPZ: the gzip stream can't be read (" + why + ")";
-    return nullptr;
+    return false;
   }
   report.times.unpack_ms = (now_seconds() - started) * 1000.0;
+  return true;
+}
+
+PointCloudPtr spz_decode_gzip(const std::vector<uint8_t> &raw, SplatReadReport &report) {
   if (raw.size() < 16) {
     report.error = "SPZ: the header is cut short";
     return nullptr;
@@ -726,7 +733,11 @@ PointCloudPtr spz_ngsp(const std::string &bytes, SplatReadReport &report) {
 
 PointCloudPtr read_spz(const std::string &bytes, SplatReadReport &report) {
   if (bytes.size() >= 4 && le32((const uint8_t *)bytes.data()) == kSpzMagic) return spz_ngsp(bytes, report);
-  if (bytes.size() >= 2 && (uint8_t)bytes[0] == 0x1f && (uint8_t)bytes[1] == 0x8b) return spz_gzip(bytes, report);
+  if (spz_is_gzip(bytes)) {
+    std::vector<uint8_t> raw;
+    if (!spz_unpack_gzip(bytes, raw, report)) return nullptr;
+    return spz_decode_gzip(raw, report);
+  }
   report.error = "SPZ: not an SPZ file (neither gzip nor NGSP)";
   return nullptr;
 }
@@ -936,14 +947,19 @@ bool import_ply_point_cloud(const std::string &path, const std::string &data, Im
 
 bool import_spz_file(const std::string &path, ImportResult &out) {
   if (out.source.empty()) out.source = path;
-  std::string bytes;
-  if (!fs::read_file(path, bytes)) {
-    out.error = "cannot read " + path;
-    return false;
-  }
   SplatReadReport report;
-  PointCloudPtr pc = read_spz(bytes, report);
-  return cloud_node(pc, path, report, out);
+  std::vector<uint8_t> raw;
+  {
+    std::string bytes;
+    if (!fs::read_file(path, bytes)) {
+      out.error = "cannot read " + path;
+      return false;
+    }
+    if (!spz_is_gzip(bytes)) return cloud_node(read_spz(bytes, report), path, report, out);
+    if (!spz_unpack_gzip(bytes, raw, report)) return cloud_node(nullptr, path, report, out);
+  }
+  // Release the file buffer before allocating the decoded cloud's attributes.
+  return cloud_node(spz_decode_gzip(raw, report), path, report, out);
 }
 
 }  // namespace bl
