@@ -8545,6 +8545,55 @@ inline bool draw(Rig &r, const std::vector<gpu::RasterInstance> &inst, const gpu
 
 }  // namespace r565
 
+static void tests_round610_gpu() {
+  test("filtered camera lighting: display, depth, IDs and linear light match separate lighting on the same card (round 610)", [] {
+    r565::Rig rig;
+    const bool require_pair = std::getenv("BLENDITY_TEST_REQUIRE_PAIRED_LIGHTING") != nullptr;
+    const bool require_ray = std::getenv("BLENDITY_TEST_REQUIRE_TRACED_SHADOWS") != nullptr;
+    if (!rig.open() || !rig.g->can_draw_hdr()) {
+      CHECK(!require_pair && !require_ray);
+      return;
+    }
+    const auto instances = rig.plain(6);
+    auto frame = rig.frame(r565::Rig::three_lights(), 512, true);
+    frame.want_hdr = true;
+    r565::Pic separate, candidate;
+    std::vector<float> linear((size_t)rig.W * rig.H * 4), reference(linear.size());
+    std::string err;
+    const bool ray_capable = rig.g->can_trace_shadows();
+    if (require_ray) CHECK(ray_capable);
+    for (int variant = 0; variant < (ray_capable ? 3 : 1); ++variant) {
+      frame.rt_shadows = variant != 0;
+      const bool missing_traced_hdr = variant == 2;
+      for (int background : {0, 1, 2}) {
+        frame.background = background;
+        rig.g->separate_lighting_for_test(true, missing_traced_hdr);
+        uint64_t start = rig.g->detail().lighting_draws;
+        CHECK(r565::draw(rig, instances, frame, separate));
+        const bool traced = frame.rt_shadows && rig.g->can_trace_shadows() && rig.g->rt_shadow_stats().tlas_builds > 0;
+        if (require_ray && frame.rt_shadows) CHECK(traced);
+        CHECK(rig.g->detail().lighting_draws == start + 2);
+        CHECK(rig.g->read_hdr(frame.slot, reference.data(), &err));
+        rig.g->separate_lighting_for_test(false, missing_traced_hdr);
+        start = rig.g->detail().lighting_draws;
+        CHECK(r565::draw(rig, instances, frame, candidate));
+        const uint64_t draws = rig.g->detail().lighting_draws - start;
+        std::printf("    ray variant %d, background %d: %llu lighting draw(s) with optional paired targets\n", variant, background, (unsigned long long)draws);
+        if (traced && missing_traced_hdr) CHECK(draws == 2);
+        else if (require_pair) CHECK(draws == 1);
+        else CHECK(draws == 1 || draws == 2);  // Optional on other drivers.
+        CHECK(rig.g->read_hdr(frame.slot, linear.data(), &err));
+        CHECK(candidate.shows_objects() && separate.same(candidate));
+        CHECK(linear == reference);
+      }
+    }
+    frame.want_hdr = false;
+    const uint64_t start = rig.g->detail().lighting_draws;
+    CHECK(r565::draw(rig, instances, frame, candidate));
+    CHECK(rig.g->detail().lighting_draws == start + 1);
+  });
+}
+
 static void tests_round565_gpu() {
   test("a card frame's parts are counted: frames, draws, binds, instances, lights and pixels rise by what each frame held, the card's and the host's times are finite and never fall, and the parts add up to the frame's own time (round 565; skipped without a GPU)", [] {
     r565::Rig rig;
@@ -9144,6 +9193,7 @@ void run_gpu_tests() {
   tests_round520_gpu();
   tests_round521_gpu();
   tests_round565_gpu();
+  tests_round610_gpu();
   tests_round563_gpu();
   tests_round564_gpu();
 }
