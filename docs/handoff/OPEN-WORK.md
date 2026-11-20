@@ -52,7 +52,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   frame (and the ADR notes the exception) or it is reverted.
 
 ### 5. Splat import: the whole-file read, SPZ's inflate, serial validation (M)
-- **SPZ copy removed in round 615.** On a million-splat input the legacy gzip reader used 61.92 MiB less peak memory during decompression. Peak memory across the complete import stayed near 350 MiB. The PLY file read and serial validation remain open. [Task 0597](../tasks/0597-splat-import-memory.md)
+- **SPZ copy removed in round 615.** On a million-splat input the legacy gzip reader used 61.92 MiB less peak memory during decompression. Peak memory across the complete import stayed near 350 MiB. Round 619 subsequently reduced complete-import median peak from about 350 to 293 MiB at both two and four allowed CPUs. [Task 0601](../tasks/0601-spz-file-peak.md) The PLY file read and serial validation remain open. [Task 0597](../tasks/0597-splat-import-memory.md)
 - **Evidence:** round 567's fragment: a 1M-splat PLY imports in 273 ms of which `fs::read_file` is 184; an SPZ
   in 365 ms of which inflate and the copy `gunzip` makes of its output are 253; `pointcloud_validate` is serial,
   about 30 ms. The import already runs off the main thread and meets ADR 0105's frame budget.
@@ -76,7 +76,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 
 ### Fresh-process Textures window still misses its 100 ms budget
 
-After round 617, opening 2,000 existing procedural textures in a fresh Windows CPU editor took a median 169.0 ms at the default worker limit and 244.7 ms with a two-worker cap. The following frame and same-process reopen took 3.5–3.9 ms. Profile directory discovery and visible thumbnails on the improved build before choosing the next change. Keep nested paths, aliases, case-sensitive filesystem identity, search and selection in the acceptance fixture. [Task 0599](../tasks/0599-cold-textures.md)
+Round 623 reduced the Windows first-open median for 2,000 procedural textures from 177.6 to 123.2 ms at default affinity and from 242.6 to 193.4 ms with two workers. The next frame took 3.7–3.8 ms. The 100 ms first-open target remains open. Profile the remaining startup work with the same nested-path, alias, search and selection controls. [Task 0599](../tasks/0599-cold-textures.md) and [task 0605](../tasks/0605-cold-texture-directory.md)
 
 ## Testability and flaky checks
 

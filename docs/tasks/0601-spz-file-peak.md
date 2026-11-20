@@ -1,21 +1,45 @@
 # 0601: Lower peak memory when opening a legacy SPZ file
 
-- Status: independently reviewed and verified for integration. Approved for dispatch by the owner's engine performance assignment.
-- Parent: 0600. Requirements: Q-06, preserve existing file and scene compatibility.
-- Implementation: project implementer. No new dependency or data format. Round 619.
+- **Status:** in review
+- **Authorization:** The owner's engine performance assignment in the Hub authorizes this pass.
+- **Requirements:** Q-06 and existing SPZ file and scene compatibility.
+- **Decisions:** None needed. The importer keeps its public API and file format.
+- **Implementation:** Project implementer with independent test engineering and code review.
+- **PR:** Pending cumulative publication against main.
 
-## Acceptance
+## Goal
+
+Open a large legacy SPZ file using less peak memory while preserving decoded geometry and attributes.
+
+## Scope
+
+Task 0597; src/scene/import_splat.cpp (import_spz_file, spz_gzip, spz_decode); scratch C:/blab/0615-splat/measure.cpp. The decoded arrays, inflated bytes and file-owned compressed bytes have overlapping lifetimes. Test the effect at the production file import entry point.
+
+## Likely files
+
+The round owns src/scene/import_splat.cpp, tests/test_splats.cpp and changelog.d/619-spz-file-peak.md. The benchmark reuses the existing splats stress fixture.
+
+## Acceptance criteria
 
 1. Limit the lifetime of the disk importer's compressed file buffer to the stage that consumes it. Preserve the borrowed read_spz interface and its input on success and failure. Preserve gzip validation, reported errors and timings, v4 fallback and full-library support.
 2. Compare full import of the task 0597 one-million-point fixture in five interleaved fresh-process pairs against 66feaeb3. Record peak RSS and elapsed time at four and two permitted CPUs, six output arrays and count. Target at least 45 MiB less peak RSS without a material time regression. Use the same external file and scratch directories. Report full-import numbers separately from inflate.
 3. Verify valid v1–4 as applicable, truncated/corrupt input, byte-for-byte decoded attribute parity, and borrowed input lifetime. Run splats and editor groups on Windows and Linux and splats stress. Use independent testing and review.
-4. Ownership: src/scene/import_splat.cpp, tests/test_splats.cpp, changelog.d/619-spz-file-peak.md and this spec. Use existing stress fixture; request overlap approval before editing stress. Cite results and remaining limitations in the fragment.
 
-## Basis
+## Tests and checks to run
 
-Task 0597; src/scene/import_splat.cpp (import_spz_file, spz_gzip, spz_decode); scratch C:/blab/0615-splat/measure.cpp. The decoded arrays, inflated bytes and file-owned compressed bytes have overlapping lifetimes. Test the effect at the production file import entry point.
+Run the splats and editor groups, the damaged-input splats stress workload, Windows full-library Zstandard cases, and five alternating full-import pairs at each CPU affinity.
 
-## Implementation and measurement method
+## Risks and edge cases
+
+Borrowed compressed bytes must remain unchanged after successful and failed reads. Decode errors, malformed headers, gzip bounds and the v4 fallback must remain observable to the caller.
+
+## Documentation to update
+
+Record the end-to-end RSS, time, geometry parity, and qualifications in the round 619 fragment and this task.
+
+## Outcome
+
+### Implementation and measurement method
 
 The legacy disk importer reads the compressed bytes into a scoped string, unpacks into the existing byte vector,
 and releases the string when that scope ends. It then validates the unpacked layout and decodes the cloud using
@@ -31,14 +55,14 @@ Normalized production source and external code match the archived baseline revis
 link the same harness and 304 common objects. The importer's source blob is `783ee286` at baseline and
 `825c0dd9` for this candidate.
 
-Five interleaved pairs per CPU count each run one fresh process, on CPUs 0–3 with four permitted job threads
+Each side of five interleaved pairs per CPU count ran in a fresh process (20 processes in total), on CPUs 0–3 with four permitted job threads
 or CPUs 0–1 with two permitted job threads. Both revisions use the same cached input file and scratch directories.
 The elapsed interval covers the production `import_spz_file` call, including disk read and decoded cloud validation.
 Peak RSS is the process high-water mark from `getrusage(RUSAGE_SELF)` at the end of that call.
 The harness checks the point count and SH degree and records six array element counts and raw-byte digests
 after the measured interval. Task 0597 measured gzip inflate separately. This comparison measures full import.
 
-## Paired full-import results
+### Paired full-import results
 
 Each entry shows the median and range across five processes. The reduction column is the median of the five
 paired differences in peak RSS.
@@ -68,7 +92,7 @@ Build identity and raw rows are in `C:/blab/0619/prepare-bench.log` and `C:/blab
 The timed wrapper recorded a successful exit and zero taints in `C:/blab/pass32-spz01.log`. The independent
 audit confirmed all 20 production imports and array digests in `C:/blab/0619-test/audit_bench.log`.
 
-## Local verification
+### Local verification
 
 The dependency-free WSL release build used the candidate source above and independent test source blob
 `fc00a24e`. The splats group passed 517 checks, including v1–v3 attribute equality across disk and borrowed
@@ -80,4 +104,4 @@ WSL evidence in `C:/blab/0619` includes `build-wsl.log`, `verify-wsl-tests.log` 
 The same lab contains the benchmark source, build script, launch script and result summarizer. The coverage
 map found 398 covered entries and zero empty entries.
 
-Independent code review approved the source, ownership and measured evidence against 66feaeb3. The independent Windows full-libraries build passed 530 splat checks, including 76 focused legacy assertions and 17 actual Zstandard v4 assertions. Valid v4 attributes and malformed-table refusal matched. The tester checked 364 common object hashes against the 66feaeb3 build manifest and replaced only the importer and splats test objects (C:/blab/0619-test/win-libs-15ffjgp_/provenance.json). The Hub runs the joined editor suites and CI before publication for owner review.
+Independent code review approved the source, ownership and measured evidence against 66feaeb3. The independent Windows full-libraries build passed 530 splat checks, including 76 focused legacy assertions and 17 actual Zstandard v4 assertions. Valid v4 attributes and malformed-table refusal matched. The tester checked 364 common object hashes against the 66feaeb3 build manifest and replaced only the importer and splats test objects (C:/blab/0619-test/win-libs-15ffjgp_/provenance.json). The Hub runs the joined local suites, publishes the cumulative PR, and verifies hosted CI on the published head before owner review.

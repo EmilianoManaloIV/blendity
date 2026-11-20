@@ -50,10 +50,10 @@ non-trivial.
   test goes when its ADR is written. `python tools/test_coverage_map.py --check` must find no console command,
   keymap action or window without a test.
 - Before a change is done: the round's test groups and `editor` pass locally on Windows and Linux
-  (`BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
+  (`TAG="verify-$(date +%s)-$$" BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" BLENDITY_LIBDIR="$win_blender_bundle" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
   groups are those whose tests it changed and those that test the code it changed (code behind a `BL_WITH_*`
   switch included: CI builds without the libraries); a round that cannot name them runs the whole suite
-  locally (the chain without `TEST_GROUPS`).
+  locally (the chain without `TEST_GROUPS`). The full-library tree uses `BLENDITY_LIBDIR` or its sibling `../blender/lib/windows_x64`. The bundle must contain `tbb/include` and `tbb/lib/tbb12.lib`.
 - A timed run (a measurement, a timed bake, a chain with `POSING=1`) takes a slot from the hub first:
   one holder at a time, nothing else builds or runs meanwhile. See [the machine's limits](docs/handoff/MACHINE.md).
 - Geometry changes also run the matching stress sections (`blendity_stress --only pushpull |

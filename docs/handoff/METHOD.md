@@ -29,7 +29,7 @@ loss is in `PITFALLS.md`.
    real fault after a 50-minute chain costs a second chain. Read-only; findings ranked; approve only with no
    blockers or majors. Fixes go in, and a second review looks at the fixes.
 5. **Verify.** The round's test groups and `editor`, on Windows (both builds) and Linux
-   (set the three path variables to the candidate's scratch Windows tree, full-library Windows tree, and WSL-visible Linux tree first; `BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
+   (set the scratch paths to the Windows, full-library Windows, and WSL-visible Linux trees first; set `win_blender_bundle` to the Windows x64 bundle containing `tbb/include` and `tbb/lib/tbb12.lib`. The default is `../blender/lib/windows_x64` relative to the full-library tree; `TAG="verify-$(date +%s)-$$" BL_W="$win_candidate" BL_MAIN="$win_libs_candidate" BL_WSL_TREE="$linux_candidate" BLENDITY_LIBDIR="$win_blender_bundle" TEST_GROUPS="modeling,editor" bash tools/dev/chain.sh`, or the same steps by hand from a worktree); the stress sections
    for geometry changes; the audits (`tools/test_coverage_map.py --check`, `tools/sweep_commands.py --check`,
    `py tools/dev/changelog.py check`). The whole suite, macOS and the sanitizers are CI's.
 6. **Publish.** The hub merges the stack's current top into the round's branch (build the tests again if the merge
