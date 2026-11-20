@@ -1,6 +1,7 @@
 # Open work
 
-Every follow-up that was named and not taken, as of 2026-11-18 (the tree of PR #472 plus Pass 28's write-up).
+The original inventory covers follow-ups named by 2026-11-18 (PR #472 plus Pass 28's write-up).
+Later updates link the task or evidence that changed an item's status.
 Each item gives what is wrong or missing, the evidence, the files, and what "done" would look like, so it can
 become a task spec (`docs/tasks/TEMPLATE.md`) with little more reading. Line numbers are those of this tree and
 will drift; the function names will not. Item 19 could have held up 1.0.0. Windows CI and release builds use MSVC 14.51.
@@ -193,30 +194,31 @@ After round 617, opening 2,000 existing procedural textures in a fresh Windows C
 ### 17. Pass 24's open points (owner's decisions and M-L work)
 - **Evidence:** `docs/tasks/0460-*` to `0464-*`, Pass 24's write-up and rounds 484-488 in `CHANGELOG.md`: a re-read replacing a typed material
   value; the direction-dependent slow Scene view; the bake's remaining specks; the bake's CPU half on the card;
-  bakes over 2^23 texels depend on batch size; `tools/dev/chain.sh` copies into the shared checkout and is not
-  usable from a worktree (rounds since ran its steps by hand).
-- **Done:** each needs a spec; the `chain.sh` item is tooling and the most useful to a new agent - a chain that
-  runs in whatever tree it is called from.
+  bakes over 2^23 texels depend on batch size. The original `chain.sh` assumed the shared checkout.
+- **Verification chain update:** the helper now accepts a selected dependency-free checkout through `BL_W` and
+  requires explicit scratch targets through `BL_MAIN` and `BL_WSL_TREE`. Use the receipt's actual command and
+  test results when checking the chain. [Migration inventory](CODEX.md) · [Helper](../../tools/dev/chain.sh)
+- **Remaining work:** write a spec for each unresolved product item before implementation.
 
 ### 18. `build.sh` gaps (S)
-- **Evidence:** `PITFALLS.md`: `build.sh` checks only `src/*/*.h` and `src/*/*/*.h` for newer headers (editing a
-  `tests/*.h` alone rebuilds nothing), compares mtimes only, and compiles with `nproc` jobs (no `JOBS`
-  override; on a memory-limited WSL that means `taskset`).
-- **Done:** test headers in the dependency check; a `JOBS` setting; both documented in `tools/README.md` via a
-  fragment.
+- **Updated:** `build.sh` now checks `tests/*.h` and `tests/fixtures/*.h` when deciding whether to rebuild test
+  objects. Its dependency checks still use modification times.
+- **Remaining:** the script computes its parallel job count with `nproc` or `sysctl`. A caller-provided
+  `JOBS` override is still open. Follow the machine's WSL affinity limit. [Build script](../../build.sh) · [WSL limits](MACHINE.md#wsl-limits)
 
 ## The owner's decisions and housekeeping
-These wait on the owner, not on a task. Do not act on them unasked.
+The owner decides the open items below. Standing authorization already covers hub cleanup of verified merged
+`task/*` branches through the guarded helper.
 - Item 4 above (round 565's fix under the 1.3x bar) and item 1's choice.
 - ADR 0146's amendments made during Pass 26 (rounds 520 and 521: vertex deform stays per frame and F12 poses
   at the snapshot on the main thread; the outline is the rest shape's hull skinned, up to 44 % of thickness off
   the old hull where bones blend) were published for the owner's reading.
 - Whether to keep `tools/dev/integrate.sh` (the integration PR trial, ADR 0132) or retire it: Passes 26 to 28
   used one top per stack instead.
-- The backlog of merged `task/*` branches on GitHub and the `diag/549-gcc15` branch: `AGENTS.md` asks for
-  merged branches to be deleted after each merge, but the agents' deletes were refused by the permission
-  system, so the owner deletes them or allows it.
-- Removing finished worktrees and scratch folders on the development machine (`MACHINE.md` lists the families;
-  one folder with a mangled name, `C:\blcmp565$tag`, was left because its delete was blocked).
+- Only the hub may exercise the standing cleanup approval. The helper requires verification of each merged
+  `task/*` branch. Other refs, including `diag/549-gcc15`, remain owner decisions. [Guarded cleanup approval](../tasks/0570-project-parity.md#owner-decision-on-merged-branch-cleanup)
+- The owner authorized task 0594 to retire verified stale worktrees and branches. It removed 31 worktrees,
+  59 local branches and 97 remote branches. The task records the retained exceptions and the limits of that
+  cleanup. Refer new ambiguous paths or refs to the hub. [Cleanup outcome](../tasks/0594-verified-cleanup.md)
 - A larger WSL memory limit (`.wslconfig`) was never asked for; it would lift the one-build rule.
 - Releases after 1.0.0: version numbers, tags and what goes in them.

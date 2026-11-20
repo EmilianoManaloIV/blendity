@@ -10,14 +10,15 @@ This folder is what a new agent, or a person, needs in order to carry on without
    using the [Codex setup and migration inventory](CODEX.md).
 2. This file, then `METHOD.md` (how a change goes from a request to a merged PR) and `PITFALLS.md` (what cost
    time, so it need not cost it again).
-3. `OPEN-WORK.md`: the follow-ups nobody has taken, each with its files and evidence, ready to become tasks.
+3. [OPEN-WORK.md](OPEN-WORK.md) records the 1.0.0 follow-up inventory and subsequent status updates. Check a
+   linked task's outcome and PR before taking an item.
 4. `MACHINE.md`: the owner's development machine - toolchains, limits, scratch folders and the helper scripts
    (copied into `tools/dev/machine/`). Only needed when working on that machine.
 5. Before changing code: `docs/requirements.md`, `docs/ARCHITECTURE.md`, and the ADRs the area cites.
 
 ## What 1.0.0 contains
 The README's feature section is the full list; `docs/MANUAL.md` walks through it. In short:
-- A Unity-style editor: Hierarchy, Inspector, Project, Scene and Game views, docking, Play mode, two keymap
+- A Unity-style editor with Hierarchy, Inspector, Project, Scene and Game views, docking, Play mode, keymap
   presets, a console that reaches every tool, and the Learn tab (interactive lessons, `src/editor/lessons.cpp`).
 - Blender's modeling behind it: meshes in Blender's layout, Edit Mode tools, modifiers, Booleans, UV unwrapping,
   sculpting, weight and vertex paint, LoopTools; SketchUp-style drawing and Push/Pull; the Blockout object
@@ -26,8 +27,8 @@ The README's feature section is the full list; `docs/MANUAL.md` walks through it
   lighting (lightmaps, probes, Shadowmask), ray-traced shadows in the views, Gaussian splats, panoramic cameras.
 - Rigging and animation: skins, IK, humanoid posing, clips; skinning on the graphics card (Pass 26).
 - Files: OBJ, FBX, glTF, STL, PLY, USDA in and out, Unity packages in, splats (PLY, SPZ); a Unity Live Link.
-- Three programs per build: `Blendity`, `blendity_tests` (over 100,000 unit checks in about 3,700 tests; the
-  README holds the exact count) and `blendity_stress` (robustness sweeps and timed rows).
+- Three programs per build are `Blendity`, `blendity_tests` for unit checks and `blendity_stress` for
+  robustness sweeps and timed rows. The README records the latest folded check count.
 - Two builds that must both keep working: with Blender's prebuilt libraries (`../blender/lib/<platform>`) and
   dependency-free (`BLENDITY_NO_LIBS=1`, what CI builds).
 - Installers for Windows, macOS (Apple chips) and Linux, built by `release.yml` from a `v*` tag.
@@ -38,9 +39,10 @@ of the stack this handoff was published on, and by the Releases page; this folde
 ## What is open
 - **Follow-ups:** `OPEN-WORK.md`. None blocks the release; the largest are the graphics card's power state
   holding posing frames in a world over 16.7 ms, and a handful of testability gaps.
-- **Decisions that are the owner's:** listed at the end of `OPEN-WORK.md` (for example whether round 565's
-  kept fix, at 1.2x, stays under ADR 0112's 1.3x bar; the backlog of merged `task/*` branches the agents were
-  not allowed to delete; old worktrees).
+- **Owner decisions and housekeeping** are listed at the end of [OPEN-WORK.md](OPEN-WORK.md#the-owners-decisions-and-housekeeping).
+  The hub can use the approved helper for verified merged `task/*` branches. Task 0594 records the separately
+  authorized cleanup and its retained exceptions. [Guarded cleanup approval](../tasks/0570-project-parity.md#owner-decision-on-merged-branch-cleanup) ·
+  [Cleanup outcome](../tasks/0594-verified-cleanup.md)
 - **The integration PR** (`tools/dev/integrate.sh`, ADR 0132) was a trial; Passes 26 to 28 used one top per
   stack instead. The rule in `AGENTS.md` stands until the owner decides (`OPEN-WORK.md`).
 
@@ -50,7 +52,7 @@ of the stack this handoff was published on, and by the Releases page; this folde
 | The rules | `AGENTS.md` (`CLAUDE.md` retains the Claude Code guide) |
 | What the program must do | `docs/requirements.md` |
 | How it is built; which function to build on | `docs/ARCHITECTURE.md`, `docs/Blendity-Architecture.pdf` |
-| Why it is built that way | `docs/decisions/` (ADRs up to 0153; its README lists them) |
+| Why it is built that way | [Architecture decision index](../decisions/README.md) |
 | What each round was asked and did | `docs/tasks/NNNN-slug.md` (the spec, with its status and results) |
 | What changed, round by round, with check counts | `CHANGELOG.md`; rounds not yet folded: `changelog.d/` |
 | Measurements and budgets | `docs/PERFORMANCE.md`, `docs/perf/` (the sweeps and verifications) |
@@ -70,9 +72,10 @@ folders (their lessons are in `PITFALLS.md`; their open items in `OPEN-WORK.md`)
 from the owner's `Assets/`.
 
 ## First hour, suggested
-1. Clone, build both ways, run one test group (`AGENTS.md`, "Build and run"; `--list-groups`).
+1. Open the project, confirm role discovery and read the current task. Coordinate build slots and GPU access with
+   the hub before building or running a test group in scratch. [Parallel verification](METHOD.md#parallel-verification-and-evidence)
 2. `bash tools/dev/stack_check.sh` and `gh pr list`: what is open, and that each stack has one top.
-3. `python tools/test_coverage_map.py --check`, `python tools/sweep_commands.py --check`,
-   `py tools/dev/changelog.py check`: the three checks that most often surprise a publisher.
-4. Pick a small item from `OPEN-WORK.md`, write its spec from `docs/tasks/TEMPLATE.md`, and take it through
-   `METHOD.md` once before starting anything parallel.
+3. On Windows, run `py tools/test_coverage_map.py --check`, `py tools/sweep_commands.py --check` and
+   `py tools/dev/changelog.py check`. Use `python3` for these commands in WSL. [Machine toolchains](MACHINE.md)
+4. For a new round, use the [task template](../tasks/TEMPLATE.md) and follow the
+   [round procedure](METHOD.md#one-round-spec-implement-test-review-pr).
