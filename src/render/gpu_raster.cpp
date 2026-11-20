@@ -3071,9 +3071,8 @@ class VulkanRaster final : public Raster {
 
   /* The device, with ray queries chained when the card has them (round 543, ADR 0151: the views' traced shadows) - a
    * driver that refuses them opens it as before. The features go through VkPhysicalDeviceFeatures2 then. */
-  bool open_device(const VkDeviceQueueCreateInfo &qci, const VkPhysicalDeviceFeatures &want, const char *swapchain_ext) {
-    std::vector<const char *> exts;
-    if (swapchain_ok_) exts.push_back(swapchain_ext);
+  bool open_device(const VkDeviceQueueCreateInfo &qci, const VkPhysicalDeviceFeatures &want, bool portability_subset) {
+    const std::vector<const char *> exts = vk::base_device_extensions(portability_subset, swapchain_ok_);
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
@@ -3113,7 +3112,8 @@ class VulkanRaster final : public Raster {
 
   bool init(int index, std::string *err) {
     info_ = devices()[(size_t)index];
-    pd_ = vk::physical(index);
+    const vk::PhysicalDevice physical = vk::physical(index);
+    pd_ = physical.handle;
     VkInstance inst = vk::instance();
     PFN_vkGetInstanceProcAddr gipa = vk::get_instance_proc_addr();
 #define BL_RV_LOAD_I(name) f_.name = (PFN_##name)gipa(inst, #name);
@@ -3147,7 +3147,6 @@ class VulkanRaster final : public Raster {
     qci.queueFamilyIndex = qfam_;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
-    const char *swapchain_ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     swapchain_ok_ = wants_swapchain();
     /* The g-buffer shader reads gl_PrimitiveID for Edit Mode's face highlight (task 0166), which Vulkan ties to the
      * geometryShader feature: enabled where the card has it; elsewhere the highlight stays on the CPU. */
@@ -3158,7 +3157,7 @@ class VulkanRaster final : public Raster {
     geometry_ = have.geometryShader != 0;
     want.dualSrcBlend = have.dualSrcBlend;  // (task 0195: the see-through pass's blending)
     dual_src_ = have.dualSrcBlend != 0;
-    if (!open_device(qci, want, swapchain_ext)) return fail(err, "could not open " + info_.name);
+    if (!open_device(qci, want, physical.portability_subset)) return fail(err, "could not open " + info_.name);
 #define BL_RV_LOAD_D(name) f_.name = (PFN_##name)f_.vkGetDeviceProcAddr(dev_, #name);
     BL_RV_DEVICE(BL_RV_LOAD_D)
     if (swapchain_ok_) {
