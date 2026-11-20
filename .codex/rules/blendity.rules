@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# These are literal argument prefixes. AGENTS.md governs equivalent Git actions.
+# The hub-only merged task cleanup uses tools/dev/cleanup_task_branch.py.
+
+prefix_rule(
+    pattern = [["git", "git.exe"], "push", ["--force", "-f", "--force-with-lease", "--delete"]],
+    decision = "forbidden",
+)
+
+prefix_rule(
+    pattern = [["git", "git.exe"], "push", "origin", ["--force", "-f", "--force-with-lease", "--delete"]],
+    decision = "forbidden",
+)
+
+prefix_rule(
+    pattern = [["git", "git.exe"], "push", "origin", [
+        "main", "refs/heads/main", "main:main", "main:refs/heads/main",
+        "blendity", "refs/heads/blendity", "blendity:blendity", "blendity:refs/heads/blendity",
+        "blendity-root:main", "blendity-root:refs/heads/main",
+        "HEAD:main", "HEAD:refs/heads/main", "HEAD:blendity", "HEAD:refs/heads/blendity",
+    ]],
+    decision = "forbidden",
+)
+
+prefix_rule(
+    pattern = [["gh", "gh.exe"], "pr", "merge"],
+    decision = "forbidden",
+)
+
+prefix_rule(
+    pattern = [["git", "git.exe"], "reset", "--hard"],
+    decision = "forbidden",
+)

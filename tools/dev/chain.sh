@@ -8,8 +8,8 @@
 # the user's group ids and throws a value given to it away.)
 # Usage: TAG=NNN OUT=C:/blsuitesNNN [TEST_GROUPS=a,b] [LMQ=1] [SIDERAIL=1] [POSING=1] bash tools/dev/chain.sh
 W=${BL_W:-W:/blendity}
-M=${BL_MAIN:-C:/Users/trick/Downloads/blender-main/blendity}
-WSL_TREE=${BL_WSL_TREE:-/mnt/c/Users/trick/AppData/Local/Temp/claude/C--Users-trick-Downloads-blender-main/a08cffd5-528d-4068-9221-b120acf3ea14/scratchpad/wt169/blendity}
+M=${BL_MAIN:?set BL_MAIN to the scratch Blender-libraries checkout}
+WSL_TREE=${BL_WSL_TREE:?set BL_WSL_TREE to the candidate scratch checkout as seen by WSL}
 U=${BL_UNITY:-"C:/Program Files/Unity/Hub/Editor/2022.3.22f1/Editor/Unity.exe"}
 BP=${BL_SIDERAIL:-"C:/Users/trick/Downloads/SideRail Blendity"}
 TAG=${TAG:-x}
@@ -23,7 +23,7 @@ if [ -n "$TEST_GROUPS" ]; then
   # Before anything is built: a list that is no list of names stops here, not after three builds.
   echo "$TEST_GROUPS" | grep -qE '^[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*$' || { echo "TEST_GROUPS is not a list of group names (a,b,c): '$TEST_GROUPS'"; exit 1; }
   TEST_GROUPS=$(echo "$TEST_GROUPS" | tr ',' '\n' | awk '!seen[$0]++' | paste -sd, -)  # (a name given twice runs once)
-  case ",$TEST_GROUPS," in *,editor,*) ;; *) TEST_GROUPS="$TEST_GROUPS,editor" ;; esac  # (CLAUDE.md: the round's groups and editor)
+  case ",$TEST_GROUPS," in *,editor,*) ;; *) TEST_GROUPS="$TEST_GROUPS,editor" ;; esac  # (AGENTS.md: the round's groups and editor)
   echo "test groups: $TEST_GROUPS (the whole suite runs on CI)"
 fi
 
@@ -54,7 +54,7 @@ if [ -n "$TEST_GROUPS" ]; then
     "$W/dist/windows/blendity_tests.exe" --list-groups | tr -d '\r' | grep -qx "$g" || { echo "TEST_GROUPS: no such group: $g (blendity_tests --list-groups names them)"; exit 1; }
   done
 fi
-py "$W/tools/dev/copy_w_to_main.py" > "$CMP/copy.log" 2>&1 || { tail -3 "$CMP/copy.log"; echo "COPY FAILED"; exit 1; }; tail -1 "$CMP/copy.log"
+BL_W="$W" BL_MAIN="$M" py "$W/tools/dev/copy_w_to_main.py" > "$CMP/copy.log" 2>&1 || { tail -3 "$CMP/copy.log"; echo "COPY FAILED"; exit 1; }; tail -1 "$CMP/copy.log"
 cd "$M" || exit 1
 BLENDITY_NO_LTCG=1 cmd //c "$WIN_M\\build.bat release tests" > "$CMP/main_tests_build.log" 2>&1; echo "main tests rc=$?"
 mv dist/windows/Blendity.exe "dist/windows/Blendity.old$(date +%s).exe" 2>/dev/null  # (a running copy is renamed aside, never closed)
@@ -79,7 +79,8 @@ py tools/hci_consistency_audit.py --check 2>&1 | tail -2
 py tools/hci_klm.py --check 2>&1 | tail -1
 py tools/unity_meta.py --check 2>&1 | tail -1
 py tools/make_books.py --check-cited 2>&1 | tail -1
-py tools/sweep_commands.py --check 2>&1 | tail -1
+py tools/test_sweep_commands.py || exit 1
+py tools/sweep_commands.py --check || exit 1
 py tools/test_perf_suite.py 2>&1 | tail -1
 py tools/bench_world.py --self-test 2>&1 | tail -1
 echo AUDITS DONE

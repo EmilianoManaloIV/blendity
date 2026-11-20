@@ -669,7 +669,8 @@ bool point_colors_need_carry(const Mesh &from, const Mesh &to, bool restore_miss
 void apply_color_map(const GroupTransferMap &map, const Mesh &from, Mesh &to, bool restore_missing);
 void transfer_point_colors(const Mesh &from, Mesh &to, bool restore_missing);
 /* An operator that built `to` anew from `from` (Voxel Remesh, Quad Remesh): Point layers come back by position; the
- * layers that can't (Corner ones) are named in to.dropped_colors for the editor to report. */
+ * Corner layers sample the source surface per face. Invalid input layers are reported to the editor. */
+void transfer_corner_colors(const Mesh &from, Mesh &to);
 void carry_colors_rebuilt(const Mesh &from, Mesh &to);
 /* Names of from's layers that aren't Point layers fitting it, as dropped_colors entries (Decimate, Remesh). */
 void note_unkept_colors(const Mesh &from, Mesh &to);
@@ -805,7 +806,11 @@ void solidify(Mesh &m, float thickness, float offset, bool even, bool rim);
  * dst's); slot_remap[i] is dst's material slot for src's slot i. */
 /* join_keys (round 357): shape keys joined by name too - Join's and Fix Model's; the Z-fight check and Scatter merge
  * don't want every key times every vertex (review 357). */
-void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap = {}, bool join_keys = false);
+struct ColorJoinNames {
+  std::unordered_map<std::string, std::string> point, corner;
+  std::unordered_set<std::string> reserved;
+};
+void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap = {}, bool join_keys = false, ColorJoinNames *names = nullptr);
 /* Shape keys that move none of the mesh's vertices dropped (round 358: Separate by Shape Keys); returns how many. */
 size_t drop_unmoving_keys(Mesh &m);
 /* Separate > Selection: a new mesh of the selected faces (the caller deletes them from m). */

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <cstdio>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,7 +24,7 @@ static float det3(const Mat4 &w) {
          w.m[8] * (w.m[1] * w.m[6] - w.m[2] * w.m[5]);
 }
 
-void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap, bool join_keys) {
+void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap, bool join_keys, ColorJoinNames *names) {
   const uint32_t base = (uint32_t)dst.vert_count();
   const bool flip = det3(xf) < 0;  // a mirrored object: keep its faces pointing out
   /* Vertex groups joined by name: dst's go on with src's weights (0 where src has none), src's new ones start at 0
@@ -36,32 +37,58 @@ void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<i
       for (size_t i = 0; i < src.vert_count(); i++) dg.weights.push_back(si >= 0 ? src.vertex_groups[(size_t)si].weights[i] : 0.0f);
     }
   }
-  /* Task 0525 (ADR 0152): Point colour layers joined by name as the groups are - white where a side has none. Corner
-   * layers can't follow add_face yet: sync_attributes drops dst's (reported by the editor), src's aren't joined. */
-  {
-    auto point_fits = [](const Mesh &m, const ColorAttribute &c) { return c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m.vert_count(); };
-    /* What can't be joined, decided before dst's layers grow (they fit again only once the positions have): src's
-     * Corner or stale layers, and src's Point ones whose name dst holds as another kind (reported by the editor). */
-    for (const ColorAttribute &sc : src.color_attributes) {
-      const int di = dst.find_color(sc.name);
-      if (point_fits(src, sc) && (di < 0 || point_fits(dst, dst.color_attributes[(size_t)di]))) continue;
-      dst.dropped_colors.push_back("'" + sc.name + (sc.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+  // Resolve source layers while both meshes still have their original topology.
+  const bool inherit_choices = !names && dst.color_attributes.empty();
+  std::vector<int> source_for(dst.color_attributes.size(), -1);
+  for (size_t i = 0; i < src.color_attributes.size(); ++i) {
+    const ColorAttribute &layer = src.color_attributes[i];
+    if (!src.color_fits(layer)) {
+      dst.dropped_colors.push_back("'" + layer.name + (layer.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+      continue;
     }
-    const bool dst_had = !dst.color_attributes.empty();
-    for (const ColorAttribute &sc : src.color_attributes)
-      if (point_fits(src, sc) && dst.find_color(sc.name) < 0) dst.color_attributes.push_back(dst.make_color(sc.name, ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1)));
-    for (ColorAttribute &dc : dst.color_attributes) {
-      if (!point_fits(dst, dc)) continue;
-      const int si = src.find_color(dc.name);
-      const bool has = si >= 0 && point_fits(src, src.color_attributes[(size_t)si]);
-      for (size_t i = 0; i < src.vert_count(); i++) dc.rgba.push_back(has ? src.color_attributes[(size_t)si].rgba[i] : Vec4(1, 1, 1, 1));
+    auto *aliases = names ? (layer.domain == ColorAttribute::Domain::Point ? &names->point : &names->corner) : nullptr;
+    std::string name = layer.name;
+    if (aliases) {
+      auto it = aliases->find(name);
+      if (it != aliases->end()) name = it->second;
     }
-    /* src's choices only when dst had no layers to choose from ("none" on dst stays none). */
-    if (!dst_had && src.active_color >= 0 && src.active_color < (int)src.color_attributes.size())
-      dst.active_color = dst.find_color(src.color_attributes[(size_t)src.active_color].name);
-    if (!dst_had && src.render_color >= 0 && src.render_color < (int)src.color_attributes.size())
-      dst.render_color = dst.find_color(src.color_attributes[(size_t)src.render_color].name);
+    int dest = dst.find_color(name);
+    if (dest >= 0 && dst.color_attributes[(size_t)dest].domain != layer.domain) {
+      for (int n = 1; ; ++n) {
+        char suffix[20];
+        std::snprintf(suffix, sizeof(suffix), ".%03d", n);
+        name = layer.name + suffix;
+        if (dst.find_color(name) < 0 && src.find_color(name) < 0 && (!names || !names->reserved.count(name))) break;
+      }
+      dest = -1;
+    }
+    if (dest < 0) {
+      dest = (int)dst.color_attributes.size();
+      dst.color_attributes.push_back(dst.make_color(name, layer.domain, Vec4(1, 1, 1, 1)));
+      source_for.push_back(-1);
+    }
+    if (aliases) (*aliases)[layer.name] = name;
+    source_for[(size_t)dest] = (int)i;
   }
+  for (size_t i = 0; i < dst.color_attributes.size(); ++i) {
+    ColorAttribute &layer = dst.color_attributes[i];
+    if (!dst.color_fits(layer)) continue;
+    const ColorAttribute *source = source_for[i] >= 0 ? &src.color_attributes[(size_t)source_for[i]] : nullptr;
+    if (layer.domain == ColorAttribute::Domain::Point) {
+      if (source) layer.rgba.insert(layer.rgba.end(), source->rgba.begin(), source->rgba.end());
+      else layer.rgba.resize(layer.rgba.size() + src.vert_count(), Vec4(1, 1, 1, 1));
+      continue;
+    }
+    for (size_t f = 0; f < src.face_count(); ++f) {
+      const uint32_t first = src.face_offsets[f], last = src.face_offsets[f + 1];
+      for (uint32_t j = first; j < last; ++j) {
+        const uint32_t c = flip ? last - 1 - (j - first) : j;
+        layer.rgba.push_back(source ? source->rgba[c] : Vec4(1, 1, 1, 1));
+        layer.corners.push_back(base + src.corner_verts[c]);
+      }
+    }
+  }
+  if (inherit_choices) restore_color_choices(src, dst);  // Building a fresh combined mesh (Scatter, for example).
   /* Shape keys joined by name too (round 357: they had been left a vertex count short - "the mesh was edited since"):
    * dst's go on with src's offsets turned into dst's space (0 where src has none), src's new ones start at 0. */
   if (join_keys && dst.keys_fit() && src.keys_fit()) {
@@ -121,6 +148,39 @@ static void copy_color_choices(const Mesh &from, Mesh &to) {
   if (to.render_color < 0 && from.render_color >= 0 && !to.color_attributes.empty()) to.render_color = 0;
 }
 
+// Validation of a Corner layer compares its entire signature. A many-part split performs it once per input.
+static std::vector<uint8_t> valid_part_colors(const Mesh &mesh) {
+  std::vector<uint8_t> valid;
+  for (const auto &layer : mesh.color_attributes) valid.push_back(mesh.color_fits(layer));
+  return valid;
+}
+
+// Faces are emitted in source order. Using their original corner ranges keeps a seam at a shared vertex.
+static void copy_part_colors(const Mesh &from, Mesh &part, const std::vector<uint32_t> &faces, const std::vector<uint32_t> *vertices,
+                             const std::vector<uint8_t> &valid) {
+  for (size_t i = 0; i < from.color_attributes.size(); ++i) {
+    const ColorAttribute &layer = from.color_attributes[i];
+    if (!valid[i]) {
+      part.dropped_colors.push_back("'" + layer.name + (layer.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+      continue;
+    }
+    ColorAttribute out;
+    out.name = layer.name;
+    out.domain = layer.domain;
+    if (layer.domain == ColorAttribute::Domain::Corner) {
+      out.corners = part.corner_verts;
+      out.rgba.reserve(part.corner_count());
+      for (uint32_t f : faces)
+        out.rgba.insert(out.rgba.end(), layer.rgba.begin() + from.face_offsets[f], layer.rgba.begin() + from.face_offsets[f + 1]);
+    } else if (vertices) {
+      out.rgba.reserve(vertices->size());
+      for (uint32_t v : *vertices) out.rgba.push_back(layer.rgba[v]);
+    } else out.rgba = layer.rgba;
+    part.color_attributes.push_back(std::move(out));
+  }
+  copy_color_choices(from, part);
+}
+
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   Mesh out;
   out.name = m.name;
@@ -131,15 +191,12 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   out.seams = m.seams;
   out.sharp_edges = m.sharp_edges;
   out.vertex_groups = m.vertex_groups;  // remove_loose_verts below keeps the separated vertices' weights
-  for (const ColorAttribute &c : m.color_attributes) {  // (task 0525) Point colours likewise; Corner ones don't follow add_face yet
-    if (c.domain == ColorAttribute::Domain::Point && c.rgba.size() == m.vert_count()) out.color_attributes.push_back(c);
-    else out.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
-  }
-  copy_color_choices(m, out);
+  std::vector<uint32_t> kept_faces;
   if (!m.face_smooth.empty()) out.face_smooth.reserve(m.face_count());
   const bool uv = m.has_uvs();
   for (size_t f = 0; f < m.face_count(); f++) {
     if (f >= face_sel.size() || !face_sel[f]) continue;
+    if (!m.color_attributes.empty()) kept_faces.push_back((uint32_t)f);
     out.add_face(m.face_verts(f), m.face_size(f), uv ? m.uvs.data() + m.face_offsets[f] : nullptr, m.material_of(f));
     if (!m.face_smooth.empty()) {
       out.face_smooth.resize(out.face_count() - 1, m.smooth ? 1 : 0);
@@ -147,6 +204,7 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
     }
   }
   if (!m.face_material.empty()) out.face_material.resize(out.face_count(), 0);
+  copy_part_colors(m, out, kept_faces, nullptr, valid_part_colors(m));
   const std::vector<uint32_t> remap = remove_loose_verts(out);
   /* The shape keys' offsets for the vertices kept (round 358; only their rows: a copy of every key a part had made a
    * many-part Separate slow - review 358). */
@@ -166,6 +224,7 @@ std::vector<Mesh> split_by_part(const Mesh &m, const std::vector<int> &face_part
   std::vector<std::vector<uint32_t>> faces(parts);
   for (size_t f = 0; f < m.face_count() && f < face_part.size(); f++)
     if (face_part[f] >= 0 && (size_t)face_part[f] < parts) faces[(size_t)face_part[f]].push_back((uint32_t)f);
+  const auto valid = valid_part_colors(m);
   std::vector<Mesh> out(parts);
   std::vector<uint32_t> remap(m.vert_count(), UINT32_MAX), touched, local;
   const bool uv = m.has_uvs();
@@ -223,16 +282,7 @@ std::vector<Mesh> split_by_part(const Mesh &m, const std::vector<int> &face_part
       for (uint32_t v : touched) nk.delta[remap[v]] = k.delta[v];
       o.shape_keys.push_back(std::move(nk));
     }
-    for (const ColorAttribute &c : m.color_attributes) {  // (task 0525) Point colours of the part's vertices
-      if (c.domain != ColorAttribute::Domain::Point || c.rgba.size() != m.vert_count()) {
-        o.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
-        continue;
-      }
-      ColorAttribute nc = o.make_color(c.name, ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
-      for (uint32_t v : touched) nc.rgba[remap[v]] = c.rgba[v];
-      o.color_attributes.push_back(std::move(nc));
-    }
-    copy_color_choices(m, o);
+    copy_part_colors(m, o, faces[p], &touched, valid);
     for (uint32_t v : touched) remap[v] = UINT32_MAX;
     o.sync_attributes();
     o.touch();
@@ -300,6 +350,7 @@ size_t extrude_verts_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
   std::vector<uint8_t> in_edge(m.vert_count(), 0);
   for (const EdgeUse &u : edges) in_edge[u.a] = in_edge[u.b] = 1;
   std::vector<uint32_t> dup(m.vert_count(), UINT32_MAX);
+  const auto layers = valid_corner_layers(m);
   const size_t nv0 = m.vert_count();
   auto copy_of = [&](uint32_t v) {
     if (dup[v] == UINT32_MAX) dup[v] = m.add_vert(m.positions[v]);
@@ -324,6 +375,12 @@ size_t extrude_verts_edges(Mesh &m, std::vector<uint8_t> &vert_sel) {
     const Vec2 quv[4] = {ta, tb, tb, ta};
     const int mat = u.face >= 0 ? m.material_of((size_t)u.face) : 0;
     m.add_face(quad, 4, uv ? quv : nullptr, mat);
+    if (!layers.empty()) {
+      const uint32_t ca = u.face < 0 ? UINT32_MAX : u.forward ? u.cb : u.ca;
+      const uint32_t cb = u.face < 0 ? UINT32_MAX : u.forward ? u.ca : u.cb;
+      const uint32_t corners[]{ca, cb, cb, ca};
+      append_corner_copies(m, layers, corners, 4);
+    }
     if (!m.face_smooth.empty() && u.face >= 0) m.face_smooth.back() = m.smooth_of((size_t)u.face) ? 1 : 0;
     made++;
   }
@@ -370,7 +427,7 @@ uint32_t split_edge(Mesh &m, uint32_t a, uint32_t b, float t) {
         }
       }
     }
-    fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
   }
   fb.commit(m);
   const uint64_t key = Mesh::edge_key(a, b);
@@ -399,7 +456,7 @@ bool split_face(Mesh &m, size_t f, uint32_t va, uint32_t vb) {
   for (size_t g = 0; g < m.face_count(); g++) {
     const uint32_t gb = m.face_offsets[g], gn = m.face_size(g);
     if (g != f) {
-      fb.add(m.face_verts(g), gn, fb.has_uv ? &m.uvs[gb] : nullptr, m.material_of(g), m.smooth_of(g));
+      fb.add(m.face_verts(g), gn, fb.has_uv ? &m.uvs[gb] : nullptr, m.material_of(g), m.smooth_of(g), g);
       continue;
     }
     /* ia .. ib and ib .. ia, both closed by the new edge. */
@@ -412,7 +469,7 @@ bool split_face(Mesh &m, size_t f, uint32_t va, uint32_t vb) {
         if (fb.has_uv) ft.push_back(m.uvs[base + (uint32_t)k]);
         if (k == to) break;
       }
-      fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
+      fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
     }
   }
   fb.commit(m);
@@ -669,7 +726,7 @@ bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vec
   FaceBuilder fb(m);
   for (size_t g = 0; g < m.face_count(); g++) {
     if (g != f) {
-      fb.add(m.face_verts(g), m.face_size(g), fb.has_uv ? &m.uvs[m.face_offsets[g]] : nullptr, m.material_of(g), m.smooth_of(g));
+      fb.add(m.face_verts(g), m.face_size(g), fb.has_uv ? &m.uvs[m.face_offsets[g]] : nullptr, m.material_of(g), m.smooth_of(g), g);
       continue;
     }
     /* va .. vb along the face, then back to va through the path (reversed);
@@ -693,7 +750,7 @@ bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vec
           fv.push_back(mid[i]);
           if (fb.has_uv) ft.push_back(mid_uv[i]);
         }
-      if (fv.size() >= 3) fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
+      if (fv.size() >= 3) fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f), f);
     }
   }
   fb.commit(m);

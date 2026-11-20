@@ -55,7 +55,7 @@ untouched() { [ -z "$(git -C "$W" status --porcelain)" ] && [ "$(git -C "$W" wor
 
 run() {  # run SCRIPT [VAR=value...]: OUT and RC
   local script=$1; shift
-  OUT=$(cd "$W" && env -u CI -u FIX -u CHECK -u NEW -u SKIP -u ANY -u REQUIRED GH="$FAKE" FAKE_GH="$F" REPO=test/test BL_MAIN="$W" "$@" \
+  OUT=$(cd "$W" && env -u CI -u FIX -u CHECK -u NEW -u SKIP -u ANY -u REQUIRED -u BL_AI_COAUTHOR GH="$FAKE" FAKE_GH="$F" REPO=test/test BL_MAIN="$W" "$@" \
           bash "tools/dev/$script" 2>&1)
   RC=$?
 }
@@ -126,7 +126,7 @@ t "CHECK=1 pushes nothing" unpushed integration/1
 t "CHECK=1 opens no pull request" unlogged create
 t "CHECK=1 leaves the working tree and the worktree list alone" untouched
 
-run integrate.sh
+run integrate.sh BL_AI_COAUTHOR="Test assistant <assistant@example.invalid>"
 t "a real run on a local origin succeeds" rc 0
 t "it pushes integration/1" pushed integration/1
 t "integration/1 holds every stack's top" eval 'holds integration/1 a2 && holds integration/1 b1 && holds integration/1 c1'
@@ -134,7 +134,8 @@ t "integration/1 is main plus merge commits only" merges_only integration/1
 t "it opens one PR on main from integration/1" logged "create #5 head=integration/1 base=main"
 t "the PR's body has the 'Merging this also merges' line for every PR carried" body_has "**Merging this also merges #1, #2, #3 and #4.**"
 t "the real run leaves the working tree and the worktree list alone" untouched
-t "the merge commits carry the Co-Authored-By line" eval 'git -C "$O" log -1 --format=%B integration/1 | grep -q "^Co-Authored-By: "'
+t "the merge commits name the actual assistant" eval 'git -C "$O" log -1 --format=%B integration/1 | grep -Fxq "Co-Authored-By: Test assistant <assistant@example.invalid>"'
+t "the integration PR names the actual assistant" body_has "AI assistance for this run: Test assistant."
 run stack_check.sh
 t "stack_check accepts the integration PR as the one top over the stacks" rc 0
 t "... and says each stack is in it" has "in integration #5: merging #5 merges all of it"

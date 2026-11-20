@@ -81,10 +81,13 @@ void Editor::join_selected() {
   Mesh &dst = *mesh_make_mutable(mp);
   const Mat4 inv = a->world_matrix().inverse();
   size_t faces = 0;
+  meshops::ColorJoinNames names;
+  for (GameObject *o : others)
+    for (const ColorAttribute &layer : o->get<MeshFilter>()->mesh->color_attributes) names.reserved.insert(layer.name);
   for (GameObject *o : others) {
     const Mesh &src = *o->get<MeshFilter>()->mesh;
     faces += src.face_count();
-    meshops::append_mesh(dst, src, inv * o->world_matrix(), merge_slots(*a, *o, src), true);
+    meshops::append_mesh(dst, src, inv * o->world_matrix(), merge_slots(*a, *o, src), true, &names);
   }
   /* Children of the joined objects move to the result (Blender keeps them too). */
   for (GameObject *o : others) {

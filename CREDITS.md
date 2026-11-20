@@ -5,13 +5,11 @@ Blendity stands on the work of others. Ideas are borrowed with their names attac
 full reference list, every paper, manual and library with the pages where it is used.
 
 ## Authorship
-Blendity is copyright Emiliano Manalo and contributors. Its source, tests, documentation and books are written with
-Anthropic's Claude through Claude Code, under a human's direction and review (`docs/AI_DISCLOSURE.md`): the user decides
-what Blendity is for, approves every task's specification and decision record before code is written, reviews every
-pull request and merges it. The model's outputs belong to the user who directed them under Anthropic's terms, and are licensed to the extent
-copyright subsists in them (the human selection, direction, review and editing); the `Co-Authored-By` trailer on each
-commit is attribution, not a licence grant. Everything is licensed GPL-2.0-or-later
-(binaries GPL-3.0-or-later, ADR 0002); nothing of anyone else's code is claimed as the project's own.
+Blendity is copyright Emiliano Manalo and contributors. Through 1.0.0, the project was built with
+Anthropic's Claude through Claude Code, under a human's direction and review. OpenAI Codex assists with
+ongoing work. The owner directs and approves the work, reviews each pull
+request and merges it. See [AI disclosure](docs/AI_DISCLOSURE.md) for the role of each tool and commit attribution.
+The project is licensed GPL-2.0-or-later (binaries GPL-3.0-or-later, ADR 0002).
 
 ## The programs Blendity follows
 | Who | What Blendity takes from them |
@@ -33,6 +31,7 @@ commit is attribution, not a licence grant. Everything is licensed GPL-2.0-or-la
 | **Carnegie Mellon University** (the Graphics Lab Motion Capture Database) | The data the inbetweening network and the pose prior were trained on: "The data used in this project was obtained from mocap.cs.cmu.edu. The database was created with funding from NSF EIA-0196217." |
 | **Microsoft** (ONNX Runtime, MIT), **NVIDIA** (OptiX, CUDA), **The Khronos Group** (Vulkan, glTF, OpenXR), **Intel**, **Pixar**, **the Academy Software Foundation** and every library's authors | The optional downloads and the libraries listed with their versions and licences in `licenses/README.md`. |
 | **Anthropic** (Claude, Claude Code) and **GitHub** (Actions, Releases) | The development environment and the build, test and release machinery. |
+| **OpenAI** (Codex) | The current development environment. |
 
 ## The books and the papers
 The Learn tab teaches from *Fundamentals of Computer Graphics* (Marschner and Shirley, 5th ed.) and *Game Engine

@@ -7,6 +7,7 @@
 #include "mesh_internal.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
@@ -19,12 +20,14 @@ size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows) {
   cols = std::max(1, std::min(64, cols));
   rows = std::max(1, std::min(64, rows));
   face_sel.resize(m.face_count(), 0);
+  const auto layers = valid_corner_layers(m);
   struct Quad {
     size_t face;
     uint32_t c[4];
     Vec2 uv[4];
     int mat;
     bool smooth;
+    std::vector<std::array<Vec4,4>> colors;
   };
   std::vector<Quad> quads;
   const bool has_uv = m.has_uvs();
@@ -35,7 +38,11 @@ size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows) {
       q.c[k] = m.face_verts(f)[k];
       if (has_uv) q.uv[k] = m.uvs[m.face_offsets[f] + k];
     }
-    quads.push_back(q);
+    for (size_t index : layers) {
+      const auto *rgba = m.color_attributes[index].rgba.data() + m.face_offsets[f];
+      q.colors.push_back({rgba[0],rgba[1],rgba[2],rgba[3]});
+    }
+    quads.push_back(std::move(q));
   }
   if (quads.empty() || (cols == 1 && rows == 1)) return 0;
   /* Each side's cut vertices, from its lower-numbered end. */
@@ -65,6 +72,7 @@ size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows) {
   std::vector<std::vector<uint32_t>> new_faces;
   std::vector<std::vector<Vec2>> new_uvs;
   std::vector<std::pair<int, bool>> new_attr;
+  std::vector<std::vector<Vec4>> colors(layers.size());
   size_t done = 0;
   for (const Quad &q : quads) {
     const std::vector<uint32_t> s0 = side(q.c[0], q.c[1], cols), s1 = side(q.c[1], q.c[2], rows), s2 = side(q.c[3], q.c[2], cols),
@@ -90,6 +98,13 @@ size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows) {
             const float u = (float)(i + di) / cols, v = (float)(j + dj) / rows;
             t.push_back(q.uv[0] * ((1 - u) * (1 - v)) + q.uv[1] * (u * (1 - v)) + q.uv[2] * (u * v) + q.uv[3] * ((1 - u) * v));
           }
+        for (size_t l = 0; l < layers.size(); ++l) {
+          const auto &src = q.colors[l];
+          for (auto [di,dj] : {std::pair<int,int>{0,0},{1,0},{1,1},{0,1}}) {
+            const float u = float(i+di)/cols, v = float(j+dj)/rows;
+            colors[l].push_back(blend_corner(blend_corner(src[0],src[1],u),blend_corner(src[3],src[2],u),v));
+          }
+        }
         new_uvs.push_back(t);
         new_attr.push_back({q.mat, q.smooth});
       }
@@ -101,6 +116,11 @@ size_t grid_faces(Mesh &m, std::vector<uint8_t> &face_sel, int cols, int rows) {
   const size_t kept = m.face_count() - (size_t)std::count(drop.begin(), drop.end(), 1);
   for (size_t k = 0; k < new_faces.size(); k++)
     m.add_face(new_faces[k].data(), new_faces[k].size(), new_uvs[k].empty() ? nullptr : new_uvs[k].data(), new_attr[k].first);
+  for (size_t l = 0; l < layers.size(); ++l) {
+    auto &layer = m.color_attributes[layers[l]];
+    layer.rgba.insert(layer.rgba.end(),colors[l].begin(),colors[l].end());
+    layer.corners = m.corner_verts;
+  }
   drop.resize(m.face_count(), 0);
   delete_faces(m, drop);
   face_sel.assign(m.face_count(), 0);
@@ -132,7 +152,13 @@ bool pipe(Mesh &m, const std::vector<uint32_t> &path, float radius, int sides, s
     const float ang = 2.0f * kPi * i / sides;
     ring.push_back(m.add_vert(p0 + (a * std::cos(ang) + b * std::sin(ang)) * radius));
   }
+  const auto layers = valid_corner_layers(m);
   m.add_face(ring.data(), ring.size());
+  for (size_t index : layers) {
+    auto &layer = m.color_attributes[index];
+    layer.rgba.resize(m.corner_count(),{1,1,1,1});
+    layer.corners = m.corner_verts;
+  }
   const size_t face = m.face_count() - 1;
   /* All wire edges: the tube replaces them; otherwise they are the mesh's and stay. */
   bool wires = true;

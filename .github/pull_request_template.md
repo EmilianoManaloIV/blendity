@@ -6,13 +6,13 @@ docs/tasks/NNNN-slug.md (status: in review) - requirements R-xx; ADR NNNN or "no
 
 ## Tests
 - [ ] New / changed tests: (names)
-- [ ] Full unit suite: Windows ___ checks, Linux ___ checks, 0 failed
+- [ ] Applicable verification: Windows ___ checks, Linux ___ checks or lightweight checks (names and results)
 - [ ] Stress (sections run): problems ___ -> ___, faces on top of each other ___ -> ___
-- [ ] Builds without Blender's libraries (CI) and with them (local)
+- [ ] Native builds without Blender's libraries (CI) and with them (local) when applicable
 
 ## Review
-- [ ] `code-reviewer` (Opus) verdict: approve / changes needed - findings addressed: ...
-- [ ] Nothing touches the user's `Assets/`, `Renders/`, `Screenshots/`
+- [ ] Independent `code-reviewer` verdict: approve / changes needed - findings addressed: ...
+- [ ] Owner files in `Assets/`, `Renders/`, `Screenshots/` and `research/` are outside the round
 - [ ] No new dependency (or ADR + `licenses/` updated)
 
 ## Documentation
@@ -22,5 +22,5 @@ docs/tasks/NNNN-slug.md (status: in review) - requirements R-xx; ADR NNNN or "no
       sections of that fragment, the four files untouched (ADR 0123)
 - [ ] ADR (if architectural)
 
-Merging is the human's decision; agents never merge. This project is written with an AI under human direction and
-review: see docs/AI_DISCLOSURE.md.
+The owner reviews and merges. Record the AI tool used for this change and its role here.
+See `docs/AI_DISCLOSURE.md` for attribution.

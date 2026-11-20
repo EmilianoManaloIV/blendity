@@ -1253,6 +1253,7 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "import" && (to_lower(fs::extension(line_rest(line, 1))) == ".prefab" || to_lower(fs::extension(line_rest(line, 1))) == ".unity"))
     return import_model_file(line_rest(line, 1), true);  // (round 370: a Unity prefab or scene - by the path's own extension, review 370)
   if (c == "import" && to_lower(line).find(".unitypackage") != std::string::npos) return import_model_file(line_rest(line.substr(0, to_lower(line).find(".unitypackage") + 13), 1), true);  // (round 369: a package takes no shading word)
+  if (c == "import" && t.size() == 2 && t[1] == "source") return source_import_dialog();
   if (c == "import" && t.size() > 1) {  // import <model file> [asis|pbr|classic|guiltygear|soft|painterly|manga]: as dropped (copied into Assets); a shading word imports at once with it (task 0152)
     int shading = t.size() > 3 ? import_shading_index(t[t.size() - 2] + " " + t.back()) : -1;  // ("guilty gear", "soft anime")
     size_t words = shading >= 0 ? 2 : 0;

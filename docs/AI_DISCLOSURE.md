@@ -6,13 +6,16 @@ what the machine did and what a person did.
 ## How Blendity is built
 - **The direction is human.** Emiliano Manalo decides what Blendity is for, which features it gets and in what order,
   reviews the work on GitHub and merges every pull request. Nothing lands without that review.
-- **The code is written with Claude.** The C++ source, the tests, the stress sections and the documentation are
-  written by Anthropic's Claude through Claude Code, working from task specifications (`docs/tasks/`) and
-  architecture decisions (`docs/decisions/`) that the human approves before code is written, under the engineering
-  standards in `CLAUDE.md`. A second model pass reviews each change against its spec before it is opened as a pull
-  request, and its findings are fixed or answered in the task's record.
-- **Every commit says so.** Commits carry a `Co-Authored-By: Claude ...` trailer naming the model, and pull requests
-  end with "Generated with Claude Code". The CHANGELOG records, round by round, what was asked and what changed.
+- **AI assists with development.** Anthropic's Claude through Claude Code helped build Blendity through 1.0.0.
+  New work continues
+  with OpenAI Codex under the engineering standards in [AGENTS.md](../AGENTS.md). The owner approves task specs
+  and architectural decisions before implementation. Separate workers test from the spec and review the change
+  before publication. The round's record reports the findings and their resolution.
+- **Attribution follows the work.** Preserve historical `Co-Authored-By: Claude ...` trailers and
+  "Generated with Claude Code" pull-request disclosures. New AI-assisted
+  commits carry a `Co-Authored-By` trailer for the tool that helped write the change, for example
+  `Co-Authored-By: OpenAI Codex <noreply@openai.com>` for Codex. Pull requests identify the tool and its role.
+  The CHANGELOG records what was asked and what changed in each round.
 - **Numbers are measured, not guessed.** Check counts, timings and the stress suite's figures in the CHANGELOG and
   README come from runs on the machines named there. Where something was not tried (a pen on hardware, a
   particular GPU), the task's record says so.
@@ -36,11 +39,10 @@ work.
 Open an issue on GitHub. If something in this page is out of date, that is a bug: say so.
 
 ## Authorship and copyright
-Blendity is copyright Emiliano Manalo and contributors. The model's outputs belong to the user who directed them
-under Anthropic's terms, and the project licenses them GPL-2.0-or-later (binaries GPL-3.0-or-later) to the extent
-copyright subsists in them - the human selection, direction, review and editing; a purely machine-written passage may
-carry no copyright of its own, and the licence claims none it does not have. The `Co-Authored-By` trailer on every
-commit is attribution, not a licence grant. No third-party
+Blendity is copyright Emiliano Manalo and contributors. The project licenses its work GPL-2.0-or-later
+(binaries GPL-3.0-or-later) to the extent copyright subsists in it, including the human selection, direction,
+review and editing. A `Co-Authored-By` trailer records attribution. The repository's licence files describe
+the grant. No third-party
 code is claimed as the project's own: what is copied is listed with its licence in `licenses/README.md`, what is
 ported keeps its origin's notice in its header, and what is followed is credited in `CREDITS.md` and in the two books'
 References chapter (ADR 0104). The AI is a tool at build time, not in the product: the GPL program depends on no

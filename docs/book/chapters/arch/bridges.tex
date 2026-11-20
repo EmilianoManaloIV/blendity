@@ -40,6 +40,14 @@ against Blender 5.2 (R-06). Import reads the same formats plus MMD's PMX / PMD /
 \cite{MToon2026}, BVH, Collada, and \code{.blend} through the installed Blender, with an Import Preview that shows the
 model under a chosen shading before anything is written (\adr{0047}).
 
+\section{Steam Workshop snapshots}
+Steam manages downloading. Blendity reads installed content from explicit mounts (\adr{0154}). The resolver
+searches an embedded map archive before the ordered user mounts, and identifies the provider of a selected virtual
+path. Separate readers convert classic MDL and BSP resources or Source 2 compiled models and worlds into native
+import results. Import writes project assets with project-relative material dependencies and preserves shared
+meshes and skin bind data. The saved scene can reopen without the source mounts. Missing dependencies are
+reported by virtual path. See \code{docs/guides/workshop.md} for title-specific verification.
+
 \section{Unity's project files}
 Rounds 369--408 made Blendity read and write Unity's own files: \code{.unitypackage} unpacked into the project with
 GUIDs kept; prefabs and scenes brought in with nested prefabs and overrides, every other component as an Engine

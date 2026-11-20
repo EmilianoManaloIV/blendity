@@ -91,6 +91,7 @@ Editor::~Editor() {
   mesh_job_.reset();
   open_job_.reset();
   import_job_.reset();
+  source_picker_job_.reset();
   file_export_job_.reset();
   render_job_.reset();     // (round 412: a render on a worker stopped and joined before the tracer and the scene go)
   bake_job_.reset();       // (a bake the same)
@@ -258,7 +259,7 @@ bool Editor::wants_continuous_redraw() const {
          lighting_update_requested_ || preview_running_ ||
          seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
-         !deferred_.empty() ||
+         !deferred_.empty() || source_picker_job_ ||
          (cam_preview_pt_hash_ != 0 && !cam_preview_done_) ||
          gsplat_sorts_running() > 0 ||  // (round 532: a worker's splat order lands; the frame after it shows it)
          vr_running();  // (round 383: the headset wants every frame - idle, the editor would draw one a second - review 383)
@@ -783,6 +784,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   seq_tick();
   seq_audio_tick();  // (round 365)
   ui_.end_frame();
+  source_picker_poll();  // A Cancel click in the popup wins before staged files can publish.
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
   lighting_update_step();
@@ -1096,6 +1098,9 @@ void Editor::draw_menubar(const Recti &r) {
     u.menu_separator();
     if (u.menu_item("Import Model...")) import_dialog();
     u.tooltip("OBJ, FBX, glTF (.glb / .gltf), STL, PLY or USD (.usda): the formats Blender exports.");
+    u.submenu("Import", u.px(230), [this] {
+      if (ui_.menu_item("Source Engine Assets...")) source_import_dialog();
+    });
     if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
     u.tooltip("A .unitypackage unpacked into Assets/Imported/<package>: models and textures to use, scripts kept as they are.");
     if (u.menu_item("Export Unity Package...")) export_package_of_selection();  // (round 372)
@@ -5123,11 +5128,12 @@ void Editor::draw_dialogs() {
   ui::Id id = u.id("dialog") ^ (uint64_t)dialog_;
   const bool wide = dialog_ == Dialog::Preferences || dialog_ == Dialog::Update || dialog_ == Dialog::History || dialog_ == Dialog::Libraries ||
                     dialog_ == Dialog::MoonRay || dialog_ == Dialog::Ai;
-  int w = u.px(dialog_ == Dialog::About ? 460 : wide || dialog_ == Dialog::Report ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
+  int w = u.px(dialog_ == Dialog::About ? 460 : wide || dialog_ == Dialog::Report || dialog_ == Dialog::SourceImport ? 640 : dialog_ == Dialog::ImportPreview ? 560 : dialog_ == Dialog::FirstRunTier ? 600 : 420);
   Recti anchor{fb_.width / 2 - w / 2, fb_.height / 4, w, 0};
   if (!u.popup_open(id)) {
     if (dialog_shown_ == (int)dialog_) {  // was open and got closed by a click outside
       dialog_shown_ = 0;
+      if (dialog_ == Dialog::SourceImport) source_picker_cancel();
       dialog_ = Dialog::None;
       return;
     }
@@ -5195,6 +5201,10 @@ void Editor::draw_dialogs() {
         if (u.button({b.right() - u.px(92), b.y + u.px(4), u.px(80), b.h - u.px(8)}, "Cancel")) close();
         break;
       }
+      case Dialog::SourceImport:
+        title("Source Engine Assets");
+        draw_source_import_dialog(close);
+        break;
       case Dialog::ImportPreview: {
         draw_import_preview_dialog(close);
         break;

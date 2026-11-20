@@ -3,7 +3,7 @@
 Every follow-up that was named and not taken, as of 2026-11-18 (the tree of PR #472 plus Pass 28's write-up).
 Each item gives what is wrong or missing, the evidence, the files, and what "done" would look like, so it can
 become a task spec (`docs/tasks/TEMPLATE.md`) with little more reading. Line numbers are those of this tree and
-will drift; the function names will not. Nothing here blocks 1.0.0; item 19 (programs built by MSVC 14.52 crash; CI and the release build with 14.44) was the one that could have held it.
+will drift; the function names will not. Item 19 could have held up 1.0.0. Windows CI and release builds use MSVC 14.51.
 
 Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 
@@ -82,6 +82,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   Mass test is removed; playback by hand unchanged.
 
 ### 9. Make `sweep_commands`' pick stable (S)
+- **Verified:** The explicit inventory retains all 203 runnable verbs and 32 skips on both test scenes. A missing verb fails the local check and names the verb. [PR 477](https://github.com/EmilianoManaloIV/blendity/pull/477)
 - **Evidence:** three red Linux jobs (#443, #462, #466). `tools/sweep_commands.py` `examples()` picks, per verb,
   "the shortest invocation with arguments the tests run", so any new test line can change the committed
   `stress/sweep_commands.inc`; CI's check step then exits 1 with no failing test.
@@ -126,7 +127,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Done:** the `gpu` group is clean in the libraries build on a card, or each remaining difference has a
   justified tolerance written in the test.
 
-### 19. Programs built by MSVC 14.52 crash in mesh code (M; CI builds with 14.51 or not at all meanwhile)
+### 19. Programs built by MSVC 14.52 crash in mesh code (M; hosted builds use 14.51 meanwhile)
 - **What happened:** GitHub Actions run 44354841677 (PR #472's tree `36dd42af`, the dependency-free Windows build) crashed
   in two programs built by one `windows-build`: `blendity_tests.exe`, run as CI runs it - the whole suite in one process -
   with a segmentation fault as test 645 ran ("smart materials (ADR 0082): Worn Steel on a subdivided cube's baked maps
@@ -143,26 +144,26 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   on either crash site's path, and nothing reached before test 645 differs between #468 and #472 (round 562 / 572's);
   every branch Pass 26 added runs only for a skinned mesh. The built-in job pool was suspected before the compiler was
   noticed; the stress crash is on the main thread in a section that runs no bake.
-- **What is in place (task 0561):** `build.bat` prints its compiler in every build and takes `BLENDITY_VCVARS_VER`;
-  CI's `windows-build` and the release's Windows job ask for `14.51` with `BLENDITY_VCVARS_STRICT=1`: on a runner whose
-  image has no 14.51 (the new image) the build stops with a line saying so, and the job is run again until it lands on
-  one that has it. So CI and the installer are never built by 14.52 - at the price of red Windows jobs to re-run, more
-  of them as the new image rolls out, and none passing once the old image is gone. The image's other toolset, 14.44,
-  is no way out: it stops at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` (C2026, a string literal too long
-  for that compiler). The fault itself is still there for anyone who builds with 14.52.
-- **Next step:** build with MSVC 14.52 (Visual Studio 2026 18.12 or newer, or a CI run with the pin taken off) and
-  `BLENDITY_PDB=1`, which keeps the symbols beside the programs: `blendity_stress.exe --quick --only modifiers_ngon` then
-  names its crash's frames, and `cdb -g -G -o dist\windows\blendity_tests.exe` with `BLENDITY_TEST_RANGE=1-650` catches
-  the other (`kb`, `.dump /ma` at the fault; don't turn on Windows Error Reporting's LocalDumps: that is a system
-  setting). Then decide which it is: the compiler's fault (a small repro for Microsoft, the pin stays), or undefined
-  behaviour of ours that 14.51 tolerated (fix it, take the pin off). `/fp:fast` and `/GL` are the first switches to try
-  without (`BLENDITY_NO_LTCG=1`).
-- **Done:** the fault explained and fixed or reported, the Windows suite and the stress sections green on a 14.52 build,
-  and the pin in `build.yml` / `release.yml` taken off (it cannot stay: the old runner image will go).
+- **Hosted 14.51 setup (task 0591).** `windows-build` and the release's Windows job select the newest usable x64
+  14.51 patch in the Visual Studio instance chosen by `vswhere`. On a runner that lacks it, the helper adds the
+  versioned component with Visual Studio Installer. Each build activates that exact patch and checks the first compiler
+  and linker on PATH along with `VCToolsVersion`. Setup or activation failures stop the job. The run log records the image,
+  revision, inventory, installer result and tool paths. Image `20261103.298.1` reused its installed
+  14.51 toolset. On `20261116.315.1`, the installer added `14.51.36231` in 651 seconds, repeat setup
+  reused it, and both installer modes passed. [Task 0591 evidence](../tasks/0591-hosted-msvc.md#verification)
+  MSVC 14.44 previously stopped at `src/editor/lessons.cpp` and `unity_lighting_ui.cpp` with C2026 (string literal too long).
+- **Branch-only MSVC 14.44 trial (task 0562).** With the long strings split, the diagnostic build compiled and passed quick stress. Four bit-for-bit Catmull-Clark checks failed in the full Windows suite. [Trial run](https://github.com/EmilianoManaloIV/blendity/actions/runs/44380568201)
+- **Round 582 compatibility status (2026-11-19).** The 14.52 candidate compiled and passed quick stress under
+  release defaults, with precise floating-point mode, and with link-time code generation disabled. The full
+  Windows unit suite failed in all three runs. The cause remains unresolved. [Task 0564 and CI results](../tasks/0564-msvc-1452.md)
+- **Unresolved.** The 14.52 full suite failed in each tested configuration. [PR 485](https://github.com/EmilianoManaloIV/blendity/pull/485)
+- **Acceptance remains open.** Keep Windows CI and release builds pinned to 14.51 until the original failures
+  are explained and addressed and the full Windows unit suite and quick stress both pass on the intended 14.52 release build.
 
 ## Product follow-ups
 
 ### 14. Corner colour layers are dropped by most mesh operators (M-L)
+- **Verified:** Mesh edits carry per-corner paint, including across seams. The modeling checks cover Boolean difference, remesh, Join, Separate and modifier application. [PR 480](https://github.com/EmilianoManaloIV/blendity/pull/480)
 - **Evidence:** ADR 0152 and round 545 (`docs/tasks/0525-vertex-paint.md`): point colours follow vertex
   groups through edits; a Corner layer is dropped whole by every operator that rebuilds corners (the Edit Mode
   tools, the modifiers, Join, Separate), and the Inspector says when one was dropped.

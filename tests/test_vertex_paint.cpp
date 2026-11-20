@@ -11,6 +11,8 @@
 
 #include "../src/core/json.h"
 #include "../src/scene/dyntopo.h"
+#include "../src/scene/dynamesh.h"
+#include "../src/scene/quad_remesh.h"
 
 #include <chrono>
 
@@ -1505,9 +1507,11 @@ void run_vertex_paint_tests() {
     CHECK(vpt_valid(fm) && fm.color_attributes.size() == 1 && vpt_same2(fm.uvs, ref->uvs));
   });
 
-  test("colour attribute: an edit that rebuilds the corners drops a Corner layer whole (a Point layer stays), names it in the log and the Inspector, and OK dismisses it", [] {
+  test("colour attribute: a damaged Corner layer is reported by name and the Inspector note can be dismissed", [] {
     Editor ed;
-    vpt_setup(ed, vpt_flat(true, true));
+    auto base = vpt_flat(true, true);
+    vpt_setup(ed, base);
+    base->color_attributes[(size_t)base->find_color("Seam")].rgba.pop_back();
     ed.record_buttons_for_test(true);
     const size_t mark = vpt_log_mark();
     vpt_op(ed, "extrude", "faces");
@@ -1533,49 +1537,41 @@ void run_vertex_paint_tests() {
       gone = !ed.button_rect_for_test("vp:DroppedOK", r);
     }
     CHECK(gone);
-    /* Undo brings the layer back (the snapshot before the edit has it). */
-    ed.command("undo");
-    ed.step_frame_headless();
-    const Mesh &back = vpt_grid(ed);
-    std::printf("    after Undo: Seam back %d\n", (int)(vpt_find(back, "Seam") != nullptr));
-    CHECK(vpt_valid(back) && vpt_find(back, "Seam") && vpt_find(back, "P"));
   });
 
-  test("colour attribute: Loop Cut, Dissolve, Delete and a modifier never leave a Corner layer on the wrong corners; a Corner layer that survives belongs to unchanged corners", [] {
-    struct Case { const char *op; const char *select; bool must_drop; };
-    const Case cases[] = {{"loopcut", "edge", true}, {"dissolve_vertices", "some", true}, {"delete", "some", true}, {"extrude", "faces", true},
-                          {"split", "subset", true}, {"subdivide_edges", "all", true}, {"inset", "faces", true}, {"poke", "faces", true},
-                          {"triangulate_faces", "faces", true}, {"edge_split", "some", false}, {"merge_distance", "all", false}, {"bevel", "some", false},
-                          {"duplicate", "faces", false}, {"dissolve_faces", "faces", false}, {"tris_to_quads", "all", false}, {"collapse", "edge", false},
-                          {"connect", "some", false}};
+  test("colour attribute: Loop Cut, Dissolve, Delete and a modifier preserve the painted Corner layer alongside Point colours", [] {
+    struct Case { const char *op; const char *select; };
+    const Case cases[] = {{"loopcut", "edge"}, {"dissolve_vertices", "some"}, {"delete", "some"}, {"extrude", "faces"},
+                          {"split", "subset"}, {"subdivide_edges", "all"}, {"inset", "faces"}, {"poke", "faces"},
+                          {"triangulate_faces", "faces"}, {"edge_split", "some"}, {"merge_distance", "all"}, {"bevel", "some"},
+                          {"duplicate", "faces"}, {"dissolve_faces", "faces"}, {"tris_to_quads", "all"}, {"collapse", "edge"},
+                          {"connect", "some"}};
     int bad = 0;
     for (const Case &c : cases) {
       Editor ed;
       MeshPtr base = vpt_flat(true, true);
       vpt_setup(ed, base);
-      const std::vector<uint32_t> corners0 = base->corner_verts;
       vpt_op(ed, c.op, c.select);
       const Mesh &m = vpt_grid(ed);
       const ColorAttribute *seam = vpt_find(m, "Seam");
       bool ok = vpt_valid(m) && vpt_find(m, "P") && vpt_find(m, "P")->rgba.size() == m.vert_count();
-      if (seam) ok = ok && m.corner_verts == corners0;  // it may only stay on the very corners it was made for
-      if (c.must_drop) ok = ok && !seam;
+      ok = ok && seam && seam->corners == m.corner_verts;
       if (!ok) std::printf("    %s: BAD (Corner layer kept %d, valid %d)\n", c.op, (int)(seam != nullptr), (int)vpt_valid(m));
       bad += !ok;
     }
     std::printf("    %zu operators: %d bad\n", sizeof(cases) / sizeof(cases[0]), bad);
     CHECK(bad == 0);
-    /* The Subdivision modifier builds a new mesh: its result carries no Corner layer (and a Point one by position). */
+    /* The Subdivision modifier builds a new mesh: its result carries both domains. */
     Scene s;
     GameObject *g = s.create("G");
     g->add<MeshFilter>()->mesh = vpt_flat(true, true, 4);
     g->add<SubdivisionSurface>()->levels = 1;
     const Mesh *e = g->evaluated_mesh();
-    CHECK(e && vpt_valid(*e) && !vpt_find(*e, "Seam") && vpt_find(*e, "P"));
-    std::printf("    Subdivision modifier: Corner layer gone %d, Point layer kept %d\n", (int)(e && !vpt_find(*e, "Seam")), (int)(e && vpt_find(*e, "P") != nullptr));
+    CHECK(e && vpt_valid(*e) && vpt_find(*e, "Seam") && vpt_find(*e, "P"));
+    std::printf("    Subdivision modifier: Corner layer kept %d, Point layer kept %d\n", (int)(e && vpt_find(*e, "Seam") != nullptr), (int)(e && vpt_find(*e, "P") != nullptr));
   });
 
-  test("colour attribute: an edit that keeps the corner count but rebuilds the corners (Split) drops the Corner layer, never misplacing it", [] {
+  test("colour attribute: an edit that keeps the corner count but rebuilds the corners (Split) keeps the original colour at each corner", [] {
     Editor ed;
     MeshPtr base = vpt_flat(false, true, 4);
     const size_t corners = base->corner_count();
@@ -1587,7 +1583,7 @@ void run_vertex_paint_tests() {
                 (int)(m.color_attributes.size() > 0));
     CHECK(m.corner_count() == corners);  // (the setup: the same count)
     CHECK(m.corner_verts != c0);
-    CHECK(vpt_valid(m) && m.color_attributes.empty());
+    CHECK(vpt_valid(m) && vpt_find(m, "Seam") && vpt_same(vpt_find(m,"Seam")->rgba, base->color_attributes[0].rgba));
     /* The rule itself: two faces swap their corners (same count, other vertices). */
     Mesh q = *primitives::grid(2.0f, 2, 2);
     vpt_add_layer(q, "Seam", Dom::Corner);
@@ -2516,6 +2512,574 @@ void run_vertex_paint_tests() {
     }
   });
 
+
+  // Round 584. Expected values come from the painted fixture before editing.
+  test("face-corner colours: subdivision copies, averages and keeps the two sides of a seam including alpha", [] {
+    Mesh source = *primitives::grid(2,2,2);
+    source.face_material.resize(source.face_count());
+    for (size_t f = 0; f < source.face_count(); ++f) source.face_material[f] = int(f % 2);
+    const Mesh bare = source;
+    vpt_add_layer(source, "Seam", Dom::Corner);
+    source.active_color = vpt_add_layer(source, "Mask", Dom::Corner);
+    for (auto &layer : source.color_attributes)
+      for (size_t k = 0; k < layer.rgba.size(); ++k) layer.rgba[k].w = float(k+1)/float(source.corner_count());
+    for (bool smooth : {false,true}) {
+      auto out = smooth ? meshops::subdivide_catmull_clark(source) : meshops::subdivide_simple(source);
+      const Mesh unpainted = smooth ? meshops::subdivide_catmull_clark(bare) : meshops::subdivide_simple(bare);
+      CHECK(unpainted.color_attributes.empty() && unpainted.face_offsets == out.face_offsets && unpainted.corner_verts == out.corner_verts);
+      CHECK(unpainted.face_material == out.face_material && vpt_same2(unpainted.uvs,out.uvs));
+      CHECK(unpainted.positions.size() == out.positions.size() &&
+            std::memcmp(unpainted.positions.data(),out.positions.data(),out.positions.size()*sizeof(Vec3)) == 0);
+      CHECK(vpt_valid(out) && out.active_color == 1 && out.render_color == 0 && out.color_attributes.size() == 2);
+      if (out.color_attributes.size() != 2) continue;
+      for (size_t f = 0; f < source.face_count(); ++f) {
+        const uint32_t b = source.face_offsets[f], n = source.face_size(f);
+        for (size_t j = 0; j < 2; ++j) {
+          const auto &input = source.color_attributes[j].rgba, &got = out.color_attributes[j].rgba;
+          Vec4 center;
+          for (uint32_t k = 0; k < n; ++k) center = center + input[b+k];
+          center = center * (1.0f / float(n));
+          for (uint32_t k = 0; k < n; ++k) {
+            size_t q = (b+k)*4;
+            CHECK(vpt_near(got[q],input[b+k],0));
+            CHECK(vpt_near(got[q+1],(input[b+k]+input[b+(k+1)%n])*0.5f,1e-6f));
+            CHECK(vpt_near(got[q+2],center,1e-6f));
+            CHECK(vpt_near(got[q+3],(input[b+k]+input[b+(k+n-1)%n])*0.5f,1e-6f));
+          }
+        }
+      }
+    }
+  });
+
+  test("face-corner colours: Extrude and its F9 rerun keep the cap and each side, and Undo restores all painted layers", [] {
+    Editor ed;
+    auto base = vpt_flat(true,true,2);
+    const int first = base->find_color("Seam");
+    const int second = vpt_add_layer(*base,"Alpha",Dom::Corner);
+    base->active_color = second;
+    base->render_color = first;
+    for (size_t k = 0; k < base->corner_count(); ++k) base->color_attributes[second].rgba[k].w = float(k+1);
+    const auto original = base->color_attributes;
+    const auto nf = base->face_count(), nc = base->corner_count();
+    vpt_setup(ed,base);
+    ed.command("edit face all");
+    ed.command("editop extrude");
+    ed.step_frame_headless();
+    for (const char *adjust : {"redo amount 0.2","redo amount 0.5"}) {
+      ed.command(adjust);
+      ed.step_frame_headless();
+      const auto &mesh = vpt_grid(ed);
+      CHECK(vpt_valid(mesh) && mesh.face_count() > nf && mesh.active_color == second && mesh.render_color == first);
+      if (mesh.color_attributes.size() != original.size() || mesh.corner_count() < nc) { CHECK(false); return; }
+      for (int layer : {first,second}) {
+        const auto &rgba = mesh.color_attributes[(size_t)layer].rgba;
+        CHECK(std::memcmp(rgba.data(),original[(size_t)layer].rgba.data(),nc*sizeof(Vec4)) == 0);
+        for (size_t f = nf; f < mesh.face_count(); ++f) {
+          const uint32_t k = mesh.face_offsets[f];
+          CHECK(mesh.face_size(f) == 4);
+          if (mesh.face_size(f) == 4) CHECK(vpt_near(rgba[k],rgba[k+3],0) && vpt_near(rgba[k+1],rgba[k+2],0));
+        }
+      }
+    }
+    ed.command("undo");
+    ed.step_frame_headless();
+    const auto &restored = vpt_grid(ed);
+    CHECK(restored.corner_count() == nc && restored.active_color == second && restored.render_color == first);
+    CHECK(vpt_valid(restored) && vpt_find(restored,"Alpha") && vpt_same(vpt_find(restored,"Alpha")->rgba,original[(size_t)second].rgba));
+  });
+
+  test("face-corner colours: OpenSubdiv and native subdivision keep each parent face isolated for two levels", [] {
+    if (!meshops::subdiv_opensubdiv_available()) return;
+    auto source = primitives::cube(1);
+    auto layer = source->make_color("Seams",Dom::Corner,{});
+    for (size_t f = 0; f < source->face_count(); ++f)
+      for (uint32_t k = source->face_offsets[f]; k < source->face_offsets[f+1]; ++k)
+        layer.rgba[k] = Vec4(float(k-source->face_offsets[f]),0,0,float(f+1));
+    source->color_attributes.push_back(layer);
+    meshops::set_subdiv_opensubdiv(true);
+    Mesh osd = meshops::subdivide(*source,2,true);
+    meshops::set_subdiv_opensubdiv(false);
+    Mesh native = meshops::subdivide(*source,2,true);
+    CHECK(vpt_valid(osd) && vpt_valid(native) && osd.corner_count() == native.corner_count());
+    if (!vpt_find(osd,"Seams") || !vpt_find(native,"Seams")) { CHECK(false); return; }
+    std::vector<std::pair<int,float>> expected, got;
+    auto collect = [](const Mesh &m, std::vector<std::pair<int,float>> &values) {
+      const auto &rgba = vpt_find(m,"Seams")->rgba;
+      for (size_t f = 0; f < m.face_count(); ++f) {
+        const int parent = (int)std::lround(rgba[m.face_offsets[f]].w);
+        for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f+1]; ++k) {
+          CHECK(rgba[k].w == (float)parent && parent >= 1 && parent <= 6);
+          values.emplace_back(parent,rgba[k].x);
+        }
+      }
+      std::sort(values.begin(),values.end());
+    };
+    collect(native,expected);
+    collect(osd,got);
+    CHECK(expected == got);
+  });
+
+  test("face-corner colours: Join preserves conflicting names, mirrored corner order and Separate restores each side", [] {
+    Mesh a = *primitives::cube(1), b = *primitives::cube(1);
+    vpt_add_layer(a,"Paint",Dom::Point);
+    a.active_color = vpt_add_layer(a,"Seam",Dom::Corner);
+    a.render_color = -1;
+    vpt_add_layer(b,"Paint",Dom::Corner);
+    for (size_t i = 0; i < b.corner_count(); ++i) b.color_attributes[0].rgba[i].w = (float)i;
+    const auto seam = a.color_attributes[1].rgba;
+    const size_t nf = a.face_count(), nc = a.corner_count();
+    Mat4 xf = Mat4::identity();
+    xf.m[0] = -1;
+    meshops::append_mesh(a,b,xf);
+    CHECK(vpt_valid(a) && a.active_color == a.find_color("Seam") && a.render_color == -1);
+    auto *paint = vpt_find(a,"Paint.001");
+    CHECK(paint && paint->domain == Dom::Corner);
+    if (!paint) return;
+    for (size_t k = 0; k < nc; ++k) CHECK(vpt_near(paint->rgba[k],{1,1,1,1},0));
+    for (size_t f = 0; f < b.face_count(); ++f)
+      for (uint32_t k = 0; k < b.face_size(f); ++k)
+        CHECK(vpt_near(paint->rgba[nc+b.face_offsets[f]+k],b.color_attributes[0].rgba[b.face_offsets[f+1]-1-k],0));
+    std::vector<uint8_t> sel(a.face_count());
+    std::vector<int> part(a.face_count());
+    for (size_t f = 0; f < a.face_count(); ++f) { sel[f] = f<nf; part[f] = f>=nf; }
+    Mesh back = meshops::extract_faces(a,sel);
+    auto pieces = meshops::split_by_part(a,part,2);
+    CHECK(vpt_valid(back) && vpt_find(back,"Seam") && vpt_same(vpt_find(back,"Seam")->rgba,seam));
+    CHECK(vpt_valid(pieces[0]) && vpt_find(pieces[0],"Seam") && vpt_same(vpt_find(pieces[0],"Seam")->rgba,seam));
+    CHECK(pieces[1].active_color == pieces[1].find_color("Seam") && pieces[1].render_color == -1);
+  });
+
+  test("face-corner colours: Mirror and Array copy every RGBA, while Screw and Solidify keep layers on the generated faces", [] {
+    Mesh source = *vpt_flat(true,true,2);
+    auto &paint = source.color_attributes[(size_t)source.find_color("Seam")];
+    for (size_t k = 0; k < paint.rgba.size(); ++k) paint.rgba[k].w = float(k+1);
+    for (const char *op : {"mirror","array","radial","solidify","screw","wireframe"}) {
+      Mesh mesh = source;
+      if (std::strcmp(op,"mirror") == 0) meshops::mirror(mesh,true,false,false,0);
+      if (std::strcmp(op,"array") == 0) meshops::make_array(mesh,2,{},Vec3(4,0,0),0);
+      if (std::strcmp(op,"radial") == 0) meshops::radial_array(mesh,2,1,90,0);
+      if (std::strcmp(op,"solidify") == 0) meshops::solidify(mesh,.1f,0,false,true);
+      if (std::strcmp(op,"screw") == 0) meshops::screw(mesh,90,2,.1f,1,1,false,true);
+      if (std::strcmp(op,"wireframe") == 0) meshops::wireframe(mesh,.05f,true,true);
+      auto *layer = vpt_find(mesh,"Seam");
+      CHECK(layer && mesh.color_fits(*layer));
+      if (!layer) continue;
+      if (std::strcmp(op,"array") == 0 || std::strcmp(op,"radial") == 0) {
+        CHECK(layer->rgba.size() == paint.rgba.size()*2);
+        if (layer->rgba.size() == paint.rgba.size()*2)
+          CHECK(std::memcmp(layer->rgba.data()+paint.rgba.size(),paint.rgba.data(),paint.rgba.size()*sizeof(Vec4)) == 0);
+      } else if (std::strcmp(op,"mirror") == 0 || std::strcmp(op,"solidify") == 0) {
+        for (size_t f = 0; f < source.face_count(); ++f)
+          for (uint32_t k = 0; k < source.face_size(f); ++k) {
+            const size_t j = source.corner_count()+source.face_offsets[f]+k;
+            CHECK(j < layer->rgba.size() && vpt_near(layer->rgba[j],paint.rgba[source.face_offsets[f+1]-1-k],0));
+          }
+      } else {
+        for (const Vec4 &v : layer->rgba) CHECK(vpt_finite4(v) && v.w >= 1 && v.w <= float(paint.rgba.size()));
+      }
+    }
+  });
+
+  test("face-corner colours: voxel and quad remesh assign each face one side of the six painted cube faces", [] {
+    auto cube = primitives::cube(1);
+    auto layer = cube->make_color("Face",Dom::Corner,{});
+    for (size_t f = 0; f < cube->face_count(); ++f)
+      for (uint32_t k = cube->face_offsets[f]; k < cube->face_offsets[f+1]; ++k) layer.rgba[k] = Vec4(.4f,.2f,.6f,float(f+1)/8);
+    cube->color_attributes.push_back(layer);
+    cube->active_color = cube->render_color = 0;
+    for (bool quad : {false,true}) {
+      if (quad && !meshops::quad_remesh_available()) continue;
+      Mesh out;
+      meshops::QuadRemeshParams params;
+      params.target_faces = 200;
+      const bool ok = quad ? meshops::quad_remesh(*cube,params,out) : meshops::dynamesh(*cube,12,1,out);
+      CHECK(ok && vpt_valid(out) && out.active_color == 0 && out.render_color == 0 && out.face_count());
+      if (!ok || out.color_attributes.empty()) continue;
+      bool seen[6]{};
+      const auto &values = out.color_attributes[0].rgba;
+      for (size_t f = 0; f < out.face_count(); ++f) {
+        const int face = (int)std::lround(values[out.face_offsets[f]].w*8);
+        CHECK(face >= 1 && face <= 6);
+        if (face >= 1 && face <= 6) seen[face-1] = true;
+        for (uint32_t k = out.face_offsets[f]; k < out.face_offsets[f+1]; ++k)
+          CHECK(vpt_near(values[k],{.4f,.2f,.6f,float(face)/8},1e-5f));
+      }
+      CHECK(std::all_of(seen,seen+6,[](bool present) { return present; }));
+    }
+  });
+
+  test("face-corner colours: Dyntopo split and collapse keep each face side through compaction, and Decimate retains seam values", [] {
+    for (float detail : {.06f,.4f}) {
+      auto m = vci_pad(true,.25f,12);
+      auto &paint = m->color_attributes[0];
+      for (size_t f = 0; f < m->face_count(); ++f) {
+        const Vec4 c = paint.rgba[m->face_offsets[f]];
+        for (uint32_t k = m->face_offsets[f]; k < m->face_offsets[f+1]; ++k) paint.rgba[k].w = c.x > .5f ? .25f : .75f;
+      }
+      std::vector<uint32_t> region(m->vert_count()), added;
+      for (uint32_t i = 0; i < region.size(); ++i) region[i] = i;
+      meshops::Dyntopo stroke(*m);
+      const auto changed = stroke.refine(region,{},2,detail,added);
+      stroke.finish();
+      CHECK(changed.changed() && vpt_valid(*m) && vpt_find(*m,"Col"));
+      if (!vpt_find(*m,"Col")) continue;
+      for (size_t f = 0; f < m->face_count(); ++f) {
+        const auto &rgba = vpt_find(*m,"Col")->rgba;
+        const Vec4 side = rgba[m->face_offsets[f]];
+        CHECK(side.w == .25f || side.w == .75f);
+        for (uint32_t k = m->face_offsets[f]; k < m->face_offsets[f+1]; ++k) CHECK(vpt_near(rgba[k],side,0));
+      }
+    }
+    if (!meshops::decimate_available()) return;
+    auto reduced = vci_pad(true,.25f,12);
+    const size_t original = reduced->vert_count();
+    CHECK(meshops::decimate(*reduced,.5f));
+    const auto *col = vpt_find(*reduced,"Col");
+    CHECK(col && vpt_valid(*reduced) && reduced->vert_count() < original);
+    if (!col) return;
+    size_t red = 0, blue = 0;
+    for (size_t f = 0; f < reduced->face_count(); ++f) {
+      const Vec4 c = col->rgba[reduced->face_offsets[f]];
+      red += c.x > .5f;
+      blue += c.z > .5f;
+      for (uint32_t k = reduced->face_offsets[f]; k < reduced->face_offsets[f+1]; ++k) CHECK(vpt_near(col->rgba[k],c,0));
+    }
+    CHECK(red && blue);
+  });
+
+  test("face-corner colours: Bridge and Push Through take their region side regardless of face order and UVs", [] {
+    const Vec4 front(1,.2f,0,.25f), rear(0,.4f,1,.75f), neighbor(0,1,0,1);
+    for (bool reverse : {false,true}) for (bool push : {false,true}) {
+      const auto cube = primitives::cube(1);
+      Mesh m;
+      m.positions = cube->positions;
+      for (size_t i = 0; i < cube->face_count(); ++i) {
+        const size_t f = reverse ? cube->face_count()-1-i : i;
+        m.add_face(cube->face_verts(f),cube->face_size(f));
+      }
+      std::vector<uint8_t> selection(m.face_count());
+      for (size_t f = 0; f < m.face_count(); ++f) {
+        const float z = m.face_center(f).z;
+        selection[f] = z < -.49f || (!push && z > .49f);
+      }
+      if (push) meshops::inset_faces(m,selection,.4f);
+      auto paint = m.make_color("Region",Dom::Corner,neighbor);
+      for (size_t f = 0; f < m.face_count(); ++f) if (selection[f])
+        std::fill(paint.rgba.begin()+m.face_offsets[f],paint.rgba.begin()+m.face_offsets[f+1],m.face_center(f).z < 0 ? front : rear);
+      m.color_attributes.push_back(paint);
+      std::vector<uint8_t> vertices;
+      CHECK(push ? meshops::push_through(m,selection,2) : meshops::bridge(m,vertices,selection,2,0,0));
+      if (!vpt_valid(m) || !vpt_find(m,"Region")) { CHECK(false); continue; }
+      size_t walls = 0;
+      for (size_t f = 0; f < m.face_count(); ++f) {
+        const Vec3 center = m.face_center(f);
+        if (!push && !selection[f]) continue;
+        if (push && (std::abs(center.z) > .49f || std::abs(center.x) > .49f || std::abs(center.y) > .49f)) continue;
+        ++walls;
+        for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f+1]; ++k) {
+          const float t = m.positions[m.corner_verts[k]].z + .5f;
+          CHECK(vpt_near(vpt_find(m,"Region")->rgba[k],push ? front : lerp(front,rear,t),1e-5f));
+        }
+      }
+      CHECK(walls >= 4);
+    }
+  });
+
+  test("face-corner colours: Bevel blends the trimmed face gradients including alpha across three segments", [] {
+    Mesh m = *primitives::cube(1);
+    const Mesh before = m;
+    auto gradient = [](size_t face, Vec3 p) { return Vec4(p.x+2*p.z,p.y-3*p.x,float(face),.25f+p.y+p.z+.1f*float(face)); };
+    auto paint = m.make_color("Gradient",Dom::Corner,{});
+    for (size_t f = 0; f < m.face_count(); ++f)
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f+1]; ++k) paint.rgba[k] = gradient(f,m.positions[m.corner_verts[k]]);
+    m.color_attributes.push_back(paint);
+    std::vector<uint8_t> vertices(m.vert_count()), faces(m.face_count());
+    vertices[m.face_verts(0)[0]] = vertices[m.face_verts(0)[1]] = 1;
+    CHECK(meshops::bevel_edges(m,vertices,faces,.15f,3));
+    const auto *out = vpt_find(m,"Gradient");
+    if (!out || !vpt_valid(m)) { CHECK(false); return; }
+    std::vector<size_t> strips;
+    for (size_t f = 0; f < m.face_count(); ++f) if (faces[f]) strips.push_back(f);
+    if (strips.size() != 3) { CHECK(false); return; }
+    auto parent_value = [&](size_t face, size_t local) {
+      const auto v = m.face_verts(face)[local];
+      for (size_t f = 0; f < before.face_count(); ++f) {
+        const auto *first = m.face_verts(f);
+        if (std::find(first, first+m.face_size(f), v) == first+m.face_size(f)) continue;
+        const auto *other = m.face_verts(face);
+        // Both vertices of this strip boundary belong to the trimmed parent face.
+        const auto peer = other[local^1];
+        if (std::find(first, first+m.face_size(f), peer) != first+m.face_size(f)) return gradient(f,m.positions[v]);
+      }
+      CHECK(false);
+      return Vec4();
+    };
+    for (int end = 0; end < 2; ++end) {
+      const Vec4 low = parent_value(strips.front(),end);
+      const Vec4 high = parent_value(strips.back(),3-end);
+      for (size_t seg = 0; seg < strips.size(); ++seg) {
+        const auto base = m.face_offsets[strips[seg]];
+        CHECK(vpt_near(out->rgba[base+end],lerp(low,high,float(seg)/3),1e-5f));
+        CHECK(vpt_near(out->rgba[base+3-end],lerp(low,high,float(seg+1)/3),1e-5f));
+      }
+    }
+  });
+
+  test("face-corner colours: Dissolve takes the source face on each outgoing boundary edge", [] {
+    Mesh m;
+    m.positions = {{0,0,0},{1,0,0},{2,0,0},{0,1,0},{1,1,0},{2,1,0}};
+    m.add_face({0,1,4,3});
+    m.add_face({1,2,5,4});
+    auto paint = m.make_color("Dissolve",Dom::Corner,{});
+    for (size_t k = 0; k < paint.rgba.size(); ++k) paint.rgba[k] = Vec4(float(k),.2f,.4f,float(k)/8);
+    m.color_attributes.push_back(paint);
+    const Mesh source = m;
+    std::vector<uint8_t> sel(2,1);
+    CHECK(meshops::dissolve_faces(m,sel) && m.face_count() == 1);
+    if (!vpt_find(m,"Dissolve") || !vpt_valid(m) || m.face_count() != 1) { CHECK(false); return; }
+    for (uint32_t k = 0; k < m.face_size(0); ++k) {
+      const auto a = m.corner_verts[k], b = m.corner_verts[(k+1)%m.face_size(0)];
+      bool found = false;
+      for (size_t f = 0; f < 2; ++f) for (unsigned j = 0; j < 4; ++j) {
+        if (source.face_verts(f)[j] != a || source.face_verts(f)[(j+1)%4] != b) continue;
+        CHECK(vpt_near(vpt_find(m,"Dissolve")->rgba[k],paint.rgba[source.face_offsets[f]+j],0));
+        found = true;
+      }
+      CHECK(found);
+    }
+  });
+
+  test("face-corner colours: a grid keeps all four original endpoints bit-exact", [] {
+    Mesh m;
+    m.positions = {{0,0,0},{1,0,0},{1,1,0},{0,1,0}};
+    m.add_face({0,1,2,3});
+    auto paint = m.make_color("Grid",Dom::Corner,{1,1,1,1});
+    paint.rgba[1] = {1e-8f,1,1e-8f,.3f};
+    paint.rgba[2] = {1e-9f,1e-8f,1e-10f,1e-9f};
+    paint.rgba[3] = {1e-8f,1e-8f,.5f,1};
+    m.color_attributes.push_back(paint);
+    std::vector<uint8_t> selected(1,1);
+    CHECK(meshops::grid_faces(m,selected,2,3) == 1);
+    if (!vpt_valid(m) || !vpt_find(m,"Grid")) { CHECK(false); return; }
+    int endpoints = 0;
+    for (size_t k = 0; k < m.corner_count(); ++k) if (m.corner_verts[k] < 4) {
+      ++endpoints;
+      CHECK(std::memcmp(&paint.rgba[m.corner_verts[k]],&vpt_find(m,"Grid")->rgba[k],sizeof(Vec4)) == 0);
+    }
+    CHECK(endpoints == 4);
+  });
+
+  test("face-corner colours: editor Join and each Separate mode keep ordered RGBA, missing layers and active/render choices", [] {
+    for (const char *mode : {"loose","material","selection"}) {
+      Editor ed;
+      ed.init_headless(800,600);
+      MeshPtr a = primitives::cube(1), b = primitives::cube(1);
+      auto painted = a->make_color("A paint",Dom::Corner,{});
+      for (size_t k = 0; k < painted.rgba.size(); ++k) painted.rgba[k] = Vec4(float(k),.2f,.5f,float(k+1)/40);
+      a->color_attributes.push_back(painted);
+      a->active_color = 0;
+      a->render_color = -1;
+      for (bool first : {true,false}) {
+        auto *object = ed.scene().create(first ? "A" : "B");
+        object->add<MeshFilter>()->mesh = first ? a : b;
+        auto *mr = object->add<MeshRenderer>();
+        mr->materials = {std::make_shared<Material>()};
+        if (!first) object->set_world_position({3,0,0});
+      }
+      ed.mark_changed_for_test("painted pieces");
+      ed.step_frame_headless();
+      ed.command("select B");
+      ed.command("selectadd A");
+      ed.command("join");
+      ed.step_frame_headless();
+      auto *joined = ed.scene().find_by_name("A");
+      if (!joined || !joined->mesh_filter()) { CHECK(false); continue; }
+      const auto &m = *joined->mesh_filter()->mesh;
+      const auto *color = vpt_find(m,"A paint");
+      if (!vpt_valid(m) || !color || m.corner_count() != 2*painted.rgba.size()) { CHECK(false); continue; }
+      for (size_t k = 0; k < m.corner_count(); ++k)
+        CHECK(vpt_near(color->rgba[k],k < painted.rgba.size() ? painted.rgba[k] : Vec4(1,1,1,1),0));
+      if (std::strcmp(mode,"material") == 0) {
+        Mesh &editable = *mesh_make_mutable(joined->mesh_filter()->mesh);
+        editable.face_material.assign(editable.face_count(),1);
+        std::fill_n(editable.face_material.begin(),a->face_count(),0);
+        editable.touch();
+      }
+      if (std::strcmp(mode,"selection") == 0) {
+        ed.command("edit face all");
+        std::vector<size_t> selected;
+        for (size_t f = 0; f < a->face_count(); ++f) selected.push_back(f);
+        ed.select_faces_for_test(selected);
+      }
+      ed.command(std::string("separate ")+mode);
+      ed.step_frame_headless();
+      int white = 0, matched = 0;
+      ed.scene().for_each([&](GameObject &o) {
+        const auto *mf = o.mesh_filter();
+        if (!mf || !mf->mesh) return;
+        const auto &piece = *mf->mesh;
+        const auto *layer = vpt_find(piece,"A paint");
+        if (!layer) return;
+        CHECK(vpt_valid(piece) && piece.active_color == piece.find_color("A paint") && piece.render_color == -1);
+        if (layer->rgba.size() != painted.rgba.size()) { CHECK(false); return; }
+        matched += vpt_same(layer->rgba,painted.rgba);
+        white += std::all_of(layer->rgba.begin(),layer->rgba.end(),[](Vec4 v) { return vpt_near(v,{1,1,1,1},0); });
+      });
+      CHECK(matched == 1 && white == 1);
+    }
+  });
+
+  test("face-corner colours: editor Apply All bakes the evaluated paint and Undo restores the original mesh and modifier", [] {
+    Editor ed;
+    ed.init_headless(800,600);
+    auto *object = ed.scene().create("Painted");
+    auto mesh = vpt_flat(true,true,2);
+    mesh->active_color = vpt_add_layer(*mesh,"Alpha",Dom::Corner);
+    mesh->render_color = mesh->find_color("Seam");
+    for (size_t k = 0; k < mesh->corner_count(); ++k) mesh->color_attributes[mesh->active_color].rgba[k].w = float(k+1)/23;
+    object->add<MeshFilter>()->mesh = mesh;
+    object->add<MeshRenderer>();
+    object->add<SubdivisionSurface>()->levels = 1;
+    ed.command("select Painted");
+    ed.mark_changed_for_test("painted subdivision");
+    ed.step_frame_headless();
+    const Mesh original = *mesh, shown = *object->evaluated_mesh();
+    CHECK(shown.face_count() > original.face_count());
+    auto check = [](const Mesh &actual, const Mesh &expected) {
+      CHECK(vpt_valid(actual) && actual.corner_verts == expected.corner_verts && actual.face_offsets == expected.face_offsets);
+      CHECK(actual.active_color == expected.active_color && actual.render_color == expected.render_color);
+      CHECK(actual.color_attributes.size() == expected.color_attributes.size());
+      for (const auto &layer : expected.color_attributes) {
+        const auto *got = vpt_find(actual,layer.name.c_str());
+        CHECK(got && got->domain == layer.domain && got->corners == layer.corners && vpt_same(got->rgba,layer.rgba));
+      }
+    };
+    ed.command("applymods");
+    ed.step_frame_headless();
+    object = ed.scene().find_by_name("Painted");
+    if (!object || !object->mesh_filter()) { CHECK(false); return; }
+    CHECK(!object->get<SubdivisionSurface>());
+    check(*object->mesh_filter()->mesh, shown);
+    ed.command("undo");
+    ed.step_frame_headless();
+    object = ed.scene().find_by_name("Painted");
+    if (!object || !object->mesh_filter()) { CHECK(false); return; }
+    CHECK(object->get<SubdivisionSurface>() != nullptr);
+    check(*object->mesh_filter()->mesh, original);
+  });
+
+
+  test("face-corner colours: coincident remesh surfaces take the matching normal and a Boolean cut takes the cutter paint", [] {
+    Mesh src;
+    src.positions = {{0,0,0},{1,0,0},{0,1,0}};
+    src.add_face({0,1,2});
+    src.add_face({2,1,0});
+    auto c = src.make_color("Sides",Dom::Corner,{1,0,0,.25f});
+    std::fill(c.rgba.begin()+3,c.rgba.end(),Vec4(0,1,0,.75f));
+    src.color_attributes.push_back(c);
+    Mesh result;
+    result.positions = src.positions;
+    result.add_face({2,1,0});
+    meshops::carry_colors_rebuilt(src,result);
+    CHECK(vpt_valid(result) && vpt_find(result,"Sides"));
+    if (vpt_find(result,"Sides")) for (auto v : vpt_find(result,"Sides")->rgba) CHECK(vpt_near(v,{0,1,0,.75f},1e-6f));
+    if (!meshops::boolean_available()) return;
+    auto a = primitives::cube(2), b = primitives::cube(1);
+    // RGB identifies the original cube wall. Alpha identifies the operand even where both walls face the same way.
+    auto paint_walls = [](Mesh &cube, float alpha) {
+      auto paint = cube.make_color("Paint",Dom::Corner,{});
+      for (size_t f = 0; f < cube.face_count(); ++f) {
+        const Vec3 unit = normalize(cube.face_center(f));
+        const Vec4 color(.5f+.5f*unit.x,.5f+.5f*unit.y,.5f+.5f*unit.z,alpha);
+        std::fill(paint.rgba.begin()+cube.face_offsets[f],paint.rgba.begin()+cube.face_offsets[f+1],color);
+      }
+      cube.color_attributes.push_back(std::move(paint));
+    };
+    paint_walls(*a,.25f);
+    paint_walls(*b,.75f);
+    CHECK(meshops::boolean_op(*a,*b,Mat4::identity(),meshops::BooleanOp::Difference));
+    const auto *out = vpt_find(*a,"Paint");
+    if (!out || !vpt_valid(*a) || out->domain != Dom::Corner) { CHECK(false); return; }
+    bool seen[2][6] = {};
+    for (size_t f = 0; f < a->face_count(); ++f) {
+      // A wall lies on a signed coordinate plane at +/-0.5 or +/-1, including the reversed cavity faces.
+      const Vec3 p = a->face_center(f);
+      int axis = 0;
+      for (int i = 1; i < 3; ++i)
+        if (std::fabs(p[i]) > std::fabs(p[axis])) axis = i;
+      const float extent = std::fabs(p[axis]);
+      const bool cutter = extent < .75f;
+      CHECK_NEAR(extent,cutter ? .5f : 1.f,1e-5f);
+      const bool positive = p[axis] > 0;
+      seen[cutter][2*axis+positive] = true;
+      Vec3 rgb(.5f);
+      rgb[axis] = positive ? 1.f : 0.f;
+      const Vec4 expected(rgb.x,rgb.y,rgb.z,cutter ? .75f : .25f);
+      for (uint32_t k = a->face_offsets[f]; k < a->face_offsets[f+1]; ++k)
+        CHECK(vpt_near(out->rgba[k],expected,1e-6f));
+    }
+    for (const auto &walls : seen)
+      for (bool present : walls) CHECK(present);
+  });
+
+  test("face-corner colours: remesh clamps RGBA on the source triangle and resolves equal normals by source order", [] {
+    Mesh original;
+    original.positions = {{0,0,0},{1,0,0},{0,1,0}};
+    original.add_face({0,1,2});
+    original.add_face({0,1,2});
+    auto paint = original.make_color("Gradient",Dom::Corner,{0,0,0,1});
+    paint.rgba[0] = {1,0,0,0};
+    paint.rgba[1] = {0,1,0,.5f};
+    paint.rgba[2] = {0,0,1,1};
+    original.color_attributes.push_back(paint);
+    Mesh result;
+    result.positions = {{.25f,.25f,0},{1,1,0},{-1,0,0}};
+    result.add_face({0,1,2});
+    meshops::carry_colors_rebuilt(original,result);
+    const auto *out = vpt_find(result,"Gradient");
+    if (!out || !vpt_valid(result) || out->rgba.size() != 3) { CHECK(false); return; }
+    CHECK(vpt_near(out->rgba[0],{.5f,.25f,.25f,.375f},1e-6f));  // interior barycentrics
+    CHECK(vpt_near(out->rgba[1],{0,.5f,.5f,.75f},1e-6f));       // nearest point on the hypotenuse
+    CHECK(vpt_near(out->rgba[2],{1,0,0,0},1e-6f));               // nearest point is the red vertex
+  });
+
+  test("face-corner colours: three-way Join reserves existing suffixes and reuses one alias across operands", [] {
+    Editor ed;
+    ed.init_headless(800,600);
+    const char *names[] = {"Join left","Join middle","Join right"};
+    const Vec4 white(1,1,1,1), green(0,1,0,.5f), red(1,0,0,.25f), blue(0,0,1,.75f);
+    for (int i = 0; i < 3; ++i) {
+      auto *object = ed.scene().create(names[i]);
+      auto mesh = primitives::cube(1);
+      mesh->color_attributes.push_back(mesh->make_color("Paint",i == 0 ? Dom::Point : Dom::Corner,i == 1 ? red : green));
+      if (i == 2) mesh->color_attributes.push_back(mesh->make_color("Paint.001",Dom::Corner,blue));
+      mesh->active_color = mesh->render_color = -1;
+      object->add<MeshFilter>()->mesh = mesh;
+      object->add<MeshRenderer>();
+      object->set_world_position({float(i*4),0,0});
+    }
+    ed.mark_changed_for_test("three painted meshes");
+    ed.step_frame_headless();
+    ed.command("select Join middle");
+    ed.command("selectadd Join right");
+    ed.command("selectadd Join left");
+    ed.command("join");
+    ed.step_frame_headless();
+    const auto *object = ed.scene().find_by_name(names[0]);
+    if (!object || !object->mesh_filter()) { CHECK(false); return; }
+    const Mesh &joined = *object->mesh_filter()->mesh;
+    const auto *point = vpt_find(joined,"Paint"), *existing = vpt_find(joined,"Paint.001"), *alias = vpt_find(joined,"Paint.002");
+    if (!vpt_valid(joined) || !point || !existing || !alias || joined.face_count() != 18) { CHECK(false); return; }
+    if (point->domain != Dom::Point || existing->domain != Dom::Corner || alias->domain != Dom::Corner) { CHECK(false); return; }
+    CHECK(joined.color_attributes.size() == 3 && joined.active_color == -1 && joined.render_color == -1);
+    for (size_t f = 0; f < joined.face_count(); ++f) {
+      const float x = joined.face_center(f).x;
+      for (uint32_t k = joined.face_offsets[f]; k < joined.face_offsets[f+1]; ++k) {
+        CHECK(vpt_near(alias->rgba[k],x < 2 ? white : x < 6 ? red : green,0));
+        CHECK(vpt_near(existing->rgba[k],x < 6 ? white : blue,0));
+      }
+    }
+  });
 
   vertex_colour_input_tests();
   vertex_colour_card_packing_tests();

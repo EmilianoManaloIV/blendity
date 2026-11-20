@@ -1,6 +1,6 @@
 # Blendity test checklist
 
-Every feature, as an artist reaches it. Time each task from your first move to the result; a task over 1.5x its target is marked slow. Targets are an expert's times from the keystroke-level model (docs/hci/klm.md) or estimates on the same rules; the first time through, expect to be slower.
+Every feature, as an artist reaches it. Time each task from your first move to the result; a task over 1.5x its target is marked slow. Targets are an expert's times from the keystroke-level model (docs/hci/klm.md) or estimates on the same rules; the first time through, expect to be slower. A fresh profile uses the Unity keymap. For another preset or a customized shortcut, open Preferences > Keymap and search for the action name to see or assign its binding.
 
 The interactive page (tick, time, export) is built from the same data: `py tools/hci_checklist.py --html <file>`.
 
@@ -22,7 +22,7 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 
 | # | Task | Steps | Expected | Target | Done | Time |
 |---|---|---|---|---|---|---|
-| B1 | Frame the selected object | Select Cube, F | The Scene view centres and fits the cube | 2 s | [ ] | |
+| B1 | Frame the selected object | Select Cube in the Scene view and use Frame Selected (F in Unity). | The Scene view centres and fits the cube | 2 s | [ ] | |
 | B2 | Orbit, pan and zoom with the mouse (Unity feel) | Alt+LMB orbit, MMB pan, wheel zoom | Smooth, no jumps | 5 s | [ ] | |
 | B3 | Orbit with the pen only | Drag the Scene Gizmo; drag the hand below it to pan | The view follows the pen | 5 s | [ ] | |
 | B4 | Box-select three objects | Drag a rectangle over Cube, Sphere and Cylinder | Three selected; the Inspector shows multi-edit | 3 s | [ ] | |
@@ -45,9 +45,9 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 
 | # | Task | Steps | Expected | Target | Done | Time |
 |---|---|---|---|---|---|---|
-| D1 | Add a cube and bevel its edges | GameObject > 3D Object > Cube; Tab; 2 (edges); select all; Bevel | Rounded edges; F9 adjusts the last operation | 10 s | [ ] | |
-| D2 | Extrude a face | Edit Mode, 3 (faces), click a face, E, drag | A new face pulled out | 5 s | [ ] | |
-| D3 | Loop cut | Edit Mode, Ctrl+R over an edge ring, click | A loop across the ring | 4 s | [ ] | |
+| D1 | Add a cube and bevel its edges | GameObject > 3D Object > Cube. In the Scene view, use Edit Mode On / Off (Tab in Unity), then Edge Select Mode (2 in Unity). Select All, then Bevel. | Rounded edges; F9 adjusts the last operation | 10 s | [ ] | |
+| D2 | Extrude a face | In the Scene view, enter Edit Mode and use Face Select Mode (3 in Unity). Click a face, invoke Extrude (Ctrl+E in Unity), move the pointer, then click or press Enter to confirm. | A new face pulled out | 5 s | [ ] | |
+| D3 | Loop cut | In the Scene view, enter Edit Mode and use Edge Select Mode (2 in Unity). Point at an edge of a quad ring and invoke Loop Cut (Ctrl+R in Unity) to cut it. If Loop Cut is unbound, assign it in Preferences > Keymap first. | A loop across the ring | 4 s | [ ] | |
 | D4 | Mirror a half model along Y | Modeling Tools > Mirror Y | The mirrored half added, faces doubled | 3 s | [ ] | |
 | D5 | Add a Subdivision Surface modifier | Add Component > Subdivision Surface, Levels 2 | Smooth surface, cage kept | 6 s | [ ] | |
 | D6 | Boolean difference | Select cutter then target; Modeling Tools > Difference | The cutter's shape removed | 5 s | [ ] | |
@@ -145,7 +145,7 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 
 | # | Task | Steps | Expected | Target | Done | Time |
 |---|---|---|---|---|---|---|
-| K1 | Key a position at frame 0 and 30 | Animation window > New clip; move; Shift+K at 0 and 30 | Two keys; the object moves between them | 8 s | [ ] | |
+| K1 | Key a position at frame 0 and 30 | Animation window > New clip. Move the object and use Set Key (Shift+K in Unity) at frames 0 and 30. | Two keys; the object moves between them | 8 s | [ ] | |
 | K2 | Pose a reach by the hand (Puppet Posing) | AutoPosing on; drag the hand's dot | The body follows, feet planted | 3.75 s | [ ] | |
 | K3 | Pose with the learned prior (local AI install) | Puppet > Use the Pose Prior; drag the hand toward the knee | The spine bends naturally; the hand reaches exactly | 4 s | [ ] | |
 | K4 | Lock a foot | Select the foot bone; Puppet > Lock the Selected Bone | It stays put while the body moves | 3 s | [ ] | |
@@ -214,7 +214,7 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 | # | Task | Steps | Expected | Target | Done | Time |
 |---|---|---|---|---|---|---|
 | Q1 | Orbit a 1M-triangle scene | Benchmark scene million; orbit | Smooth (the status bar's fps at 30 or more on the GPU) | 5 s | [ ] | |
-| Q2 | Edit Mode on a 200k-face mesh | Tab on a big mesh; select and move a face | No pause over a fraction of a second | 5 s | [ ] | |
+| Q2 | Edit Mode on a 200k-face mesh | Select a big mesh in the Scene view and use Edit Mode On / Off (Tab in Unity). Select and move a face. | No pause over a fraction of a second | 5 s | [ ] | |
 | Q3 | First render after start | Start Blendity; F12 | The first render as fast as the second (no long cold start) | 5 s | [ ] | |
 | Q4 | Resize a window to 1024 x 640 | Shrink the window | Nothing overlaps; long labels end in ... | 3 s | [ ] | |
 
@@ -233,4 +233,4 @@ The interactive page (tick, time, export) is built from the same data: `py tools
 | R9 | Round the joins | Select a piece; Inspector > Blend Radius 0.2 | The piece meets its neighbours with a fillet | 4 s | [ ] | |
 | R10 | Scale a Blockout without shear | Scale the Blockout 2 along X; read its Scale; Apply Scale to Pieces on an old scene | Scale reads 1 1 1; turned pieces grow along their own axes | 6 s | [ ] | |
 | R11 | Bake to a mesh and back | Inspector > Bake to Mesh; then Unbake | An ordinary mesh that Edit Mode takes; Unbake brings the pieces back | 6 s | [ ] | |
-| R12 | Try Edit Mode on a Blockout | Select the Blockout; Tab | Refused, with the reason and what to do instead | 2 s | [ ] | |
+| R12 | Try Edit Mode on a Blockout | Select the Blockout in the Scene view and use Edit Mode On / Off (Tab in Unity). | Refused, with the reason and what to do instead | 2 s | [ ] | |

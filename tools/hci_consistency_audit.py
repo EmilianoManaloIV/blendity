@@ -63,12 +63,37 @@ def statements(text):
 
 
 def label_of(stmt):
-    """The label of a menu_item / button / submenu call: its first literal after the call's name."""
+    """Find a literal in the label argument, including a conditional button label.
+
+    >>> label_of('u.button_enabled(row, name, ready, "Select a Source entry")') is None
+    True
+    >>> label_of('u.button(rect("layout key", {1, 2}), add ? "Add Root" : "Use Path")')
+    'Add Root'
+    """
     m = re.search(r'(?:menu_item|submenu)\(\s*"((?:[^"\\]|\\.)*)"', stmt)
     if m:
         return m.group(1)
-    m = re.search(r'\bu\.button(?:_enabled)?\([^"]*?"((?:[^"\\]|\\.)*)"', stmt)
-    return m.group(1) if m else None
+    button = re.search(r'\bu\.button(?:_enabled)?\(', stmt)
+    if not button:
+        return None
+    # Button arguments start with the rectangle and label. A rectangle can
+    # contain nested calls or a braced initializer with commas of its own.
+    argument = depth = 0
+    for token in re.finditer(r'''"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[(),{}\[\]]''', stmt[button.end():]):
+        value = token.group()
+        if value.startswith('"') and argument == 1:
+            return value[1:-1]
+        if value in ("(", "{", "["):
+            depth += 1
+        elif value in (")", "}", "]"):
+            if depth == 0:
+                break
+            depth -= 1
+        elif value == "," and depth == 0:
+            argument += 1
+            if argument > 1:
+                break
+    return None
 
 
 def title_case_ok(label):

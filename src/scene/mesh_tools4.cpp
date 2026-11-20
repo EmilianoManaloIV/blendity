@@ -183,18 +183,33 @@ static bool follow_impl(Mesh &m, size_t face, const std::vector<uint32_t> &path,
     for (size_t k = 0; k < np; k++) part_of_solid = part_of_solid && other.count(Mesh::edge_key(prof[k], prof[(k + 1) % np])) > 0;
   }
   /* Sides (each profile edge a strip), the old face becomes the start cap, and an end cap. */
+  const auto layers = valid_corner_layers(m);
+  std::vector<uint32_t> profile_corners;
+  if (!layers.empty()) {
+    const uint32_t *first = m.face_verts(face);
+    for (uint32_t v : prof) profile_corners.push_back(m.face_offsets[face] + (uint32_t)(std::find(first,first+np,v)-first));
+  }
   const int mat = m.material_of(face);
   for (size_t i = 0; i + 1 < nr; i++)
     for (size_t k = 0; k < np; k++) {
       const size_t k1 = (k + 1) % np;
       const uint32_t q[4] = {rings[i][k1], rings[i][k], rings[i + 1][k], rings[i + 1][k1]};
       m.add_face(q, 4, nullptr, mat);
+      if (!layers.empty()) {
+        uint32_t src[]{profile_corners[k1],profile_corners[k],profile_corners[k],profile_corners[k1]};
+        append_corner_copies(m,layers,src,4);
+      }
     }
   std::vector<uint32_t> cap0 = prof, cap1(rings[nr - 1].rbegin(), rings[nr - 1].rend());
   /* A face of a solid (every side shared with another face) grows the solid, as Extrude
    * does: no start cap, which would leave three faces on each of its edges. */
-  if (!part_of_solid) m.add_face(cap0.data(), cap0.size(), nullptr, mat);
+  if (!part_of_solid) {
+    m.add_face(cap0.data(), cap0.size(), nullptr, mat);
+    append_corner_copies(m,layers,profile_corners.data(),np);
+  }
+  std::reverse(profile_corners.begin(),profile_corners.end());
   m.add_face(cap1.data(), cap1.size(), nullptr, mat);
+  append_corner_copies(m,layers,profile_corners.data(),np);
   /* The path's wire edges are inside the solid now: they go. */
   if (wires)
     for (size_t i = 0; i + 1 < path.size(); i++) {
@@ -230,7 +245,8 @@ size_t spin(Mesh &m, std::vector<uint8_t> &vert_sel, Vec3 center, Vec3 axis, flo
       copies[v].push_back(m.add_vert(center + q.rotate(m.positions[v] - center)));
     }
   }
-  const int bands = full ? steps : steps;
+  const BoundaryColors boundary(m);
+  const int bands = steps;
   for (auto &e : edges)
     for (int r = 0; r < bands; r++) {
       const auto &ca = copies[e.first], &cb = copies[e.second];
@@ -238,6 +254,7 @@ size_t spin(Mesh &m, std::vector<uint8_t> &vert_sel, Vec3 center, Vec3 axis, flo
       const uint32_t a1 = full ? ca[(size_t)((r + 1) % steps)] : ca[(size_t)r + 1], b1 = full ? cb[(size_t)((r + 1) % steps)] : cb[(size_t)r + 1];
       const uint32_t q[4] = {a0, b0, b1, a1};
       m.add_face(q, 4);
+      boundary.strip(m, e.first, e.second);
     }
   /* Lone vertices spin into a ring of wire edges. */
   for (uint32_t v : verts) {
@@ -318,6 +335,7 @@ void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dis
   const Mesh src = m;
   const uint32_t nv = (uint32_t)src.vert_count();
   const bool has_uv = src.has_uvs();
+  const auto layers = valid_corner_layers(src);
   for (int c = 1; c < count; c++) {
     const Quat q = Quat::axis_angle(ax, step * (float)c * kDeg2Rad);
     const uint32_t off = (uint32_t)m.vert_count();
@@ -330,6 +348,12 @@ void radial_array(Mesh &m, int count, int axis, float angle_deg, float merge_dis
       fv.assign(src.face_verts(f), src.face_verts(f) + src.face_size(f));
       for (uint32_t &v : fv) v += off;
       m.add_face(fv.data(), fv.size(), has_uv ? src.uvs.data() + src.face_offsets[f] : nullptr, src.material_of(f));
+    }
+    for (size_t i : layers) {
+      auto &layer = m.color_attributes[i];
+      const auto &source = src.color_attributes[i];
+      layer.rgba.insert(layer.rgba.end(), source.rgba.begin(), source.rgba.end());
+      layer.corners.insert(layer.corners.end(), m.corner_verts.end() - src.corner_count(), m.corner_verts.end());
     }
     for (uint64_t k : src.loose_edges) m.add_loose_edge((uint32_t)(k >> 32) + off, (uint32_t)(k & 0xFFFFFFFF) + off);
   }
@@ -640,7 +664,7 @@ void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness,
     const uint32_t fn = m.face_size(f), *fv = m.face_verts(f), base = m.face_offsets[f];
     const Vec2 *t = fb.has_uv ? &m.uvs[base] : nullptr;
     if (!face_sel[f]) {
-      fb.add(fv, fn, t, m.material_of(f), m.smooth_of(f));
+      fb.add(fv, fn, t, m.material_of(f), m.smooth_of(f), f);
       sel.push_back(0);
       src.push_back(UINT32_MAX);  // untouched
       continue;
@@ -656,7 +680,8 @@ void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness,
       const uint32_t q[4] = {a, b, moved_c(j), moved_c(k)};
       Vec2 tq[4];
       if (t) tq[0] = tq[3] = t[k], tq[1] = tq[2] = t[j];
-      fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f));
+      const uint32_t corners[]{base+k,base+j,base+j,base+k};
+      fb.add(q, 4, t ? tq : nullptr, m.material_of(f), m.smooth_of(f), f, corners);
       sel.push_back(0);
       src.push_back((uint32_t)f);
     }
@@ -666,7 +691,9 @@ void inset_region_once(Mesh &m, std::vector<uint8_t> &face_sel, float thickness,
       nv.push_back(moved_c(k));
       if (t) nt.push_back(t[k]);
     }
-    fb.add(nv.data(), fn, t ? nt.data() : nullptr, m.material_of(f), m.smooth_of(f));
+    std::vector<uint32_t> corners;
+    if (!fb.layers.empty()) for (uint32_t i = 0; i < fn; ++i) corners.push_back(base+i);
+    fb.add(nv.data(), fn, t ? nt.data() : nullptr, m.material_of(f), m.smooth_of(f), f, corners.empty() ? nullptr : corners.data());
     sel.push_back(1);
     src.push_back((uint32_t)f);
   }
@@ -768,7 +795,7 @@ LooseCounts delete_loose(Mesh &m, bool verts, bool edges, bool faces, const std:
     if (c.faces) {
       FaceBuilder fb(m);
       for (size_t f = 0; f < m.face_count(); f++)
-        if (!drop[f]) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+        if (!drop[f]) fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f), f);
       fb.commit(m);
     }
   }
@@ -812,6 +839,8 @@ LooseCounts delete_loose(Mesh &m, bool verts, bool edges, bool faces, const std:
           }
         c.verts = m.vert_count() - np.size();
         if (c.verts) {
+          for (size_t i : valid_corner_layers(m))
+            for (uint32_t &v : m.color_attributes[i].corners) v = remap[v];
           for (uint32_t &v : m.corner_verts) v = remap[v];
           for (uint64_t &k : m.loose_edges) k = Mesh::edge_key(remap[(uint32_t)(k >> 32)], remap[(uint32_t)(k & 0xFFFFFFFFu)]);
           std::sort(m.loose_edges.begin(), m.loose_edges.end());
@@ -1331,6 +1360,8 @@ size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<
  * corner keep the rest, and ones left with fewer than 3 go. */
 void merge_verts(Mesh &m, uint32_t a, uint32_t b) {
   if (a == b || a >= m.vert_count() || b >= m.vert_count()) return;
+  for (size_t i : valid_corner_layers(m))
+    for (uint32_t &v : m.color_attributes[i].corners) if (v == b) v = a;
   for (uint32_t &v : m.corner_verts)
     if (v == b) v = a;
   for (std::vector<uint64_t> *es : {&m.loose_edges, &m.seams, &m.sharp_edges}) {
@@ -1520,8 +1551,10 @@ SmartFillResult smart_fill(Mesh &m, const std::vector<uint8_t> *vert_sel, float 
       for (size_t f = 0; f < m.face_count(); f++)
         for (uint32_t k = 0; k < m.face_size(f); k++)
           if (m.face_verts(f)[k] == loop[0]) mat = m.material_of(f);
+      BoundaryColors boundary(m);
       if (bend <= 1e-3f * std::max(extent, 1e-6f) || loop.size() <= 3) {
         m.add_face(loop.data(), loop.size(), nullptr, mat);
+        boundary.fill(m, loop);
         res.faces++;
       }
       else {
@@ -1529,6 +1562,20 @@ SmartFillResult smart_fill(Mesh &m, const std::vector<uint8_t> *vert_sel, float 
         for (size_t i = 0; i < loop.size(); i++) {
           const uint32_t tri[3] = {loop[i], loop[(i + 1) % loop.size()], cv};
           m.add_face(tri, 3, nullptr, mat);
+          if (!boundary.layers.empty()) {
+            const uint32_t ca = boundary.corner(tri[0],tri[1]), cb = boundary.corner(tri[1],tri[0]);
+            const uint32_t corners[]{ca,cb,UINT32_MAX};
+            append_corner_copies(m,boundary.layers,corners,3);
+            for (size_t idx : boundary.layers) {
+              auto &layer = m.color_attributes[idx];
+              Vec4 center;
+              for (size_t j = 0; j < loop.size(); ++j) {
+                uint32_t k = boundary.corner(loop[j],loop[(j+1)%loop.size()]);
+                center = center + (k == UINT32_MAX ? Vec4(1,1,1,1) : layer.rgba[k]);
+              }
+              layer.rgba.back() = center * (1.0f / float(loop.size()));
+            }
+          }
         }
         res.faces += loop.size();
         res.fans++;

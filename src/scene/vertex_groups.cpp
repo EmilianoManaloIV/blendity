@@ -5,13 +5,14 @@
 // old surface. The correspondence is a map (old vertices and weights per new vertex), so a modifier stack can keep it
 // while the topology stays (a drag re-runs the stack every frame).
 // Theory: Ericson, Real-Time Collision Detection, 5.1.5 (closest point on a triangle).
-#include "mesh.h"
+#include "mesh_internal.h"
 #include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 
 namespace bl {
@@ -55,6 +56,77 @@ bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bit
 
 }  // namespace
 
+std::vector<size_t> valid_corner_layers(const Mesh &mesh) {
+  std::vector<size_t> layers;
+  for (size_t i = 0; i < mesh.color_attributes.size(); ++i) {
+    const auto &layer = mesh.color_attributes[i];
+    if (layer.domain == ColorAttribute::Domain::Corner && mesh.color_fits(layer)) layers.push_back(i);
+  }
+  return layers;
+}
+
+void restore_color_choices(const Mesh &from, Mesh &to) {
+  auto choice = [&](int i) {
+    return i >= 0 && (size_t)i < from.color_attributes.size() ? to.find_color(from.color_attributes[(size_t)i].name) : -1;
+  };
+  to.active_color = choice(from.active_color);
+  to.render_color = choice(from.render_color);
+}
+
+void append_corner_copies(Mesh &mesh, const std::vector<size_t> &layers, const uint32_t *corners, size_t count) {
+  for (size_t i : layers) {
+    auto &layer = mesh.color_attributes[i];
+    for (size_t j = 0; j < count; ++j) {
+      const Vec4 value = corners[j] == UINT32_MAX ? Vec4(1,1,1,1) : layer.rgba[corners[j]];
+      layer.rgba.push_back(value);
+      layer.corners.push_back(mesh.corner_verts[mesh.corner_count() - count + j]);
+    }
+  }
+}
+
+CornerSample sample_face_corner(const Mesh &mesh, size_t face, uint32_t vertex, Vec3 p, const std::vector<uint32_t> &triangles) {
+  CornerSample result;
+  const uint32_t first = mesh.face_offsets[face], last = mesh.face_offsets[face + 1];
+  for (uint32_t k = first; k < last; ++k)
+    if (mesh.corner_verts[k] == vertex) return {k};
+  float best = std::numeric_limits<float>::infinity();
+  for (size_t t = 0; t + 2 < triangles.size(); t += 3) {
+    uint32_t i = first + triangles[t], j = first + triangles[t + 1], k = first + triangles[t + 2];
+    const Vec3 a = mesh.positions[mesh.corner_verts[i]], b = mesh.positions[mesh.corner_verts[j]], c = mesh.positions[mesh.corner_verts[k]];
+    const Vec3 w = closest_barycentric(p, a, b, c);
+    const float d = length_sq(a * w.x + b * w.y + c * w.z - p);
+    if (d < best) {
+      best = d;
+      result = {i, j, k, w};
+    }
+  }
+  return result;
+}
+
+void append_colors_on_surface(Mesh &mesh, const std::vector<size_t> &layers, const std::vector<uint32_t> &hosts, const std::vector<uint32_t> &vertices) {
+  if (layers.empty()) return;
+  std::vector<CornerSample> samples(vertices.size());
+  std::vector<float> dist(vertices.size(),std::numeric_limits<float>::infinity());
+  std::vector<uint32_t> triangles;
+  for (uint32_t f : hosts) {
+    triangulate_face_local(mesh,f,triangles);
+    for (size_t i = 0; i < vertices.size(); ++i) {
+      const Vec3 p = mesh.positions[vertices[i]];
+      CornerSample s = sample_face_corner(mesh,f,vertices[i],p,triangles);
+      if (s.a == UINT32_MAX) continue;
+      const auto at = [&](uint32_t k) { return mesh.positions[mesh.corner_verts[k]]; };
+      const Vec3 q = s.b == UINT32_MAX ? at(s.a) : at(s.a)*s.weight.x + at(s.b)*s.weight.y + at(s.c)*s.weight.z;
+      const float d = length_sq(p-q);
+      if (d < dist[i]) { samples[i] = s; dist[i] = d; }
+    }
+  }
+  for (size_t idx : layers) {
+    auto &layer = mesh.color_attributes[idx];
+    for (auto &sample : samples) layer.rgba.push_back(sample.read(layer));
+    layer.corners.insert(layer.corners.end(),vertices.begin(),vertices.end());
+  }
+}
+
 uint64_t topology_key(const Mesh &m) {
   uint64_t h = kFnvBasis;
   const uint64_t n[3] = {m.vert_count(), m.face_offsets.size(), m.corner_verts.size()};
@@ -64,12 +136,12 @@ uint64_t topology_key(const Mesh &m) {
   return h;
 }
 
-void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map) {
+static void surface_map(const Mesh &from, const Mesh &to, GroupTransferMap &map, const std::vector<Vec3> *face_normals) {
   const size_t nv = to.vert_count(), nf = from.vert_count();
   map.src.assign(nv * 3, UINT32_MAX);
   map.bary.assign(nv, Vec3(1, 0, 0));
   /* Nothing renumbered: by index. */
-  if (nv == nf && to.corner_verts == from.corner_verts && to.face_offsets == from.face_offsets) {
+  if (!face_normals && nv == nf && to.corner_verts == from.corner_verts && to.face_offsets == from.face_offsets) {
     for (uint32_t v = 0; v < (uint32_t)nv; v++) map.src[v * 3] = map.src[v * 3 + 1] = map.src[v * 3 + 2] = v;
     return;
   }
@@ -80,8 +152,10 @@ void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map)
   };
   auto same = [](Vec3 a, Vec3 b) { return std::memcmp(&a, &b, sizeof(Vec3)) == 0; };
   std::unordered_map<uint64_t, uint32_t> at;  // exact old positions (the first old vertex at each)
-  at.reserve(nf * 2);
-  for (uint32_t i = 0; i < (uint32_t)nf; i++) at.emplace(bits(from.positions[i]), i);
+  if (!face_normals) {
+    at.reserve(nf * 2);
+    for (uint32_t i = 0; i < (uint32_t)nf; i++) at.emplace(bits(from.positions[i]), i);
+  }
   /* The old surface's triangles (or its vertices, with no faces) in a uniform grid, stored flat (counts, then
    * offsets): one allocation however many cells. */
   std::vector<uint32_t> tris, local;
@@ -131,7 +205,7 @@ void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map)
       uint32_t *s = &map.src[v * 3];
       /* A vertex still at its own index and place (operators that add vertices append them): itself, which also keeps
        * coincident vertices (split seams, touching parts) apart. Then any old vertex exactly there. */
-      if (v < nf && same(p, from.positions[v])) {
+      if (!face_normals && v < nf && same(p, from.positions[v])) {
         s[0] = s[1] = s[2] = (uint32_t)v;
         continue;
       }
@@ -148,7 +222,7 @@ void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map)
       const Vec3 clamped(std::max(lo.x, std::min(p.x, lo.x + gx * cell)), std::max(lo.y, std::min(p.y, lo.y + gy * cell)),
                          std::max(lo.z, std::min(p.z, lo.z + gz * cell)));
       const float outside = length(p - clamped);
-      float best = 1e30f;
+      float best = std::numeric_limits<float>::infinity(), alignment = -2.0f;
       uint32_t best_item = UINT32_MAX;
       Vec3 best_bary(1, 0, 0);
       const int rmax = std::max(gx, std::max(gy, gz));
@@ -173,7 +247,18 @@ void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map)
                 else
                   q = from.positions[i];
                 const float d = length_sq(q - p);
-                if (d < best) best = d, best_item = i, best_bary = bc;
+                if (d > best || !finite_bits(d)) continue;
+                float facing = 0.0f;
+                if (nt && face_normals) {
+                  const Vec3 a = from.positions[tris[i*3]], b = from.positions[tris[i*3+1]], c = from.positions[tris[i*3+2]];
+                  facing = dot(normalize(cross(b-a, c-a)), (*face_normals)[v]);
+                }
+                if (d < best || (face_normals && (facing > alignment || (facing == alignment && i < best_item)))) {
+                  best = d;
+                  best_item = i;
+                  best_bary = bc;
+                  alignment = facing;
+                }
               }
             }
           }
@@ -187,6 +272,56 @@ void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map)
       map.bary[v] = best_bary;
     }
   });
+}
+
+void group_transfer_map(const Mesh &from, const Mesh &to, GroupTransferMap &map) {
+  surface_map(from, to, map, nullptr);
+}
+
+void transfer_corner_colors(const Mesh &from, Mesh &to) {
+  auto layers = valid_corner_layers(from);
+  layers.erase(std::remove_if(layers.begin(), layers.end(), [&](size_t index) {
+    const int i = to.find_color(from.color_attributes[index].name);
+    return i >= 0 && to.color_fits(to.color_attributes[(size_t)i]);
+  }), layers.end());
+  if (layers.empty()) return;
+  // One unwelded vertex per source corner lets the existing spatial index return a face-side correspondence.
+  Mesh surface, centers;
+  surface.face_offsets = from.face_offsets;
+  surface.positions.reserve(from.corner_count());
+  for (uint32_t v : from.corner_verts) {
+    surface.corner_verts.push_back((uint32_t)surface.positions.size());
+    surface.positions.push_back(from.positions[v]);
+  }
+  centers.positions.reserve(to.face_count());
+  std::vector<Vec3> normals;
+  for (size_t f = 0; f < to.face_count(); ++f) {
+    centers.positions.push_back(to.face_center(f));
+    normals.push_back(to.face_normal(f));
+  }
+  GroupTransferMap faces;
+  surface_map(surface, centers, faces, &normals);
+  std::vector<CornerSample> samples(to.corner_count());
+  for (size_t f = 0; f < to.face_count(); ++f) {
+    const uint32_t *tri = &faces.src[f * 3];
+    if (tri[0] == UINT32_MAX) continue;
+    const Vec3 a = surface.positions[tri[0]], b = surface.positions[tri[1]], c = surface.positions[tri[2]];
+    for (uint32_t k = to.face_offsets[f]; k < to.face_offsets[f+1]; ++k) {
+      const Vec3 w = closest_barycentric(to.positions[to.corner_verts[k]], a, b, c);
+      samples[k] = {tri[0], tri[1], tri[2], w};
+    }
+  }
+  for (size_t i : layers) {
+    const auto &src = from.color_attributes[i];
+    auto dst = to.make_color(src.name, src.domain, {});
+    for (size_t k = 0; k < samples.size(); ++k) dst.rgba[k] = samples[k].read(src);
+    int existing = to.find_color(src.name);
+    if (existing < 0) to.color_attributes.push_back(std::move(dst));
+    else to.color_attributes[(size_t)existing] = std::move(dst);
+    const std::string warning = "'" + src.name + "' (per corner)";
+    to.dropped_colors.erase(std::remove(to.dropped_colors.begin(), to.dropped_colors.end(), warning), to.dropped_colors.end());
+  }
+  restore_color_choices(from, to);
 }
 
 void apply_group_map(const GroupTransferMap &map, const Mesh &from, Mesh &to) {
@@ -261,12 +396,14 @@ void apply_color_map(const GroupTransferMap &map, const Mesh &from, Mesh &to, bo
 
 void note_unkept_colors(const Mesh &from, Mesh &to) {
   for (const ColorAttribute &c : from.color_attributes)
-    if (!point_layer_fits(from, c)) to.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
+    if (!from.color_fits(c)) to.dropped_colors.push_back("'" + c.name + (c.domain == ColorAttribute::Domain::Point ? "' (per vertex)" : "' (per corner)"));
 }
 
 void carry_colors_rebuilt(const Mesh &from, Mesh &to) {
   if (from.color_attributes.empty()) return;
+  transfer_corner_colors(from, to);
   transfer_point_colors(from, to, true);
+  restore_color_choices(from, to);
   note_unkept_colors(from, to);
 }
 

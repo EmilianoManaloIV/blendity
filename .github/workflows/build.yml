@@ -28,9 +28,8 @@ permissions:
   pull-requests: read
 
 jobs:
-  # What this run has to do. A pull request that changes only text nothing builds, tests or checks (specs, ADRs,
-  # changelog fragments, CLAUDE.md: the list is in tools/dev/test_shards.py) skips every build; the four required jobs
-  # then pass at once. Not `paths-ignore`: a workflow that never starts leaves required checks waiting for ever.
+  # Always run the lightweight checks. A PR limited to documentation and recognized agent metadata skips
+  # native builds using tools/dev/test_shards.py. The four required jobs still report the changes job's result.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -42,6 +41,12 @@ jobs:
         run: |
           python3 tools/dev/test_shards.py --self-test
           python3 tools/dev/test_shards.py --check
+      - name: Check the project Codex agents and command rules
+        run: python3 tools/dev/check_codex_config.py
+      - name: Test publishing and merged task cleanup on local remotes
+        run: |
+          python3 tools/dev/test_cleanup_task_branch.py
+          python3 tools/dev/test_subtree_publish.py
       - name: Build, or nothing to build
         id: decide
         env:
@@ -65,7 +70,7 @@ jobs:
           if [ "$build" = true ]; then
             echo "::notice::This run builds and tests."
           else
-            echo "::notice::Only documents that nothing builds or tests changed: no build, the required jobs pass at once."
+            echo "::notice::Only documentation or recognized agent metadata changed. Native builds are skipped."
           fi
 
   # ------------------------------------------------------------------------------------------------ Windows
@@ -75,25 +80,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      # Round 579 (task 0561): which image and which compilers this runner has - the first build on image 20261116.315
-      # (MSVC 14.52) made programs that crashed in two places; it was found only by comparing two logs' compiler paths.
-      - name: Runner image and MSVC toolsets
-        shell: bash
-        run: |
-          echo "image: ${ImageOS:-?} ${ImageVersion:-?}"
-          for d in "/c/Program Files/Microsoft Visual Studio"/*/*/VC/Tools/MSVC; do echo "$d:"; ls "$d" || true; done
+      - name: Test hosted compiler selection with scratch fixtures
+        shell: pwsh
+        run: ./tools/dev/test_hosted_msvc.ps1
+      - name: Prepare the MSVC 14.51 x64 toolset
+        shell: pwsh
+        run: ./tools/dev/hosted_msvc.ps1 -Mode Prepare
       - name: Build (MSVC, no CMake needed)
         shell: cmd
         # Task 0169 (ADR 0054): NVIDIA's OptiX host headers fetched at a pinned tag; the kernel's PTX is committed.
         # `all` compiles every source once and links the three programs from the same objects (round 492).
         env:
           BLENDITY_FETCH_OPTIX: "1"
-          # Round 579: the compiler every green build used. Runner image 20261116.315's default, 14.52, built programs
-          # that crashed, and that image has no 14.51; its other toolset, 14.44, cannot compile the lessons' long
-          # strings (C2026). So on such a runner the build stops (STRICT) rather than use 14.52: run the job again.
-          BLENDITY_VCVARS_VER: "14.51"
-          BLENDITY_VCVARS_STRICT: "1"
-        run: call build.bat release all || exit /b 1
+        run: call tools\dev\hosted_msvc.cmd release all || exit /b 1
       - uses: actions/upload-artifact@v4
         with:
           name: blendity-windows
