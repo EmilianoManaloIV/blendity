@@ -983,6 +983,23 @@ static void round69_tests() {
     CHECK(pool <= 3);
   });
 
+  test("CPU affinity: explicit worker counts and serial and parallel output", [] {
+    JobSystem pool(2);
+    pool.set_backend(JobSystem::Backend::Builtin);
+    CHECK(pool.thread_count() == 3);  // Two explicitly requested workers plus the caller.
+    for (int limit : {3, 1}) {
+      pool.set_thread_limit(limit);
+      CHECK(pool.thread_count() == limit);
+      std::vector<int> values(4096, -1);
+      pool.parallel_for((int64_t)values.size(), 7, [&](int64_t a, int64_t b) {
+        for (auto i = a; i < b; ++i) values[(size_t)i] = (int)(i * i);
+      });
+      bool exact = true;
+      for (int i = 0; i < (int)values.size(); ++i) exact &= values[(size_t)i] == i * i;
+      CHECK(exact);
+    }
+  });
+
   test("min spec: Viewport Resolution at 50 % draws a quarter of the pixels, keeps clicks exact, and is part of the views' picture keys", [] {
     Editor ed;
     r34_open(ed);

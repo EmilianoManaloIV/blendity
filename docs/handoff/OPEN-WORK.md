@@ -29,6 +29,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   `nvidia-smi` sampled beside the run (`PITFALLS.md`, "The card's power state").
 
 ### 2. The see-through corners are compared on the CPU every frame (S-M)
+- **Comparison removed for unchanged lists in round 614.** On the RTX 4070 SUPER, eligible posing workloads fell from one CPU comparison per card frame to 0.00–0.15. A changing camera still uploads its new list. Controlled replays covered dragging and Rigging playback. Live Link rendered the same frames, but asynchronous mesh traffic varied between trials, so its whole-frame timing remains inconclusive. [Task 0596](../tasks/0596-transparent-corner-reuse.md)
 - **Evidence:** round 565's fragment, "Named, not fixed": 7 MB read twice, 0.5 to 1 ms a card frame - as long
   as the copy it replaced. The editor already knows when its sorted list is last frame's (round 471).
 - **Files:** `src/editor/gpu_views.cpp`, `src/render/gpu_raster.cpp`.
@@ -36,6 +37,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   is sent; the `posing` rows no worse.
 
 ### 3. A camera with filters lights its picture twice on the card (M)
+- **Closed in round 610.** On the RTX 4070 SUPER and RTX 3060 Ti, filtered cameras produced identical display and HDR values with one opaque lighting draw. The original two-draw path covers incompatible resources and mixed shadow modes. Matched Play trials on both cards reduced median and 95th-percentile frame times. [Task 0592](../tasks/0592-filtered-camera-lighting.md)
 - **Evidence:** round 565: the linear-light pass costs 2 to 3.6 ms in P8 in the Play row; one pass with two
   targets would halve it (the see-through and overlay draws share that pass).
 - **Files:** `src/render/gpu_raster.cpp` and the card's shaders.
@@ -49,6 +51,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   frame (and the ADR notes the exception) or it is reverted.
 
 ### 5. Splat import: the whole-file read, SPZ's inflate, serial validation (M)
+- **SPZ copy removed in round 615.** On a million-splat input the legacy gzip reader used 61.92 MiB less peak memory during decompression. Peak memory across the complete import stayed near 350 MiB. The PLY file read and serial validation remain open. [Task 0597](../tasks/0597-splat-import-memory.md)
 - **Evidence:** round 567's fragment: a 1M-splat PLY imports in 273 ms of which `fs::read_file` is 184; an SPZ
   in 365 ms of which inflate and the copy `gunzip` makes of its output are 253; `pointcloud_validate` is serial,
   about 30 ms. The import already runs off the main thread and meets ADR 0105's frame budget.
@@ -69,6 +72,10 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   filters 102 to 332 ms, Unity import 533 ms, two views or a drag at 50,000 objects, two-level card rows while
   dragging.
 - **Done:** each needs its own measurement round first; treat the document as the list, not as a plan.
+
+### Fresh-process Textures window still misses its 100 ms budget
+
+After round 617, opening 2,000 existing procedural textures in a fresh Windows CPU editor took a median 169.0 ms at the default worker limit and 244.7 ms with a two-worker cap. The following frame and same-process reopen took 3.5–3.9 ms. Profile directory discovery and visible thumbnails on the improved build before choosing the next change. Keep nested paths, aliases, case-sensitive filesystem identity, search and selection in the acceptance fixture. [Task 0599](../tasks/0599-cold-textures.md)
 
 ## Testability and flaky checks
 
@@ -91,6 +98,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   only added), or `--check` runs in the local chain and the failure names the verb. A self-test for the tool.
 
 ### 10. Preferences focus: two cases the re-reveal does not see (S-M)
+- **Closed in round 611.** Preferences keeps an edited field visible when rows move or the scroll offset is clamped. Scrolling with the wheel during recovery still moves the field out of view. Windows full, Windows dependency-free and Linux passed the focus, HCI and editor tests. Keeping dynamic status text at a fixed row height is a separate layout suggestion. [Task 0593](../tasks/0593-preferences-focus.md)
 - **Evidence:** round 573 (`docs/tasks/0555-preferences-budget-rows.md`, "Out, from the review"): a text or
   number field that Tab is *editing* goes through `Context::walk_stop` only (`src/editor/ui.cpp`) and is not
   watched, so rows changing above it can still push it out of view; rows that go away above the control on the

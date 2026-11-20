@@ -16217,6 +16217,57 @@ static void tests_round594() {
   });
 }
 
+static void tests_round617() {
+  test("Textures window: batch loading preserves row order, shared assets and edits, and retries repaired files", [] {
+    r594::Project project("r617-texture-batch");
+    Editor ed;
+    ed.init_headless(800, 600);
+    const std::string dir = "Assets/Library/";
+    const std::string old_path = dir + "Old.ptex", new_path = dir + "Renamed.ptex";
+    const std::string edited_path = dir + "Edited.ptex", missing = dir + "Missing.ptex", corrupt = dir + "Corrupt.ptex";
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(old_path, src));
+    const std::string old_file = resolve_asset_path(old_path);
+    CHECK(ed.move_project_entry(old_file, fs::parent(old_file), "Renamed.ptex"));
+    CHECK(fs::write_file(resolve_asset_path(corrupt), "invalid texture\n"));
+    const auto edited = create_texture_asset(src, edited_path);
+    CHECK(edited);
+    if (!edited) return;
+    edited->physical_size = 7.0f;
+    edited->touch();
+    CHECK(loaded_texture_assets().size() == 1);
+
+    std::vector<std::string> paths{missing, old_path, corrupt, edited_path, new_path, old_path};
+    // Cold misses span more than one worker chunk, with a distinct order from the directory.
+    for (int i = 15; i >= 0; --i) {
+      const std::string path = dir + strprintf("Cold%02d.ptex", i);
+      CHECK(r594::write(path, src));
+      paths.push_back(path);
+    }
+    const auto first = texture_assets_for_browser(paths);
+    CHECK(first.size() == paths.size());
+    if (first.size() != paths.size()) return;
+    CHECK(!first[0] && !first[2]);
+    CHECK(first[1] && first[1]->asset_path == new_path && first[1] == first[4] && first[1] == first[5]);
+    CHECK(first[3] == edited && edited->physical_size == 7.0f);
+    CHECK(loaded_texture_assets().size() == 18);
+    for (size_t row = 6; row < paths.size(); ++row)
+      CHECK(first[row] && first[row]->asset_path == paths[row]);
+
+    CHECK(r594::write(missing, src) && r594::write(corrupt, src));
+    const auto reopened = texture_assets_for_browser(paths);
+    CHECK(reopened.size() == first.size());
+    if (reopened.size() != first.size()) return;
+    CHECK(reopened[0] && reopened[0]->asset_path == missing);
+    CHECK(reopened[2] && reopened[2]->asset_path == corrupt);
+    CHECK(loaded_texture_assets().size() == 20);
+    for (size_t row = 0; row < paths.size(); ++row)
+      if (first[row]) CHECK(reopened[row] == first[row]);
+    CHECK(reopened[3] == edited && edited->physical_size == 7.0f);
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -16284,4 +16335,5 @@ void run_assets_tests() {
   tests_round507_import();
   tests_round507_te();
   tests_round594();
+  tests_round617();
 }

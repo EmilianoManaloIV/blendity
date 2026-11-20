@@ -2267,6 +2267,8 @@ using ProceduralTexturePtr = std::shared_ptr<ProceduralTexture>;
 std::string save_texture_text(ProceduralTexture &t);
 bool load_texture_text(const std::string &text, ProceduralTexture &t);
 ProceduralTexturePtr texture_asset(const std::string &path);  // loads on first use; nullptr if missing
+// Resolve the browser's paths in order, including null entries for missing assets.
+std::vector<ProceduralTexturePtr> texture_assets_for_browser(const std::vector<std::string> &paths);
 ProceduralTexturePtr create_texture_asset(const ProceduralTexture &src, const std::string &path);  // writes the file
 size_t save_dirty_texture_assets();
 const std::vector<std::pair<std::string, ProceduralTexturePtr>> &loaded_texture_assets();
