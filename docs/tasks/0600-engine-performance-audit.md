@@ -69,3 +69,17 @@ Keep texture-window edits outside the draw-collection declarations owned by 622 
 ### Workflow corrections
 
 Tasks 0606–0610 cover template use, PR description preservation, local check failure propagation, historical handoff records and the task records on the open stack. Their individual outcomes distinguish independently verified corrections from pending publication and owner merge.
+
+### Combined release builds
+
+Both MSVC 14.51 Windows packages (full libraries and dependency-free) and the dependency-free WSL Linux release build completed. The full-library Windows suite exercised the Vulkan renderer. The WSL run exercised the portable policy cases. The table gives passed assertions in each completed group. All 15 group runs reported zero failures. Matched whole-program stress comparisons are pending.
+
+| Configuration | Modeling | Splats | Assets | GPU | Editor |
+|---|---:|---:|---:|---:|---:|
+| Windows full libraries | 34,570 | 530 | 3,204 | 1,836 | 3,904 |
+| Windows dependency-free | 32,247 | 517 | 3,161 | 186 | 3,882 |
+| Linux dependency-free | 32,247 | 517 | 3,166 | 187 | 3,860 |
+
+See the per-group logs under `C:/blab/pass32/final-full-groups/`, `C:/blab/pass32/final-lite-groups/` and `C:/blab/pass32/final/joined-linux-*.log`.
+
+The cumulative product revision is bce0c11ff75c3e994e2c83ebb47ecba5b34fa893. The Hub checked all 1,008 files in the archived build inputs against Git (allowing Windows text line endings), the 12 changed source and test blobs, and the SHA-256 identities of the six packaged Windows executables. See C:/blab/pass32/final/build-receipt.json. The release-build comparison uses the head of PR #499, 66feaeb3, as its baseline.
