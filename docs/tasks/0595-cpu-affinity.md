@@ -1,6 +1,6 @@
 # 0595. Size automatic CPU work to the available processor set
 
-Round 613. Approved by the owner on November 19 under the application-wide performance and hardware compatibility goal.
+Round 613. Implemented and verified on Windows x64, Linux x86-64 and Linux ARM64. Approved by the owner on November 19 under the application-wide performance and hardware compatibility goal.
 
 ## Evidence and scope
 

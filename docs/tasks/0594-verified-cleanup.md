@@ -1,6 +1,6 @@
 # 0594. Retire completed worktrees and task branches
 
-**Status:** Assigned for round 612. The owner's workspace cleanup request authorizes ordinary removal of verified stale worktrees and merged branches. The Hub reviews the exact candidate manifest before removal.
+**Status:** Completed in round 612 and verified against the closing inventory. The owner's workspace cleanup request authorizes ordinary removal of verified stale worktrees and merged branches. The Hub reviews the exact candidate manifest before removal.
 
 ## Procedure and acceptance
 

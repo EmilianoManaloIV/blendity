@@ -1,6 +1,6 @@
 # 0593. Keep the field being edited visible during Preferences layout changes
 
-- **Status:** complete in the candidate, awaiting integration.
+- **Status:** integrated and verified on Windows and Linux for owner review.
 - **Authorization:** approved for dispatch by the Hub under the owner's performance and HCI assignment.
 - **Requirements:** keyboard navigation and focus visibility, Q-04.
 - **Decisions:** extends the focus behavior of task 0555. No public interface change.
