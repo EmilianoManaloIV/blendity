@@ -72,6 +72,19 @@ Drag endpoints, corner and upload counts, and client counts matched throughout. 
 
 The eight deltas per row, frame durations, work counters, shader inventory and device samples are in `C:\blab\0614-reuse\interleaved-20261120-013414` and `C:\blab\0614-reuse\probe\package.json`. The timing log is `C:\blab\reuse614-probe01.log`.
 
+## Fixed-clock clip follow-up
+
+The two clip rows also ran in a scratch build that supplied a fixed 16.7 ms clock to the original Preview playback start and tick. Each block restarts at frame zero, takes two preroll steps and records 30 wall durations with the original playback pacing. The Live Link test hook runs the real comparison once per step while a loopback client stays connected. The same frozen timing margins and eight balanced pairs apply. The additional match criterion compares the full playhead sequence, per-step card and waited frames, corner and upload counts, draws and pixels, view counts, clients and Live Link work counters. See `C:\blab\0614-reuse\exact-gate.md`.
+
+| Fixed-clock row | Median paired change in block median (ms) | Median paired change in block p95 (ms) | Median paired corner writer change (ms per card frame) | Pairs with all recorded work equal |
+|---|---:|---:|---:|---:|
+| Rigging window, clip playback | −0.478 | −0.282 | −0.395 | 8/8 |
+| Live Link with a client, clip playback | −0.380 | −0.271 | −0.630 | 0/8 |
+
+Both rows stayed within the timing margins and had zero candidate-only 16.7 ms crossings. Every block advanced through the same playhead sequence and had 29 waited Vulkan frames across 30 measured steps. Per-step raster work and client counts matched in every pair. Each Live Link block kept one client and ran 30 comparisons, 112 transform sends and 28 pose sends. The asynchronous worker produced 179–186 deform sends and 179–187 mesh sends per block, so the full Live Link workload still varied. The retained Live Link pairs support the corner writer result for matching raster work, with uncertainty in the whole-frame comparison. A stricter controlled variant could wait for `Link::wait_meshes_for_test()` after each preroll and measured step, outside the wall sample. This would settle the asynchronous work before the next tick and measure a synchronized Live Link workload. The real-clock trial remains the reference for the ordinary streaming schedule.
+
+The locked RTX 4070 SUPER window completed all 32 blocks with zero taint and zero shader cache misses. Its matched-playhead traces and unfiltered pairs are in `C:\blab\0614-reuse\exact-clips-20261120-014642`. See `C:\blab\reuse614-exact01.log` and the shader inventory in `C:\blab\0614-reuse\exact\package.json`.
+
 ## Sources
 
 [Open work item 2](../handoff/OPEN-WORK.md), [original card-storage measurements](0547-card-world-draw-cost.md), the round 471 editor cache in `src/editor/gpu_views.cpp` and the round 565 submission and upload paths in `src/render/gpu_raster.cpp`.
