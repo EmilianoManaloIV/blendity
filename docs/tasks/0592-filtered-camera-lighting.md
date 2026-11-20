@@ -1,31 +1,54 @@
-# 0592. Evaluate filtered-camera lighting once
+# 0592: Evaluate filtered-camera lighting once
 
-- **Status:** implemented and verified on November 19, 2026.
-- **Requirements:** Q-06, C-01, C-02. Round 610. Existing rendering decisions ADR 0110 and ADR 0151 apply.
-- **Implementation:** renderer workstream. The Hub owns integration, scarce resources and publication.
+- **Status:** in review
+- **Authorization:** Dispatched under the owner's application performance assignment for round 610.
+- **Requirements:** Q-06, C-01, C-02. Round 610.
+- **Decisions:** Existing rendering decisions ADR 0110 and ADR 0151 apply.
+- **Implementation:** Renderer workstream. The Hub owns integration, scarce resources and publication.
+- **PR:** [#498](https://github.com/EmilianoManaloIV/blendity/pull/498), carried by [#499](https://github.com/EmilianoManaloIV/blendity/pull/499)
 
 ## Goal
 
 Keep both the display picture and linear light for camera bloom or exposed grading from one opaque lighting evaluation. Current Vulkan frame recording reruns the full-screen lighting shader after drawing overlays. Round 565 measured a 2–3.6 ms linear-light pass on its Play workload.
 
-## Scope and ownership
+## Scope
 
 Own the optional lighting path in `src/render/gpu_raster.cpp`, draw-count instrumentation and the test seam in `src/render/gpu_raster.h`, regression coverage in `tests/test_gpu.cpp`, and `changelog.d/610-filtered-camera-lighting.md`. Keep existing single-target and CPU routes when the device, framebuffer, or shader cannot supply the combined result. No owner assets, device configuration changes or new dependencies.
 
-## Acceptance
+## Likely files
+
+`src/render/gpu_raster.cpp`, `src/render/gpu_raster.h`, `tests/test_gpu.cpp`.
+
+## Acceptance criteria
 
 1. Demonstrate that a filtered camera produces display and linear light in one full-screen lighting draw on a supported device. Unfiltered rendering keeps its existing sequence.
 2. Verify display output, HDR sentinels, bloom and grading, overdraw and transparency against existing CPU/GPU comparisons. Check the ray-query variant where available. Verify the original route when the optional path is unavailable.
 3. Build app and tests with and without Blender libraries. Measure baseline and candidate GPU lighting and total frame time on matching content with warmed shaders under an exclusive timing window. Record variation and reject adoption if there is no repeatable gain or if pictures regress.
 4. Have an independent tester and reviewer check the evidence. Record results in the task and round fragment. Physical GPUs beyond those actually tested remain unverified.
 
-## References
+## Tests and checks to run
+
+Run GPU, rendering and editor groups, strict hardware-required draw-count and pixel checks, and the warmed-shader Play comparisons defined above.
+
+## Risks and edge cases
+
+Preserve fallback when the optional pipeline or targets are unavailable. Account for partial ray-query fallback, splat changes and GPU power-state variation.
+
+## Documentation to update
+
+Record the result in `changelog.d/610-filtered-camera-lighting.md`.
+
+## Outcome
+
+Implemented and verified on November 19, 2026.
+
+### References
 
 [Open work item 3](../handoff/OPEN-WORK.md), [round 565 measurement](0547-card-world-draw-cost.md), the existing Vulkan render passes and the CPU filter implementation in `src/render/camera_filter.cpp`.
 
 The candidate stores both colour attachments before subsequent colour and HDR passes load their respective pictures for overlays or a transparent-pixel mask. The existing single-colour framebuffer can be loaded by a compatible pass with different load and store operations. [Vulkan render-pass compatibility](https://docs.vulkan.org/spec/latest/chapters/renderpass.html#renderpass-compatibility)
 
-## Verification
+### Verification
 
 The implementation creates the optional map and ray-query pipelines when a frame first needs them. The original two lighting draws remain available if the combined targets or shader are unavailable, if a traced display uses shadow-map HDR, or if splats have changed the instance IDs before the original linear-light pass.
 
@@ -37,7 +60,7 @@ The matched stock stress binary was built for importer revision `1e7bdb28`. A Gi
 
 The same Windows binary passed all 81 strict checks on a physical RTX 3060 Ti. A separate plain-scene test identified the adapter by name, used GPU rendering for all seven views and matched the CPU within 3/255 for 99.97% of measured pixels. The test process selected this adapter using the Vulkan loader's device ID filter, `0x2489`. [Khronos loader environment](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderInterfaceArchitecture.md#active-environment-variables)
 
-### Whole-program comparison
+#### Whole-program comparison
 
 The full posing stress section ran four times in baseline–candidate–candidate–baseline order. The Windows build slots and WSL compiler lock were exclusive, the continuous quiet preflight lasted 61 seconds and the window logged zero conflicting build/test samples. All four runs completed. Values below are milliseconds from the existing world Play row. Lighting includes its full-screen display pass. The linear column includes the later transparency mask when present.
 
@@ -50,7 +73,7 @@ The full posing stress section ran four times in baseline–candidate–candidat
 
 The discrete GPU's power state differed substantially between processes. The first baseline logged no P8 samples during the full section, while the first candidate logged 131. The linear column shrank on both candidate runs. These separate program runs do not establish a repeatable end-to-end speedup. The raw reports, card clocks and power samples are in `C:/blab/0610-camera/paired-posing/`.
 
-### Within-session Play comparison
+#### Within-session Play comparison
 
 A scratch stress harness ran the existing baked `avatarworld` Play workload in one editor process per trial. Both paths ran on the same device, at the same viewport size and with the same game and spring simulation. The harness changed only the existing separate-lighting test switch before each editor frame. Each eight-frame block assigned four frames to each mode in the order separate, paired, paired, separate, paired, separate, separate, paired. After 80 warm-up frames, the harness captured 320 frames, including GPU draws, total GPU time and the time taken by `step_frame_headless()`. Both modes used the same 16.7 ms pacing target. Frame time excludes the sleep after the measured frame. The scratch probe and raw clock samples are under `C:/blab/0610-camera/paired-probe/`. The stress harness and analysis scripts are in its parent directory.
 
@@ -65,3 +88,5 @@ Every sampled frame rendered one GPU view and read back one picture. All 480 sep
 The paired path reduced median Play frame time by 5.1–8.2% across these trials. Lighting and total GPU time improved in every eight-frame block. Keep the paired path on capable devices. These results apply to this filtered Play scene and these two adapters. The probe ran after 60 continuous seconds of quiet preflight and all three trials completed within the locked window, with zero conflicting workload samples. `C:/blab/0610-camera/probe-stats.py` verifies the number and order of frames, readbacks and lighting draws and reproduces the summaries from the preserved raw logs. The cross-process samples above remain part of the result.
 
 An independent reviewer reproduced the metrics from all 960 raw frame records. The paired path had lower median editor wall time in 118 of 120 blocks.
+
+The published task record is in [#498](https://github.com/EmilianoManaloIV/blendity/pull/498), carried by [#499](https://github.com/EmilianoManaloIV/blendity/pull/499). PR #498 was open at head `22d735b345c40947cbefd3455923bdc212cd2b82` when checked on November 20, 2026. The cumulative PR #499 was open at head `66feaeb3adee0f85c373f304a181c2ce0e23b6ce`.
