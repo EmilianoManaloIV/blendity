@@ -749,6 +749,149 @@ void tests_round573() {
     CHECK(!whole_in_area());
   });
 
+  test("hci: layout changes keep keyboard editing visible and preserve the caret, selection and walk (round 611)", [] {
+    ui::Context u;
+    Image img;
+    img.resize(300, 200);
+    Recti area{10, 10, 200, 100};
+    const ui::Id scroll = u.id("focus_area");
+    int above = 170, content = 260;
+    std::string text = "hello";
+    float number = 12;
+    double t = 0;
+    auto frame = [&] {
+      u.begin_frame(&img, t += 0.1);
+      const int y = area.y + above - u.begin_scroll(scroll, area, content);
+      u.text_field(u.id("name"), {20, y, 120, 18}, text);
+      u.float_field(u.id("amount"), {20, y + 20, 120, 18}, number);
+      u.end_scroll();
+      u.end_frame();
+      u.in = {};
+    };
+    auto key = [&](int code, int mods = 0) {
+      u.in.key_pressed[code] = true;
+      u.in.key_mods[code] = u.in.mods = mods;
+      frame();
+    };
+    auto visible = [&] {
+      const Recti r = u.edit_rect_for_test();
+      return r.h > 0 && r.y >= area.y && r.bottom() <= area.bottom();
+    };
+    u.scroll_to(scroll, 160);
+    u.focus_first_in(area);
+    for (int i = 0; i < 6; ++i) frame();
+    CHECK(visible());
+    key(platform::KEY_HOME);
+    key(platform::KEY_RIGHT);
+    above -= 100;
+    content -= 60;  // fewer rows above, additional rows below: automatic clamp from 160 to 100
+    frame();
+    CHECK(!visible());
+    frame();
+    CHECK(visible());
+    u.in.text = "x";
+    frame();
+    CHECK(text == "hxello");
+    key(platform::KEY_TAB);
+    for (int i = 0; i < 6; ++i) frame();
+    above += 100;
+    content += 100;
+    area.h -= 10;
+    for (int i = 0; i < 3; ++i) frame();
+    CHECK(visible());
+    u.in.text = "73";  // the Tab selection still replaces the whole original number
+    frame();
+    CHECK(number == 12);
+    key(platform::KEY_TAB, platform::MOD_SHIFT);
+    frame();
+    CHECK(number == 73);
+    CHECK(visible());
+    u.in.text = "back";
+    frame();
+    CHECK(text == "back");
+    above += 140;
+    content += 140;
+    frame();
+    CHECK(!visible());  // another reveal has just been requested
+    u.in.mx = 50;
+    u.in.my = 50;
+    u.in.wheel_y = 8;
+    for (int i = 0; i < 6; ++i) frame();
+    CHECK(!visible());
+    CHECK(u.scroll_offset(scroll) == 0);
+  });
+
+  test("hci: real Preferences accepts a keyboard scale edit and respects the wheel on the next field (round 611)", [] {
+    Editor ed;
+    R573::open(ed);
+    using ET = platform::EventType;
+    const auto tab = [&] {
+      ed.step_frame_headless({ev(ET::KeyDown, 5, 5, platform::KEY_TAB)});
+      ed.step_frame_headless();
+    };
+    tab();  // UI Scale
+    CHECK(ed.ui_for_test().any_editing());
+    for (char c : std::string("1.5")) {
+      platform::Event e;
+      e.type = ET::Text;
+      e.codepoint = c;
+      ed.step_frame_headless({e});
+    }
+    tab();  // commit the resize, then Theme
+    CHECK(ed.ui_scale_pref_for_test() == 1.5f && ed.ui_for_test().scale == 1.5f);
+    tab();  // Move Snap
+    Recti dlg = ed.top_popup_rect_for_test();
+    CHECK(ed.ui_for_test().any_editing() && inside(ed.ui_for_test().edit_rect_for_test(), dlg));
+    platform::Event wheel = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+    wheel.wheel_y = -20;
+    ed.step_frame_headless({ev(ET::MouseMove, wheel.x, wheel.y), wheel});
+    for (int n = 0; n < 6; ++n) ed.step_frame_headless();
+    CHECK(ed.prefs_open_for_test() && ed.ui_for_test().any_editing());
+    CHECK(ed.ui_for_test().edit_rect_for_test().bottom() < dlg.y);
+  });
+
+  test("hci: a resizing Preferences-style popup keeps an edited field visible when its scroll is clamped (round 611)", [] {
+    ui::Context u;
+    Image img;
+    img.resize(300, 100);
+    const ui::Id dialog = u.id("preferences");
+    std::string value = "original";
+    int above = 170;
+    double t = 0;
+    auto frame = [&] {
+      u.begin_frame(&img, t += 0.1);
+      u.popup(dialog, 240, [&] {
+        u.popup_row(above);
+        u.text_field(u.id("name"), u.popup_row(18), value);
+        u.popup_row(230 - above);  // results filled in below as the status rows above disappeared
+      });
+      u.end_frame();
+      u.in = {};
+    };
+    u.open_popup(dialog, {0, 0, 1, 1});
+    frame();
+    frame();
+    u.in.mx = 50;
+    u.in.my = 50;
+    u.in.wheel_y = -20;
+    frame();
+    u.in.key_pressed[platform::KEY_TAB] = true;
+    for (int i = 0; i < 6; ++i) frame();
+    const int old_offset = u.top_popup_scroll();
+    CHECK(old_offset > 100);
+    CHECK(u.edit_rect_for_test().y >= 0);
+    above -= 100;
+    img.resize(300, 140);
+    frame();
+    CHECK(u.edit_rect_for_test().y < 0);
+    for (int i = 0; i < 4; ++i) frame();
+    const Recti field = u.edit_rect_for_test();
+    CHECK(field.h == 18 && field.y >= 0 && field.bottom() <= img.height);
+    u.in.text = "replacement";
+    frame();
+    CHECK(value == "replacement");
+  });
+
   test("hci: a list inside a scrolling panel - wheeling the panel until the list's focused row is partly out of view leaves the list's own scroll alone (round 573, task 0555, the review)", [] {
     /* (The focused row leaves the clip while the list's own offset is the same; the panel's offset changed, and that is the user's scroll: the list is not scrolled against the wheel.) */
     ui::Context u;

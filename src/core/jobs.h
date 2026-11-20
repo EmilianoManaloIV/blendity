@@ -22,7 +22,7 @@ class JobSystem {
  public:
   enum class Backend { Builtin, TBB };
 
-  /* threads == 0 -> hardware_concurrency - 1 workers (+ the calling thread). */
+  /* Zero selects the available logical CPUs, including the calling thread. */
   explicit JobSystem(int threads = 0);
   ~JobSystem();
   JobSystem(const JobSystem &) = delete;

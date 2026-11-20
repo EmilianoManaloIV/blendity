@@ -36,6 +36,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   is sent; the `posing` rows no worse.
 
 ### 3. A camera with filters lights its picture twice on the card (M)
+- **Closed in round 610.** On the RTX 4070 SUPER and RTX 3060 Ti, filtered cameras produced identical display and HDR values with one opaque lighting draw. The original two-draw path covers incompatible resources and mixed shadow modes. Matched Play trials on both cards reduced median and 95th-percentile frame times. [Task 0592](../tasks/0592-filtered-camera-lighting.md)
 - **Evidence:** round 565: the linear-light pass costs 2 to 3.6 ms in P8 in the Play row; one pass with two
   targets would halve it (the see-through and overlay draws share that pass).
 - **Files:** `src/render/gpu_raster.cpp` and the card's shaders.
@@ -91,6 +92,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   only added), or `--check` runs in the local chain and the failure names the verb. A self-test for the tool.
 
 ### 10. Preferences focus: two cases the re-reveal does not see (S-M)
+- **Closed in round 611.** Preferences keeps an edited field visible when rows move or the scroll offset is clamped. Scrolling with the wheel during recovery still moves the field out of view. Windows full, Windows dependency-free and Linux passed the focus, HCI and editor tests. Keeping dynamic status text at a fixed row height is a separate layout suggestion. [Task 0593](../tasks/0593-preferences-focus.md)
 - **Evidence:** round 573 (`docs/tasks/0555-preferences-budget-rows.md`, "Out, from the review"): a text or
   number field that Tab is *editing* goes through `Context::walk_stop` only (`src/editor/ui.cpp`) and is not
   watched, so rows changing above it can still push it out of view; rows that go away above the control on the

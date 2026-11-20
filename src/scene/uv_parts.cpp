@@ -693,7 +693,7 @@ void solve_parts(Solver &s, const Dendrogram &tree) {
     if (items.size() * 5 >= s.d.face.size() && items.size() > 2000) s.solve(tree, node);
     else tops.push_back(node);
   }
-  const int threads = std::max(1, std::min((int)tops.size(), (int)std::thread::hardware_concurrency()));
+  const int threads = std::max(1, std::min((int)tops.size(), sys::hardware_threads()));
   if (threads == 1) {
     for (int node : tops) s.solve(tree, node);
     return;

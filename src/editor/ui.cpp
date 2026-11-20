@@ -292,7 +292,10 @@ bool Context::walk_stop(Id i, const Recti &r, Id *before) {
 void Context::focus_reveal(const Recti &r) {
   const Recti clip = canvas.clip();
   const bool seen = r.y >= clip.y && r.bottom() <= clip.bottom();  // (cut at a side only: scrolling up or down would not help)
-  if (seen || reveal_left_-- <= 0) {
+  const bool popup_scrolled = current_layer_ > 0 && current_layer_ <= (int)popups_.size() &&
+                              popups_[(size_t)current_layer_ - 1].scrolled_by_input;
+  if (seen || reveal_left_-- <= 0 || popup_scrolled ||
+      std::any_of(scroll_stack_.begin(), scroll_stack_.end(), [](const ScrollState &s) { return s.scrolled_by_input; })) {
     reveal_id_ = 0;
     return;
   }
@@ -309,17 +312,23 @@ void Context::focus_reveal(const Recti &r) {
   else reveal_id_ = 0;
 }
 
-/* Round 573 (task 0555): the focused control pushed out of its scroll area with no scroll - rows above it grew or went (a sentence that re-wraps, a list that fills in) after focus_reveal's
- * four frames were over. When it was whole in the clip the frame before, is not now, and the area's offset is the same, it is revealed again. A wheel or a dragged scrollbar changes the
- * offset: the user scrolled it away, and it stays away. */
+/* Keep a previously visible focus stop in view when its layout changes. Scroll gestures win. */
 void Context::focus_watch(Id i, const Recti &r) {
   const Recti clip = canvas.clip();
   const bool seen = r.y >= clip.y && r.bottom() <= clip.bottom();
   /* Every level it sits in - each enclosing scroll area and its popup - because the clip is all of theirs together: a wheel on the popup round a list is the user's scroll too
    * (the review: only the innermost was read, and the list was then scrolled against the wheel). */
-  int offset = current_layer_ > 0 && current_layer_ <= (int)popups_.size() ? popups_[(size_t)current_layer_ - 1].scroll : 0;
-  for (const ScrollState &s : scroll_stack_) offset += s.offset;
-  const bool pushed_out = watch_id_ == i && watch_seen_ && !seen && offset == watch_offset_;
+  int offset = 0, layout_clamp = 0;
+  if (current_layer_ > 0 && current_layer_ <= (int)popups_.size()) {
+    const Popup &popup = popups_[(size_t)current_layer_ - 1];
+    offset = popup.scroll;
+    layout_clamp = popup.layout_clamp;
+  }
+  for (const ScrollState &s : scroll_stack_) {
+    offset += s.offset;
+    layout_clamp += s.layout_clamp;
+  }
+  const bool pushed_out = watch_id_ == i && watch_seen_ && !seen && offset + layout_clamp == watch_offset_;
   watch_id_ = i, watch_seen_ = seen, watch_offset_ = offset;
   if (!pushed_out || reveal_id_ == i) return;
   reveal_id_ = i;
@@ -747,6 +756,7 @@ int Context::edit_text(Id i, const Recti &r, std::string &buf) {
   edit_rect_ = r;
   int result = 0;
   if (in.pressed[0] && !r.contains(in.mx, in.my)) return 2;  // blur commits
+  focus_watch(i, r);
   if (in.pressed[0] && r.contains(in.mx, in.my)) {
     edit_select_all_ = false;
     edit_cursor_ = font.hit_index(buf, in.mx - (r.x + px(4)) + edit_scroll_);
@@ -819,7 +829,6 @@ int Context::edit_text(Id i, const Recti &r, std::string &buf) {
   if (std::fmod(time, 1.0) < 0.5 || result) canvas.fill_rect({tx + caret_px, ty, std::max(1, px(1)), font.line_height()}, theme.text_bright);
   canvas.pop_clip();
   cursor = Cursor::IBeam;
-  (void)i;
   return result;
 }
 
@@ -1902,11 +1911,21 @@ void Context::touch_scroll_update(Id i, const Recti &r, int &off) {
   if (active_ == (i ^ 0x70C4ull)) active_ = 0;
 }
 
+/* A shorter document or taller viewport can clamp the offset without a wheel, touch or drag. */
+static int clamp_scroll(int &offset, int previous, int maximum) {
+  const bool unchanged_by_input = offset == previous;
+  offset = std::clamp(offset, 0, maximum);
+  return unchanged_by_input ? previous - offset : 0;
+}
+
 int Context::begin_scroll(Id i, const Recti &r, int content_h) {
   int &off = scroll_[i];
+  const int previous = off;
   int maxoff = std::max(0, content_h - r.h);
   touch_scroll_update(i, r, off);
+  bool scrolled_by_input = off != previous;
   if (hovered(r) && in.wheel_y != 0 && !in.ctrl()) {
+    scrolled_by_input = true;
     off -= (int)(in.wheel_y * row_h() * 3);
     in.wheel_y = 0;  // consumed
   }
@@ -1923,13 +1942,14 @@ int Context::begin_scroll(Id i, const Recti &r, int content_h) {
       scroll_drag_offset_ = thumb.contains(in.mx, in.my) ? in.my - ty : th / 2;
     }
     if (active_ == sid) {
+      scrolled_by_input = true;
       int nty = in.my - scroll_drag_offset_;
       off = (int)((int64_t)(nty - r.y) * maxoff / std::max(1, r.h - th));
       if (in.released[0]) active_ = 0;
     }
   }
-  off = std::max(0, std::min(off, maxoff));
-  scroll_stack_.push_back({i, r, content_h, off});
+  const int layout_clamp = clamp_scroll(off, previous, maxoff);
+  scroll_stack_.push_back({i, r, content_h, off, layout_clamp, scrolled_by_input});
   canvas.push_clip({r.x, r.y, r.w - (bar ? bw : 0), r.h});
   return off;
 }
@@ -2106,14 +2126,16 @@ void Context::draw_popups() {
     r.x = std::max(0, r.x);
     r.y = std::max(0, r.y);
     const int scroll_max = std::max(0, h - r.h);
-    if (scroll_max > 0 && r.contains(in.mx, in.my) && in.wheel_y != 0.0f) {
+    const bool wheel = scroll_max > 0 && r.contains(in.mx, in.my) && in.wheel_y != 0.0f;
+    if (wheel) {
       popups_[k].scroll -= (int)(in.wheel_y * (float)(row_h() * 3));
       in.wheel_y = 0.0f;
       redraw = true;
     }
     const int bar_w = scroll_max > 0 ? px(10) : 0;
     if (bar_w) popup_scrollbar_drag(k, r, h, scroll_max);
-    popups_[k].scroll = std::max(0, std::min(scroll_max, popups_[k].scroll));
+    popups_[k].scrolled_by_input = wheel || popups_[k].scroll != p.scroll;
+    popups_[k].layout_clamp = clamp_scroll(popups_[k].scroll, p.scroll, scroll_max);
     p.scroll = popups_[k].scroll;
     canvas.push_clip({0, 0, canvas.width(), canvas.height()});
     canvas.fill_rect({r.x + px(3), r.y + px(3), r.w, r.h}, Color::hex(0x000000, 80));

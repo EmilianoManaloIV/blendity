@@ -1998,7 +1998,13 @@ vec3 ocio(vec3 c) {
   if (fb > fr) return c000 + (c111 - lut_at(i, 0, 1, 1)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (lut_at(i, 0, 1, 1) - lut_at(i, 0, 1, 0)) * fb;
   return c000 + (lut_at(i, 1, 1, 0) - lut_at(i, 0, 1, 0)) * fr + (lut_at(i, 0, 1, 0) - c000) * fg + (c111 - lut_at(i, 1, 1, 0)) * fb;
 }
+#ifdef BL_LIGHT_PAIR
+layout(location = 1) out vec4 o_linear;
+#endif
 vec4 display(vec3 hdr) {
+#ifdef BL_LIGHT_PAIR
+  o_linear = vec4(hdr, 1.0);
+#endif
 #ifdef BL_HDR
   return vec4(hdr, 1.0);  // (task 0197: the picture in linear light, before the view transform)
 #endif
@@ -2329,6 +2335,9 @@ void main() {
   vec2 ndc = (vec2(px) + 0.5) / view.xy * 2.0 - 1.0;
   float d = texelFetch(g_depth, px, 0).r;
   if (d >= 1.0) {
+#ifdef BL_LIGHT_PAIR
+    o_linear = vec4(-1.0, 0.0, 0.0, 0.0);  // World backgrounds overwrite this in display().
+#endif
     o_color = background_at(ndc);
     return;
   }
@@ -2337,6 +2346,9 @@ void main() {
   uint flags = uint(em.a + 0.5);
   if ((flags & F_RAW) != 0u) {  // (task 0195: Solid shading's, clamped as the CPU packs it)
     o_color = vec4(clamp(em.rgb, 0.0, 1.0), 1.0);
+#ifdef BL_LIGHT_PAIR
+    o_linear = o_color;
+#endif
     return;
   }
   uint self = texelFetch(g_inst, px, 0).r;
@@ -3007,7 +3019,7 @@ struct Slot {
   Img mask;                               // round 454: the baked pass's shadowmask plane, RGBA8 beside it (4 bytes a pixel)
   VkFramebuffer fb_baked = VK_NULL_HANDLE;
   Img hdr;                                // task 0197: the picture in linear light (made when first needed)
-  VkFramebuffer fb_hdr = VK_NULL_HANDLE;
+  VkFramebuffer fb_hdr = VK_NULL_HANDLE, fb_light_pair = VK_NULL_HANDLE;
   /* Round 416: the filters' images (made when first needed) - the picture's other half of a ping-pong, the bloom's
    * bright plane and its pyramid, two of each level; their framebuffers; the passes' descriptor sets, one a pass. */
   Img post, bright, mips[2][12];
@@ -3952,14 +3964,28 @@ class VulkanRaster final : public Raster {
     }
     stamp(kStampBaked);
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rb.renderPass = rp_light_;
-    rb.framebuffer = sl.fb_light;
+    // Splats update the instance IDs before the original HDR pass; preserve that ordering.
+    const bool traced_hdr = traced && pl_hdr_rt_ && !omit_traced_hdr_for_test_;
+    // The original pair can use traced display with shadow-map HDR on a partial driver.
+    const bool same_shadows = !traced || traced_hdr;
+    VkPipeline pair = fr.want_hdr && sl.fb_light_pair && !splat_drawn_ && same_shadows && !separate_lighting_ ? light_pair_pipeline(traced) : VK_NULL_HANDLE;
+    const bool paired = pair != VK_NULL_HANDLE;
+    rb.renderPass = paired ? rp_light_pair_ : rp_light_;
+    rb.framebuffer = paired ? sl.fb_light_pair : sl.fb_light;
     rb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
     f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     viewport(fr.width, fr.height);
-    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced ? pl_light_rt_ : pl_light_);
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, paired ? pair : (traced ? pl_light_rt_ : pl_light_));
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
     f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+    detail_.lighting_draws++;
+    if (paired) {
+      f_.vkCmdEndRenderPass(cmd_);
+      barrier();
+      rb.renderPass = rp_light_load_;
+      rb.framebuffer = sl.fb_light;
+      f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    }
     stamp(kStampLight);
     if (splat_drawn_ && can_draw_splats()) draw_splats(fr, sl);  // (round 532: over the lit picture, under the see-through surfaces)
     stamp(kStampSplats);
@@ -3970,17 +3996,21 @@ class VulkanRaster final : public Raster {
     f_.vkCmdEndRenderPass(cmd_);
     barrier();
     stamp(kStampOverlays);
-    if (fr.want_hdr) {  // (task 0197: the lighting again in linear light, for a camera's bloom)
+    const bool mark_transparency = !fr.see_through.empty() && can_draw_see_through() && pl_see_hdr_;
+    if (fr.want_hdr && (!paired || mark_transparency)) {
       VkRenderPassBeginInfo hb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-      hb.renderPass = rp_hdr_;
+      hb.renderPass = paired ? rp_hdr_load_ : rp_hdr_;
       hb.framebuffer = sl.fb_hdr;
       hb.renderArea = {{0, 0}, {(uint32_t)fr.width, (uint32_t)fr.height}};
       f_.vkCmdBeginRenderPass(cmd_, &hb, VK_SUBPASS_CONTENTS_INLINE);
       viewport(fr.width, fr.height);
-      f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced && pl_hdr_rt_ ? pl_hdr_rt_ : pl_hdr_);
       f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
-      f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
-      if (!fr.see_through.empty() && can_draw_see_through() && pl_see_hdr_) {  // (round 414: the see-through pixels marked "none", as the CPU marks them)
+      if (!paired) {
+        f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, traced_hdr ? pl_hdr_rt_ : pl_hdr_);
+        f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+        detail_.lighting_draws++;
+      }
+      if (mark_transparency) {  // (round 414: the see-through pixels marked "none", as the CPU marks them)
         f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_see_hdr_);
         f_.vkCmdDraw(cmd_, (uint32_t)fr.see_through.size(), 1, 0, 0);
       }
@@ -3999,6 +4029,10 @@ class VulkanRaster final : public Raster {
   bool can_trace_shadows() const override { return rt_ok_ && !rt_failed_ && (!rt_pipelines_tried_ || pl_light_rt_); }
   void fail_rt_shadows_for_test() override { rt_force_fail_ = true; }
   void fail_next_frame_for_test() override { fail_frame_once_ = true; }
+  void separate_lighting_for_test(bool separate, bool omit_traced_hdr) override {
+    separate_lighting_ = separate;
+    omit_traced_hdr_for_test_ = omit_traced_hdr;
+  }
   bool frame_fails_for_test(std::string *err) {
     if (!fail_frame_once_) return false;
     fail_frame_once_ = false;
@@ -4727,6 +4761,10 @@ class VulkanRaster final : public Raster {
   uint64_t rt_written_[kSlots] = {};  // the top level's serial each slot's set holds
   VkPipeline pl_light_rt_ = VK_NULL_HANDLE, pl_hdr_rt_ = VK_NULL_HANDLE;
   std::vector<rt::Caster> rt_casters_;
+  VkPipeline pl_light_pair_[2] = {};  // lazily created for map and traced shadows
+  bool tried_light_pair_[2] = {};
+  bool separate_lighting_ = false, omit_traced_hdr_for_test_ = false;
+  VkRenderPass rp_light_pair_ = VK_NULL_HANDLE, rp_hdr_load_ = VK_NULL_HANDLE;
   VkRenderPass rp_hdr_ = VK_NULL_HANDLE;
   /* Round 416: the filters' passes - a pipeline a kind, the float planes' render pass, the passes' own set layout (set
    * 1: the pass's images) with the frame's set 0, and push constants for the settings. */
@@ -5947,6 +5985,8 @@ class VulkanRaster final : public Raster {
     rp_ids_ = make_pass({VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT}, false, false, true);  // (task 0195)
     rp_toon_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}, true, false, false, true);  // (task 0196)
     rp_baked_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM}, true, false, false, true);  // (task 0197; round 454: the shadowmask beside the plane)
+    rp_light_pair_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R32G32B32A32_SFLOAT}, false, true);
+    rp_hdr_load_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, false, false, true);
     rp_hdr_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, false, true);
     rp_post16_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT}, false, true);  // (round 416: the bloom's planes)
     rp_light_load_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, false, true);
@@ -6126,6 +6166,22 @@ class VulkanRaster final : public Raster {
     if (!can_draw_baked()) Log::warn("The GPU view can't draw lightmaps or probes (%s): the CPU draws those views", berr.empty() ? "?" : berr.c_str());
   }
   /* Task 0197: the lighting pass again into linear light (the picture a camera's bloom reads). */
+  VkPipeline light_pair_pipeline(bool traced) {
+    const int i = traced ? 1 : 0;
+    if (tried_light_pair_[i]) return pl_light_pair_[i];
+    tried_light_pair_[i] = true;
+    const std::string defines = std::string(traced ? rt::kRtExtension : "") + "#define BL_LIGHT_PAIR 1\n";
+    std::string err;
+    VkShaderModule f = module(defines + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader, &err);
+    if (!f) return VK_NULL_HANDLE;
+    VkShaderModule v = module(kFullVert, shaderc_vertex_shader, &err);
+    if (v) {
+      pl_light_pair_[i] = make_pipeline(rp_light_pair_, v, f, 2, false, VK_CULL_MODE_NONE);
+      f_.vkDestroyShaderModule(dev_, v, nullptr);
+    }
+    f_.vkDestroyShaderModule(dev_, f, nullptr);
+    return pl_light_pair_[i];
+  }
   void make_hdr_pipeline(VkShaderModule fv) {
     std::string herr;
     VkShaderModule hf = module(std::string("#define BL_HDR 1\n") + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain,
@@ -6338,6 +6394,7 @@ class VulkanRaster final : public Raster {
         {std::string(geometry_ ? "#define BL_HIGHLIGHT 1\n" : "") + mat + kLightFns + kGbufFrag, shaderc_fragment_shader},
         {std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader},
         {std::string("#define BL_HDR 1\n") + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader},
+        {std::string("#define BL_LIGHT_PAIR 1\n") + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain, shaderc_fragment_shader},
         {mat + kToonFrag, shaderc_fragment_shader},
         {std::string(kLightFns) + kGbufVert, shaderc_vertex_shader},
     };
@@ -6353,6 +6410,7 @@ class VulkanRaster final : public Raster {
     if (rt_ok_) {  // (round 543: the traced shadows' lighting passes, as rt_pipelines makes them)
       const std::string lit = std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kLightMain;
       srcs.push_back({rt::kRtExtension + lit, shaderc_fragment_shader});
+      srcs.push_back({std::string(rt::kRtExtension) + "#define BL_LIGHT_PAIR 1\n" + lit, shaderc_fragment_shader});
       srcs.push_back({std::string(rt::kRtExtension) + "#define BL_HDR 1\n" + lit, shaderc_fragment_shader});
     }
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
@@ -6429,6 +6487,8 @@ class VulkanRaster final : public Raster {
     const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;  // (round 416: the filters' passes read it)
     if (!make_image(sl.hdr, sl.color.w, sl.color.h, VK_FORMAT_R32G32B32A32_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the linear picture");
     sl.fb_hdr = framebuffer(rp_hdr_, {sl.hdr.view}, sl.color.w, sl.color.h);
+    if (rp_light_pair_ && rp_hdr_load_ && sl.fb_hdr)
+      sl.fb_light_pair = framebuffer(rp_light_pair_, {sl.color.view, sl.hdr.view}, sl.color.w, sl.color.h);
     return sl.fb_hdr ? true : fail(err, "could not make the linear picture's framebuffer");
   }
   /* Task 0197: the slot's baked plane and its framebuffer, at the slot's size, made the first time a frame needs them. */
@@ -6459,9 +6519,9 @@ class VulkanRaster final : public Raster {
       sl.fb_shadow = framebuffer(rp_shadow_, {sl.shadow.view}, s, s);
     }
     if (!view_ok) {
-      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
+      for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr, sl.fb_light_pair})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      sl.fb_toon = sl.fb_baked = sl.fb_hdr = VK_NULL_HANDLE;
+      sl.fb_toon = sl.fb_baked = sl.fb_hdr = sl.fb_light_pair = VK_NULL_HANDLE;
       free_post(sl);  // (round 416: the filters' images are the picture's size)
       for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
@@ -6513,19 +6573,19 @@ class VulkanRaster final : public Raster {
     if (compose_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, compose_set_layout_, nullptr);
     for (Slot &sl : slots_) {
       free_post(sl);  // (round 416)
-      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
+      for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr, sl.fb_light_pair})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
       for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_splat_, pl_splat_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_, pl_light_rt_, pl_hdr_rt_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_splat_, pl_splat_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_, pl_light_rt_, pl_hdr_rt_, pl_light_pair_[0], pl_light_pair_[1]})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkPipeline p : pl_post_)  // (round 416)
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     if (post_pool_) f_.vkDestroyDescriptorPool(dev_, post_pool_, nullptr);
     if (post_layout_) f_.vkDestroyPipelineLayout(dev_, post_layout_, nullptr);
     if (post_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, post_set_layout_, nullptr);
-    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_, rp_post16_})
+    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_, rp_post16_, rp_light_pair_, rp_hdr_load_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     destroy_skin_pass();  // (round 519: the skins' buffers and sets, the pass's pipeline and pool)
     for (Mesh &m : meshes_) free_mesh(m);
