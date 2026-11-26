@@ -37,9 +37,15 @@ in **[docs/INSTALL.md](docs/INSTALL.md)**. Every version is on the
   **sculpt** with brushes, DynaMesh and Dyntopo.
 - **Unwrap and texture**: a UV Editor, Principled and toon materials, layered procedural textures, painting on the
   model, face-corner paint that survives mesh editing, and texture baking.
+  Textures cards follow paint Undo and Redo (round 639).
 - **Light and render**: a realtime rasterizer and a path tracer on the CPU or a Vulkan graphics card, baked
   lightmaps and probes, Gaussian splats (PLY, SPZ, glTF).
+  Vulkan device creation supports the advertised portability subset (round 616).
+  On Vulkan, mesh storage can be reused without disrupting baked lighting on other objects.
+  The built-in CPU ray tracer uses less memory when preparing large splat clouds (round 629).
   The Lighting window shows the active update mode first and reveals the full bake counts on hover.
+  Selecting Low releases oversized shadow planes in CPU viewports (round 631).
+  Find and apply Low, Medium or High Viewport Quality from the command palette.
 - **Rig and animate**: bones, IK, automatic weights, a dopesheet and curves, a Sequencer, walk cycles, spring bones.
 - **Work with other tools**: import and export OBJ, FBX, glTF, STL, PLY and USD; Unity packages and scenes, VRM and
   MikuMikuDance characters; **Live Link** to Blender, Unity, Godot and Unreal.
@@ -57,6 +63,7 @@ The full list, stage by stage, is in **[docs/FEATURES.md](docs/FEATURES.md)**.
 2. Press **F1** for the **Learn** tab, or pick a stage from the **Layout** dropdown (top right).
 3. **Alt+drag** orbits, the **wheel** zooms, **W / E / R** move, rotate and scale, **Tab** enters Edit Mode,
    **Ctrl+P** plays, and **Ctrl+K** finds any command by name.
+   4. In Preferences, press **Tab** or **Shift+Tab** to move between controls. The field you are editing stays in view when settings change the layout.
 
 ## Learn more
 
@@ -84,7 +91,7 @@ Blender's prebuilt libraries (faster rendering, denoising, video export), CMake 
 **[docs/BUILDING.md](docs/BUILDING.md)**.
 
 <!-- The unit-check count: the pass write-up updates this one line (tools/dev/changelog.py fold --checks). -->
-Each build is tested: `blendity_tests` (139512 unit checks in 3892 tests with Blender's libraries), on Windows, Linux and
+Each build is tested: `blendity_tests` (141819 unit checks in 3942 tests with Blender's libraries), on Windows, Linux and
 macOS by GitHub Actions.
 
 ## License

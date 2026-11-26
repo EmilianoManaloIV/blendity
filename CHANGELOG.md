@@ -2,6 +2,319 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-26 (round 640): Measure four low-end Linux VM profiles
+
+**Asked:** Exercise the editor under several low-end device budgets, including a Pi-class SBC.
+
+**Added (task 0622):**
+- Four native Linux CPU and RAM profiles with scratch-only editor checks, hosted ARM64 automation and a repeatable x86-64 VM procedure.
+
+**Checked:** On final joined revision `6ed52dc0`, four profiles reopened the edited scene and rendered it through the CPU viewport and F12 camera. The hosted ARM profiles recorded 3.36–5.09 ms steady orbit means across six samples. Two joined WSL profiles recorded 3.72–3.79 ms. See the [VM report](docs/perf/0622-low-end-vm.md) for caps, image checks and memory peaks.
+
+## 2026-11-26 (round 639): Refresh Textures cards after paint Undo and Redo
+
+**Asked:** Show the original texture after undoing the first paint stroke on a surface.
+
+**Fixed (task 0621, ADR 0081)**
+- Textures cards follow the restored paint pixels after Undo and Redo. Each stroke remains a tile-based history step.
+- The Paint layer's stroke stamp now reaches the thumbnail hash and the saved texture. The baseline already restored the saved albedo after Undo, while the card stayed painted.
+- A new stroke on a Paint layer saved at the maximum stamp wraps to zero. Undo and Redo restore the stamp for each saved pixel state.
+- Reopening Textures after a hidden Undo and replacement stroke refreshes the painted card and selected preview even when the replacement reuses the undone stamp.
+- Undo and Redo refresh a full preview that still contains live dab pixels from before the tile restore.
+- Live Link shares a painted surface's texture send budget across its maps during a burst. Each map can update during painting and sends its final state after the burst. New clients receive a full snapshot.
+- A Live Link client that joins during a paint burst gets the restored map if the latest stroke is undone before the next broadcast.
+- A queued snapshot with unchanged pixels goes only to clients that requested it, even when an update for all clients is queued for the same map.
+
+**Checked:** Windows and Linux each passed 150 focused Paint checks. Tests cover a hidden replacement stroke, immediate Undo, the maximum saved stamp, and an unchanged neighboring texture. The unchanged four-client Live Link test passed three times on each platform with seven sends per run. The final Linux receiver check verified full-size normal updates during height-only painting and identical final PNG pixels for all five maps on existing and late peers.
+
+## 2026-11-26 (round 638): Pass 35 performance and interaction survey
+
+**Asked:** Measure a fresh cross-program sample on the published baseline, exercise editor workflows and account for low-end and optional platform coverage.
+
+**Added (task 0620):** A [survey of Pass 35](docs/perf/0620-pass35-survey.md) records the workload registry, CPU and graphics paths, unmeasured families and pass decisions.
+
+**Checked:** The baseline Windows library build completed 29 quick stress runs under exclusive timing, with 1,095 CSV records and zero taint. The HCI sweep exercised 2,168 screens at 12 configurations. The editor saved and reopened a seven-object scene and exported the selected cube to GLB. A second exclusive measurement verified six selected-mesh actions after the original starter fixture failed to select its target in 352 attempts.
+
+## 2026-11-26 (round 637): Keep CPU libraries available with a partial Vulkan bundle
+
+**Asked:** Preserve optional CPU acceleration when the build bundle is missing Vulkan development files.
+
+**Fixed (task 0619, ADR 0001)**
+
+- The Windows batch, Unix shell and CMake build entry points enable Vulkan when the public Vulkan and shaderc headers and the platform's shaderc link library are present. A missing file leaves the CPU libraries available.
+
+**Checked:** 28/28 Windows and Linux plans passed. The baseline failed all 12 partial-bundle cases and passed all 16 controls. GCC 15.2 reproduced the missing shaderc header failure in the original Linux build. The corrected Linux build compiled the device code in each configuration. Its partial-bundle probe reported no GPU backend, and the complete-bundle archive linked and returned its SPIR-V version.
+
+## 2026-11-26 (round 636): CPU live procedural close-ups
+
+**Asked:** Reduce the deferred raster cost of close-up live materials while preserving every rendered pixel.
+
+**Changed (task 0618)**
+
+- Prepare the enabled layer order when a live texture snapshot has no remapper. The normal samples use the existing height and mask subset in the same order.
+- Cover full samples and both normal sampling paths with an identity Tile comparison on ordinary and nested, masked stacks, including seams and invalid UVs.
+
+**Checked:** All 32 matched Windows CPU launches returned identical pixels per mode. All five live-frame pairs improved on both two physical cores and normal affinity. Windows with Blender libraries passed 3,509 asset, 3,871 editor and 40,476 render checks. Joined dependency-free Linux passed 3,471 asset, 3,984 editor and 40,479 render checks. Quick procedural-texture stress passed 343 fuzz cases on each of three joined configurations. Independent review approved the candidate.
+
+## 2026-11-26 (round 635): Find viewport quality in the command palette
+
+**Asked** — Assess common editor workflows and make it easier to lower viewport quality while editing.
+
+**Changed (task 0617)** — Search the command palette for Low, Medium or High Viewport Quality to apply the existing editor presets. Existing user shortcuts and Quick Favorites for raw quality commands still use their saved names. The quality tiers lesson shows the search route.
+
+**Checked** — At 1024 by 640, Unity and Blender keyboard searches applied all three tiers and preserved render settings and undo history. The saved-shortcut and Quick Favorite fixture failed six checks on the earlier implementation and passed all 16 after correction. Windows with libraries, Windows dependency-free and Linux dependency-free each passed all 95 focused checks. Their HCI/editor groups passed 2,208/3,900, 2,205/3,889 and 2,203/3,865 checks respectively. The five HCI audits passed. Geometry stress was outside this UI change.
+
+## 2026-11-26 (round 634): Measure cold texture file reads on two cores
+
+**Asked:** Determine whether avoiding size seeks for ordinary texture files improves the first complete Textures frame.
+
+**Checked (task 0616)**
+
+- On 2,000 small textures, four of five matched pairs favored the 4 KiB reader. Its median whole-frame gain of 4.8 ms fell below the 6.8 ms difference observed between baseline runs.
+- With half the textures padded to 64 KiB, the prototype was slower in four of five pairs. First-frame pixels and all 2,000 loaded paths matched. The round records the measurements and rejects the prototype.
+
+## 2026-11-26 (round 633): Bounded reads for large binary point-cloud PLY files
+
+**Asked:** Reduce peak memory when importing a large binary point cloud from disk.
+
+**Changed (task 0615, ADR 0147)**
+
+- Read fixed-width binary point-cloud PLY records from disk in batches. Check the vertex range against the file length before allocating the decoded cloud.
+- Reuse the PLY decoder for disk batches and borrowed input. Small files, ASCII and mesh PLY files use the existing byte importer.
+
+**Checked:** Generated test cases cover both byte orders, mixed-width and padded records, skipped elements, batch boundaries, degree-4 SH warnings, malformed sizes, dispatch and the editor import command. The three affected groups passed 7,909 checks on dependency-free Windows, 7,991 on Windows with Blender libraries and 7,914 on Linux. Quick splat stress reported zero problems across 2,100 damaged files.
+
+## 2026-11-26 (round 632): Shorten Recalculate Normals on large closed meshes
+
+**Asked:** Reduce the wait for Edit Mode Recalculate Normals on a large mesh.
+
+**Changed (task 0614)**
+- Determine whether each component is closed during the winding traversal. For a closed component whose signed volume determines its orientation, skip the farthest-face search.
+
+**Checked:** Windows modeling and editor groups passed 34,892 and 3,914 checks with Blender libraries and 32,569 and 3,888 dependency-free. Linux passed 32,569 and 3,866. The 2.10M-face reference and candidate produced identical positions, face offsets, corner indices, UVs, custom normals and face materials. The focused tests cover open and non-manifold surfaces, negligible and nonfinite volume, corner data and Shift+N followed by Undo with either keymap.
+
+## 2026-11-26 (round 631): Low quality releases oversized CPU shadow planes
+
+**Asked:** Make memory available to the editor after switching a shaded CPU viewport to Low quality.
+
+**Fixed (task 0613, ADR 0026)**
+
+- Switching to Low releases obsolete completed shadows, static caster layers and the rasterizer's spare depth plane.
+- Compatible shadow maps keep their depth data and cache keys. The shadow memory account includes the spare depth plane.
+
+**Checked:** On the 1280 × 720 software viewport, matched single and split views fell from 20 MiB to 4 MiB of retained CPU shadow storage at settled Low. The first caster edit fell from 28 MiB to 12 MiB. Scene, Game and shadow-depth hashes matched, as did all six F12 images. Windows passed 45 focused, 40,585 render and 3,908 editor checks. Linux passed 40,479 render and 3,860 editor checks. Both editor stress runs completed 1,500 frames with zero stale pictures or missed changes.
+
+## 2026-11-26 (round 630): Reduce Textures preview latency
+
+**Asked:** Open and scroll the Textures window with less delay on low-core machines.
+
+**Changed (task 0612)**
+- Evaluate visible procedural thumbnail misses in one job, keeping Image and Paint stacks one at a time to bound full-size decode memory.
+- Reuse Edge Wear's wrapped or clamped sample indices and copy clipped preview rows directly when the picture fits pixel for pixel.
+
+**Checked:** Five matched Windows runs with 2,000 assets improved the two-core first-scroll median from 56.6 to 53.0 ms and warm reopen from 3.6 to 1.7 ms. Two-core cold open was inconclusive. With 32 logical CPUs, cold open improved from 119.7 to 89.2 ms and first scroll from 41.3 to 9.8 ms. Desktop working set after first scroll grew 4.6 MB. Matched panel pixels and full-size exports agree with the integration baseline.
+
+## 2026-11-26 (round 629): Lower peak memory for CPU splat rendering
+
+**Asked:** Reduce the memory required to prepare a large Gaussian splat cloud on machines with limited memory and CPU capacity.
+
+**Changed (task 0611)**
+Built-in CPU preparation retains the filled record array when every splat is visible and sizes the retained arrays to the number of visible records for mixed clouds. The built-in ray accelerator reorders records and their source indices in place.
+
+**Measured:** With one million visible splats, the built-in accelerator's median process peak fell from 363.90 to 321.31 MiB across five matched pairs on two physical cores. Median build time fell from 590.92 to 503.81 ms. Dense Embree peak memory stayed close to 414 MiB. The retained implementation preserves Embree preparation. Its near-dense query timing tracked identical-baseline variation in a separate nine-pair control.
+
+**Checked:** Windows full-library splat tracing covered the built-in and Embree paths. Dependency-free Linux covered built-in tracing. All measured cloud counts and query digests matched the baseline. Windows quick splat stress reported zero problems across 2,100 damaged inputs.
+
+## 2026-11-20 (round 628): Restore the full template for open task records
+
+**Changed (task 0610)**
+
+- Restored the six metadata fields and eight sections in tasks 0592–0599. The records identify their open PRs and checked heads, and retain the original acceptance criteria, measurements, references and limitations.
+- Linked the correction to the handoff reconciliation in task 0609.
+
+## 2026-11-20 (round 627): Reconcile the handoff with published history
+
+**Asked** — Audit the transition from Claude Code to Codex and correct inconsistent project records.
+
+**Changed** — Link the four merged migration and closeout tasks to their actual PRs and merge revisions. Record the compact handoff verification results, index every numbered architecture decision and refresh onboarding and cleanup guidance with the applicable commands and approvals.
+
+**Checked** — Compared the four merge records with GitHub and published main. Verified the decision index, cross-links, change scope and changelog fragment. Task 0609 records the historical discrepancies and shared workflow follow-ups.
+
+## 2026-11-20 (round 626): Propagate local verification failures
+
+**Fixed (task 0608, ADR 0134)**
+
+- Local verification returns failure when a build, test group, full suite, WSL invocation, audit or selected optional stage fails. The chain names the failed stage and keeps its logs.
+- Windows batch invocation handles checkout paths with spaces. The usage example supplies all three scratch checkout paths and the Windows library bundle.
+- Each Windows build verifies its requested library mode. The WSL build runs on the ten cores specified in the machine handoff.
+
+**Checked:** Synthetic Git Bash verification with fake Windows build, test and WSL commands.
+
+## 2026-11-20 (round 625): Preserve integration PR evidence on refresh
+
+**Asked:** Bring integration pull requests into line with the project PR template and preserve the owner's notes and reviewers' evidence.
+
+**Fixed (task 0607, ADR 0132)**
+- New integration PRs use the five template sections. Refreshes update the carried PRs, stack heads and omission reasons in a marked summary while preserving surrounding content and attribution.
+- Existing unmarked descriptions retain their manual content on migration. The script stops before pushing or editing if it cannot read the existing body or finds ambiguous summary markers. It re-reads the body immediately before editing and leaves any newer description intact if the comparison fails.
+
+**Checked:** `bash tools/dev/stack_selftest.sh` passed 112 checks each on Windows (Git Bash) and Linux (WSL) against a local origin and fake `gh`. The task record is `docs/tasks/0607-integration-pr-template.md`.
+
+## 2026-11-20 (round 624): Apply Blendity’s documentation templates in every subsystem
+
+**Asked:** Have the Hub and every subsystem use the repository’s provided templates.
+
+**Changed (task 0606)**
+- Documented the task, ADR, changelog fragment and PR formats, with checks for applicable pass, handoff and subsystem records.
+- Added template checks for authors, testers, reviewers and the Hub, and showed how to supply a completed body when opening a PR.
+- Clarified the existing task lifecycle and Codex and Claude role references.
+
+**Checked:** Documentation-only round. See task 0606 for the template and fragment checks.
+
+## 2026-11-20 (round 623): Avoid per-file attribute queries in the Textures browser
+
+**Asked:** Shorten the first usable frame when opening an existing library of 2,000 procedural textures.
+
+**Changed (task 0605)**
+- Use attributes returned by Windows directory enumeration to classify ordinary texture files. Preserve canonical path resolution for reparse entries and use the filesystem scan when the native search cannot open a directory.
+
+**Checked:** Three interleaved production pairs per worker setting improved the median first open from 177.6 to 123.2 ms at default parallelism and from 242.6 to 193.4 ms at two workers. Both remain above the 100 ms target. The Windows reference passed all 17 focused checks. Windows libraries passed 3,204 assets and 3,868 editor checks. Linux dependency-free passed 3,166 assets and 3,860 editor checks on the combined tree.
+
+## 2026-11-20 (round 622): Reuse draw-list storage during large-scene movement
+
+**Asked:** Reduce interaction latency while moving one object among 50,000.
+
+**Changed (task 0604, ADR 0115)**
+
+The collector refills each invalidated view list in place. Cache verification can still build a separate comparison list, and shrinking the scene releases excess storage.
+
+**Checked:** The first two matched runs reduced the 50k drag median by 8.7–11.2 percent and reduced the 95th percentile in both orderings. Simultaneous reserved draw-list storage at the measured point fell from 44,241,840 to 22,120,920 bytes. Across 72 matched work/output pairs, the 50k mover median fell from 244.10 to 220.75 ms and p95 from 285.48 to 245.18 ms. Two-view p95 was nearly flat (108.29 to 108.39 ms). The 10k mover improved at pooled p95, but p95 rose slightly within each launch order. Task 0604 records the per-order results and baseline controls.
+
+## 2026-11-20 (round 621): Less work for a one-segment bevel
+
+**Asked:** Reduce the time and memory of the all-edge bevel on the 50k-face sphere.
+
+**Changed (task 0603)**
+
+- A straight bevel builds each strip directly from its oriented endpoints. A rounded bevel still builds and reuses the profile arcs and inserts their interior vertices where adjacent faces need them.
+- The 50k-face sphere's all-edge modifier evaluation fell from 574.0 to 439.6 ms median on the Windows release build and from 537.9 to 452.3 ms on one logical CPU. The candidate was faster in all eight pairs at both affinities. Median peak working set fell from 184.6 to 166.9 MiB and from 181.9 to 163.5 MiB. All runs produced 200,192 vertices, 200,194 faces and 800,768 corners.
+
+**Checked:** Windows modeling and editor passed 34,570 and 3,848 checks. Linux passed 32,247 and 3,819 checks. On baseline and candidate, Windows `curved` stress returned 6 problems and 67 results with new overlaps in 5,032 operations, and Linux returned 3 problems and 68 results with new overlaps in 5,036 operations. Both platforms ran 236 projected draws with zero problems. Windows recorded zero new overlaps and Linux recorded one on each build. The 32 direct and Edit Mode receipts matched within each platform.
+
+## 2026-11-20 (round 620): Smaller baked-corner buffers on low-memory GPUs
+
+**Asked:** Reduce the first-use memory cost of baked corners on integrated and low-memory GPUs and preserve existing corners under reuse.
+
+**Changed (task 0602, ADR 0109)**
+- Use a 1 MiB minimum when the corner buffer first outgrows 4 KiB on integrated GPUs and GPUs reporting up to 4 GiB of device-local memory. Keep this policy through 4 MiB of baked data, then use the standard growth targets to avoid repeatedly copying large spans. Try the exact required size before falling back to the CPU.
+- Preserve live corner blocks during free-range splits and retain their data and bases when the buffer grows or an allocation fails.
+
+**Checked:** Native Vulkan grew the four-cube scene's 4 KiB buffer to 1 MiB under an emulated integrated profile, down from 64 MiB. The first compact candidate reached 121.4 ms on a large-scene growth frame and was rejected. With adaptive growth the same scene used one growth allocation and reached 6.24 ms against 5.91 ms on its paired baseline. Display, depth and ID data matched in all 24 adaptive pairs. The scratch probe reproduced the baseline overlap and exercised growth, coalescing, tail reuse and exact-size retry. Independent focused checks passed 68 assertions on Windows Vulkan and 22 portable assertions each on Windows and Linux. The joined `gpu` group passed 1,836 checks on Windows and 187 on Linux. The Linux `editor` group passed 3,860 checks. Windows quick editor stress drew 131 Vulkan views with zero CPU fallbacks. Its 1,500 fuzzed frames produced zero crashes, stale pictures or missed changes.
+
+## 2026-11-20 (round 619): Lower peak memory for legacy SPZ file imports
+
+**Asked:** Reduce the peak memory of opening a legacy SPZ file while preserving decoded attributes and errors.
+
+**Changed (task 0601)**
+The disk importer releases the compressed file bytes once gzip unpacking finishes, before it allocates decoded
+attributes. Disk imports and the borrowed SPZ reader share gzip validation, timing and decoding. Version 4
+continues through the Zstandard reader where the library is available.
+
+**Measured:** Full import of 1,000,000 SPZ v3 splats at SH degree 3 in five matched fresh-process pairs
+per CPU count against `66feaeb3`. Median paired peak RSS fell by 58.05 MiB on four CPUs and 57.90 MiB
+on two CPUs in dependency-free x86-64 WSL 2. Median elapsed time moved from 473.42 to 417.94 ms on
+four CPUs and from 468.15 to 461.83 ms on two CPUs. All six array counts and digests matched across
+20 imports. See `docs/tasks/0601-spz-file-peak.md` for the ranges and evidence.
+
+**Checked:** Dependency-free WSL passed 517 splats and 3,819 editor checks. Quick splats stress reported
+zero problems in 2,100 damaged inputs. Independent unit tests compare all six decoded arrays and pin the
+borrowed reader's input lifetime and refusal messages. The full-library Windows build passed all 530 splat checks, including Zstandard v4 success and malformed input. Independent review approved integration.
+
+## 2026-11-20 (round 618): Engine performance audit and shared verification
+
+**Asked:** Identify measurable costs in modeling, interactive frames, memory and hardware scaling, with particular attention to constrained configurations.
+
+**Changed (task 0600)**
+
+The audit links each selected workload to a numbered subsystem task and a production-level correctness and performance check.
+
+**Checked:** The pass reconciled 63 historical workload reports against the current 67-section stress registry, then selected fresh comparisons for large-scene drags, single-segment bevel, end-to-end SPZ peak memory, Vulkan baked-corner allocation and first access to a texture library. Task 0600 records ownership, acceptance criteria and the distinction between measurements on actual adapters and controlled small-memory or low-core configurations.
+
+The combined tree passed all 15 affected group runs on Windows with and without Blender libraries and on dependency-free Linux. The matched sweep covered 56 full-size selectors and all 67 registered stress sections. The 50k-object move improved from 218.1 to 197.7 ms median and from 240.5 to 221.5 ms p95. The bevel of the 50k-face sphere improved from 505.21 to 406.59 ms. The audit retains the original small-scene GPU slowdown, isolated camera-frame spikes and the results of same-executable controls alongside the gains. [Task 0600](docs/tasks/0600-engine-performance-audit.md)
+
+## 2026-11-20 (round 617): Fresh-process Textures browser
+
+**Changed (task 0599)**
+
+- The Textures browser reads and decodes uncached procedural assets in parallel while retaining the existing path, cache and selection semantics.
+- In three matched Windows CPU runs per build with 2,000 existing synthetic textures, median first open fell from 334.5 to 169.0 ms at default parallelism and from 351.0 to 244.7 ms with a parallelism ceiling of two. The following frame and same-process reopen took 3.5–3.9 ms. All first opens remain above the 100 ms budget.
+
+- The combined Windows libraries build passed all 68 checks in the focused regression for row order, shared asset identity, repaired files, and unsaved edits.
+
+## 2026-11-20 (round 616): Enable the Vulkan portability subset when advertised
+
+**Fixed (task 0598)**
+
+- The compute, path tracing and raster backends now enable the mandatory portability subset on Vulkan devices that advertise it. Raster keeps it enabled when retrying device creation without ray queries.
+- Pipeline support still depends on the driver's reported features and limits.
+
+**Checked:** 144 independent synthetic creation profiles passed, including the raster retry. Four extension-selection checks and 39 native Windows Vulkan checks passed across compute, path tracing and raster. Physical MoltenVK and Raspberry Pi runs are outside this round.
+
+## 2026-11-20 (round 615): Lower gzip inflate peak for SPZ imports
+
+**Asked:** Reduce temporary memory when importing gzip SPZ splats and measure both inflation and the full import.
+
+**Changed (task 0597)**
+- SPZ v1–v3 decodes directly from the validated inflate output. Unity packages keep the gzip string API.
+- The byte and string APIs share the bounded inflate and trailer length check. Tests cover binary data, empty
+  output, exact limits, forged lengths and preservation of earlier output on failure.
+
+**Measured:** Five matched fresh processes per revision and stage, using 1,000,000 SPZ v3 splats at SH degree 3.
+On the x86-64 WSL 2 machine with GCC 15.2, median gzip inflate peak RSS fell from 187.1 to 125.1 MiB and
+median inflate time fell from 266 to 205 ms. Full-import peak stayed near 350.4 MiB. Median full-import time
+was 470 ms before and 431 ms after, with overlapping ranges. See `docs/tasks/0597-splat-import-memory.md`.
+
+**Checked:** The splats, assets and editor groups passed 7,404 checks on Windows with Blender's libraries
+and 7,343 on dependency-free WSL. Quick splats stress reported zero problems in 2,100 damaged inputs on each
+platform. Independent SPZ v1–v3 imports matched the baseline byte for byte across all six cloud attributes.
+
+## 2026-11-20 (round 614): Reuse uploaded transparent corners
+
+**Changed (task 0596)**
+
+- A Vulkan view that reuses its sorted transparent corners can keep the uploaded buffer without comparing the arrays on the CPU. A view can still compare corners with its cached staging bytes when the generation is unknown or changes.
+- The `posing` stress report counts byte comparisons and generation hits per card frame alongside the existing upload and reuse counts.
+- On the RTX 4070 SUPER, 34 eligible posing rows dropped from 1.00 comparison per card frame to 0.00–0.15. Interleaved measurements of six eligible rows and a camera-orbit control stayed within the recorded median and p95 margins. Windows Vulkan and dependency-free Linux GPU and editor checks passed.
+
+## 2026-11-19 (round 613): Size automatic CPU work to Linux processor affinity
+
+**Asked:** Improve performance on machines and sessions with fewer processor resources.
+
+**Changed (task 0595):** Linux uses the main thread's inherited CPU mask when sizing the built-in worker pool, texture readers, UV workers and optional inference sessions. Preferences reports the same available count. Built-in background jobs use the background caller when their budget leaves one lane.
+
+**Checked:** On the previous Linux build a process restricted to one or two CPUs created 32 threads in the scheduling test. The regression launches fresh processes with a single CPU, a noncontiguous pair and the full allowed mask, and checks foreground and background scheduling and exact results.
+
+## 2026-11-19 (round 612): Retire verified merged development work
+
+**Asked:** Reclaim disk space and remove stale task branches while retaining unmerged work, verification evidence and the owner's active editor.
+
+**Changed (task 0594):** Retired 31 development worktrees, 59 local branches and 97 verified merged remote task branches.
+
+**Checked:** The final inventory accounted for every removed checkout and branch. The removed files occupied 57.47 GiB. The existing project's merge and branch deletion checks preserved 47 remote and two local candidates. [Task 0594](docs/tasks/0594-verified-cleanup.md) records the accounting and retained exceptions.
+
+## 2026-11-19 (round 611): Keep the active Preferences field visible
+
+When Preferences status rows appear or disappear, the scroll area brings the field being edited back into view. Text and number fields retain their current input, caret and selection. A wheel scroll still lets the user look elsewhere while editing.
+
+Three regression cases passed 22 assertions on Windows with and without Blender's libraries and on dependency-free Linux. The HCI and editor groups passed on each build.
+
+## 2026-11-19 (round 610): Filtered camera lighting
+
+**Changed (task 0592)**
+
+- Supported Vulkan devices now produce display colour and linear light for bloom or exposure grading in one lighting draw. Devices and scenes that require separate passes retain that path.
+- In the filtered avatar-world Play scene, median frame time fell from 24.82 to 22.78 ms on an RTX 4070 SUPER and from 16.20 to 15.38 ms on an RTX 3060 Ti. Both cards produced identical display, HDR, depth and ID buffers in the parity checks. Task 0592 records the repeat run, comparison method and portability checks.
+
 ## 2026-11-19 (round 609): Hosted Windows builds provision MSVC 14.51
 
 **Asked:** Keep Windows CI and installer builds on MSVC 14.51 as the hosted runner image changes.
