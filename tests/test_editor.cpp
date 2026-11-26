@@ -17088,11 +17088,31 @@ static void tests_round639_paint_undo() {
     history(platform::KEY_Y);
     same(second, "both strokes redone", 2);
 
+    auto hide_textures = [&] {
+      ed.command(strprintf("layout L(%d:0)", (int)WindowKind::Scene));
+      ed.step_frame_headless();
+      CHECK(card("R639Painted").empty());
+    };
+    auto check_preview = [&](const State &saved) {
+      ed.command("perf wait");
+      ed.step_frame_headless();
+      const Recti view = ed.texture_ui_rect_for_test("preview");
+      CHECK(!view.empty() && saved.albedo.size() == 64 * 64 * 4);
+      if (view.empty() || saved.albedo.size() != 64 * 64 * 4) return;
+      // Sample the selected preview at the centers of the three potential marks.
+      const Image &frame = ed.framebuffer();
+      for (int quarter : {1, 2, 3}) {
+        const int sx = view.w * quarter / 4, sy = view.h / 4;
+        const size_t i = ((size_t)(sy * 64 / view.h) * 64 + sx * 64 / view.w) * 4;
+        const uint8_t *p = &saved.albedo[i];
+        const uint32_t expected = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+        CHECK(frame.pixels[(size_t)(view.y + sy) * frame.width + view.x + sx] == expected);
+      }
+    };
+
     ed.command("perf wait");
     const uint64_t second_hash = painted->hash();
-    ed.command(strprintf("layout L(%d:0)", (int)WindowKind::Scene));
-    ed.step_frame_headless();
-    CHECK(card("R639Painted").empty());
+    hide_textures();
     history(platform::KEY_Z);
     ed.command("paint color 0 1 0");
     ed.command("paint 2d dab 0.75 0.75");
@@ -17101,23 +17121,22 @@ static void tests_round639_paint_undo() {
     r34_steps(ed, 2);
     const State new_branch = state("reopened after a different second stroke", 2);
     CHECK(new_branch.card != second.card && new_branch.albedo != second.albedo);
-    ed.command("perf wait");
-    ed.step_frame_headless();
-    const Recti reopened = ed.texture_ui_rect_for_test("preview");
-    CHECK(!reopened.empty() && new_branch.albedo.size() == 64 * 64 * 4);
-    if (!reopened.empty() && new_branch.albedo.size() == 64 * 64 * 4) {
-      // Check centers of the discarded, retained, and replacement marks in the selected preview.
-      for (int quarter : {1, 2, 3}) {
-        const int sx = reopened.w * quarter / 4, sy = reopened.h / 4;
-        const size_t i = ((size_t)(sy * 64 / reopened.h) * 64 + sx * 64 / reopened.w) * 4;
-        const uint8_t *p = &new_branch.albedo[i];
-        const uint32_t expected = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
-        const Image &frame = ed.framebuffer();
-        CHECK(frame.pixels[(size_t)(reopened.y + sy) * frame.width + reopened.x + sx] == expected);
-      }
-    }
+    check_preview(new_branch);
     history(platform::KEY_Y);
     same(new_branch, "discarded stroke cannot be redone", 2);
+
+    history(platform::KEY_Z);
+    check_preview(first);
+    hide_textures();
+    const size_t before_fast_stroke = ed.undo_steps_for_test();
+    ed.command("paint 2d dab 0.75 0.75");
+    CHECK(ed.undo_steps_for_test() == before_fast_stroke + 1);
+    ed.command("undo");  // No intervening frame for the new stroke to replace the warmed output.
+    CHECK(ed.undo_steps_for_test() == before_fast_stroke);
+    ed.command(texture_layout);
+    r34_steps(ed, 2);
+    same(first, "reopened after an immediate undo", 1);
+    check_preview(first);
   });
 
   test("round 639: a saved maximum Paint stamp accepts a new canvas stroke through Undo and Redo", [] {

@@ -747,6 +747,15 @@ void Editor::paint_world_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float r
   ui_.redraw = true;
 }
 
+/* A replacement stroke can reuse a stamp, and a live dab can change the cached pixels of the stamp Undo restores. */
+void Editor::paint_surface_changed(ProceduralTexture &pt) {
+  pt.touch();
+  const std::string &asset = pt.asset_path;
+  const uint64_t hash = procedural_texture_cache_hash(pt);
+  if (surface_job_ && surface_job_->path == asset && surface_job_->hash == hash) surface_job_->cancel.store(true, std::memory_order_relaxed);
+  if (procedural_texture_cached(asset, hash) || procedural_texture_trimmed(asset, hash)) procedural_texture_cache_forget(asset);
+}
+
 /* The stroke's end: the painted texels dilated two texels into their islands' unpainted neighbours (a painting stroke;
  * the tiles the dilation reaches join the step), the tiles' after taken, one undo step holding the tiles, the layer's
  * stamp bumped so the surface re-evaluates on its worker. */
@@ -784,12 +793,7 @@ void Editor::paint_end_stroke() {
   if (l) {  // (the stamp travels in the tile step, not in a texture-text snapshot: one step a stroke)
     l->stamp = l->stamp == std::numeric_limits<int>::max() ? 0 : l->stamp + 1;
     paint_delta_->stamp_after = l->stamp;
-    paint_surface_->touch();
-    // Replacing an undone stroke can reuse the old stamp before the worker has seen the undo.
-    const std::string &asset = paint_surface_->asset_path;
-    const uint64_t hash = procedural_texture_cache_hash(*paint_surface_);
-    if (surface_job_ && surface_job_->path == asset && surface_job_->hash == hash) surface_job_->cancel.store(true, std::memory_order_relaxed);
-    if (procedural_texture_cached(asset, hash) || procedural_texture_trimmed(asset, hash)) procedural_texture_cache_forget(asset);
+    paint_surface_changed(*paint_surface_);
   }
   commit_undo();  // (a change made during the stroke is its own step, before this one)
   UndoState s;
@@ -846,7 +850,7 @@ void Editor::apply_paint_delta(UndoState s, std::vector<UndoState> &into, const 
   for (const PaintDelta::Tile &t : s.paint->tiles) paint_tile_write(im, t, undo);
   im.dirty = true;
   l->stamp = undo ? s.paint->stamp_before : s.paint->stamp_after;
-  pt->touch();
+  paint_surface_changed(*pt);
   invalidate_material_textures();
   scene_dirty_ = true;
   Log::info("%s %s", verb, s.label.c_str());

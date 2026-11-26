@@ -5795,6 +5795,7 @@ class Editor {
   void paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, const Mat4 &W, Vec2 centre, float radius, float k_max, bool all);
   std::vector<Vec3> paint_mirrors(Vec3 hit_local) const;
   void paint_end_stroke();
+  void paint_surface_changed(ProceduralTexture &pt);
   void paint_abort_stroke();
   static void paint_tile_write(PaintImages &im, const PaintDelta::Tile &t, bool before);
   void apply_paint_delta(UndoState s, std::vector<UndoState> &into, const char *verb, bool undo);
