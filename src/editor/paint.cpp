@@ -794,6 +794,7 @@ void Editor::paint_end_stroke() {
     l->stamp = l->stamp == std::numeric_limits<int>::max() ? 0 : l->stamp + 1;
     paint_delta_->stamp_after = l->stamp;
     paint_surface_changed(*paint_surface_);
+    if (livelink_ && livelink_->running()) livelink_->note_surface_paint(paint_surface_->asset_path, clock_now());
   }
   commit_undo();  // (a change made during the stroke is its own step, before this one)
   UndoState s;

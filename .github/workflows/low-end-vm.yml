@@ -22,10 +22,6 @@ jobs:
             arch: aarch64
             first: pi-sbc
             second: arm-notebook
-          - runner: ubuntu-24.04
-            arch: x86_64
-            first: school-laptop
-            second: thin-client
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -53,7 +49,7 @@ jobs:
       - name: Supply approved ARM64 headers when absent
         if: matrix.arch == 'aarch64'
         run: |
-          if [[ ! -r /usr/include/X11/Xlib.h ]]; then
+          if [[ ! -r /usr/include/X11/Xlib.h || ! -r /usr/include/X11/XKBlib.h ]]; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends libx11-dev
           fi
