@@ -237,27 +237,40 @@ template<class T> void box_mean(const std::vector<T> &src, std::vector<T> &dst, 
 /* max - min of the height in a (2r+1)² square, wrapping (clamped for a surface): two passes of O(r) per texel. */
 void height_range(const TexPlanes &p, int r, std::vector<float> &out, bool wrap = true) {
   const int w = p.w, h = p.h;
+  if (w <= 0 || h <= 0) {
+    out.clear();
+    return;
+  }
+  const int samples = 2 * r + 1;
+  // Every row uses the same horizontal coordinates, and every column
+  // uses the same vertical offsets. Resolve wrapping once per axis.
+  std::vector<int> columns(w + 2 * r);
+  std::vector<size_t> rows(h + 2 * r);
+  for (int x = 0; x < (int)columns.size(); ++x) columns[x] = edge_index(x - r, w, wrap);
+  for (int y = 0; y < (int)rows.size(); ++y) rows[y] = (size_t)edge_index(y - r, h, wrap) * w;
   std::vector<float> mx(p.size()), mn(p.size());
   JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
-    for (int64_t y = y0; y < y1; y++)
+    for (int64_t y = y0; y < y1; y++) {
+      const float *height = p.height.data() + (size_t)y * w;
       for (int x = 0; x < w; x++) {
         float a = 0.0f, b = 1.0f;
-        for (int k = -r; k <= r; k++) {
-          const float v = p.height[(size_t)y * w + edge_index(x + k, w, wrap)];
+        for (int k = 0; k < samples; k++) {
+          const float v = height[columns[x + k]];
           a = std::max(a, v);
           b = std::min(b, v);
         }
         mx[(size_t)y * w + x] = a;
         mn[(size_t)y * w + x] = b;
       }
+    }
   });
   out.assign(p.size(), 0.0f);
   JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
     for (int64_t y = y0; y < y1; y++)
       for (int x = 0; x < w; x++) {
         float a = 0.0f, b = 1.0f;
-        for (int k = -r; k <= r; k++) {
-          const size_t j = (size_t)edge_index((int)y + k, h, wrap) * w + x;
+        for (int k = 0; k < samples; k++) {
+          const size_t j = rows[(size_t)y + k] + x;
           a = std::max(a, mx[j]);
           b = std::min(b, mn[j]);
         }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "jobs.h"
+#include "core.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -17,6 +18,7 @@ namespace bl {
 
 namespace {
 thread_local bool tl_background = false;  // inside run_background on the built-in pool (and on the background pool's workers): loops go to the background pool
+thread_local bool tl_serial = false;
 }
 
 struct JobSystem::TbbState {
@@ -63,7 +65,7 @@ int JobSystem::thread_count() const {
     return limit > 0 ? std::min(all, limit) : all;
   }
 #endif
-  int threads = requested_threads_ > 0 ? requested_threads_ : (int)std::max(1u, std::thread::hardware_concurrency()) - 1;
+  int threads = requested_threads_ > 0 ? requested_threads_ : sys::hardware_threads() - 1;
   const int limit = thread_limit_.load();
   if (limit > 0) threads = std::min(threads, limit - 1);
   return std::max(0, threads) + 1;
@@ -185,10 +187,27 @@ void JobSystem::run_background(const std::function<void()> &fn) {
   tl_background = was;
 }
 
+void run_job_loops_serial(const std::function<void()> &fn) {
+  struct Restore {
+    bool previous = tl_serial;
+    ~Restore() { tl_serial = previous; }
+  } restore;
+  tl_serial = true;
+  fn();
+}
+
 void JobSystem::parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn) {
   if (count <= 0) return;
+  if (tl_serial) {
+    fn(0, count);
+    return;
+  }
   grain = std::max<int64_t>(1, grain);
   if (tl_background && backend_ != Backend::TBB && !is_background_) {
+    if (thread_count() <= 3) {
+      fn(0, count);  // The background caller occupies the one available lane.
+      return;
+    }
     background_pool()->parallel_for(count, grain, fn);  // (round 412: the background pool's workers, not the main thread's)
     return;
   }

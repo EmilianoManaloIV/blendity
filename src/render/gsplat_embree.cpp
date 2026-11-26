@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numeric>
 #include <tuple>
 #include <type_traits>
 
@@ -121,7 +122,7 @@ struct SplatSetData {
 /* Preparing and the built-in BVH                                                                                    */
 /* ---------------------------------------------------------------------------------------------------------------- */
 
-static void prepare_cloud(const SplatCloudView &v, PreparedCloud &pc) {
+static void prepare_cloud(const SplatCloudView &v, PreparedCloud &pc, bool use_embree) {
   pc.prep.clear();
   pc.source.clear();
   pc.skipped = 0;
@@ -136,8 +137,19 @@ static void prepare_cloud(const SplatCloudView &v, PreparedCloud &pc) {
                           : 0;
     }
   });
-  pc.prep.reserve(v.count);
-  pc.source.reserve(v.count);
+  size_t capacity = v.count;
+  if (!use_embree) {
+    capacity = (size_t)std::count(ok.begin(), ok.end(), uint8_t{1});
+    if (capacity == v.count) {
+      /* The built-in BVH can reorder this dense buffer directly. */
+      pc.prep.swap(all);
+      pc.source.resize(v.count);
+      std::iota(pc.source.begin(), pc.source.end(), uint32_t{0});
+      return;
+    }
+  }
+  pc.prep.reserve(capacity);
+  pc.source.reserve(capacity);
   for (size_t i = 0; i < v.count; i++) {
     if (!ok[i]) {
       pc.skipped++;
@@ -201,14 +213,23 @@ static void build_bvh(PreparedCloud &pc) {
     work.push_back({left + 1, mid, it.end});
     work.push_back({left, it.begin, mid});
   }
-  std::vector<gsplat::Prepared> prep(n);
-  std::vector<uint32_t> source(n);
+  /* idx maps each leaf slot to its old slot. Apply each cycle in place and mark its slots done in idx. */
   for (uint32_t k = 0; k < n; k++) {
-    prep[k] = pc.prep[idx[k]];
-    source[k] = pc.source[idx[k]];
+    if (idx[k] == k) continue;
+    const gsplat::Prepared first = pc.prep[k];
+    const uint32_t first_source = pc.source[k];
+    uint32_t dst = k;
+    while (idx[dst] != k) {
+      const uint32_t src = idx[dst];
+      pc.prep[dst] = pc.prep[src];
+      pc.source[dst] = pc.source[src];
+      idx[dst] = dst;
+      dst = src;
+    }
+    pc.prep[dst] = first;
+    pc.source[dst] = first_source;
+    idx[dst] = dst;
   }
-  pc.prep.swap(prep);
-  pc.source.swap(source);
 }
 
 /* One cloud along a ray in its own space, closer than `tmax`:
@@ -392,7 +413,7 @@ void SplatSet::build(const std::vector<SplatCloudView> &clouds, bool use_embree)
     if (!pc) {
       pc = std::make_shared<PreparedCloud>();
       pc->position = v.position, pc->count = v.count, pc->key = v.key;
-      prepare_cloud(v, *pc);
+      prepare_cloud(v, *pc, want_embree);
 #ifdef BL_WITH_EMBREE
       if (want_embree && !pc->prep.empty()) build_embree_cloud(*pc);
       else build_bvh(*pc);

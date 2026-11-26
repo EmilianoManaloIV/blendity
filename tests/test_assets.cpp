@@ -39,6 +39,25 @@
 #include "../src/scene/avatar_tools.h"
 #include "../extern/ufbx/ufbx.h"
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+// Keep the SDK's hotkey macros out of Blendity's platform modifier names.
+#  pragma push_macro("MOD_ALT")
+#  pragma push_macro("MOD_SHIFT")
+#  include <windows.h>
+#  include <winioctl.h>
+#  pragma pop_macro("MOD_SHIFT")
+#  pragma pop_macro("MOD_ALT")
+#  undef far
+#  undef near
+#  undef small
+#endif
+
 static void image_tests() {
   test("image: PNG round-trip is exact", [] {
     const int w = 37, h = 21;
@@ -16217,6 +16236,346 @@ static void tests_round594() {
   });
 }
 
+static void tests_round617() {
+  test("Textures window: batch loading preserves row order, shared assets and edits, and retries repaired files", [] {
+    r594::Project project("r617-texture-batch");
+    Editor ed;
+    ed.init_headless(800, 600);
+    const std::string dir = "Assets/Library/";
+    const std::string old_path = dir + "Old.ptex", new_path = dir + "Renamed.ptex";
+    const std::string edited_path = dir + "Edited.ptex", missing = dir + "Missing.ptex", corrupt = dir + "Corrupt.ptex";
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(old_path, src));
+    const std::string old_file = resolve_asset_path(old_path);
+    CHECK(ed.move_project_entry(old_file, fs::parent(old_file), "Renamed.ptex"));
+    CHECK(fs::write_file(resolve_asset_path(corrupt), "invalid texture\n"));
+    const auto edited = create_texture_asset(src, edited_path);
+    CHECK(edited);
+    if (!edited) return;
+    edited->physical_size = 7.0f;
+    edited->touch();
+    CHECK(loaded_texture_assets().size() == 1);
+
+    std::vector<std::string> paths{missing, old_path, corrupt, edited_path, new_path, old_path};
+    // Cold misses span more than one worker chunk, with a distinct order from the directory.
+    for (int i = 15; i >= 0; --i) {
+      const std::string path = dir + strprintf("Cold%02d.ptex", i);
+      CHECK(r594::write(path, src));
+      paths.push_back(path);
+    }
+    const auto first = texture_assets_for_browser(paths);
+    CHECK(first.size() == paths.size());
+    if (first.size() != paths.size()) return;
+    CHECK(!first[0] && !first[2]);
+    CHECK(first[1] && first[1]->asset_path == new_path && first[1] == first[4] && first[1] == first[5]);
+    CHECK(first[3] == edited && edited->physical_size == 7.0f);
+    CHECK(loaded_texture_assets().size() == 18);
+    for (size_t row = 6; row < paths.size(); ++row)
+      CHECK(first[row] && first[row]->asset_path == paths[row]);
+
+    CHECK(r594::write(missing, src) && r594::write(corrupt, src));
+    const auto reopened = texture_assets_for_browser(paths);
+    CHECK(reopened.size() == first.size());
+    if (reopened.size() != first.size()) return;
+    CHECK(reopened[0] && reopened[0]->asset_path == missing);
+    CHECK(reopened[2] && reopened[2]->asset_path == corrupt);
+    CHECK(loaded_texture_assets().size() == 20);
+    for (size_t row = 0; row < paths.size(); ++row)
+      if (first[row]) CHECK(reopened[row] == first[row]);
+    CHECK(reopened[3] == edited && edited->physical_size == 7.0f);
+  });
+}
+
+/* Round 623 (task 0605): cold discovery through the Textures browser. */
+#ifdef _WIN32
+static DWORD r623_make_junction(const std::filesystem::path &link, const std::filesystem::path &target) {
+  // The mount-point tag lets the test create a junction without symlink privileges.
+  constexpr DWORD common_header = sizeof(DWORD) + 2 * sizeof(WORD);
+  constexpr DWORD mount_header = 4 * sizeof(WORD);
+  constexpr size_t name_capacity = (MAXIMUM_REPARSE_DATA_BUFFER_SIZE - common_header - mount_header) / sizeof(WCHAR);
+  static_assert(MAXIMUM_REPARSE_DATA_BUFFER_SIZE <= MAXWORD);
+  struct MountPointData {
+    DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    WORD length = 0, reserved = 0;
+    WORD substitute_offset = 0, substitute_length = 0;
+    WORD print_offset = 0, print_length = 0;
+    WCHAR names[name_capacity]{};
+  } data;
+  const std::wstring print = target.native(), substitute = L"\\??\\" + print;
+  const size_t name_count = substitute.size() + print.size() + 2;
+  if (name_count > name_capacity) return ERROR_FILENAME_EXCED_RANGE;
+  data.substitute_length = (WORD)(substitute.size() * sizeof(WCHAR));
+  data.print_offset = (WORD)(data.substitute_length + sizeof(WCHAR));
+  data.print_length = (WORD)(print.size() * sizeof(WCHAR));
+  data.length = (WORD)(mount_header + name_count * sizeof(WCHAR));
+  std::copy(substitute.begin(), substitute.end(), data.names);
+  std::copy(print.begin(), print.end(), data.names + substitute.size() + 1);
+
+  if (!CreateDirectoryW(link.c_str(), nullptr)) return GetLastError();
+  const HANDLE dir = CreateFileW(link.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (dir == INVALID_HANDLE_VALUE) return GetLastError();
+  DWORD returned = 0;
+  const BOOL made = DeviceIoControl(dir, FSCTL_SET_REPARSE_POINT, &data, common_header + data.length, nullptr, 0, &returned, nullptr);
+  const DWORD error = made ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(dir);
+  return error;
+}
+#endif
+
+static void tests_round623() {
+  test("Textures window (round 623): searching for equal names keeps both thumbnails in path order and opens each file", [] {
+    r594::Project project("r623-texture-duplicate-names");
+    Editor ed;
+    r594::init(ed);
+    const std::string first_path = "Assets/Library/Zinc/Same.ptex", second_path = "Assets/Library/amber/Same.ptex";
+    const std::string other_path = "Assets/Library/00/Unrelated.ptex";
+    ProceduralTexture plain;
+    plain.width = plain.height = 64;
+    ProceduralTexture patterned = plain;
+    CHECK(patterned.add("Brick") && r594::write(second_path, patterned));
+    CHECK(r594::write(other_path, plain) && r594::write(first_path, plain));
+    r594::open(ed);
+    CHECK(ed.texture_count_shown_for_test() == 3);
+
+    // The first result after filtering takes the old first slot. Equal labels record only the last slot.
+    const Recti first = r594::thumb(ed, "Unrelated"), last_before = r594::thumb(ed, "Same");
+    CHECK(r594::click(ed, r594::search(ed)));
+    r594::type(ed, "sAmE");
+    const Recti second = r594::thumb(ed, "Same");
+    CHECK(ed.texture_count_shown_for_test() == 2 && r594::thumb(ed, "Unrelated").empty());
+    CHECK(!first.empty() && !second.empty() && first.y == second.y && first.x < second.x && second.x < last_before.x);
+    const auto first_pixels = r594::thumbnail_center(ed, first), second_pixels = r594::thumbnail_center(ed, second);
+    CHECK(first_pixels.size() == 64 && second_pixels.size() == 64 && first_pixels != second_pixels);
+    CHECK(r594::click(ed, first));
+    const auto selected_first = ed.texture_selected_for_test();
+    CHECK(selected_first && selected_first->asset_path == first_path && selected_first == texture_asset(first_path));
+    CHECK(r594::click(ed, second));
+    const auto selected_second = ed.texture_selected_for_test();
+    CHECK(selected_second && selected_second->asset_path == second_path && selected_second == texture_asset(second_path));
+    CHECK(selected_first != selected_second);
+  });
+
+#ifdef _WIN32
+  test("Textures window (round 623): a junction outside the project keeps the clicked thumbnail's alias path", [] {
+    r594::Project project("r623-texture-junction");
+    Editor ed;
+    r594::init(ed);
+    const std::string target = fs::join(fs::normalize(test_dir()), "r623-junction-source");
+    const std::string target_file = fs::join(target, "LinkedTile.PTEX");
+    const std::string link = resolve_asset_path("Assets/Junction.ptex");
+    struct RemoveFixture {
+      std::filesystem::path link, target, file;
+      ~RemoveFixture() {
+        RemoveDirectoryW(link.c_str());
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+        std::filesystem::remove(target, ec);
+      }
+    } fixture{std::filesystem::u8path(link).make_preferred(), std::filesystem::u8path(target).make_preferred(), std::filesystem::u8path(target_file)};
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(target_file, src));
+    const DWORD error = r623_make_junction(fixture.link, fixture.target);
+    if (error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED) {
+      std::printf("    junction fixture skipped: the scratch filesystem does not support mount-point reparse data (%lu)\n", error);
+      return;
+    }
+    if (error != ERROR_SUCCESS) std::printf("    junction fixture creation failed (%lu)\n", error);
+    CHECK(error == ERROR_SUCCESS);
+    if (error != ERROR_SUCCESS) return;
+    r594::open(ed);
+    CHECK(ed.texture_count_shown_for_test() == 1);
+    CHECK(r594::click(ed, r594::thumb(ed, "LinkedTile")));
+    const auto selected = ed.texture_selected_for_test();
+    const std::string alias = fs::join(link, "LinkedTile.PTEX");
+    CHECK(selected && selected->asset_path == alias && selected == texture_asset(alias));
+  });
+#endif
+}
+
+/* Round 630 (task 0612): the texture grid draws fresh pixels on the first open, scroll or edit frame. */
+namespace r630 {
+static Recti picture(const Editor &ed, const Recti &cell) {
+  const int inset = ed.ui_for_test().px(4);
+  const int side = cell.w - 2 * inset;
+  // The upper half of the image excludes the label and the unused-asset badge.
+  return cell.empty() ? Recti{} : Recti{cell.x + inset, cell.y + inset, side, side / 2};
+}
+
+static std::vector<uint32_t> pixels(const Editor &ed, const std::string &name) {
+  Recti cell;
+  if (!ed.button_rect_for_test("tex:" + name, cell)) return {};
+  const Image &fb = ed.framebuffer();
+  return r34_crop(ed, picture(ed, cell).intersect({0, 0, fb.width, fb.height}));
+}
+
+static std::vector<uint32_t> expected(const Editor &ed, const ProceduralTexture &t, const Bitmap &albedo) {
+  Recti cell;
+  if (!ed.button_rect_for_test("tex:" + t.name, cell) || albedo.rgba8.empty()) return {};
+  const Recti r = picture(ed, cell);
+  std::vector<uint32_t> result;
+  for (int y = 0; y < r.h; y++) {
+    for (int x = 0; x < r.w; x++) {
+      const int sx = x * albedo.width / r.w, sy = y * albedo.height / r.w;
+      const uint8_t *p = &albedo.rgba8[((size_t)sy * albedo.width + sx) * 4];
+      result.push_back(0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]);
+    }
+  }
+  return result;
+}
+
+static Bitmap albedo(ProceduralTexture t) {
+  t.width = t.height = 64;
+  TexPlanes planes;
+  t.evaluate(planes);
+  return t.output(0, planes);
+}
+}  // namespace r630
+
+static void tests_round630() {
+  test("Textures window (round 630): thumbnail workers keep their inner loops local and leave other jobs parallel", [] {
+    JobSystem pool(2);
+    pool.set_backend(JobSystem::Backend::Builtin);
+    auto chunks = [&] {
+      std::atomic<int> calls{0};
+      pool.parallel_for(8, 1, [&](int64_t, int64_t) { ++calls; });
+      return calls.load();
+    };
+    CHECK(chunks() == 8);
+    run_job_loops_serial([&] {
+      CHECK(chunks() == 1);
+      run_job_loops_serial([&] { CHECK(chunks() == 1); });
+      CHECK(chunks() == 1);
+      int other_chunks = 0;
+      std::thread other([&] { other_chunks = chunks(); });
+      other.join();
+      CHECK(other_chunks == 8);
+    });
+    CHECK(chunks() == 8);
+    struct Interrupt {};
+    bool interrupted = false;
+    try {
+      run_job_loops_serial([] { throw Interrupt{}; });
+    } catch (const Interrupt &) {
+      interrupted = true;
+    }
+    CHECK(interrupted && chunks() == 8);
+  });
+
+  test("Textures window (round 630): an empty grid opens and a single texture has pixels on its first frame", [] {
+    {
+      r594::Project project("r630-empty-textures");
+      Editor ed;
+      r594::init(ed);
+      ed.command("window Textures");
+      ed.step_frame_headless();
+      CHECK(!ed.window_rect_for_test(WindowKind::Textures).empty());
+      CHECK(ed.texture_count_shown_for_test() == 0 && !ed.texture_selected_for_test());
+    }
+    r594::Project project("r630-one-texture");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture noise = r49_tex("Noise", 128);
+    noise.name = "OnlyNoise";
+    CHECK(r594::write("Assets/OnlyNoise.ptex", noise));
+    ed.command("window Textures");
+    ed.step_frame_headless();
+    CHECK(ed.texture_count_shown_for_test() == 1);
+    const auto first = r630::pixels(ed, noise.name);
+    CHECK(!first.empty() && first == r630::expected(ed, noise, r630::albedo(noise)));
+    ed.step_frame_headless();
+    CHECK(r630::pixels(ed, noise.name) == first);
+  });
+
+  test("Textures window (round 630): distinct layer stacks, a first scroll and a layer edit all draw immediately", [] {
+    r594::Project project("r630-distinct-textures");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture tile = r49_tex("Leaves", 128);
+    tile.name = "LeafCover";
+    tile.alpha_from_cover = true;
+    CHECK(tile.add("Tile") && r49_set(tile, "L1 Across", "2"));
+    ProceduralTexture brick = r49_tex("Brick", 128);
+    brick.name = "ChangedBrick";
+    CHECK(brick.add("Blur"));
+    ProceduralTexture unseen = r49_tex("Noise", 128);
+    unseen.name = "Unseen";
+    CHECK(unseen.add("Warp"));
+    CHECK(r594::write("Assets/00/LeafCover.ptex", tile));
+    CHECK(r594::write("Assets/00/ChangedBrick.ptex", brick));
+    CHECK(r594::write("Assets/02/Unseen.ptex", unseen));
+    ProceduralTexture placeholder;
+    for (int i = 0; i < 144; i++) CHECK(r594::write(strprintf("Assets/01/Filler%03d.ptex", i), placeholder));
+
+    ed.command("window Textures");
+    ed.step_frame_headless();
+    CHECK(ed.texture_count_shown_for_test() == 147);
+    const Bitmap leaf_image = r630::albedo(tile);
+    bool clear = false, opaque = false;
+    for (size_t i = 3; i < leaf_image.rgba8.size(); i += 4) {
+      clear |= leaf_image.rgba8[i] < 128;
+      opaque |= leaf_image.rgba8[i] >= 128;
+    }
+    CHECK(clear && opaque);
+    const auto leaf_pixels = r630::pixels(ed, tile.name), brick_pixels = r630::pixels(ed, brick.name);
+    CHECK(!leaf_pixels.empty() && leaf_pixels == r630::expected(ed, tile, leaf_image));
+    CHECK(!brick_pixels.empty() && brick_pixels == r630::expected(ed, brick, r630::albedo(brick)));
+    CHECK(leaf_pixels != brick_pixels && r630::pixels(ed, unseen.name).empty());
+
+    ed.command("settex Assets/00/ChangedBrick.ptex L0Rows 3");
+    CHECK(r49_set(brick, "L0 Rows", "3"));
+    ed.step_frame_headless();
+    const auto changed = r630::pixels(ed, brick.name);
+    CHECK(!changed.empty() && changed != brick_pixels && changed == r630::expected(ed, brick, r630::albedo(brick)));
+    CHECK(r630::pixels(ed, tile.name) == leaf_pixels);
+
+    const Recti card = r594::thumb(ed, tile.name), search = r594::search(ed);
+    CHECK(!card.empty() && !search.empty());
+    if (card.empty() || search.empty()) return;
+    const auto toolbar = r34_crop(ed, search);
+    r594::wheel(ed, card, -100.0f);
+    const auto scrolled = r630::pixels(ed, unseen.name);
+    CHECK(!scrolled.empty() && scrolled == r630::expected(ed, unseen, r630::albedo(unseen)));
+    CHECK(r34_crop(ed, search) == toolbar);
+    ed.step_frame_headless();
+    CHECK(r630::pixels(ed, unseen.name) == scrolled);
+  });
+
+  test("Textures window (round 630): painting the canvas updates the selected card on the next frame", [] {
+    r594::Project project("r630-paint-preview");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture neighbor = r49_tex("Noise", 128);
+    neighbor.name = "Neighbor";
+    CHECK(r594::write("Assets/Neighbor.ptex", neighbor));
+    ed.command("select Cube");
+    ed.command("surface new PaintedCard");
+    ed.command("settex PaintedCard Width 128");
+    ed.command("settex PaintedCard Height 128");
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    r594::open(ed);
+    const auto selected = ed.texture_selected_for_test();
+    CHECK(ed.paint_for_test() && selected && selected->name == "PaintedCard");
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(!pane.empty());
+    if (pane.empty() || !selected) return;
+    const auto before = r630::pixels(ed, selected->name), other = r630::pixels(ed, neighbor.name);
+    CHECK(!before.empty() && !other.empty());
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    ed.step_frame_headless();
+    const auto after = r630::pixels(ed, selected->name);
+    CHECK(!after.empty() && after != before && after == r630::expected(ed, *selected, r630::albedo(*selected)));
+    CHECK(ed.texture_selected_for_test() == selected && r630::pixels(ed, neighbor.name) == other);
+    const auto images = ed.paint_images_for_test();
+    CHECK(images && std::any_of(images->cover.begin(), images->cover.end(), [](uint8_t alpha) { return alpha > 0; }));
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -16284,4 +16643,7 @@ void run_assets_tests() {
   tests_round507_import();
   tests_round507_te();
   tests_round594();
+  tests_round617();
+  tests_round623();
+  tests_round630();
 }

@@ -606,10 +606,85 @@ void run_r533_scene() {
   });
 }
 
+void run_r629_preparation() {
+  test("CPU splats retain original hit IDs and shading through skipped inputs and shared instances", [] {
+    TestCloud c;
+    c.rest = 3;
+    for (int i = 0; i < 19; i++) {
+      const float color = 0.1f + i * 0.02f;
+      c.add({float((i * 7) % 19) * 3, 0, 5}, {color, 0.5f, 0.6f}, 1.0f, {0.3f, 0.2f, 0.1f});
+      c.sh[3 * i + 1] = {0.2f, color, 0};
+      if (i % 3 == 0) c.position[i].z = kNaN;
+      if (i % 3 == 1) c.scale[i] = {0, 0, 0};
+    }
+    c.add({0, 0, 5}, {1, 1, 1}, 0.005f, {0.3f, 0.2f, 0.1f});
+    c.add({0, 0, 5}, {1, 1, 1}, 0.25f, {0.3f, 0.2f, 0.1f});
+    c.add({0, 0, 6}, {1, 1, 1}, 0.5f, {0.3f, 0.2f, 0.1f});
+    const Mat4 mirror = Mat4::trs({0, 10, 18}, Quat(), {-2, -1, -2});
+    const std::vector<SplatCloudView> views{c.view(Mat4::identity(), 71), c.view(mirror, 83)};
+
+    for (bool embree : {false, true}) {
+      if (embree && !PathTracer::embree_available()) continue;
+      for (int build = 0; build < 2; build++) {
+        SplatSet set;
+        set.build(views, embree);
+        CHECK(set.uses_embree() == embree);
+        CHECK(set.splat_count() == 16 && set.skipped() == 28);
+        for (uint32_t cloud = 0; cloud < views.size(); cloud++) {
+          const Mat4 &model = views[cloud].model;
+          for (uint32_t i = 2; i < 19; i += 3) {
+            const Vec3 center = model.point(c.position[i]);
+            const Ray ray{{center.x, center.y, 0}, {0, 0, 1}};
+            SplatHit hit;
+            CHECK(set.intersect(ray, 20, 11, hit));
+            CHECK(hit.splat == i && hit.cloud == cloud);
+            CHECK(set.object_id(hit) == views[cloud].id);
+            CHECK_NEAR(hit.t, center.z, 1e-4f);
+            const Vec3 color = c.color[i];
+            const Vec3 sh = c.sh[3 * i + 1] * (cloud == 0 ? 0.488602512f : -0.488602512f);
+            const auto expected = gsplat::radiance_linear(g3(color.x + sh.x, color.y + sh.y, color.z + sh.z));
+            const Vec3 radiance = set.radiance(hit, ray.dir);
+            CHECK_NEAR(length(radiance - Vec3(expected.x, expected.y, expected.z)), 0.0f, 1e-5f);
+            CHECK_NEAR(length(set.normal(hit, ray.dir) - Vec3(0, 0, -1)), 0.0f, 1e-5f);
+          }
+          const Ray ray{{0, model.m[13], 0}, {0, 0, 1}};
+          CHECK(set.any(ray, 20));
+          CHECK_NEAR(set.transmittance(ray, 20), 0.375f, 1e-5f);
+        }
+        CHECK(!set.any({{0, 5, 0}, {0, 0, 1}}, 20));
+      }
+    }
+  });
+
+  test("CPU splat rays cross empty and wholly rejected clouds without a hit", [] {
+    TestCloud invalid;
+    invalid.add({0, 0, 5}, {1, 1, 1}, 1.0f, {0, 0, 0});
+    invalid.add({0, 0, 6}, {1, 1, 1}, 0.005f, {0.3f, 0.2f, 0.1f});
+    TestCloud visible;
+    visible.add({0, 0, 5}, {1, 1, 1}, 1.0f, {0.3f, 0.2f, 0.1f});
+    const Ray ray{{0, 0, 0}, {0, 0, 1}};
+    for (bool embree : {false, true}) {
+      if (embree && !PathTracer::embree_available()) continue;
+      SplatSet set;
+      set.build({visible.view()}, embree);
+      CHECK(set.any(ray, 10));
+      for (const SplatCloudView &view : {invalid.view(), SplatCloudView{}}) {
+        set.build({view}, embree);
+        SplatHit hit;
+        CHECK(set.empty() && set.skipped() == view.count);
+        CHECK(!set.intersect(ray, 10, 0, hit));
+        CHECK(!set.any(ray, 10));
+        CHECK(set.transmittance(ray, 10) == 1.0f);
+      }
+    }
+  });
+}
+
 }  // namespace
 
 void run_splats_trace_tests() {
   run_r533_math();
   run_r533_trace();
   run_r533_scene();
+  run_r629_preparation();
 }
