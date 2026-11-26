@@ -2,6 +2,280 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-19 (round 609): Hosted Windows builds provision MSVC 14.51
+
+**Asked:** Keep Windows CI and installer builds on MSVC 14.51 as the hosted runner image changes.
+
+**Changed (task 0591, ADR 0156)**
+- Select the newest usable x64 14.51 patch in the Visual Studio instance the build selects. Add the versioned
+  component through Visual Studio Installer when the runner lacks it.
+- Activate the exact selected patch in the build shell and verify the compiler, linker and toolset version before
+  compilation. Log the runner image, revision, installer outcome and active tool paths.
+
+**Checked:** Windows fixtures cover preinstalled and missing toolsets, repeat setup, installer failures and exact
+activation for each build variant. See task 0591 for hosted verification.
+
+## 2026-11-19 (round 608): Incremental local Windows builds
+
+**Asked:** Shorten the Hub's local editor refresh by reusing verified MSVC objects between published revisions.
+
+**Added (task 0590, ADR 0155)**
+- `BLENDITY_INCREMENTAL=1` opts the Windows release editor and unit tests into a separate scratch cache. It uses the clean build's resolved source lists, library selection and compiler flags, including LTCG.
+- The worker checks transitive include contents and search candidates, relinks each requested target as needed and validates the staged runtime. It publishes one complete package at a time and keeps earlier packages available while their executables are in use.
+
+**Checked**: Clean and incremental camera renders matched at both tested scene geometries, and all 101 runtime, license and shader files matched by SHA-256. Eight independent native build scenarios passed. On the owner machine, the clean editor took 234.4 s, an empty incremental cache took 303.4 s, an unchanged request took 19.4 s, and a documentation-only request took 18.3 s. The Hub now uses the incremental path for routine local editor refreshes. Task 0590 records timings, conditions and full-suite results.
+
+## 2026-11-19 (round 607): Parallel verification and evidence collection
+
+**Changed (task 0589)**
+
+- Route dependency handoffs directly, exercise one integrated path early, and run full verification
+  on a recorded combined revision. Give each independent role a fresh brief.
+- Add a Python helper for compact native test and GitHub Actions evidence.
+
+## 2026-11-19 (round 606): Workshop fixtures, rig controls and compatibility guide
+
+**Asked:** Verify classic Source Filmmaker, Half-Life: Alyx and Counter-Strike 2 character and map imports through posing, rendering and reopening with the source detached.
+
+**Changed (task 0588, ADR 0154)**
+
+- Auto IK recognizes Scout's side-specific hips and the exact arm and leg naming patterns in Alyx and CS2. An alarm prop armature keeps its existing joints without gaining humanoid controls.
+- Added original loose and packed Workshop layouts and checks for weighted movement, marker rigs, editable project materials and cold reopen. Added the Workshop guide and updated both book chapters.
+
+**Checked:** Focused Windows and hosted Linux fixture runs each passed 772 initial checks and 224 in a separate process with source and cache detached, including the alarm-armature regression. Independent Linux and Windows generation produced identical bytes for all 15 fixture files. Rebuilt both manuals and inspected Workshop sections on user guide PDF page 42 and architecture PDF page 28. All three real character-and-map scenes matched their detached-source renders. The downloaded CS2 map contributed 61 mesh objects and the combined scene resolved base textures on all 75 material slots. Both platforms also passed 905 checks across five editor processes for same-name assets, two reimports and byte-for-byte retention of edited and untouched project PNGs. The task records material coverage and outstanding checks.
+
+## 2026-11-19 (round 605): Import compiled Source 2 maps
+
+**Asked:** Bring compiled Alyx and CS2 world geometry and its placed props into Blendity.
+
+**Added (task 0587, ADR 0154)**
+- Follow the map's world and world-node references to load standalone meshes, placed props and aggregate draws. Keep repeated meshes shared. Convert the placements and geometry to metres in Blendity's axes.
+- Apply whole-model material overrides to the affected placements. Import notes name unsupported material skins and per-draw overrides and the resources that use them.
+- Keep placement tints in reusable materials and snapshot aggregate LOD 0. Report the compiled paths of omitted baked lightmaps and the path and version of an unsupported map resource.
+- Show a magenta placeholder at a missing prop's placement and report its compiled resource path.
+
+**Checked:** Eight map cases passed 550 checks on a fresh Windows release build. They cover material assignments and pixels, tint, repeated rotated props, aggregate LOD and draw selection, missing and unsupported dependencies, and stable source IDs across cache moves, placement reordering and changed pixels. With meshoptimizer enabled, the real Alyx map *Bad Kitty* imported all 84 placements and 111,182 faces. The installed CS2 graphics settings map imported all 70 placements and 147,105 faces, with 206 texture paths from the mounted game archives.
+
+## 2026-11-19 (round 604): Compiled Source 2 characters and materials
+
+**Asked:** Import Half-Life: Alyx and Counter-Strike 2 Workshop characters for posing and rendering in Blendity.
+
+**Added (task 0586, ADR 0154)**
+- Compiled Source 2 model and mesh resources through the mounted content resolver, with Source bone names, bind transforms, remapped vertex weights, UVs and face material slots.
+- Compiled Source 2 materials with editable base color, normal, roughness, metalness, emission and cutout settings. Texture paths resolve through mounts and use the native import asset workflow.
+- Path-specific diagnostics for missing resources, unsupported versions, texture encodings and shader features. Meshoptimizer and Zstandard streams use Blender's existing libraries.
+- Full-width visibility masks preserve each model's authored mesh groups, including maps with unsigned 64-bit masks.
+- Material and texture identities follow their compiled virtual paths and conversion roles through reimport.
+- The material reader extracts authored metalness channels, keeps R8 red-only, and names unsupported anisotropic gloss. Embedded images and aggregate resource and geometry allocations are validated before staging.
+
+**Checked:** 436 focused Windows checks, real CS2 SAS and SWAT characters, two Alyx add-on humanoids, the Alyx ApertureVR cutout prop, a CS2 Workshop prop with 64-bit mesh masks, and two genuine VTEX resources with embedded images. Task 0586 records measured bind drift, texture checks and reimport identity coverage. Pass 0588 tracks joined editor verification.
+
+## 2026-11-19 (round 603): Import classic Source maps
+
+**Asked:** Bring a compiled classic Source map into Blendity with its terrain, materials and placed props.
+
+**Added (task 0585, ADR 0154)**
+- Import world surfaces, displaced terrain and brush models from classic VBSP. Brush entities and static props keep their placement. Repeated static props share their model mesh.
+- Keep compiled brush surfaces with retraced edges and use the BSP's indexed triangles where provided.
+- Brush entities retain their placements with mixed-case property names or shortened origin and angle vectors.
+- Resolve materials and props against the BSP pakfile and the mounted content roots. A missing prop keeps its placement as a magenta marker and reports its path.
+- Map surfaces and static props carry their source material and texture identities into the project import so reimport can find existing edited assets.
+
+**Checked:** The Windows map tests passed 1,846 checks, including repeated import of same-named props, materials and textures from different virtual directories. Offline reopen retained all 47 placements from the SFM Warehouse item and all 40 displacement grids from Valve's Lockdown map. A generated map retained the expected packed texture over a conflicting mounted file. Task 0585 records the fixtures and commands.
+
+## 2026-11-19 (round 602): Import classic Source characters and materials
+
+**Asked** Bring installed Source Filmmaker characters into a Blendity project for posing and rendering.
+
+**Added (task 0584, ADR 0154)**
+
+- Classic MDL v48/v49 with VVD v4 and VTX v7 companions. The default bodygroups, skin family and base LOD become a native mesh, with authored normals, UVs, joint hierarchy, bind matrices and weights. A missing companion names its virtual path.
+- Recognized ValveBiped and TF-style humanoids keep their bone names. Their arm and leg bones point toward the next joint for native Auto IK. Static props import as meshes.
+- Native editable materials keep base colour, diffuse texture, normal map, and alpha test or blend settings from supported VMTs. Missing and unsupported resources are named in the import report.
+- An edited material keeps its project file when a missing VMT appears in a later search directory. Same-name textures from different virtual paths remain distinct across reimport.
+
+**Checked** The focused Windows group passed 528 checks in 17 cases, including two editor reimports with a saved material edit. A separate compiled SFM Scout probe passed 64 checks covering material assignments, converted texture pixels and weighted deformation of both arms and legs.
+
+**Checked** The focused Linux suite passed 204 checks, including a native asymmetric cutout render, weighted posing, ValveBiped Auto IK and marker Auto-Rig. The SFM Scout demo imported 7,814 faces, 78 joints, four material slots and four converted textures. Neutral bind displacement stayed under `0.6 µm`. EyeRefract used native fallback materials and reported its unsupported maps.
+
+## 2026-11-19 (round 601): Choose installed Source Engine content
+
+**Asked:** Choose among models and maps in a local Steam Workshop item. Resolve their dependencies from the item and other content roots.
+
+**Added (task 0583, ADR 0154)**
+- File > Import > Source Engine Assets lists model and map paths from an installed folder, loose file, or VPK. The list shows the provider for the selected entry.
+- VPKs inside a Workshop archive are listed with their own provider. An inner map can use its outer package’s resources, and a skipped child produces a warning without hiding healthy siblings.
+- The resolver searches the map's embedded ZIP first, then the item and any additional roots in order. Add a root after a missing dependency is reported and retry the chosen entry.
+- Source conversion stages project assets before publication. Cancel or a publication failure discards fresh files, and explicit reimport reuses edited assets by their virtual identity even when same-named resources change order. Workshop item IDs distinguish otherwise identical entries and other providers need corroborating entry bytes for relocation. Legacy assets remain eligible for migration when they return after an intervening import. The Learn tab walks through choosing an item and its dependencies.
+
+**Checked:** Independent Windows tests passed 899 checks in 18 cases, including failed or canceled preparation, offline native scene reload, reordered same-name assets, distinct Steam items, provider relocation and returning legacy assets. The GCC resolver read the nested map and outer material from CS2 Workshop item 3070193546, matching independent CRCs. The [joined verification record](docs/tasks/0588-workshop-verification.md) includes the hosted Linux fixture groups and Windows editor stress.
+
+The legacy packed-material test checks that split and embedded images share a per-model directory under the selected import cache. The Linux full-suite run exposed its former assumption that a scratch home always selected the cache location.
+
+## 2026-11-19 (round 600): Steam Workshop import architecture
+
+**Changed (task 0582, ADR 0154)**
+
+- Recorded the approved design to import downloaded Workshop content into project-owned assets and the separate acceptance criteria for classic SFM, Half-Life: Alyx and CS2.
+- Assigned humanoid manual posing, marker Auto-Rig and Auto IK checks to the character and verification rounds.
+
+**Checked:** The pass specification, ADR and six task specifications resolve their relative links.
+
+## 2026-11-19 (round 599): Compact handoffs for Codex workers
+
+**Changed (task 0581)**
+
+- Give each role a fresh brief and tie verification results to the candidate it checked.
+- Track each task's cursor and candidate to surface new results, failures and changes that need verification.
+
+**Checked:** The scratch fixture exercised 13 observations and suppressed four duplicate reports. The Codex
+configuration and changelog fragment checks passed.
+
+## 2026-11-19 (round 598): Make the release manuals easier to read and find
+
+- Asked: correct the five findings from the 1.0.0 documentation audit and document how assigned work reaches final owner review.
+- Changed: the Architecture module map wraps the Blender shader path and the User Guide names the double-chevron overflow button. The README points to the released manuals and the architecture guide distinguishes the PR citation check from release regeneration. The standing workflow records the owner assignment before implementation and routes owner-reserved decisions through the hub. Explicit project-wide workflow changes carry forward to future sessions within the scope set by the owner. The hub updates affected briefs and tooling, and each role cites its evidence.
+- Checked: the Windows build and release workflows both request MSVC 14.51. Both current-book URLs resolved to their 1.0.0 attachments. The committed citation check passed with 182 references. After joining the Workshop changes, the parser accepted the Steamworks lesson citation with Valve attribution. Release regeneration checked 185 references and both books compiled with LuaLaTeX and Biber. On physical page 14 of Architecture the complete path fits its column. On physical page 11 of the User Guide the button name renders and extracts as text.
+
+## 2026-11-19 (round 597): Measure distant toon detail before editor notifications
+
+**Fixed (task 0579):** The hatched plane, face-shadow sphere and box-mapped cube now use the cached Scene view
+for both captures in the near and far comparisons. A warning toast could previously change the sampled colors
+and extend the object mask.
+
+**Checked:** The regression compares the composited and cached captures with a visible toast at both distances
+and checks that the measured energy responds to a rendered checker. Sanitizer shard 4 passed all 49,030 checks. The toast added 10,586 pixels to each composited mask,
+while the cached colors and coverage stayed identical. Both Windows configurations passed render and editor.
+
+## 2026-11-19 (round 596): Target-aware Linux build and Raspberry Pi 5 performance assessment
+
+**Asked:** Find a practical route to interactive editing on an 8 GB Raspberry Pi 5.
+
+**Changed (task 0578):** The shell build consults the compiler target before selecting Blender's optional library bundle and Jolt's x86 flags. Linux ARM64 defaults to dependency-free and accepts an explicitly supplied native library directory. A compiler-target change invalidates cached objects. CMake uses the configured Linux target processor and pointer size, and disregards the obsolete automatically cached x64 path on ARM.
+
+**Checked:** Shell fixture verifies ARM64 with an x64 bundle nearby, an explicit ARM64 path, native x64 discovery and forced dependency-free x64. Five CMake configure-only cases verified the generated compile and link arguments, including a stale x64 cache path on ARM. The assessment records linked desktop baselines, renderer requirements and a scratch-only Pi acceptance procedure. Hosted Ubuntu ARM64 produced an AArch64 release editor, rendered a 720p CPU screenshot and passed all 4,101 editor/input checks. A quiet Windows x64 CPU sample at 720p completed the editing journey in 322.6 ms with 99.3 MiB observed peak working set. Its longest marked frame was texture assignment at 32.5 ms. Physical Pi measurements remain pending.
+
+## 2026-11-19 (round 595): Instance uploads during a drag
+
+**Measured (task 0577).** Writing only changed Vulkan instance rows reduced writes from 150,000 to one per frame while dragging one of 50,000 cubes. The Shaded drag median fell from 221.7 to 214.5 ms (3.25%), below the required 5% improvement. The candidate was withdrawn. Task 0577 records the matched controls, frame tails and GPU parity checks.
+
+## 2026-11-19 (round 594): Faster first open of the Textures window
+
+**Asked:** Bring the first open with 2,000 procedural textures within the 100 ms frame budget.
+
+**Changed (task 0576)**
+
+- Walk the Assets tree without collecting file sizes or modification times. Resolve each directory once for ordinary texture files, and use the existing path conversion for links and other special entries.
+- Keep the sorted paths and the texture library's existing loading, filtering and selection behavior.
+
+**Checked:** The same 90 Windows behavior checks passed before and after. Windows release assets/editor groups passed with libraries (3,118/3,872 checks) and dependency-free (3,075/3,846). Linux passed 3,085 assets and 3,846 editor checks, including file links, directory links and an unreadable file. The same focused Linux checks passed on the baseline. All six full benchmark runs completed.
+
+## 2026-11-19 (round 593): Independent task chats report directly to the hub
+
+**Changed (task 0575)**
+
+- Made direct task chats the default for independent work in every approved plan. Workstream leads coordinate dependent tasks when needed. The parent hub oversees review, machine scheduling, stack publication and ongoing health.
+
+## 2026-11-19 (round 592): Read Lighting status in a narrow pane
+
+The Lighting window shows Manual or Automatic at the start of the update status. Hovering over the row reveals the full explanation and the current preview stage while the row shows live preview progress. Hovering over the Contribute GI summary shows the contributing object count, lightmap count and size, and baked object count.
+
+Verified the painted labels and full hover text at 1024×640 and 1366×768. The full twelve-configuration HCI sweep matched its existing baseline.
+
+## 2026-11-19 (round 591): Use the active keymap in HCI checklist steps
+
+The checklist now identifies the actions for framing, Edit Mode, mesh selection, Extrude, Loop Cut and Set Key. An artist using the default Unity preset can extrude a face with Ctrl+E. Preferences > Keymap lets artists find or assign these actions on another preset or after customizing shortcuts.
+
+Task 0573 updated seven procedures. All 141 checklist IDs, expected outcomes and time targets were preserved, and the Markdown and interactive HTML were checked against the source JSON.
+
+## 2026-11-19 (round 590): HCI sweep and checklist review
+
+**Asked:** Rerun the current HCI suite and identify reproducible interface and checklist faults.
+
+**Checked (task 0572)**
+
+- The Windows libraries test build through PR #480 produced 2,156 screens across 12 configurations. The 7 elided labels and 3 vector handles matched the established baseline. The focused dim-text and keyboard focus ring checks passed.
+- The checklist evidence map accounts for all 141 rows across eight workstreams. Static label, consistency, KLM, console and checklist checks passed.
+- Recorded the incorrect default Extrude shortcut in checklist item D2 and two truncated Lighting status rows in the 1024×640 tablet-scale pane. Follow-up tasks 0573 and 0574 cover those findings.
+
+## 2026-11-19 (round 589): Measuring the first Edit Mode frame on a 500k-face sphere
+
+**Asked (task 0571)** — Bring the median cold Edit Mode entry below 100 ms while keeping the flat cage, shading, attributes and picking available on the first frame.
+
+**Measured** — With Blender libraries on Windows, the smooth sphere produced 2,004,992 flat render vertices and 3,004,416 indices. Packing the vertices took 25.113 ms median in the instrumented app. Copying the single-material index list took 1.491 ms, grouping multiple materials took 8.825 ms and card submission took 14.908 ms. A candidate used existing workers to fill disjoint ranges of the upload buffer.
+
+**Outcome** — The three matched full-selector observations were 141.5, 101.4 and 100.6 ms for the baseline and 107.2, 96.4 and 99.6 ms for the candidate. The median fell 1.8 ms, from 101.4 to 99.6 ms, within the 40.9 and 10.8 ms ranges of the two builds. The first-frame app medians were 105.7 and 103.6 ms. The candidate was rejected.
+
+**Checked** — Modeling, Render, GPU and Editor groups passed on both Windows configurations and dependency-free Linux. Four-thread quick stress completed all 48 sections on Windows in 670.1 seconds and on hosted Linux in 628.4 seconds. The Linux run peaked at 14.45 GiB resident. [Linux stress receipt](https://github.com/EmilianoManaloIV/blendity/actions/runs/44609521187/job/135862079065)
+
+## 2026-11-18 (round 588): Blendity's project workflow in Codex
+
+**Asked:** Carry the project-owned Claude workflow into a clean Codex checkout.
+
+**Changed (task 0570)**
+
+- Linked the Codex roles, project Git rules, owner approval gates and cold-start instructions from the engineering handoff.
+- Mapped ten project deny entries and recorded the responsibilities of the existing workflow and machine helpers.
+- Aligned task, review and attribution guidance for future work and added lightweight configuration checks to CI.
+- Added the owner-approved hub cleanup for verified merged task branches with checks for the exact remote and head.
+
+## 2026-11-18 (round 587): Project Codex worker roles
+
+**Asked:** Give the Blendity hub three reusable workers for implementation, independent testing and independent review.
+
+**Added (task 0569)**
+
+- Project Codex definitions for `implementer`, `test-engineer` and `code-reviewer` with role-specific models and reasoning effort.
+- Handoff instructions for named selection and explicit dispatch through the hub.
+
+## 2026-11-18 (round 586): Reusing verified work across parallel rounds
+
+**Asked:** Reduce repeated builds and timed measurements across parallel workers.
+
+**Changed (task 0568)** The handoff method describes how the coordinator tracks candidates and shared resources,
+when a worker can reuse a verified executable or measurement, and how to resume an interrupted timed batch.
+AGENTS.md links directly to the procedure.
+
+**Checked:** Walked through the release command inventory, a colour regression added after compilation, and
+full-size versus quick stress reports. Checked the procedure against the existing approval, review,
+verification and publication rules.
+
+## 2026-11-18 (round 585): Full-size performance measurements after 1.0.0
+
+**Asked:** Measure the default and extended benchmarks on the release-sized workloads, identify reproducible bottlenecks and document the results.
+
+**Measured (task 0567, ADR 0105)**
+
+All 67 registered stress sections completed. The 63 survey jobs returned reports across 69 attempts. The full operations sweep covered 1,056 operation and scene combinations. Listing GPUs on the starter scene and switching the worldlike scene to a two-by-three layout were the only observations over 50 ms. Three runs reproduced the misses for Edit Mode entry on the 500k sphere, moving one object in a 50,000-cube scene, and opening Textures with 2,000 entries.
+
+## 2026-11-18 (round 584): Carry face-corner paint through mesh edits
+
+**Asked:** Keep face-corner colours when editing, applying modifiers, joining or separating painted meshes.
+
+**Changed (task 0566, ADR 0152)**
+- Mesh edits carry each surviving face corner and interpolate linear RGBA within the contributing face. Artists can keep different colours and alpha on either side of the same vertex.
+- Join matches layers by name and domain, uses white for a missing side, and assigns distinct names when domains conflict. Separate keeps each piece's painted faces and layer selections.
+
+**Checked:** All 25 groups passed in three configurations. Including the final modeling-group rerun, Windows passed 134,275 checks with Blender libraries and 125,174 dependency-free. Linux passed 125,199 dependency-free. Focused checks included all twelve outer and cutter walls of a Boolean difference, clamped remesh gradients, a three-way Join with occupied names, editor Apply All and Undo. Against the release baseline both Windows configurations kept zero problems in 26,620 Push/Pull operations and all 394 existing overlapping results. All 11,540 odd-mesh operations passed, including 26 new painted operations. All 5,032 curved operations retained the six existing problems and overlap counts of 67 with libraries and 66 without.
+
+## 2026-11-18 (round 583): Stable console examples in the operations sweep
+
+**Asked:** Keep an unrelated unit test that uses a shorter command from changing the measured inventory (open work 9).
+
+**Changed (task 0565, ADR 0105)**
+- The generator now maintains an explicit invocation or skip reason for every registered verb. All 203 runnable commands and 32 skips match the 1.0.0 table. Adding or removing a verb reports its name until the inventory matches. A changed example shows the affected row in the check output.
+- The local chain runs the generator's self-test, prints the check output and stops on failure.
+
+**Checked:** The generator's three regression tests and read-only check pass on Windows and Linux. The generated include matches the 1.0.0 blob. A missing verb in a scratch registry makes the chain's sweep step name the verb and exit 1.
+
+The editor group passed 3,872 checks on Windows with Blender's libraries and 3,846 each on dependency-free Windows and Linux. In an exclusive quick stress window, all 203 runnable commands matched the release on each of two scenes, with the same 32 skips. Of 704 operations, one took over 50 ms and none took over 100 ms.
+
+## 2026-11-19 (round 582): Windows compatibility status for MSVC 14.52
+
+**Asked:** Check whether MSVC 14.52 meets the Windows CI and release requirements in handoff item 19.
+
+**Checked (task 0564):** The candidate compiled and passed quick stress with release defaults, with precise floating-point mode, and with link-time code generation disabled. The full Windows unit suite failed in each configuration. The cause remains unresolved, so Windows CI and release builds retain the strict MSVC 14.51 pin.
+
 ## 2026-11-18 (round 579): The Windows builds name their compiler; CI and the release build with 14.51 or not at all
 
 **Asked:** the release blocker of the day (the hub): CI's dependency-free Windows test program crashed once on #472's tree.

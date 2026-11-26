@@ -12,6 +12,11 @@
 #include <sstream>
 #include <chrono>
 #include <thread>
+#ifdef __linux__
+#  include <cerrno>
+#  include <climits>
+#  include <sched.h>
+#endif
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -537,7 +542,26 @@ uint64_t peak_working_set_bytes() {
 #endif
 }
 
-int hardware_threads() { return (int)std::max(1u, std::thread::hardware_concurrency()); }
+int hardware_threads() {
+  static const int available = [] {
+#ifdef __linux__
+    // Pools inherit the launcher's affinity. Read the main thread's mask even if first called by a worker.
+    for (int bits = CPU_SETSIZE; bits <= INT_MAX / 2; bits *= 2) {
+      cpu_set_t *mask = CPU_ALLOC(bits);
+      if (!mask) break;
+      const size_t bytes = CPU_ALLOC_SIZE(bits);
+      const int result = sched_getaffinity(getpid(), bytes, mask);
+      const int error = errno;
+      const int count = result == 0 ? CPU_COUNT_S(bytes, mask) : 0;
+      CPU_FREE(mask);
+      if (count > 0) return count;
+      if (result == 0 || error != EINVAL) break;
+    }
+#endif
+    return (int)std::max(1u, std::thread::hardware_concurrency());
+  }();
+  return available;
+}
 
 /* One argument as the C runtime splits a command line: quotes round it when it has a space, tab or quote; a quote
  * escaped by a backslash, and backslashes doubled only before a quote. */

@@ -1,4 +1,19 @@
 # Performance, limits and efficiencies
+## Post-1.0.0 full-size Windows survey (round 585)
+
+The Windows libraries build at `4dbfc99` ran on the 32-thread Ryzen 9 5900XT with an RTX 4070 SUPER. In the full operations sweep, listing GPUs on the starter scene took 187.3 ms in the command and 0.8 ms in the next frame. Switching the worldlike scene to a two-by-three layout took 57.5 ms in the next frame. The other 1,054 observations were within 50 ms.
+
+In Shaded view with caching enabled, moving one object per frame among 50,000 cubes had medians of 218.6–241.9 ms and p95s of 242.7–278.2 ms across three 60-frame runs. The median of the run medians was 222.0 ms against a 16.7 ms target. The earlier committed median was 216.7 ms. The report counted 150,000 instance rows written per frame. Opening Textures with 2,000 entries took 244.7–268.9 ms across three runs against a 100 ms first-frame budget. The next frame took 2.2–2.3 ms. On the synthetic rig, dragging an IK target with realtime GI averaged 73.32 ms with Automatic updates and 12.13 ms with Manual updates. With a live path-traced Camera Preview open, a separate synthetic drag averaged 778.28 ms and peaked at 813.8 ms.
+
+Entering Edit Mode on the 500k sphere took 101.4, 111.9 and 113.0 ms against a 100 ms budget. The committed baseline recorded 100.3 ms. In three diagnostic launches, the first frame spent 33.90–34.31 ms building the flat-shaded render mesh and 42.90–49.93 ms preparing and sending it to the card. The command itself took 0.1–0.5 ms and the second frame took 2.6–2.9 ms. Task 0571 owns the follow-up measurements. [Edit Mode follow-up](tasks/0567-performance-sweep.md#task-0571-edit-mode-first-frame)
+
+Across eight interactive workloads over 200 frames each, Blendity averaged 2.72–6.18 ms per card-presented frame. Blender 5.2.2 LTS measured 6.9–25.5 ms in its corresponding workload reports. Client sizes were 2560 × 1369 and 2560 × 1361 respectively. From process start to exit after presentation, three launches averaged 292.6 ms for Blendity and 3,095.6 ms for Blender. Each tool used its own rendering and startup procedures.
+
+Interactive editor fuzz covered 6,000 frames and 10,621 events without a reported stale frame, missed change or crash. The picking and merge reports identify their skipped slow controls. On the RTX 4070 SUPER, standalone OptiX measured 162.5 samples/s and GPU Compute measured 478.4 samples/s, with a reported mean picture difference of 0.00000. With an empty kernel cache, OptiX took 21.7 seconds for first open and upload, including about 21.4 seconds of kernel compilation.
+
+The combined archived world-and-avatar fixture reproduced the realtime GI drag miss. With card presentation, Automatic lighting updates averaged 123.53 ms and fell back to CPU view rendering. Manual averaged 12.00 ms with one GPU-rendered view. The survey excludes seven reported timings for gestures that failed to start. The nested Unity lightmap steps lacked an Editor license or headless entitlement.
+
+The round report includes the absolute historical comparisons, budget verdicts, peer methods and benchmark coverage. [Task 0567](tasks/0567-performance-sweep.md)
 
 ## Pass 24: SideRail's look - the baseline (round 484, measured locally)
 
@@ -4528,3 +4543,21 @@ The world rows of round 565 moved less than the 3 ms one build moves between two
 improved. What holds them is not the editor's work: the world's frame is 1 to 2.3 ms for the card at its full clock
 and 10 to 16 ms once the driver has let it fall to P8 (210 MHz), where every part of the frame is 4 to 6 times slower.
 The editor changes no driver or power setting; what could be done is the owner's to decide (round 565's entry).
+
+## Round 589 — Cold Edit Mode entry
+
+On the Ryzen 9 5900XT and RTX 4070 SUPER, the 501,760-face sphere sends 108,257,280 bytes when it first switches from smooth object shading to its flat Edit Mode cage. A serial/parallel probe on the integrated `22ead0eb` build measured 25.113/17.708 ms median for packing its render vertices. The 50k control took 15.8 ms on both paths. These are instrumented app observations.
+
+In three alternating cold full-selector pairs on the matched Release builds, entry took 141.5/107.2, 101.4/96.4 and 100.6/99.6 ms (baseline/candidate). The 1.8 ms median gain fell within the variation of each build and the parallel packing change was rejected. The dedicated GPU and CPU first-frame captures preserved the mesh and cage pixels. Task 0571 records the controls, upload, memory and frame diagnostics.
+
+## Round 594: Textures window first open
+
+The full `asset_windows` section creates the textures with `newtex` before it opens the window. The Textures window now resolves ordinary files' directories once per scan and uses the existing path conversion for special entries. The 2,000-texture first-open survey baseline was 244.7, 255.5 and 268.9 ms against a 100 ms budget. Three quiet before/after pairs measured 281.0 → 77.7, 291.7 → 79.7 and 294.7 → 91.2 ms. The next frame took 2.3–2.9 ms after the change, and the 2,000-texture scroll and filter p95 stayed within 3.1 ms. All Materials, History and command palette controls stayed within budget. Task 0576 records every scale and repeat.
+
+## Round 595: moving one cube among 50,000
+
+In the 60-frame Shaded `scene_views` drag, checking which Vulkan instance rows had changed reduced rows written from 150,000 to one per frame. Mean card-write time fell from 8.40 to 0.66 ms, while collection still averaged 87.86 ms. The median frame moved from 221.7 to 214.5 ms (3.25%), below the 5% adoption threshold. The 10,000-cube drag medians were 41.4 and 40.4 ms. The 50,000-cube orbit medians were 14.0 and 12.3 ms with zero rows written in both builds. The candidate was withdrawn. [Task 0577](tasks/0577-moving-object.md) records the matched conditions and tails.
+
+## Raspberry Pi 5 editing assessment (round 596)
+
+See [the Pi 5 assessment](perf/0578-pi5-baseline.md) and [the physical-board acceptance procedure](perf/0578-pi5-acceptance.md) for the 720p editing workload, frame and memory budgets, and Vulkan requirements.

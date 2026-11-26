@@ -8,7 +8,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#include <thread>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -118,7 +117,7 @@ class OrtRuntime : public Runtime {
     api_ = base ? base->GetApi(ORT_API_VERSION) : nullptr;
     if (!api_) return error = "ONNX Runtime's API " + std::to_string(ORT_API_VERSION) + " isn't there (an older library?)", false;
     OrtSessionOptions *so = nullptr;
-    const int threads = std::max(1, std::min(4, (int)std::thread::hardware_concurrency() / 2));
+    const int threads = std::max(1, std::min(4, sys::hardware_threads() / 2));
     if (!ok(api_->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "blendity", &env_), error) || !ok(api_->CreateSessionOptions(&so), error)) return false;
     ok(api_->SetIntraOpNumThreads(so, threads), error);
     const std::string model = fs::join(dir, "inbetween.onnx");

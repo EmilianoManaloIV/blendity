@@ -494,14 +494,21 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
     return c.items;
   }
   view_perf::counters.item_gathers++;
-  std::vector<DrawItem> items = collect_items_build(game, want_tangents, view_dep, lod);
+  // Only verification needs the old list during a gather. A moving object can invalidate a
+  // large list every frame; refill its storage without growing a second list beside it.
+  std::vector<DrawItem> verification_items;
+  std::vector<DrawItem> &items = hit ? verification_items : c.items;
+  items.clear();
+  collect_items_build(game, want_tangents, view_dep, lod, items);
+  if (items.capacity() > 1024 && items.size() < items.capacity() / 4)
+    items.shrink_to_fit();  // A smaller scene or a newly hidden hierarchy releases the old allocation.
   const bool same = hit && same_draw_items(items, c.items);  // (verify mode: the kept list gathered again)
   if (hit && !same) note_render_cache_mismatch();
   c.base = base, c.view = view, c.view_dep = view_dep;
   c.flattening = flatten_any_ || view_shapes_any_;
   c.lod = lod;
   c.valid = !c.flattening && !c.lod && !skin_settling_;  // (round 519: a rest settling after shape keys counts gathers until it is back on the card)
-  if (!same) c.items = std::move(items);
+  if (hit && !same) c.items = std::move(verification_items);
   skin_list_stands(c);
   if (c.valid && !same) keeps_.items_gen[variant][want_tangents] = view_keeps::next_items_gen();  // (a new list: what was kept of the old one is stale)
   *gen = c.valid ? keeps_.items_gen[variant][want_tangents] : 0;
@@ -541,12 +548,11 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
   return c.items;
 }
 
-std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod) {
+void Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod, std::vector<DrawItem> &items) {
   BL_ZONE("collect_items");
   ProfileScope prof{prof_.ms_collect, {}};
   skin_settling_ = false;
   prebuild_render_meshes(*scene_, game);
-  std::vector<DrawItem> items;
   flatten_pivots_.clear();
   view_refs_.clear();
   flatten_any_ = view_shapes_any_ = false;
@@ -608,7 +614,6 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
   });
   set_view_lattices(false);  // (out of this collect: the Scene view, exports and bakes see the model)
   if (items_card_skin_) skin_prune_stands();
-  return items;
 }
 
 /* A mesh's draw item as every view builds it (the import preview too, task 0152). */

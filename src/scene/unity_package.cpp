@@ -83,7 +83,7 @@ std::string first_line(const std::string &s) {
 
 }  // namespace
 
-bool gunzip(const std::string &gz, std::string &out, std::string &why, size_t limit) {
+bool gunzip(const std::string &gz, std::vector<uint8_t> &out, std::string &why, size_t limit) {
   const size_t at = gzip_header(gz, why);
   if (!at) return false;
   const size_t tail = gz.size() - 8;
@@ -95,6 +95,17 @@ bool gunzip(const std::string &gz, std::string &out, std::string &why, size_t li
     if (!zlib_inflate((const uint8_t *)gz.data() + at, tail - at, raw, false, limit))
       return why = raw.size() >= limit ? "too large to unpack" : "a damaged deflate stream", false;
     if ((uint32_t)raw.size() != isize) return why = "its length doesn't match the gzip trailer (damaged, or more than one member)", false;
+    out.swap(raw);
+  } catch (const std::bad_alloc &) {
+    return why = "too large for the memory free", false;
+  }
+  return true;
+}
+
+bool gunzip(const std::string &gz, std::string &out, std::string &why, size_t limit) {
+  std::vector<uint8_t> raw;
+  if (!gunzip(gz, raw, why, limit)) return false;
+  try {
     out.assign(raw.begin(), raw.end());
   } catch (const std::bad_alloc &) {
     return why = "too large for the memory free", false;

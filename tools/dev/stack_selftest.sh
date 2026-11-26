@@ -1,7 +1,7 @@
 #!/bin/bash
 # Self-test of stack_check.sh and integrate.sh (task 0465, ADR 0132) on a throwaway repository with a local bare
 # "origin" in a temporary folder. It never reaches GitHub: GH points at a stand-in gh that answers `pr list` and
-# `pr checks` from files and writes down `pr create` / `pr edit`. The `stack` CI job runs it.
+# `pr checks` / `pr view` from files and writes down `pr create` / `pr edit`. The `stack` CI job runs it.
 # Usage: bash tools/dev/stack_selftest.sh
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(mktemp -d)
@@ -13,11 +13,11 @@ cat > "$FAKE" <<'EOF'
 # A stand-in gh: open PRs in $FAKE_GH/open ("number branch"), past integration branches in all, a PR's jobs in
 # checks/<number> ("job<TAB>bucket"), what was asked to be written in log and body.
 D=$FAKE_GH
-head=; body=; base=; state=open
+head=; body_file=; base=; state=open
 a=("$@")
 for ((i = 0; i < $#; i++)); do
   case "${a[i]}" in
-    --head) head=${a[i+1]} ;; --body) body=${a[i+1]} ;; --base) base=${a[i+1]} ;; --state) state=${a[i+1]} ;;
+    --head) head=${a[i+1]} ;; --body-file) body_file=${a[i+1]} ;; --base) base=${a[i+1]} ;; --state) state=${a[i+1]} ;;
   esac
 done
 case "$1 $2" in
@@ -25,11 +25,20 @@ case "$1 $2" in
     [ -f "$D/down" ] && exit 1
     if [ "$state" = all ]; then cat "$D/all"; cut -d' ' -f2 "$D/open"; else cat "$D/open"; fi ;;
   "pr checks") cat "$D/checks/$3" 2>/dev/null; exit 8 ;;
+  "pr view")
+    [ ! -f "$D/body-down" ] || exit 1
+    cat "$D/body" || exit 1
+    if [ -f "$D/owner-edit-after-view" ]; then
+      cat "$D/owner-edit-after-view" >> "$D/body"
+      rm "$D/owner-edit-after-view"
+    fi
+    if [ -f "$D/body-down-after-view" ]; then mv "$D/body-down-after-view" "$D/body-down"; fi ;;
   "pr create")
+    cp "$body_file" "$D/body" || exit 2
     n=$(cat "$D/next"); echo $((n + 1)) > "$D/next"
-    echo "$n $head" >> "$D/open"; printf '%s\n' "$body" > "$D/body"
+    echo "$n $head" >> "$D/open"
     echo "create #$n head=$head base=$base" >> "$D/log"; echo "https://example.invalid/pull/$n" ;;
-  "pr edit") printf '%s\n' "$body" > "$D/body"; echo "edit #$3" >> "$D/log" ;;
+  "pr edit") cp "$body_file" "$D/body" && echo "edit #$3" >> "$D/log" ;;
   *) echo "fake gh: unexpected $*" >&2; exit 2 ;;
 esac
 EOF
@@ -47,6 +56,8 @@ rc() { [ "$RC" = "$1" ]; }
 logged() { grep -qF -- "$1" "$F/log"; }
 unlogged() { ! logged "$1"; }
 body_has() { grep -qF -- "$1" "$F/body"; }
+body_lacks() { ! body_has "$1"; }
+template_headings() { diff -u <(grep '^## ' "$HERE/../../.github/pull_request_template.md" | tr -d '\r') <(grep '^## ' "$F/body"); }
 pushed() { [ -n "$(git -C "$O" for-each-ref "refs/heads/$1")" ]; }
 unpushed() { ! pushed "$1"; }
 holds() { git -C "$O" merge-base --is-ancestor "$2" "$1"; }          # holds BRANCH COMMIT-ISH
@@ -132,6 +143,7 @@ t "it pushes integration/1" pushed integration/1
 t "integration/1 holds every stack's top" eval 'holds integration/1 a2 && holds integration/1 b1 && holds integration/1 c1'
 t "integration/1 is main plus merge commits only" merges_only integration/1
 t "it opens one PR on main from integration/1" logged "create #5 head=integration/1 base=main"
+t "a fresh PR uses all five template sections" template_headings
 t "the PR's body has the 'Merging this also merges' line for every PR carried" body_has "**Merging this also merges #1, #2, #3 and #4.**"
 t "the real run leaves the working tree and the worktree list alone" untouched
 t "the merge commits name the actual assistant" eval 'git -C "$O" log -1 --format=%B integration/1 | grep -Fxq "Co-Authored-By: Test assistant <assistant@example.invalid>"'
@@ -140,9 +152,17 @@ run stack_check.sh
 t "stack_check accepts the integration PR as the one top over the stacks" rc 0
 t "... and says each stack is in it" has "in integration #5: merging #5 merges all of it"
 t "... while each stack still has its own top" has "stack: #1 #2 -> OK: merging #2 merges all of it"
+sed -i '/^## Tests$/a\
+\
+Owner verified the combined preview.' "$F/body"
+sed -i '/^## Review$/a\
+\
+Independent verdict: approved for this head.' "$F/body"
 run integrate.sh
 t "a second run with nothing new pushes nothing" has "integration/1 is up to date: nothing pushed"
 t "... and opens no second PR" eval '[ "$(grep -c create "$F/log")" = 1 ]'
+t "unchanged refresh keeps the five sections and manual evidence" eval 'template_headings && body_has "Owner verified the combined preview." && body_has "Independent verdict: approved for this head."'
+t "an unassisted refresh keeps previous AI attribution" body_has "AI assistance for this run: Test assistant."
 checks 3 pending
 run integrate.sh SKIP=3
 t "SKIP of a stack already carried says it does nothing and names NEW=1" has "stack: #3 -> already in integration/1: SKIP of #3 does nothing, a carried stack cannot be taken out (NEW=1 SKIP=\"3\""
@@ -159,7 +179,7 @@ t "... and no failure line" lacks "FAIL"
 old=$(git -C "$O" rev-parse integration/1)
 run integrate.sh
 t "integrate.sh leaves the stack's new top out while it is not green" eval 'has "stack: #1 #2 #6 -> left out: #6 is not green" && [ "$(git -C "$O" rev-parse integration/1)" = "$old" ]'
-t "... but still rewrites the PR's body: what is left out has changed" eval 'logged "edit #5" && body_has "#6 not green"'
+t "... but still refreshes the PR summary: what is left out has changed" eval 'logged "edit #5" && body_has "#6 not green"'
 t "... saying so" has "integration/1 is up to date: nothing pushed, #5's body refreshed"
 checks 6 pass
 run stack_check.sh
@@ -172,8 +192,10 @@ t "integrate.sh continues the open integration PR's branch" has "integration/1: 
 t "... with a fast-forward: the old tip is inside the new one" holds integration/1 "$old"
 t "... which now holds the new top" holds integration/1 a3
 t "... still merge commits only" merges_only integration/1
-t "... and rewrites the PR's body instead of opening another" eval 'logged "edit #5" && [ "$(grep -c create "$F/log")" = 1 ]'
+t "... and refreshes the original PR instead of opening another" eval 'logged "edit #5" && [ "$(grep -c create "$F/log")" = 1 ]'
 t "the body's line now names the new PR too" body_has "**Merging this also merges #1, #2, #3, #4 and #6.**"
+t "changed refresh keeps the five sections and manual evidence" eval 'template_headings && body_has "Owner verified the combined preview." && body_has "Independent verdict: approved for this head."'
+t "a carried stack no longer appears as omitted" body_lacks "#6 not green"
 run stack_check.sh
 t "after which stack_check passes again" rc 0
 
@@ -306,6 +328,84 @@ run integrate.sh PATH="$ROOT/oldgit:$PATH"
 t "git merge-tree failing without a conflict is reported as an error" eval 'rc 2 && has "git merge-tree failed"'
 t "... never as a conflict between pull requests" lacks "CONFLICT"
 t "... and nothing is pushed" unpushed integration/1
+
+# Legacy and hand-written bodies can be brought forward. A failed or ambiguous read must preserve both PR and tip.
+three
+checks 4 pending
+run integrate.sh
+cat > "$F/body" <<'EOF'
+**Merging this also merges #1, #2 and #3.**
+
+The integration PR (ADR 0132): every open stack whose required jobs (windows linux macos linux-sanitizers) were green when `tools/dev/integrate.sh` ran, merged from main with merge commits only. Each pull request it carries can still be merged on its own instead.
+- #2 `a2` at 1234567
+- #3 `b1` at 2345678
+
+Left out:
+-  #4: #4 not green (windows: pending)
+
+AI assistance for this run: Previous assistant.
+
+### Owner notes
+
+Reviewed the viewport changes. Follow-up: verify the inspector at 200%.
+EOF
+old=$(git -C "$O" rev-parse integration/1)
+checks 4 pass
+touch "$F/body-down"
+run integrate.sh
+t "an unreadable body leaves the integration tip and description untouched" eval 'rc 1 && has "could not read #5" && unlogged "edit #5" && [ "$(git -C "$O" rev-parse integration/1)" = "$old" ]'
+rm "$F/body-down"
+printf '\nOwner updated the review during refresh.\n' > "$F/owner-edit-after-view"
+run integrate.sh
+t "a concurrent owner edit survives an advancing integration tip" eval 'rc 1 && body_has "Owner updated the review during refresh." && unlogged "edit #5" && holds integration/1 c1'
+t "a concurrent edit reports that the branch advanced before the body edit was skipped" eval 'has "body changed during refresh" && has "integration/1 already advanced"'
+run integrate.sh
+t "a legacy description adopts the template and current stack summary" eval 'rc 0 && template_headings && body_has "**Merging this also merges #1, #2, #3 and #4.**" && body_lacks "merges #1, #2 and #3" && body_lacks "#4 not green"'
+t "legacy migration retains owner notes and attribution" eval 'body_has "Reviewed the viewport changes. Follow-up: verify the inspector at 200%." && body_has "AI assistance for this run: Previous assistant."'
+t "retry uses the owner note added during the previous refresh" body_has "Owner updated the review during refresh."
+cp "$F/body" "$ROOT/before-refresh"
+: > "$F/log"
+run integrate.sh
+t "repeated refresh leaves a current body byte-for-byte and skips editing" eval 'rc 0 && cmp -s "$ROOT/before-refresh" "$F/body" && unlogged "edit #5"'
+sed -i '/^<!-- integrate.sh: end stack summary -->$/d' "$F/body"
+cp "$F/body" "$ROOT/before-refresh"
+run integrate.sh
+t "an unmatched marker leaves the description untouched and reports the error" eval 'rc 1 && has "ambiguous stack summary" && cmp -s "$ROOT/before-refresh" "$F/body" && unlogged "edit #5"'
+
+cat > "$F/body" <<'EOF'
+## Task
+
+Owner-authored reference.
+
+## What changed
+
+Owner-authored summary.
+
+## Tests
+
+- [x] Combined preview checked.
+
+## Review
+
+- [x] Independent review recorded.
+
+## Documentation
+
+- [x] Carried specs checked.
+EOF
+run integrate.sh
+t "an existing unmarked template gains the summary and retains completed checklists" eval 'rc 0 && template_headings && body_has "**Merging this also merges #1, #2, #3 and #4.**" && body_has "- [x] Combined preview checked." && body_has "- [x] Independent review recorded." && body_has "- [x] Carried specs checked."'
+
+: > "$F/log"
+cp "$F/body" "$ROOT/before-refresh"
+touch "$F/body-down-after-view"
+run integrate.sh BL_AI_COAUTHOR="Test assistant <assistant@example.invalid>"
+t "an unreadable final check on an unchanged tip leaves the original body intact" eval 'rc 1 && has "could not re-read #5" && has "nothing pushed" && cmp -s "$ROOT/before-refresh" "$F/body" && unlogged "edit #5"'
+rm -f "$F/body-down" "$F/body-down-after-view"
+printf '\n' > "$F/owner-edit-after-view"
+printf '\n' >> "$ROOT/before-refresh"
+run integrate.sh BL_AI_COAUTHOR="Test assistant <assistant@example.invalid>"
+t "the final check detects a trailing newline added to the body" eval 'rc 1 && has "body changed during refresh" && cmp -s "$ROOT/before-refresh" "$F/body" && unlogged "edit #5"'
 
 echo "stack self-test: $passed passed, $failed failed"
 [ $failed = 0 ]
