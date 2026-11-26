@@ -21,6 +21,7 @@ bool surface_stack_writes_emission(const ProceduralTexture &pt);  // (surface_ui
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <thread>
 #include <map>
 
@@ -781,7 +782,7 @@ void Editor::paint_end_stroke() {
   im.dirty = true;
   PaintLayer *l = paint_layer(false);
   if (l) {  // (the stamp travels in the tile step, not in a texture-text snapshot: one step a stroke)
-    l->stamp++;
+    l->stamp = l->stamp == std::numeric_limits<int>::max() ? 0 : l->stamp + 1;
     paint_delta_->stamp_after = l->stamp;
     paint_surface_->touch();
   }

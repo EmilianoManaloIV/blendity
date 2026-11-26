@@ -17096,6 +17096,65 @@ static void tests_round639_paint_undo() {
     history(platform::KEY_Y);
     same(new_branch, "discarded stroke cannot be redone", 2);
   });
+
+  test("round 639: a saved maximum Paint stamp accepts a new canvas stroke through Undo and Redo", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("shading wire");
+    const int max_stamp = std::numeric_limits<int>::max();
+    const std::string asset = "Assets/Textures/R639MaxPaintStamp.ptex";
+    const std::string path = resolve_asset_path(asset);
+    ProceduralTexture seed;
+    seed.width = seed.height = 128;
+    seed.surface = true;
+    seed.add("Fill");
+    auto *layer = static_cast<PaintLayer *>(seed.add("Paint"));
+    layer->base = "Assets/Textures/R639MaxPaintStamp_L1";
+    layer->stamp = max_stamp;
+    const std::string text = save_texture_text(seed);
+    const size_t stamp_line = text.find("  L1_Stamp ");
+    CHECK(stamp_line != std::string::npos);
+    if (stamp_line == std::string::npos) return;
+    std::string legacy = text;
+    legacy.erase(stamp_line, legacy.find('\n', stamp_line) - stamp_line + 1);
+    ProceduralTexture legacy_read;
+    CHECK(load_texture_text(legacy, legacy_read) && legacy_read.layers.size() == 2 && static_cast<PaintLayer &>(*legacy_read.layers[1]).stamp == 0);
+    CHECK(fs::make_dirs(fs::parent(path)) && fs::write_file(path, text));
+    const auto loaded = texture_asset(asset);
+    CHECK(loaded && loaded->layers.size() == 2);
+    if (!loaded || loaded->layers.size() != 2) return;
+
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test(asset);
+    ed.select_texture_for_test(loaded);
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("window Textures");
+    r34_steps(ed, 2);
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(ed.paint_for_test() && !pane.empty());
+    if (pane.empty()) return;
+
+    auto saved_pixels = [&](int stamp) {
+      ed.command("save Assets/Scenes/R639MaxPaintStamp.scene");
+      std::string saved_text;
+      ProceduralTexture saved;
+      const bool read = fs::read_file(path, saved_text) && load_texture_text(saved_text, saved) && saved.layers.size() == 2;
+      CHECK(read && static_cast<PaintLayer &>(*saved.layers[1]).stamp == stamp);
+      return read ? saved.output(0).rgba8 : std::vector<uint8_t>{};
+    };
+    const auto original = saved_pixels(max_stamp);
+    const size_t steps = ed.undo_steps_for_test();
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    const auto painted = saved_pixels(0);
+    CHECK(!original.empty() && !painted.empty() && painted != original);
+    CHECK(ed.undo_steps_for_test() == steps + 1 && ed.undo_label_for_test(0) == "Paint");
+    ed.command("undo");
+    CHECK(saved_pixels(max_stamp) == original);
+    ed.command("redo");
+    CHECK(saved_pixels(0) == painted);
+  });
 }
 
 void run_editor_tests() {
