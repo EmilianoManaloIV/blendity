@@ -8,8 +8,11 @@
 - A new stroke on a Paint layer saved at the maximum stamp wraps to zero. Undo and Redo restore the stamp for each saved pixel state.
 - Reopening Textures after a hidden Undo and replacement stroke refreshes the painted card and selected preview even when the replacement reuses the undone stamp.
 - Undo and Redo refresh a full preview that still contains live dab pixels from before the tile restore.
+- Live Link shares a painted surface's texture send budget across its maps during a burst. Each map can update during painting and sends its final state after the burst. New clients receive a full snapshot.
+- A Live Link client that joins during a paint burst gets the restored map if the latest stroke is undone before the next broadcast.
+- A queued snapshot with unchanged pixels goes only to clients that requested it, even when an update for all clients is queued for the same map.
 
-**Checked:** Windows and Linux each passed 150 focused checks. Real Paint, Undo and Redo events restored the expected layers, saved pixels, card and selected preview. Tests cover a hidden replacement stroke, immediate Undo, the maximum saved stamp, and an unchanged neighboring texture.
+**Checked:** Windows and Linux each passed 150 focused Paint checks. Tests cover a hidden replacement stroke, immediate Undo, the maximum saved stamp, and an unchanged neighboring texture. The unchanged four-client Live Link test passed three times on each platform with seven sends per run. The final Linux receiver check verified full-size normal updates during height-only painting and identical final PNG pixels for all five maps on existing and late peers.
 
 <!-- README -->
 after: model, face-corner paint that survives mesh editing, and texture baking.
