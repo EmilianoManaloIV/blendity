@@ -5,7 +5,7 @@
 - **Requirements:** Q-04 and Q-06.
 - **Decisions:** ADR 0115 governs editor cache invalidation.
 - **Implementation:** Hub planning task for the editor collector, with independent test engineering and code review.
-- **PR:** Pending cumulative publication against main.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

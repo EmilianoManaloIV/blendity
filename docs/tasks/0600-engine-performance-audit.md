@@ -5,7 +5,7 @@
 - **Requirements:** Q-04 and Q-06 (interactive frames and responsiveness).
 - **Decisions:** ADR 0105 (frame budgets) and ADR 0123 (shared documentation).
 - **Implementation:** Hub planning and integration with independent subsystem implementers, testers and reviewers.
-- **PR:** Pending cumulative publication against main.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

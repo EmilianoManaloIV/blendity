@@ -4,7 +4,7 @@
 - **Requirements:** C-05, Q-03.
 - **Decisions:** [ADR 0132](../decisions/0132-integration-prs.md) and [ADR 0123](../decisions/0123-changelog-fragments.md).
 - **Implementation:** Project implementer, followed by independent testing and review.
-- **PR:** Pending verified publication.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

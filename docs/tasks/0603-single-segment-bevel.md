@@ -5,7 +5,7 @@
 - **Requirements:** R-02, Q-01, Q-02, Q-03, Q-04, Q-05
 - **Decisions:** none needed
 - **Implementation:** project implementer, followed by an independent test engineer and code reviewer.
-- **PR:** pending Hub publication
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

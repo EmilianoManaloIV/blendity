@@ -5,7 +5,7 @@
 - **Requirements:** R-04, Q-04, Q-06
 - **Decisions:** ADR 0017 (procedural textures), ADR 0056 (measurement), ADR 0123 (changelog fragments). No new decision needed.
 - **Implementation:** project implementer, with independent test-engineer and code-reviewer
-- **PR:** pending hub publication
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

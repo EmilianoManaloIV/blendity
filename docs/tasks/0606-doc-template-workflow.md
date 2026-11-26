@@ -5,7 +5,7 @@
 - **Requirements:** C-05, [project documentation duties](../../AGENTS.md#documentation-duties-every-change) and [task spec rules](README.md#rules).
 - **Decisions:** [ADR 0123](../decisions/0123-changelog-fragments.md) applies. Existing formats cover this workflow clarification.
 - **Implementation:** Planning task for shared workflow instructions. The Hub coordinates the active authors and publication.
-- **PR:** Pending Hub publication of the cumulative performance pass.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

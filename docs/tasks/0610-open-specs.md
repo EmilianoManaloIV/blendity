@@ -5,7 +5,7 @@
 - **Requirements:** Project task lifecycle and documentation standards in AGENTS.md.
 - **Decisions:** Existing subsystem decisions apply; ADR 0123 governs the changelog fragment.
 - **Implementation:** Project implementer for task records, independent tester and reviewer for fidelity.
-- **PR:** Pending Hub publication on the cumulative stack.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

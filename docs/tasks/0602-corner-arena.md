@@ -5,7 +5,7 @@
 - **Requirements:** R-05, R-11, Q-03, Q-04, Q-06.
 - **Decisions:** [ADR 0109](../decisions/0109-the-cpus-share-of-a-card-frame.md) establishes stable triangle bases and the existing CPU fallback. The growth heuristic and vector split fix fit that decision.
 - **Implementation:** Project `implementer` for the allocator and policy, followed by independent test and review.
-- **PR:** Pending Hub publication.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

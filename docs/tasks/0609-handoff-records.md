@@ -5,7 +5,7 @@
 - **Requirements:** Project documentation duties, truthful review and merge status, reproducible onboarding.
 - **Decisions:** ADR 0123 governs shared documentation; accepted decisions remain immutable.
 - **Implementation:** Project implementer, independent verification and reviewer, with Hub integration.
-- **PR:** Pending publication.
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 

@@ -4,7 +4,7 @@
 - **Requirements:** Project engineering standards for verification and publication.
 - **Decisions:** ADR 0134 (verification gates).
 - **Implementation:** project `implementer`
-- **PR:** pending
+- **PR:** [#501](https://github.com/EmilianoManaloIV/blendity/pull/501) against main. Initial published head `d6af4056d5b103d9a5aad648d8301217d394f21d`.
 
 ## Goal
 
