@@ -4,7 +4,8 @@
 # origin/main it merges each such stack's top branch - merge commits only, nothing rebased or squashed - pushes
 # `integration/<n>` and opens a PR on main whose body has the "Merging this also merges #..." line for every PR it
 # carries. While an integration PR is open, a later run continues its branch (main merged in when main has moved,
-# then the tops it lacks; a fast-forward push, the PR's body rewritten); NEW=1 starts the next number from main.
+# then the tops it lacks; a fast-forward push, the generated stack summary refreshed). NEW=1 starts the next
+# number from main.
 # The merges are made with `git merge-tree`, in the object store: no working tree is touched, so a conflict leaves
 # nothing half merged. A conflict stops the run before anything is pushed and names the two pull requests.
 # Every PR still targets main and can still be merged on its own; this script never merges a PR.
@@ -169,31 +170,158 @@ if [ "$CHECK" = "1" ]; then
   echo "CHECK=1: nothing pushed, no pull request opened or changed"
   exit $conflicts
 fi
-body="**Merging this also merges $(pr_join "${carried[@]}").**
+begin='<!-- integrate.sh: begin stack summary -->'
+end='<!-- integrate.sh: end stack summary -->'
+summary="$begin
+**Merging this also merges $(pr_join "${carried[@]}").**
 
-The integration PR (ADR 0132): every open stack whose required jobs ($REQUIRED) were green when \`tools/dev/integrate.sh\` ran, merged from main with merge commits only. Each pull request it carries can still be merged on its own instead."
+Stack tops currently carried:"
 for m in "${merged[@]}"; do
-  body="$body
+  summary="$summary
 - #${N[m]} \`${B[m]}\` at $(git rev-parse --short "origin/${B[m]}")"
 done
 if [ ${#left[@]} -gt 0 ]; then
-  body="$body
+  summary="$summary
 
 Left out:"
   for l in "${left[@]}"; do
-    body="$body
+    summary="$summary
 - $l"
   done
 fi
-if [ -n "$BL_AI_COAUTHOR" ]; then
-  body="$body
+summary="$summary
+$end"
 
-AI assistance for this run: ${BL_AI_COAUTHOR%% <*}."
+# Old runs generated an unmarked summary. Remove only the recognizable summary at the start of such a body.
+# Attribution and all remaining text are retained, including headings, checklists and reviewer notes.
+legacy_notes() {
+  awk '
+    { line = $0; sub(/\r$/, "", line) }
+    NR == 1 { first = $0; next }
+    NR == 2 { second = $0; next }
+    NR == 3 {
+      legacy = first ~ /^\*\*Merging this also merges #.*\.\*\*\r?$/ && second ~ /^\r?$/ &&
+        line ~ /^The integration PR \(ADR 0132\): every open stack whose required jobs / &&
+        line ~ /Each pull request it carries can still be merged on its own instead\.$/
+      if (legacy) { section = "tops"; next }
+      printf "%s\n%s\n", first, second
+    }
+    section == "tops" && line ~ /^- #[0-9]+ `[^`]+` at [0-9a-f]+$/ { next }
+    section != "" && line == "" { next }
+    section == "tops" && line == "Left out:" { section = "left"; next }
+    section == "left" && line ~ /^- ( #[0-9]+)+: (no single top|left out by hand|#[0-9]+ not green \(.*\))$/ { next }
+    { section = ""; print }
+    END { if (NR == 1) print first; if (NR == 2) printf "%s\n%s\n", first, second }
+  '
+}
+
+# The fresh body uses the headings from .github/pull_request_template.md. Integration evidence for individual
+# rounds lives on their PRs. The combined head has its own checks and can collect manual evidence here.
+fresh_body() {
+  cat <<EOF
+## Task
+
+\`docs/tasks/0465-integration-prs.md\` (ADR 0132, requirements C-05 and Q-03).
+
+## What changed
+
+Combines open stacks on main with merge commits. Each carried pull request remains independently mergeable.
+
+$summary
+
+## Tests
+
+Required checks for newly included stack tops: $REQUIRED. See this PR's checks for the combined head.
+
+## Review
+
+See the carried pull requests for their independent reviews. The owner reviews and merges this PR.
+
+## Documentation
+
+See the carried pull requests for their task specs, changelog fragments and applicable ADRs.
+See \`docs/AI_DISCLOSURE.md\` for attribution.
+EOF
+}
+
+read_body_snapshot() {
+  "$GH" pr view "$CUR" --repo "$REPO" --json body --jq .body || return
+  # Keep trailing newlines for the comparison despite command substitution.
+  printf '.'
+}
+
+previous=
+if [ -n "$CUR" ]; then
+  snapshot=$(read_body_snapshot) ||
+    { echo "integrate: could not read #$CUR's body; nothing pushed or changed" >&2; exit 1; }
+  previous=$(printf '%s' "${snapshot%.}")
 fi
-# Nothing new to push: the body is still rewritten, since what is left out and why may have changed.
+
+# Replace only a complete, unique pair of markers. A damaged or duplicated boundary must not swallow notes.
+# A previously hand-written template can keep its original content and gain a generated summary.
+headings=$(printf '%s\n' "$previous" | sed -n 's/\r$//; /^## \(Task\|What changed\|Tests\|Review\|Documentation\)$/p')
+template_headings=$(printf '%s\n' '## Task' '## What changed' '## Tests' '## Review' '## Documentation')
+has_markers=0
+if printf '%s\n' "$previous" | sed 's/\r$//' | grep -Fxq -e "$begin" -e "$end"; then has_markers=1; fi
+if [ "$has_markers" = 1 ] || [ "$headings" = "$template_headings" ]; then
+  body=$(SUMMARY="$summary" awk -v begin="$begin" -v end="$end" -v has_markers="$has_markers" '
+    { line = $0; sub(/\r$/, "", line) }
+    line == begin { if (++begins != 1 || ends) exit 1; print ENVIRON["SUMMARY"]; next }
+    line == end { if (++ends != 1 || !begins) exit 1; next }
+    begins > ends { next }
+    { print }
+    !has_markers && line == "## What changed" { printf "\n%s\n", ENVIRON["SUMMARY"] }
+    END { if (has_markers && (begins != 1 || ends != 1)) exit 1 }
+  ' <<< "$previous") || { echo "integrate: ambiguous stack summary in #$CUR; nothing pushed or changed" >&2; exit 1; }
+else
+  body=$(fresh_body)
+  notes=$(legacy_notes <<< "$previous")
+  if [[ "$notes" == *[![:space:]]* ]]; then
+    body="$body
+
+### Previous PR description
+
+$notes"
+  fi
+fi
+if [ -n "$BL_AI_COAUTHOR" ]; then
+  attribution="AI assistance for this run: ${BL_AI_COAUTHOR%% <*}."
+  if ! printf '%s\n' "$body" | sed 's/\r$//' | grep -Fxq -- "$attribution"; then
+    body="$body
+
+$attribution"
+  fi
+fi
+# An unchanged tip can still have new omission reasons. Skip the edit if the whole body is already current.
+if [ "$body" != "$previous" ]; then
+  body_file=$(mktemp)
+  trap 'rm -f "$body_file"' EXIT
+  printf '%s\n' "$body" > "$body_file"
+fi
+
+# gh edits the whole description. Re-read immediately before sending the edit to catch newer manual evidence.
+# A concurrent edit after this final read can still race with the write.
+edit_body() {
+  local latest reason progress
+  if ! latest=$(read_body_snapshot); then
+    reason="could not re-read #$CUR's body"
+  elif [ "$latest" != "$snapshot" ]; then
+    reason="#$CUR's body changed during refresh"
+  else
+    "$GH" pr edit "$CUR" --repo "$REPO" --body-file "$body_file" >/dev/null
+    return
+  fi
+  progress="nothing pushed"
+  if [ "$tip" != "$start" ]; then
+    progress="$BRANCH already advanced to $(git rev-parse --short "$tip")"
+  fi
+  echo "integrate: $reason; skipped the body edit; $progress" >&2
+  return 1
+}
+
 if [ "$tip" = "$start" ]; then
-  if [ -n "$CUR" ]; then
-    "$GH" pr edit "$CUR" --repo "$REPO" --body "$body" >/dev/null
+  if [ -n "$CUR" ] && [ "$body" != "$previous" ]; then
+    edit_body
     echo "$BRANCH is up to date: nothing pushed, #$CUR's body refreshed"
   else
     echo "$BRANCH is up to date: nothing pushed"
@@ -202,9 +330,9 @@ if [ "$tip" = "$start" ]; then
 fi
 git push -q origin "$tip:refs/heads/$BRANCH"
 if [ -n "$CUR" ]; then
-  "$GH" pr edit "$CUR" --repo "$REPO" --body "$body" >/dev/null
+  if [ "$body" != "$previous" ]; then edit_body; fi
   echo "updated #$CUR ($BRANCH at $(git rev-parse --short "$tip"))"
 else
-  "$GH" pr create --repo "$REPO" --head "$BRANCH" --base main --title "Integration ${BRANCH#integration/}: the green stacks in one merge" --body "$body"
+  "$GH" pr create --repo "$REPO" --head "$BRANCH" --base main --title "Integration ${BRANCH#integration/}: the green stacks in one merge" --body-file "$body_file"
 fi
 echo "now run bash tools/dev/stack_check.sh"

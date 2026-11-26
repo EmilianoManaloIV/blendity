@@ -41,37 +41,70 @@ bool ordinary_texture_file(const stdfs::directory_entry &entry) {
 #endif
 }
 
+#ifdef _WIN32
+// The search already returns the attributes needed to recognize ordinary files.
+template<class Visit>
+bool visit_windows_texture_entries(const stdfs::path &dir, const Visit &visit) {
+  WIN32_FIND_DATAW data;
+  const HANDLE search = FindFirstFileW((dir / L"*").c_str(), &data);
+  if (search == INVALID_HANDLE_VALUE) return false;
+  const std::unique_ptr<void, decltype(&FindClose)> close_search(search, FindClose);
+  do {
+    if (data.cFileName[0] == L'.') continue;
+    const stdfs::path path = dir / data.cFileName;
+    const DWORD attrs = data.dwFileAttributes;
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+      // Enumeration describes the link. Recurse only if its target is a directory.
+      std::error_code ec;
+      const bool is_dir = stdfs::is_directory(path, ec);
+      if (is_dir || to_lower(path.extension().generic_u8string()) == ".ptex") visit(path, is_dir, false);
+    } else {
+      const bool is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      if (is_dir || to_lower(path.extension().generic_u8string()) == ".ptex") visit(path, is_dir, !(attrs & FILE_ATTRIBUTE_DEVICE));
+    }
+  } while (FindNextFileW(search, &data));
+  return true;
+}
+#endif
+
 void collect_texture_paths(const stdfs::path &dir, const std::string &root_lower, int depth, std::vector<std::string> &paths) {
   if (depth > 12) return;
-  std::error_code canonical_error, scan_error;
+  std::error_code canonical_error;
   stdfs::path canonical_dir;
   bool canonical_tried = false;
-  for (stdfs::directory_iterator it(dir, scan_error), end; !scan_error && it != end; it.increment(scan_error)) {
-    const stdfs::path leaf = it->path().filename();
-    const std::string name = leaf.generic_u8string();
-    if (name.empty() || name[0] == '.') continue;
-    std::error_code type_error;
-    if (it->is_directory(type_error)) {
-      collect_texture_paths(it->path(), root_lower, depth + 1, paths);
-      continue;
+  const auto visit = [&](const stdfs::path &path, bool is_dir, bool ordinary) {
+    if (is_dir) {
+      collect_texture_paths(path, root_lower, depth + 1, paths);
+      return;
     }
-    if (to_lower(leaf.extension().generic_u8string()) != ".ptex") continue;
-    const bool ordinary = !canonical_error && !type_error && ordinary_texture_file(*it);
     if (ordinary && !canonical_tried) {
       canonical_dir = stdfs::weakly_canonical(dir, canonical_error);
       canonical_tried = true;
     }
     if (!ordinary || canonical_error) {
-      paths.push_back(make_asset_relative(it->path().generic_u8string()));
-      continue;
+      paths.push_back(make_asset_relative(path.generic_u8string()));
+      return;
     }
     // Use the directory's canonical path once for its ordinary files. Keep the original path
     // when the canonical path is outside the project, as make_asset_relative does for aliases.
-    const std::string canonical = (canonical_dir / leaf).generic_u8string();
+    const std::string canonical = (canonical_dir / path.filename()).generic_u8string();
     if (!root_lower.empty() && canonical.size() > root_lower.size() + 1 && to_lower(canonical.substr(0, root_lower.size())) == root_lower)
       paths.push_back(canonical.substr(root_lower.size() + 1));
     else
-      paths.push_back(it->path().generic_u8string());
+      paths.push_back(path.generic_u8string());
+  };
+#ifdef _WIN32
+  // Keep the filesystem iterator's behavior when the native search cannot open this path.
+  if (visit_windows_texture_entries(dir, visit)) return;
+#endif
+  std::error_code scan_error;
+  for (stdfs::directory_iterator it(dir, scan_error), end; !scan_error && it != end; it.increment(scan_error)) {
+    const std::string name = it->path().filename().generic_u8string();
+    if (name.empty() || name[0] == '.') continue;
+    std::error_code type_error;
+    const bool is_dir = it->is_directory(type_error);
+    if (!is_dir && to_lower(it->path().extension().generic_u8string()) != ".ptex") continue;
+    visit(it->path(), is_dir, !is_dir && !canonical_error && !type_error && ordinary_texture_file(*it));
   }
 }
 

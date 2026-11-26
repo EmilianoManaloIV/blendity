@@ -1,6 +1,7 @@
 # Open work
 
-Every follow-up that was named and not taken, as of 2026-11-18 (the tree of PR #472 plus Pass 28's write-up).
+The original inventory covers follow-ups named by 2026-11-18 (PR #472 plus Pass 28's write-up).
+Later updates link the task or evidence that changed an item's status.
 Each item gives what is wrong or missing, the evidence, the files, and what "done" would look like, so it can
 become a task spec (`docs/tasks/TEMPLATE.md`) with little more reading. Line numbers are those of this tree and
 will drift; the function names will not. Item 19 could have held up 1.0.0. Windows CI and release builds use MSVC 14.51.
@@ -51,7 +52,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   frame (and the ADR notes the exception) or it is reverted.
 
 ### 5. Splat import: the whole-file read, SPZ's inflate, serial validation (M)
-- **SPZ copy removed in round 615.** On a million-splat input the legacy gzip reader used 61.92 MiB less peak memory during decompression. Peak memory across the complete import stayed near 350 MiB. The PLY file read and serial validation remain open. [Task 0597](../tasks/0597-splat-import-memory.md)
+- **SPZ copy removed in round 615.** On a million-splat input the legacy gzip reader used 61.92 MiB less peak memory during decompression. Peak memory across the complete import stayed near 350 MiB. Round 619 subsequently reduced complete-import median peak from about 350 to 293 MiB at both two and four allowed CPUs. [Task 0601](../tasks/0601-spz-file-peak.md) The PLY file read and serial validation remain open. [Task 0597](../tasks/0597-splat-import-memory.md)
 - **Evidence:** round 567's fragment: a 1M-splat PLY imports in 273 ms of which `fs::read_file` is 184; an SPZ
   in 365 ms of which inflate and the copy `gunzip` makes of its output are 253; `pointcloud_validate` is serial,
   about 30 ms. The import already runs off the main thread and meets ADR 0105's frame budget.
@@ -75,7 +76,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 
 ### Fresh-process Textures window still misses its 100 ms budget
 
-After round 617, opening 2,000 existing procedural textures in a fresh Windows CPU editor took a median 169.0 ms at the default worker limit and 244.7 ms with a two-worker cap. The following frame and same-process reopen took 3.5–3.9 ms. Profile directory discovery and visible thumbnails on the improved build before choosing the next change. Keep nested paths, aliases, case-sensitive filesystem identity, search and selection in the acceptance fixture. [Task 0599](../tasks/0599-cold-textures.md)
+Round 623 reduced the Windows first-open median for 2,000 procedural textures from 177.6 to 123.2 ms at default affinity and from 242.6 to 193.4 ms with two workers. The next frame took 3.7–3.8 ms. The 100 ms first-open target remains open. Profile the remaining startup work with the same nested-path, alias, search and selection controls. [Task 0599](../tasks/0599-cold-textures.md) and [task 0605](../tasks/0605-cold-texture-directory.md)
 
 ## Testability and flaky checks
 
@@ -193,30 +194,31 @@ After round 617, opening 2,000 existing procedural textures in a fresh Windows C
 ### 17. Pass 24's open points (owner's decisions and M-L work)
 - **Evidence:** `docs/tasks/0460-*` to `0464-*`, Pass 24's write-up and rounds 484-488 in `CHANGELOG.md`: a re-read replacing a typed material
   value; the direction-dependent slow Scene view; the bake's remaining specks; the bake's CPU half on the card;
-  bakes over 2^23 texels depend on batch size; `tools/dev/chain.sh` copies into the shared checkout and is not
-  usable from a worktree (rounds since ran its steps by hand).
-- **Done:** each needs a spec; the `chain.sh` item is tooling and the most useful to a new agent - a chain that
-  runs in whatever tree it is called from.
+  bakes over 2^23 texels depend on batch size. The original `chain.sh` assumed the shared checkout.
+- **Verification chain update:** the helper now accepts a selected dependency-free checkout through `BL_W` and
+  requires explicit scratch targets through `BL_MAIN` and `BL_WSL_TREE`. Use the receipt's actual command and
+  test results when checking the chain. [Migration inventory](CODEX.md) · [Helper](../../tools/dev/chain.sh)
+- **Remaining work:** write a spec for each unresolved product item before implementation.
 
 ### 18. `build.sh` gaps (S)
-- **Evidence:** `PITFALLS.md`: `build.sh` checks only `src/*/*.h` and `src/*/*/*.h` for newer headers (editing a
-  `tests/*.h` alone rebuilds nothing), compares mtimes only, and compiles with `nproc` jobs (no `JOBS`
-  override; on a memory-limited WSL that means `taskset`).
-- **Done:** test headers in the dependency check; a `JOBS` setting; both documented in `tools/README.md` via a
-  fragment.
+- **Updated:** `build.sh` now checks `tests/*.h` and `tests/fixtures/*.h` when deciding whether to rebuild test
+  objects. Its dependency checks still use modification times.
+- **Remaining:** the script computes its parallel job count with `nproc` or `sysctl`. A caller-provided
+  `JOBS` override is still open. Follow the machine's WSL affinity limit. [Build script](../../build.sh) · [WSL limits](MACHINE.md#wsl-limits)
 
 ## The owner's decisions and housekeeping
-These wait on the owner, not on a task. Do not act on them unasked.
+The owner decides the open items below. Standing authorization already covers hub cleanup of verified merged
+`task/*` branches through the guarded helper.
 - Item 4 above (round 565's fix under the 1.3x bar) and item 1's choice.
 - ADR 0146's amendments made during Pass 26 (rounds 520 and 521: vertex deform stays per frame and F12 poses
   at the snapshot on the main thread; the outline is the rest shape's hull skinned, up to 44 % of thickness off
   the old hull where bones blend) were published for the owner's reading.
 - Whether to keep `tools/dev/integrate.sh` (the integration PR trial, ADR 0132) or retire it: Passes 26 to 28
   used one top per stack instead.
-- The backlog of merged `task/*` branches on GitHub and the `diag/549-gcc15` branch: `AGENTS.md` asks for
-  merged branches to be deleted after each merge, but the agents' deletes were refused by the permission
-  system, so the owner deletes them or allows it.
-- Removing finished worktrees and scratch folders on the development machine (`MACHINE.md` lists the families;
-  one folder with a mangled name, `C:\blcmp565$tag`, was left because its delete was blocked).
+- Only the hub may exercise the standing cleanup approval. The helper requires verification of each merged
+  `task/*` branch. Other refs, including `diag/549-gcc15`, remain owner decisions. [Guarded cleanup approval](../tasks/0570-project-parity.md#owner-decision-on-merged-branch-cleanup)
+- The owner authorized task 0594 to retire verified stale worktrees and branches. It removed 31 worktrees,
+  59 local branches and 97 remote branches. The task records the retained exceptions and the limits of that
+  cleanup. Refer new ambiguous paths or refs to the hub. [Cleanup outcome](../tasks/0594-verified-cleanup.md)
 - A larger WSL memory limit (`.wslconfig`) was never asked for; it would lift the one-build rule.
 - Releases after 1.0.0: version numbers, tags and what goes in them.

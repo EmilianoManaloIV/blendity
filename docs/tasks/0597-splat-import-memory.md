@@ -1,21 +1,50 @@
-# Task 0597 — Reduce gzip SPZ import memory
+# 0597: Reduce gzip SPZ import memory
 
-Round 615. Approved for dispatch through the owner-assigned application sweep, OPEN-WORK item 5.
-Base `22d735b3` (#498). Status in review.
+- **Status:** in review
+- **Authorization:** Round 615. Approved for dispatch through the owner-assigned application sweep, OPEN-WORK item 5.
+- **Requirements:** Q-04, Q-06, C-02 and file compatibility.
+- **Decisions:** ADR 0147 governs splat compatibility and ADR 0056 governs performance measurements.
+- **Implementation:** Project implementer with independent SPZ testing and review. Base `22d735b3` (#498).
+- **PR:** [#499](https://github.com/EmilianoManaloIV/blendity/pull/499)
 
-## Scope and acceptance
+## Goal
+
+Reduce peak memory during gzip SPZ inflate while preserving decoded cloud values and legacy callers.
+
+## Scope
+
+Ownership: src/scene/unity_package.{h,cpp}, src/scene/import_splat.cpp, tests/test_splats.cpp, this spec and changelog.d/615-splat-import-memory.md. No change to project assets, UI, file formats or dependencies.
+
+## Likely files
+
+`src/scene/unity_package.{h,cpp}`, `src/scene/import_splat.cpp`, `tests/test_splats.cpp`.
+
+## Acceptance criteria
 
 - Measure the inflate stage and the complete import separately on the same synthetic valid SPZ v3, SH degree 3 file. Record point count, bytes, revision, compiler and whether samples are from the matched machine or Pi. Compare separate fresh processes for each revision, same thread count and input. Keep timing outside unit assertions (ADR 0056).
 - Transfer the validated gzip output allocation to SPZ decoding. Retain the bounded inflate, error diagnostics, preexisting string API and unaffected NGSP v4 path. Full import must yield identical cloud attributes. Check failure leaves the destination unchanged, embedded zeros, valid empty gzip, a limit below actual size and a bad trailer.
 - Run affected splats, assets and editor groups and splats stress. Coordinate build and timing with the Hub. Close with independent testing/review and a measured fragment. No claim about physical Pi performance.
-- Ownership: src/scene/unity_package.{h,cpp}, src/scene/import_splat.cpp, tests/test_splats.cpp, this spec and changelog.d/615-splat-import-memory.md. No change to project assets, UI, file formats or dependencies.
 
-## References
+## Tests and checks to run
+
+Run splats, assets and editor groups on Windows and WSL and quick splats stress. Compare separate inflate and complete-import processes under an exclusive window.
+
+## Risks and edge cases
+
+A bounded inflate must still reject an oversized or damaged payload. Keep the destination intact on failure. The development-machine results do not establish physical Pi performance.
+
+## Documentation to update
+
+Record both memory endpoints in `changelog.d/615-splat-import-memory.md`.
+
+## Outcome
+
+### References
 
 - [Round 567 stress fixture and measurements](../../stress/stress_splats.inc), [OPEN-WORK item 5](../handoff/OPEN-WORK.md), [ADR 0147](../decisions/0147-point-clouds-and-gaussian-splats.md).
 - [Validated gzip unpack](../../src/scene/unity_package.cpp), [SPZ version dispatch](../../src/scene/import_splat.cpp), [gzip member format, RFC 1952 section 2.3](https://www.rfc-editor.org/rfc/rfc1952#section-2.3).
 
-## Measurement method
+### Measurement method
 
 Use round 567's deterministic `make_spz_scene` fixture with 1,000,000 points and SH degree 3. The gzip file is
 60,773,370 bytes and expands to 65,000,016 bytes. Its SHA-256 is
@@ -36,7 +65,7 @@ one fresh process for each sample. Both revisions read the same cached file.
 The scratch lab at `C:\blab\0615-splat` contains `measure.cpp`, `prepare-bench.sh` and `run-bench-wsl.sh`.
 These runs measure the x86-64 development machine.
 
-## Measurement results
+### Measurement results
 
 Values are the median (minimum–maximum) across five fresh processes per revision and stage.
 
@@ -53,7 +82,7 @@ time. Its measured peak stayed near 350.4 MiB and its time ranges overlapped.
 Raw rows are in `run-bench.hub.out`. The Hub's `C:\blab\splat615-window01.log` recorded eight quiet
 preflight samples, exit code 0 and zero taint lines.
 
-## Compatibility evidence
+### Compatibility evidence
 
 - `spz_gzip` decodes the inflater's byte vector directly. The `gunzip` string overload continues to provide
   string output for Unity packages. The overloads publish output only on success and share the bounded inflate
@@ -65,7 +94,7 @@ preflight samples, exit code 0 and zero taint lines.
   The independent expected-value calculations agreed within `1.2e-7` at worst. See
   `independent/matched-base.json`, `independent/candidate.json` and `independent/verdict.txt` in the scratch lab.
 
-## Local verification
+### Local verification
 
 Windows used MSVC 14.51 and Blender's libraries with shader warming and OptiX disabled. WSL used GCC 15.2
 and the dependency-free build. Both suites used separate scratch project, trash, preferences and cache folders.
@@ -87,3 +116,5 @@ Build, test and stress records are in `windows-build.log`, `linux-build.log`, `l
 
 `tools/test_coverage_map.py --check` found 398 covered entries and zero empty entries. The changelog applicability
 check and `git diff --check` passed.
+
+The published task record is in [#499](https://github.com/EmilianoManaloIV/blendity/pull/499). PR #499 was open at head `66feaeb3adee0f85c373f304a181c2ce0e23b6ce` when checked on November 20, 2026.
