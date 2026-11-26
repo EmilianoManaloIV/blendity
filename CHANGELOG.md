@@ -2,6 +2,15 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-26 (round 641): Linux CI installs missing packages from Ubuntu
+
+**Asked:** Repair the failing Linux check on PR #504.
+
+**Changed (task 0623)**
+- The two Linux build jobs and three test jobs check their installed packages first. When a dependency is missing, they use the signed Ubuntu archive and verify the resulting package state.
+
+**Checked:** Bash syntax, package setup simulations and the five workflow package lists.
+
 ## 2026-11-26 (round 640): Measure four low-end Linux VM profiles
 
 **Asked:** Exercise the editor under several low-end device budgets, including a Pi-class SBC.
