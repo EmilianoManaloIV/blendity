@@ -5,7 +5,7 @@
 - **Requirements:** Q-06 and existing texture browser interactions.
 - **Decisions:** None needed for an internal preview optimization.
 - **Implementation:** Project implementer with independent test engineering and code review.
-- **PR:** Pending publication.
+- **PR:** [#502](https://github.com/EmilianoManaloIV/blendity/pull/502) against main. First published head 7d64985e4af84e8ac535bdb01c205c453e48aedc.
 
 ## Goal
 

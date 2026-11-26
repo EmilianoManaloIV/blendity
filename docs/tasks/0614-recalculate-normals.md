@@ -5,7 +5,7 @@
 - **Requirements:** Q-04 and Q-06, editor responsiveness.
 - **Decisions:** ADR 0056 (measurement outside unit assertions), 0105 (latency budgets), 0123 (fragments), 0134 (local groups).
 - **Implementation:** independent implementer, test engineer, and reviewer in sequence.
-- **PR:** Hub owns publication.
+- **PR:** [#502](https://github.com/EmilianoManaloIV/blendity/pull/502) against main. First published head 7d64985e4af84e8ac535bdb01c205c453e48aedc.
 
 ## Goal
 

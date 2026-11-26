@@ -5,7 +5,7 @@
 - **Requirements:** Q-06 and existing CPU splat rendering behavior.
 - **Decisions:** None needed for an internal allocation change with the existing renderer interface.
 - **Implementation:** Project implementer, independent test engineer and code reviewer.
-- **PR:** Pending publication.
+- **PR:** [#502](https://github.com/EmilianoManaloIV/blendity/pull/502) against main. First published head 7d64985e4af84e8ac535bdb01c205c453e48aedc.
 
 ## Goal
 
