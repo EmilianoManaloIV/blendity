@@ -16946,6 +16946,158 @@ static void tests_round622_editor() {
   });
 }
 
+static void tests_round639_paint_undo() {
+  test("round 639: Textures cards and saved pixels follow a first canvas stroke and a second drag through Undo and Redo", [] {
+    Editor ed;
+    ed.init_headless(1600, 1200);
+    ed.set_render_cache_verify(false);
+    ed.record_buttons_for_test(true);
+    ed.command("keymap Unity");
+    ed.command("shading wire");
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("surface new R639Neighbor");
+    ed.step_frame_headless();
+    ed.command("surface new R639Painted");
+    ed.command("settex R639Painted Width 128");
+    ed.command("settex R639Painted Height 128");
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    ed.command("window Textures");
+    r34_steps(ed, 2);
+    ed.command(strprintf("layout H(0.42,L(%d:0),L(%d:0))", (int)WindowKind::Scene, (int)WindowKind::Textures));
+    r34_steps(ed, 2);
+
+    const auto painted = ed.texture_selected_for_test();
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(ed.paint_for_test() && painted && painted->name == "R639Painted" && !pane.empty());
+    if (!painted || pane.empty()) return;
+    const std::string path = resolve_asset_path(painted->asset_path);
+    const std::string neighbor_path = resolve_asset_path("Assets/Textures/R639Neighbor.ptex");
+    auto card = [&](const char *name) {
+      Recti cell;
+      if (!ed.button_rect_for_test(std::string("tex:") + name, cell)) return Recti{};
+      const int inset = ed.ui_for_test().px(4);
+      const int side = cell.w - 2 * inset;
+      return Recti{cell.x + inset, cell.y + inset, side, side / 2};  // exclude the label and unused badge
+    };
+    const Recti painted_card = card("R639Painted"), neighbor_card = card("R639Neighbor");
+    CHECK(!painted_card.empty() && !neighbor_card.empty());
+    if (painted_card.empty() || neighbor_card.empty()) return;
+    const auto neighbor_pixels = r34_crop(ed, neighbor_card);
+    std::string neighbor_text;
+    CHECK(fs::read_file(neighbor_path, neighbor_text) && !neighbor_pixels.empty());
+
+    struct State {
+      std::vector<uint32_t> card;
+      std::vector<uint8_t> albedo;
+    };
+    auto state = [&](const char *stage, int stamp) {
+      State result;
+      result.card = r34_crop(ed, painted_card);
+      CHECK(ed.texture_selected_for_test() == painted && r34_crop(ed, neighbor_card) == neighbor_pixels);
+      CHECK(painted->layers.size() == (stamp < 0 ? 1u : 2u));
+      // Explicit Save exercises the editor's normal write of the .ptex and its Paint PNGs.
+      ed.command("save Assets/Scenes/R639PaintUndo.scene");
+      std::string text, other;
+      ProceduralTexture saved;
+      CHECK(fs::read_file(neighbor_path, other) && other == neighbor_text);
+      const bool read = fs::read_file(path, text) && load_texture_text(text, saved);
+      CHECK(read && text == save_texture_text(*painted));
+      if (!read) return result;
+      CHECK(!saved.layers.empty() && std::strcmp(saved.layers.front()->type_name(), "Fill") == 0);
+      int saved_stamp = -1;
+      if (stamp >= 0) {
+        const auto *layer = saved.layers.size() == 2 ? dynamic_cast<const PaintLayer *>(saved.layers.back().get()) : nullptr;
+        CHECK(layer && layer->stamp == stamp);
+        if (layer) {
+          saved_stamp = layer->stamp;
+          PaintImages images;
+          std::string err;
+          const bool load = paint_images_load(resolve_asset_path(layer->base), images, &err);
+          const bool covered = std::any_of(images.cover.begin(), images.cover.end(), [](uint8_t pixel) { return pixel > 0; });
+          CHECK(load && covered == (stamp > 0));
+        }
+      }
+      // Evaluate from disk at the thumbnail resolution and compare the visible card pixels.
+      saved.width = saved.height = 64;
+      const Bitmap bitmap = saved.output(0);
+      result.albedo = bitmap.rgba8;
+      std::vector<uint32_t> expected;
+      for (int y = 0; y < painted_card.h; y++) {
+        const int sy = y * bitmap.height / painted_card.w;
+        for (int x = 0; x < painted_card.w; x++) {
+          const int sx = x * bitmap.width / painted_card.w;
+          const uint8_t *p = &bitmap.rgba8[((size_t)sy * bitmap.width + sx) * 4];
+          expected.push_back(0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]);
+        }
+      }
+      const bool matches = result.card == expected;
+      std::printf("    %s: %zu persisted layers, saved Paint stamp %d (want %d), card matches saved pixels %d\n", stage, saved.layers.size(), saved_stamp, stamp, (int)matches);
+      CHECK(matches);
+      return result;
+    };
+    auto history = [&](int key) {
+      auto e = key_ev(key, platform::MOD_CTRL);
+      ed.step_frame_headless({e});
+      e.type = R34ET::KeyUp;
+      ed.step_frame_headless({e});
+    };
+
+    const State original = state("before paint", -1);
+    const size_t steps = ed.undo_steps_for_test();
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    CHECK(ed.undo_steps_for_test() == steps + 2 && ed.undo_label_for_test(0) == "Paint" && ed.undo_label_for_test(1) == "Add Paint Layer");
+    history(platform::KEY_Z);  // Undo on the frame immediately after release.
+    const State quick_undo = state("first stroke undone immediately", 0);
+    CHECK(quick_undo.card == original.card && quick_undo.albedo == original.albedo);
+    history(platform::KEY_Y);
+    const State first = state("first stroke after redo", 1);
+    CHECK(first.card != original.card && first.albedo != original.albedo);
+    history(platform::KEY_Z);
+    const State unpainted = state("first stroke undone", 0);
+    CHECK(unpainted.card == original.card && unpainted.albedo == original.albedo);
+    history(platform::KEY_Y);
+    const State first_redone = state("first stroke redone", 1);
+    CHECK(first_redone.card == first.card && first_redone.albedo == first.albedo);
+
+    ed.command("paint color 0 0 1");
+    const int x = pane.x + pane.w / 4, y = pane.y + pane.h / 4;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y + pane.h / 10)});
+    CHECK(ed.undo_steps_for_test() == steps + 2);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y + pane.h / 10)});
+    ed.step_frame_headless();
+    CHECK(ed.undo_steps_for_test() == steps + 3);
+    const State second = state("second stroke", 2);
+    CHECK(second.card != first.card && second.albedo != first.albedo);
+    auto same = [&](const State &want, const char *stage, int stamp) {
+      const State got = state(stage, stamp);
+      CHECK(got.card == want.card && got.albedo == want.albedo);
+    };
+    history(platform::KEY_Z);
+    same(first, "second stroke undone", 1);
+    history(platform::KEY_Z);
+    same(original, "both strokes undone", 0);
+    history(platform::KEY_Y);
+    same(first, "first of two strokes redone", 1);
+    history(platform::KEY_Y);
+    same(second, "both strokes redone", 2);
+
+    history(platform::KEY_Z);
+    ed.command("paint color 0 1 0");
+    r34_click(ed, pane.x + pane.w * 3 / 4, pane.y + pane.h / 4);
+    ed.step_frame_headless();
+    const State new_branch = state("different second stroke", 2);
+    CHECK(new_branch.card != second.card && new_branch.albedo != second.albedo);
+    history(platform::KEY_Y);
+    same(new_branch, "discarded stroke cannot be redone", 2);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -17064,5 +17216,6 @@ void run_editor_tests() {
   tests_round549();
   tests_round556();
   tests_round622_editor();
+  tests_round639_paint_undo();
   coverage_tests();
 }
