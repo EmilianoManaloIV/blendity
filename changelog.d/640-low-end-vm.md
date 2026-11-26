@@ -5,7 +5,7 @@
 **Added (task 0622):**
 - Four native Linux CPU and RAM profiles with scratch-only editor checks, hosted ARM64 automation and a repeatable x86-64 VM procedure.
 
-**Checked:** Four profiles reopened the edited scene and rendered it through the CPU viewport and F12 camera. The hosted ARM profiles recorded 3.36–5.48 ms steady orbit means across six samples. Two joined WSL profiles recorded 3.76–3.82 ms. See the [VM report](docs/perf/0622-low-end-vm.md) for caps, image checks and memory peaks.
+**Checked:** On final joined revision `6ed52dc0`, four profiles reopened the edited scene and rendered it through the CPU viewport and F12 camera. The hosted ARM profiles recorded 3.36–5.09 ms steady orbit means across six samples. Two joined WSL profiles recorded 3.72–3.79 ms. See the [VM report](docs/perf/0622-low-end-vm.md) for caps, image checks and memory peaks.
 
 <!-- docs/PERFORMANCE.md -->
 append:
