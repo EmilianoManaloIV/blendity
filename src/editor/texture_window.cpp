@@ -5,12 +5,14 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "../texture/procedural_texture.h"
 #include "../texture/surface.h"
 #include "../texture/smart_material.h"
 
 #include <algorithm>
 #include <filesystem>
+#include <string_view>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -41,37 +43,70 @@ bool ordinary_texture_file(const stdfs::directory_entry &entry) {
 #endif
 }
 
+#ifdef _WIN32
+// The search already returns the attributes needed to recognize ordinary files.
+template<class Visit>
+bool visit_windows_texture_entries(const stdfs::path &dir, const Visit &visit) {
+  WIN32_FIND_DATAW data;
+  const HANDLE search = FindFirstFileW((dir / L"*").c_str(), &data);
+  if (search == INVALID_HANDLE_VALUE) return false;
+  const std::unique_ptr<void, decltype(&FindClose)> close_search(search, FindClose);
+  do {
+    if (data.cFileName[0] == L'.') continue;
+    const stdfs::path path = dir / data.cFileName;
+    const DWORD attrs = data.dwFileAttributes;
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+      // Enumeration describes the link. Recurse only if its target is a directory.
+      std::error_code ec;
+      const bool is_dir = stdfs::is_directory(path, ec);
+      if (is_dir || to_lower(path.extension().generic_u8string()) == ".ptex") visit(path, is_dir, false);
+    } else {
+      const bool is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      if (is_dir || to_lower(path.extension().generic_u8string()) == ".ptex") visit(path, is_dir, !(attrs & FILE_ATTRIBUTE_DEVICE));
+    }
+  } while (FindNextFileW(search, &data));
+  return true;
+}
+#endif
+
 void collect_texture_paths(const stdfs::path &dir, const std::string &root_lower, int depth, std::vector<std::string> &paths) {
   if (depth > 12) return;
-  std::error_code canonical_error, scan_error;
+  std::error_code canonical_error;
   stdfs::path canonical_dir;
   bool canonical_tried = false;
-  for (stdfs::directory_iterator it(dir, scan_error), end; !scan_error && it != end; it.increment(scan_error)) {
-    const stdfs::path leaf = it->path().filename();
-    const std::string name = leaf.generic_u8string();
-    if (name.empty() || name[0] == '.') continue;
-    std::error_code type_error;
-    if (it->is_directory(type_error)) {
-      collect_texture_paths(it->path(), root_lower, depth + 1, paths);
-      continue;
+  const auto visit = [&](const stdfs::path &path, bool is_dir, bool ordinary) {
+    if (is_dir) {
+      collect_texture_paths(path, root_lower, depth + 1, paths);
+      return;
     }
-    if (to_lower(leaf.extension().generic_u8string()) != ".ptex") continue;
-    const bool ordinary = !canonical_error && !type_error && ordinary_texture_file(*it);
     if (ordinary && !canonical_tried) {
       canonical_dir = stdfs::weakly_canonical(dir, canonical_error);
       canonical_tried = true;
     }
     if (!ordinary || canonical_error) {
-      paths.push_back(make_asset_relative(it->path().generic_u8string()));
-      continue;
+      paths.push_back(make_asset_relative(path.generic_u8string()));
+      return;
     }
     // Use the directory's canonical path once for its ordinary files. Keep the original path
     // when the canonical path is outside the project, as make_asset_relative does for aliases.
-    const std::string canonical = (canonical_dir / leaf).generic_u8string();
+    const std::string canonical = (canonical_dir / path.filename()).generic_u8string();
     if (!root_lower.empty() && canonical.size() > root_lower.size() + 1 && to_lower(canonical.substr(0, root_lower.size())) == root_lower)
       paths.push_back(canonical.substr(root_lower.size() + 1));
     else
-      paths.push_back(it->path().generic_u8string());
+      paths.push_back(path.generic_u8string());
+  };
+#ifdef _WIN32
+  // Keep the filesystem iterator's behavior when the native search cannot open this path.
+  if (visit_windows_texture_entries(dir, visit)) return;
+#endif
+  std::error_code scan_error;
+  for (stdfs::directory_iterator it(dir, scan_error), end; !scan_error && it != end; it.increment(scan_error)) {
+    const std::string name = it->path().filename().generic_u8string();
+    if (name.empty() || name[0] == '.') continue;
+    std::error_code type_error;
+    const bool is_dir = it->is_directory(type_error);
+    if (!is_dir && to_lower(it->path().extension().generic_u8string()) != ".ptex") continue;
+    visit(it->path(), is_dir, !is_dir && !canonical_error && !type_error && ordinary_texture_file(*it));
   }
 }
 
@@ -94,6 +129,12 @@ void draw_pixels(ui::Context &u, const std::vector<uint32_t> &px, int w, int h, 
   if (px.empty() || w <= 0 || h <= 0 || r.w <= 0 || r.h <= 0) return;
   Image *img = u.canvas.target();
   const Recti c = r.intersect(u.canvas.clip());
+  if (c.empty()) return;
+  if (tiles == 1 && w == r.w && h == r.h) {
+    for (int y = c.y; y < c.bottom(); y++)
+      std::copy_n(px.data() + (size_t)(y - r.y) * w + (c.x - r.x), c.w, img->row(y) + c.x);
+    return;
+  }
   for (int y = c.y; y < c.bottom(); y++) {
     const int sy = (int)((int64_t)(y - r.y) * h * tiles / r.h) % h;
     for (int x = c.x; x < c.right(); x++) {
@@ -103,19 +144,67 @@ void draw_pixels(ui::Context &u, const std::vector<uint32_t> &px, int w, int h, 
   }
 }
 
-/* The albedo at 64 x 64 for the grid (a copy of the texture evaluated small: the pattern is the same). */
-const TexThumb &texture_thumb(ProceduralTexture &t, int which, int size) {
+TexThumb &texture_thumb_slot(const ProceduralTexture &t, int which, int size) {
   static std::unordered_map<std::string, TexThumb> cache;
-  const uint64_t h = t.hash();
-  TexThumb &th = cache[t.asset_path + "#" + std::to_string(which) + "@" + std::to_string(size)];
-  if (th.hash == h && th.size == size && th.which == which && !th.px.empty()) return th;
+  return cache[t.asset_path + "#" + std::to_string(which) + "@" + std::to_string(size)];
+}
+
+bool thumb_current(const TexThumb &th, uint64_t hash, int which, int size) {
+  return th.hash == hash && th.size == size && th.which == which && !th.px.empty();
+}
+
+void update_thumb(TexThumb &th, const ProceduralTexture &t, uint64_t hash, int which, int size) {
+  // A lazy Paint layer may load or create its images during evaluation. Keep that
+  // work on the thumbnail copy so its small resolution cannot affect later edits.
   ProceduralTexture small = t;
   small.width = small.height = size;
   to_argb(small.output(which), th.px);
-  th.hash = h;
+  th.hash = hash;
   th.size = size;
   th.which = which;
+}
+
+const TexThumb &texture_thumb(ProceduralTexture &t, int which, int size) {
+  const uint64_t hash = t.hash();
+  TexThumb &th = texture_thumb_slot(t, which, size);
+  if (!thumb_current(th, hash, which, size)) update_thumb(th, t, hash, which, size);
   return th;
+}
+
+constexpr int kGridThumbSize = 64;
+
+struct PendingGridThumb {
+  TexThumb *thumb;
+  const ProceduralTexture *texture;
+  uint64_t hash;
+
+  void update() const { update_thumb(*thumb, *texture, hash, 0, kGridThumbSize); }
+};
+
+bool has_file_backed_layers(const TextureLayerList &layers) {
+  for (const auto &layer : layers) {
+    if (!layer->enabled) continue;
+    const std::string_view type = layer->type_name();
+    if (type == "Image" || type == "Paint" || has_file_backed_layers(layer->mask_layers)) return true;
+    if (const TextureLayerList *children = layer->children_const())
+      if (has_file_backed_layers(*children)) return true;
+  }
+  return false;
+}
+
+void update_grid_thumbs(const std::vector<PendingGridThumb> &pending) {
+  if (pending.empty()) return;
+  if (pending.size() == 1) {
+    pending.front().update();
+    return;
+  }
+  // Give each worker whole thumbnails instead of starting row jobs for every
+  // layer of every small image. All pixels are ready before this frame draws.
+  JobSystem::global().parallel_for(pending.size(), 1, [&](int64_t begin, int64_t end) {
+    run_job_loops_serial([&] {
+      for (int64_t i = begin; i < end; ++i) pending[(size_t)i].update();
+    });
+  });
 }
 
 }  // namespace
@@ -269,8 +358,8 @@ void Editor::draw_textures_window(const Recti &r) {
   std::vector<ProceduralTexturePtr> list;
   const std::string f = to_lower(texture_search_);
   size_t all = 0;
-  for (const std::string &path : texture_asset_paths())
-    if (ProceduralTexturePtr t = texture_asset(path)) {
+  for (const ProceduralTexturePtr &t : texture_assets_for_browser(texture_asset_paths()))
+    if (t) {
       all++;
       if (f.empty() || to_lower(t->name).find(f) != std::string::npos) list.push_back(t);
     }
@@ -358,17 +447,42 @@ void Editor::draw_textures_window(const Recti &r) {
   const int rows = ((int)list.size() + cols - 1) / cols;
   const int off = u.begin_scroll(u.id("tex_grid"), grid, rows * (tile + u.row_h() + pad) + pad);
   const std::unordered_set<std::string> used = used_texture_assets();
+  struct VisibleCell {
+    size_t index;
+    Recti rect;
+    const TexThumb *thumb;
+  };
+  std::vector<VisibleCell> cells;
+  std::vector<PendingGridThumb> pending;
+  std::unordered_set<const TexThumb *> queued;
   for (size_t i = 0; i < list.size(); i++) {
     const int cx = grid.x + pad + (int)(i % (size_t)cols) * (tile + pad);
     const int cy = grid.y + pad + (int)(i / (size_t)cols) * (tile + u.row_h() + pad) - off;
     Recti cell{cx, cy, tile, tile + u.row_h()};
     texture_ui_rects_["thumb:" + list[i]->name] = cell;
     if (cell.bottom() < grid.y || cell.y > grid.bottom()) continue;
+    ProceduralTexture &t = *list[i];
+    TexThumb &th = texture_thumb_slot(t, 0, kGridThumbSize);
+    const uint64_t hash = t.hash();
+    if (!thumb_current(th, hash, 0, kGridThumbSize) && queued.insert(&th).second) {
+      const PendingGridThumb work{&th, &t, hash};
+      // Decode file-backed layers one thumbnail at a time. Loading full-size
+      // images across the whole batch can multiply transient memory and I/O.
+      if (has_file_backed_layers(t.layers)) work.update();
+      else pending.push_back(work);
+    }
+    cells.push_back({i, cell, &th});
+  }
+  update_grid_thumbs(pending);
+  for (const VisibleCell &visible : cells) {
+    const size_t i = visible.index;
+    const Recti &cell = visible.rect;
+    const int cx = cell.x, cy = cell.y;
     const ProceduralTexturePtr &t = list[i];
     const bool sel = texture_multi_.has(t), hot = u.hovered(cell);
     if (u.record_buttons) u.button_rects["tex:" + t->name] = cell;  // (tests click thumbnails)
     if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : u.theme.row_hover);
-    const TexThumb &th = texture_thumb(*t, 0, 64);
+    const TexThumb &th = *visible.thumb;
     draw_pixels(u, th.px, th.size, th.size, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
     u.label({cx, cy + tile, tile, u.row_h()}, t->name, u.theme.text, ui::Align::Center);
     const bool unused = !used.count(t->asset_path);

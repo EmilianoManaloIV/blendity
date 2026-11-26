@@ -677,6 +677,23 @@ PointCloud r531_spz_expected(const R531Spz &z) {
   return pc;
 }
 
+template <class T>
+bool r619_same_bytes(const std::vector<T> &a, const std::vector<T> &b) {
+  return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+
+void r619_check_cloud(const PointCloud &disk, const PointCloud &borrowed) {
+  static_assert(sizeof(Vec3) == 3 * sizeof(float) && sizeof(Quat) == 4 * sizeof(float));
+  CHECK(disk.consistent() && borrowed.consistent());
+  CHECK(disk.type == borrowed.type && disk.sh_degree == borrowed.sh_degree && disk.count() == borrowed.count());
+  CHECK(r619_same_bytes(disk.position, borrowed.position));
+  CHECK(r619_same_bytes(disk.color, borrowed.color));
+  CHECK(r619_same_bytes(disk.opacity, borrowed.opacity));
+  CHECK(r619_same_bytes(disk.scale, borrowed.scale));
+  CHECK(r619_same_bytes(disk.rotation, borrowed.rotation));
+  CHECK(r619_same_bytes(disk.sh_rest, borrowed.sh_rest));
+}
+
 /* A .glb holding one POINTS primitive with KHR_gaussian_splatting's attributes (degree 1), from r531_splat's values
  * activated (the extension stores linear scale and opacity). */
 std::string r531_glb(int n, bool with_extension = true) {
@@ -847,6 +864,34 @@ static void tests_round531() {
     if (pc4) CHECK(r531_diff(*pc4, r531_spz_expected(z4), kR531MirrorX) < 2e-4);
   });
 
+  test("splat import: byte gzip output is exact and survives rejected replacements", [] {
+    const std::string data("a\0b\xff", 4);
+    std::string packed = gzip(data), why;
+    std::vector<uint8_t> bytes{42};
+    CHECK(gunzip(packed, bytes, why, data.size()));
+    const std::vector<uint8_t> expected(data.begin(), data.end());
+    CHECK(bytes == expected);
+    CHECK(!gunzip(packed, bytes, why, data.size() - 1));
+    CHECK(bytes == expected && why == "too large to unpack");
+    packed[packed.size() - 4] = 3;
+    CHECK(!gunzip(packed, bytes, why));
+    CHECK(bytes == expected && why.find("length") != std::string::npos);
+    // A forged ISIZE within the limit still cannot make the inflater produce extra bytes.
+    CHECK(!gunzip(packed, bytes, why, 3));
+    CHECK(bytes == expected && !why.empty());
+    CHECK(gunzip(gzip(""), bytes, why, 0) && bytes.empty());
+  });
+
+  test("splat import: the gzip string caller keeps binary data and its previous output on failure", [] {
+    const std::string data("a\0b\xff", 4);
+    std::string out("previous"), why;
+    const std::string packed = gzip(data);
+    CHECK(gunzip(packed, out, why, data.size()) && out == data);
+    CHECK(!gunzip(packed, out, why, data.size() - 1));
+    CHECK(out == data && why == "too large to unpack");
+    CHECK(gunzip(gzip(""), out, why, 0) && out.empty());
+  });
+
   test("splat import: bad SPZ files refuse cleanly - wrong magic, version 9, degree 5, cut short, a count the data can't hold, not gzip", [] {
     const R531Spz z = r531_spz(2, 10, 1);
     std::string raw = r531_spz_raw(z, z.n);
@@ -893,15 +938,27 @@ static void tests_round531() {
       data += c;
     }
     SplatReadReport rep;
-    PointCloudPtr pc = read_spz(head + toc + data, rep);
+    const std::string encoded = head + toc + data;
+    std::string borrowed = encoded;
+    PointCloudPtr pc = read_spz(borrowed, rep);
+    CHECK(borrowed == encoded);
     CHECK(pc != nullptr);
     if (!pc) std::printf("    %s\n", rep.error.c_str());
     if (pc) CHECK(pc->count() == 25 && pc->sh_degree == 2 && r531_diff(*pc, r531_spz_expected(z), kR531MirrorX) < 2e-4);
+    ImportResult disk;
+    CHECK(import_spz_file(r531_write("r619-valid-v4.spz", encoded), disk));
+    CHECK(disk.nodes.size() == 1 && disk.nodes[0].points);
+    if (pc && disk.nodes.size() == 1 && disk.nodes[0].points) r619_check_cloud(*disk.nodes[0].points, *pc);
     /* A stream that says it holds other than the points need: refused. */
     std::string bad = head + toc + data;
     bad[32 + 8] ^= 1;
+    const std::string original_bad = bad;
     SplatReadReport rb;
     CHECK(!read_spz(bad, rb) && !rb.error.empty());
+    CHECK(bad == original_bad);
+    ImportResult bad_disk;
+    CHECK(!import_spz_file(r531_write("r619-bad-v4.spz", original_bad), bad_disk));
+    CHECK(bad_disk.error == rb.error && bad_disk.nodes.empty());
 #else
     for (const std::string *b : blocks) {
       const uint64_t cs = b->size(), us = b->size();
@@ -909,7 +966,13 @@ static void tests_round531() {
       data += *b;
     }
     SplatReadReport rep;
-    CHECK(!read_spz(head + toc + data, rep) && rep.error.find("Zstandard") != std::string::npos);
+    const std::string encoded = head + toc + data;
+    std::string borrowed = encoded;
+    CHECK(!read_spz(borrowed, rep) && rep.error.find("Zstandard") != std::string::npos);
+    CHECK(borrowed == encoded);
+    ImportResult disk;
+    CHECK(!import_spz_file(r531_write("r619-no-zstd.spz", encoded), disk));
+    CHECK(disk.error == rep.error && disk.nodes.empty());
 #endif
   });
 
@@ -1682,10 +1745,73 @@ static void tests_round567() {
   });
 }
 
+static void tests_round619() {
+  test("splat import (round 619): legacy files and borrowed bytes produce the same six arrays", [] {
+    for (uint32_t version : {1u, 2u, 3u}) {
+      const R531Spz z = r531_spz(version, 300, 3);
+      std::string raw = r531_spz_raw(z, z.n);
+      raw[14] = 1;  // The anti-aliasing flag also produces an import note.
+      const std::string encoded = gzip(raw);
+      SplatReadReport report;
+      PointCloudPtr borrowed_cloud;
+      {
+        std::string caller_bytes = encoded;
+        borrowed_cloud = read_spz(caller_bytes, report);
+        CHECK(caller_bytes == encoded);
+        std::fill(caller_bytes.begin(), caller_bytes.end(), '\0');
+      }
+      CHECK(borrowed_cloud && borrowed_cloud->count() == z.n && borrowed_cloud->sh_degree == 3);
+      CHECK(report.error.empty() && !report.notes.empty());
+      const auto &times = report.times;
+      for (double ms : {times.unpack_ms, times.setup_ms, times.decode_ms, times.axes_ms, times.validate_ms})
+        CHECK(std::isfinite(ms) && ms >= 0.0);
+
+      const std::string name = strprintf("r619-valid-v%u", version);
+      const std::string path = r531_write(name + ".spz", encoded);
+      ImportResult disk;
+      CHECK(import_spz_file(path, disk));
+      CHECK(disk.source == path && disk.error.empty() && disk.notes == report.notes);
+      CHECK(disk.nodes.size() == 1 && disk.nodes[0].points && disk.nodes[0].name == name);
+      if (borrowed_cloud && disk.nodes.size() == 1 && disk.nodes[0].points) {
+        CHECK(r531_diff(*borrowed_cloud, r531_spz_expected(z), kR531MirrorX) < 2e-4);
+        r619_check_cloud(*disk.nodes[0].points, *borrowed_cloud);
+      }
+    }
+  });
+
+  test("splat import (round 619): damaged files and borrowed bytes report the same refusal", [] {
+    const R531Spz z = r531_spz(3, 30, 3);
+    const std::string raw = r531_spz_raw(z, z.n);
+    const std::string encoded = gzip(raw);
+    std::string wrong_length = encoded;
+    wrong_length[wrong_length.size() - 4] ^= 1;  // Damaged gzip ISIZE.
+    const struct {
+      const char *name;
+      std::string bytes;
+      const char *reason;
+    } cases[] = {
+        {"truncated-gzip", encoded.substr(0, encoded.size() / 2), "gzip stream can't be read"},
+        {"bad-gzip-length", wrong_length, "length doesn't match the gzip trailer"},
+        {"short-splat-data", gzip(raw.substr(0, raw.size() - 1)), "the data ends before its points do"},
+        {"wrong-signature", "not an SPZ", "neither gzip nor NGSP"},
+    };
+    for (const auto &bad : cases) {
+      SplatReadReport report;
+      std::string borrowed = bad.bytes;
+      CHECK(!read_spz(borrowed, report) && report.error.find(bad.reason) != std::string::npos);
+      CHECK(borrowed == bad.bytes);
+      ImportResult disk;
+      CHECK(!import_spz_file(r531_write(std::string("r619-") + bad.name + ".spz", bad.bytes), disk));
+      CHECK(disk.error == report.error && disk.nodes.empty());
+    }
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
   tests_round531_engineer();
   tests_round561();
   tests_round567();
+  tests_round619();
 }

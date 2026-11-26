@@ -571,6 +571,9 @@ class Renderer3D {
  * bit (a depth buffer keeps the nearest surface whatever the order). Task 0050: the casters that didn't move. */
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds,
                        int resolution, const ShadowMap *base = nullptr);
+/* The current thread's spare depth plane. Trim between draws, when the rasterizer's workers have finished with it. */
+size_t shadow_map_scratch_bytes();
+void trim_shadow_map_scratch(size_t max_depth_values);
 /* The matrix render_shadow_map fits to `bounds` (task 0096: the GPU views render the map themselves from it). */
 Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds);
 

@@ -7962,12 +7962,13 @@ static void tests_round412() {
       (void)a, (void)b;
     });
     t.join();
+    const int lanes = js.thread_count();
     js.set_backend(was);
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    std::printf("    %u hardware threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", hw, bg_ids.size(), main_ids.size(),
+    std::printf("    %d available threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", lanes, bg_ids.size(), main_ids.size(),
                 bg_flag ? "true" : "false", JobSystem::in_background() ? "true" : "false");
     CHECK(bg_flag && !JobSystem::in_background());
-    CHECK(hw < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
+    CHECK(bg_ids.size() <= (size_t)std::max(1, lanes - 2) && main_ids.size() <= (size_t)lanes);
+    CHECK(lanes < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
     for (const std::thread::id &id : bg_ids) CHECK(!main_ids.count(id));  // (the two pools share no thread)
   });
 }
@@ -16842,6 +16843,109 @@ static void tests_round556() {
   });
 }
 
+static void tests_round622_editor() {
+  test("draw lists keep hits and refill after a move, undo and scene shrink in two views (round 622)", [] {
+    Editor ed;
+    ed.init_headless(640, 420);
+    ed.set_render_cache_verify(false);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const auto id = cube->id;
+    const auto position = cube->local().position;
+    const MeshPtr mesh = cube->get<MeshFilter>()->mesh;
+    GameObject *group = ed.scene().create("Round 622 instances");
+    const auto group_id = group->id;
+    for (int i = 0; i < 1100; ++i) {
+      GameObject *child = ed.scene().create("Round 622 item");
+      child->add<MeshFilter>()->mesh = mesh;
+      child->add<MeshRenderer>();
+      ed.scene().set_parent(child, group);
+    }
+    ed.mark_changed_for_test("populate draw lists");
+    ed.step_frame_headless();  // Commit the fixture as its own undo step before the move.
+    constexpr int scene_slot = 0, game_slot = 1;
+    auto stats = [&](int slot) { return ed.draw_list_stats_for_test(slot, slot == scene_slot); };
+    auto same_stats = [](const Editor::DrawListStats &a, const Editor::DrawListStats &b) {
+      return a.generation == b.generation && a.size == b.size && a.capacity == b.capacity;
+    };
+    const Vec3 eye(0.0f, 2.0f, -8.0f);
+    const Mat4 view = Mat4::look_at(eye, {0, 0.5f, 0}, {0, 1, 0});
+    const Mat4 proj = Mat4::perspective(50.0f * kDeg2Rad, 1.6f, 0.1f, 100.0f);
+    auto collect = [&](bool game) {
+      if (game) return ed.collect_items_for_test(true, view, proj, eye);
+      return ed.collect_items_card_for_test(false, true);
+    };
+    auto model_x = [id](const std::vector<DrawItem> &items) {
+      const auto it = std::find_if(items.begin(), items.end(), [id](const DrawItem &item) { return item.id == id; });
+      CHECK(it != items.end());
+      return it == items.end() ? std::numeric_limits<float>::quiet_NaN() : it->model.m[12];
+    };
+    const auto scene_before = collect(false);
+    const auto game_before = collect(true);
+    const auto scene_warm = stats(scene_slot);
+    const auto game_warm = stats(game_slot);
+    CHECK(scene_before.size() > 1100);
+    CHECK(game_before.size() > 1100);
+    CHECK(scene_warm.size == scene_before.size() && game_warm.size == game_before.size());
+    CHECK(scene_warm.generation != 0 && game_warm.generation != 0 && scene_warm.generation != game_warm.generation);
+    view_perf::reset();
+    collect(false);
+    collect(true);
+    CHECK(view_perf::counters.item_gathers == 0);
+    CHECK(same_stats(stats(scene_slot), scene_warm) && same_stats(stats(game_slot), game_warm));
+
+    view_perf::reset();
+    ed.command("position 1.5 0.75 0.25");
+    const auto scene_moved = collect(false);
+    const auto scene_refilled = stats(scene_slot);
+    CHECK(scene_refilled.generation != scene_warm.generation);
+    CHECK(scene_refilled.capacity == scene_warm.capacity);
+    CHECK(same_stats(stats(game_slot), game_warm));
+    const auto game_moved = collect(true);
+    const auto game_refilled = stats(game_slot);
+    CHECK(game_refilled.generation != game_warm.generation && game_refilled.generation != scene_refilled.generation);
+    CHECK(game_refilled.capacity == game_warm.capacity);
+    CHECK(same_stats(stats(scene_slot), scene_refilled));
+    CHECK(view_perf::counters.item_gathers == 2);
+    CHECK(scene_moved.size() == scene_before.size());
+    CHECK(game_moved.size() == game_before.size());
+    CHECK_NEAR(model_x(scene_moved), 1.5f, 1e-6f);
+    CHECK_NEAR(model_x(game_moved), 1.5f, 1e-6f);
+    CHECK_NEAR(model_x(scene_before), position.x, 1e-6f);
+    CHECK_NEAR(model_x(game_before), position.x, 1e-6f);
+
+    ed.set_render_cache_verify(true);
+    const uint64_t mismatches = Editor::render_cache_mismatches_all();
+    view_perf::reset();
+    collect(false);
+    collect(true);
+    CHECK(view_perf::counters.item_gathers == 2);
+    CHECK(Editor::render_cache_mismatches_all() == mismatches);
+    CHECK(same_stats(stats(scene_slot), scene_refilled) && same_stats(stats(game_slot), game_refilled));
+    ed.set_render_cache_verify(false);
+    ed.command("undo");
+    CHECK_NEAR(model_x(collect(false)), position.x, 1e-6f);
+    CHECK_NEAR(model_x(collect(true)), position.x, 1e-6f);
+    GameObject *restored_group = ed.scene().find(group_id);
+    CHECK(restored_group != nullptr);
+    if (!restored_group) return;
+    ed.scene().destroy(restored_group);
+    ed.mark_changed_for_test("remove draw-list instances");
+    view_perf::reset();
+    const auto scene_small = collect(false);
+    const auto game_small = collect(true);
+    CHECK(view_perf::counters.item_gathers == 2);
+    CHECK(scene_small.size() + 1100 == scene_before.size());
+    CHECK(game_small.size() + 1100 == game_before.size());
+    CHECK(stats(scene_slot).capacity < scene_warm.capacity / 4);
+    CHECK(stats(game_slot).capacity < game_warm.capacity / 4);
+    CHECK_NEAR(model_x(scene_small), position.x, 1e-6f);
+    CHECK_NEAR(model_x(game_small), position.x, 1e-6f);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -16959,5 +17063,6 @@ void run_editor_tests() {
   tests_round544();
   tests_round549();
   tests_round556();
+  tests_round622_editor();
   coverage_tests();
 }

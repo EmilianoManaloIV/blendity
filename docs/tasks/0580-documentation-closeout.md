@@ -1,8 +1,9 @@
 # 0580: Correct the released manual documentation
 
-- **Status:** verified documentation candidate (round 598) with performance and Workshop outcomes reconciled
+- **Status:** done (round 598), with performance and Workshop outcomes reconciled
 - **Authorization:** owner-assigned documentation closeout, including the hub clarification on standing workflow and owner review.
 - **Decisions:** ADR 0104 (books), ADR 0123 (documentation fragments)
+- **PR:** [#493](https://github.com/EmilianoManaloIV/blendity/pull/493), recorded merge `56e83384`
 
 ## Goal and scope
 Address the five findings in the 1.0.0 documentation audit. Keep the 0.13.0 snapshots and historical attribution. Record the pass outcomes once the hub supplies the final stack.
@@ -59,4 +60,4 @@ The project commands `--bib --check-cited` and `--pdf` regenerated and checked 1
 | Architecture | 69 | `fa1a1037791094fcff927108991377a6b479fcde511abed5aefceebbbceadda8` |
 | User Guide | 77 | `231414ec5128bcb949d55c681f48c732d0ca6823ce45ed53acd2195b4afb1b0e` |
 
-The build log, PDFs, page renders and extraction report are in the original round worktree under `build/docs598/joined-workshop/`. All 25 fragments passed the applicability check. Main at `4f880bb3` contains zero numbered fragments eligible for folding.
+The build log, PDFs, page renders and extraction report are in the original round worktree under `build/docs598/joined-workshop/`. All 25 fragments passed the applicability check. At preparation time, main at `4f880bb3` contained zero numbered fragments eligible for folding. The later fold at `c1a6af65` carries these README and Architecture corrections in [PR #499](https://github.com/EmilianoManaloIV/blendity/pull/499). The measurements above describe the source rebuild and the release attachments checked at the time.
