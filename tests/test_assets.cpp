@@ -16646,4 +16646,90 @@ void run_assets_tests() {
   tests_round617();
   tests_round623();
   tests_round630();
+
+  test("live textures (round 636): a straight stack and identity Tile agree at seams and invalid UVs", [] {
+    ProceduralTexture bricks;
+    CHECK(apply_texture_preset(bricks, "Bricks"));
+    if (bricks.layers.empty()) return;
+    bricks.width = 128;
+    bricks.height = 64;
+    ProceduralTexture masked = bricks;
+    masked.layers[0]->map_offset[0] = 0.19f;
+    masked.layers[0]->map_rotation = 90.0f;
+    CHECK(masked.add("Warp"));
+    masked.layers.back()->enabled = false;
+    CHECK(masked.add("Mask by Height"));
+    TextureLayer *group = masked.add("Group");
+    CHECK(group && group->children());
+    if (!group || !group->children()) return;
+    group->use_mask = true;
+    group->opacity = 0.4f;
+    group->mask_layers.push_back(create_texture_layer("Gradient"));
+    group->children()->push_back(create_texture_layer("Noise"));
+    TextureLayer *cover = masked.add("Leaves");
+    CHECK(cover);
+    if (!cover) return;
+    cover->use_mask = true;
+    cover->targets |= TargetAlpha;
+    const size_t fill_idx = masked.layers.size();
+    TextureLayer *fill = masked.add("Fill");
+    CHECK(fill);
+    if (!fill) return;
+    fill->targets = TargetMetallic | TargetEmission;
+    CHECK(r49_set(masked, strprintf("L%zu Metallic", fill_idx).c_str(), "0.75"));
+    CHECK(r49_set(masked, strprintf("L%zu Emission", fill_idx).c_str(), "0.25 0.5 0.75"));
+
+    ProceduralTexture empty;
+    empty.width = empty.height = 64;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const Vec2 points[] = {{0.0f, 0.0f}, {1.0f, 1.0f}, {-0.01f, 0.99f}, {1.01f, -1.03f},
+                          {0.237f, 0.123f}, {0.993f, 0.995f}, {nan, 0.3f}, {0.3f, -inf}};
+    for (const ProceduralTexture *t : {&bricks, &masked, &empty}) {
+      ProceduralTexture identity = *t;
+      const size_t tile = identity.layers.size();
+      CHECK(identity.add("Tile"));
+      /* An active Tile with a 1-by-1 grid uses the general evaluator but leaves all planes alone. */
+      CHECK(r49_set(identity, strprintf("L%zu Across", tile).c_str(), "1"));
+      CHECK(r49_set(identity, strprintf("L%zu Down", tile).c_str(), "1"));
+      const R53Eval straight = r53_eval(*t), general = r53_eval(identity);
+      for (const Vec2 uv : points) {
+        const TexPoint a = straight.live->at(uv.x, uv.y), b = general.live->at(uv.x, uv.y);
+        CHECK(a.albedo == b.albedo && a.height == b.height && a.rough == b.rough && a.mask == b.mask);
+        CHECK(a.alpha == b.alpha && a.alpha_written == b.alpha_written && a.metal == b.metal && a.emit == b.emit);
+        CHECK(straight.live->normal(uv.x, uv.y, &a.height) == general.live->normal(uv.x, uv.y, &b.height));
+        CHECK(straight.live->normal(uv.x, uv.y) == general.live->normal(uv.x, uv.y));
+      }
+    }
+  });
+
+  test("live textures (round 636): a partial Tile blends samples and a published texture survives edits", [] {
+    ProceduralTexture t = r49_tex("Gradient");
+    CHECK(t.layers.size() == 1);
+    if (t.layers.empty()) return;
+    TextureLayer *tile = t.add("Tile");
+    CHECK(tile);
+    if (!tile) return;
+    tile->opacity = 0.5f;
+    const R53Eval published = r53_eval(t);
+    const float u = 0.125f, v = 0.25f;
+    // The linear gradient is 1 - U. A double repeat samples U = 0.25 here and blends it with U = 0.125.
+    const float height = 0.8125f;
+    const Vec3 expected_normal = normalize(Vec3(1.5f / 64.0f, 0.0f, 1.0f));
+    const auto check_published = [&] {
+      const TexPoint p = published.live->at(u, v);
+      CHECK(p.height == height && p.albedo == Vec3(height));
+      CHECK_NEAR(length(published.live->normal(u, v, &p.height) - expected_normal), 0.0f, 1e-6f);
+      CHECK_NEAR(length(published.live->normal(u, v) - expected_normal), 0.0f, 1e-6f);
+    };
+    check_published();
+    tile->enabled = false;
+    t.normal_strength = 0.0f;
+    const R53Eval edited = r53_eval(t);
+    tile->enabled = true;
+    t.normal_strength = 1.0f;
+    CHECK(edited.live->at(u, v).height == 0.875f);
+    CHECK(edited.live->normal(u, v) == Vec3(0.0f, 0.0f, 1.0f));
+    check_published();
+  });
 }
