@@ -5,7 +5,7 @@
 - **Requirements:** R-04 and Q-06.
 - **Decisions:** Existing ADRs 0056 and 0134 apply.
 - **Implementation:** Project implementer, independent test engineer and reviewer.
-- **PR:** Hub owns publication.
+- **PR:** [#503](https://github.com/EmilianoManaloIV/blendity/pull/503) against main. First published head 62a0b1f083b6e8be73276c65db31cd637cce68b0.
 
 ## Goal
 

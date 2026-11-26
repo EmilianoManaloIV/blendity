@@ -5,7 +5,7 @@
 - **Requirements:** Q-06 and existing PLY import behavior.
 - **Decisions:** ADR 0147 governs point-cloud attributes. No new architecture planned.
 - **Implementation:** Separate project implementer, test engineer and reviewer in sequence.
-- **PR:** Hub publication pending.
+- **PR:** [#503](https://github.com/EmilianoManaloIV/blendity/pull/503) against main. First published head 62a0b1f083b6e8be73276c65db31cd637cce68b0.
 
 ## Goal
 
