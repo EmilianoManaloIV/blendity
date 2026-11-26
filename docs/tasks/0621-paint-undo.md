@@ -1,6 +1,6 @@
 # 0621: Restore painted textures on Undo
 
-- **Status:** complete, independently reviewed for local Hub handoff
+- **Status:** in review
 - **Authorization:** Pass 35 Hub assignment, round 639, baseline 68dafe59.
 - **Requirements:** Q-05
 - **Decisions:** [ADR 0081](../decisions/0081-projection-painting-and-tile-undo.md) for the existing tile-based paint history.
