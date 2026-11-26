@@ -1807,6 +1807,207 @@ static void tests_round619() {
   });
 }
 
+/* ------------------------------------------------------------- round 633: disk PLY import */
+
+namespace {
+
+constexpr size_t kR633Batch = 8u << 20;
+constexpr size_t kR633MixedStride = 1 + 8 + 2 + 2 + 4 + 4 + 64 * 8;
+
+PointCloudPtr r633_compare_ply(const std::string &name, const std::string &bytes, size_t n, int degree, bool splats) {
+  const std::string path = r531_write(name + ".ply", bytes);
+  ImportResult disk, borrowed;
+  CHECK(import_ply_file(path, disk));
+  CHECK(import_ply_point_cloud(path, bytes, borrowed));
+  CHECK(disk.source == path && disk.source == borrowed.source && disk.error.empty() && disk.error == borrowed.error
+        && disk.notes == borrowed.notes && disk.summary == borrowed.summary);
+  CHECK(disk.nodes.size() == 1 && disk.nodes[0].name == name && disk.nodes[0].points && !disk.nodes[0].mesh);
+  if (disk.nodes.size() != 1 || !disk.nodes[0].points || borrowed.nodes.size() != 1 || !borrowed.nodes[0].points) return nullptr;
+  CHECK(disk.nodes[0].name == borrowed.nodes[0].name && !borrowed.nodes[0].mesh);
+  const PointCloud &cloud = *disk.nodes[0].points;
+  CHECK(cloud.name == name && cloud.count() == n && cloud.sh_degree == degree && cloud.is_splats() == splats);
+  r619_check_cloud(cloud, *borrowed.nodes[0].points);
+  return disk.nodes[0].points;
+}
+
+std::string r633_mixed_points(int format, size_t n) {
+  std::string header = format == 1 ? "ply\nformat binary_little_endian 1.0\n" : "ply\nformat binary_big_endian 1.0\n";
+  header += "element camera 2\nproperty short id\nelement vertex " + std::to_string(n) + "\n";
+  header += "property uchar diffuse_blue\nproperty double z\nproperty ushort diffuse_red\n"
+            "property short y\nproperty float diffuse_green\nproperty int x\n";
+  for (int k = 0; k < 64; k++) header += "property double unused_" + std::to_string(k) + "\n";
+  header += "element face 0\nproperty list uchar int vertex_indices\ncomment ";
+  header.resize(4092, 'a');  // The marker crosses the first header probe read.
+  std::string bytes = header + "\nend_header\r\n";
+  r531e_put(bytes, "short", 123, format);
+  r531e_put(bytes, "short", -456, format);
+  for (size_t i = 0; i < n; i++) {
+    r531e_put(bytes, "uchar", (double)(i % 256), format);
+    r531e_put(bytes, "double", (double)i * 0.25, format);
+    r531e_put(bytes, "ushort", (double)(i % 65536), format);
+    r531e_put(bytes, "short", (double)(i % 1000) - 500, format);
+    r531e_put(bytes, "float", (double)(i % 16) / 16, format);
+    r531e_put(bytes, "int", (double)i - 100, format);
+    bytes.append(64 * 8, '\0');
+  }
+  return bytes;
+}
+
+}  // namespace
+
+static void tests_round633() {
+  test("PLY disk import: padded, reordered mixed-width points keep their colours and order across batches in both byte orders", [] {
+    const size_t batch = kR633Batch / kR633MixedStride;
+    const size_t n = 2 * batch + 3;
+    for (int format : {1, 2}) {
+      const PointCloudPtr cloud =
+          r633_compare_ply(format == 1 ? "r633-padded-le" : "r633-padded-be", r633_mixed_points(format, n), n, 0, false);
+      if (!cloud || cloud->count() != n) continue;
+      for (size_t i : {batch - 1, batch, batch + 1, 2 * batch - 1, 2 * batch, n - 1}) {
+        const Vec3 p = cloud->position[i];
+        CHECK(p.x == 100.0f - (float)i && p.y == (float)i * 0.25f && p.z == 500.0f - (float)(i % 1000));
+      }
+    }
+  });
+
+  test("PLY disk import: a final full batch ends at EOF and a missing final byte is reported", [] {
+    const size_t n = 2 * (kR633Batch / kR633MixedStride);
+    std::string ply = r633_mixed_points(1, n);
+    r633_compare_ply("r633-full-batches", ply, n, 0, false);
+    ply.pop_back();
+    const std::string path = r531_write("r633-missing-final-byte.ply", ply);
+    ImportResult disk, borrowed;
+    CHECK(!import_ply_file(path, disk));
+    CHECK(!import_ply_point_cloud(path, ply, borrowed));
+    CHECK(disk.error == "PLY: the file ends before its points do" && disk.error == borrowed.error);
+    CHECK(disk.source == borrowed.source && disk.notes == borrowed.notes && disk.summary == borrowed.summary && disk.nodes.empty());
+  });
+
+  test("PLY disk import: a long header terminator line is accepted and a missing marker is rejected", [] {
+    const std::string header = "ply\nformat binary_little_endian 1.0\nelement vertex 1\n"
+                               "property float x\nproperty float y\nproperty float z\n";
+    std::string ply = header + "end_header" + std::string((1u << 20) + 8192, ' ') + "\n";
+    ply += r531e_floats({1, 2, 3});
+    ply.resize(kR633Batch + 1, '\0');
+    r633_compare_ply("r633-long-terminator", ply, 1, 0, false);
+
+    ply = header;
+    ply.resize(kR633Batch + 1, ' ');
+    const std::string path = r531_write("r633-no-terminator.ply", ply);
+    ImportResult disk, borrowed;
+    CHECK(!import_ply_file(path, disk));
+    CHECK(!import_ply_point_cloud(path, ply, borrowed));
+    CHECK(disk.error == "PLY: not a PLY file" && disk.error == borrowed.error && disk.nodes.empty());
+  });
+
+  test("PLY disk import: large files with an incomplete unused property or an empty predecessor use the whole-file reader", [] {
+    const std::string intro = "ply\nformat binary_little_endian 1.0\n";
+    const std::string vertex = "element vertex 2\nproperty float x\nproperty float y\nproperty float z\n";
+    const std::string headers[] = {
+      intro + vertex + "property float\n",
+      intro + "element camera 2\n" + vertex,
+    };
+    for (size_t i = 0; i < std::size(headers); i++) {
+      std::string ply = headers[i] + "end_header\n" + r531e_floats({1, 2, 3, 4, 5, 6});
+      ply.resize(kR633Batch + 1, '\0');
+      const std::string path = r531_write(strprintf("r633-whole-file-%zu.ply", i), ply);
+      ImportResult probe, disk, borrowed;
+      std::string whole;
+      CHECK(!try_import_binary_ply_point_cloud(path, whole, probe).has_value() && whole == ply);
+      CHECK(import_ply_file(path, disk) && import_ply_point_cloud(path, ply, borrowed));
+      CHECK(disk.source == borrowed.source && disk.notes == borrowed.notes && disk.summary == borrowed.summary);
+      CHECK(disk.nodes.size() == 1 && borrowed.nodes.size() == 1 && disk.nodes[0].points && borrowed.nodes[0].points);
+      if (disk.nodes.size() == 1 && borrowed.nodes.size() == 1 && disk.nodes[0].points && borrowed.nodes[0].points)
+        r619_check_cloud(*disk.nodes[0].points, *borrowed.nodes[0].points);
+    }
+  });
+
+  test("PLY import: a safely padded incomplete binary declaration keeps its whole-file values in both byte orders", [] {
+    for (int format : {1, 2}) {
+      std::string header = format == 1 ? "ply\nformat binary_little_endian 1.0\n" : "ply\nformat binary_big_endian 1.0\n";
+      header += "element vertex 2\nproperty float x\nproperty float y\nproperty float\nproperty float z\nend_header\n";
+      std::string body;
+      for (int value : {1, 2, 3, 4, 5, 6, 7}) r531e_put(body, "float", value, format);
+      const PointCloudPtr cloud = r633_compare_ply(format == 1 ? "r633-padded-incomplete-le" : "r633-padded-incomplete-be",
+                                                   header + body, 2, 0, false);
+      // The unused slot shifts z while the stored record stride stays three floats. The final z is in the padding.
+      if (!cloud || cloud->count() != 2) continue;
+      const Vec3 a = cloud->position[0], b = cloud->position[1];
+      CHECK(a.x == -1 && a.y == 4 && a.z == -2 && b.x == -4 && b.y == 7 && b.z == -5);
+    }
+  });
+
+  test("PLY disk import: degree-4 splats keep all six decoded arrays and the band-discard note across batches", [] {
+    const int n = (int)(kR633Batch / (89 * 4)) + 3;
+    const std::string ply = r531_ply(1, n, 24);
+    ImportResult out;
+    CHECK(import_ply_file(r531_write("r633-degree4-note.ply", ply), out));
+    CHECK(out.notes == std::vector<std::string>{"PLY: spherical harmonics of degree 4 - Blendity keeps bands 1 to 3"});
+    r633_compare_ply("r633-degree4", ply, (size_t)n, 3, true);
+  });
+
+  test("PLY disk import: vertex counts and skipped elements that exceed the file are refused with the borrowed reader's diagnostics", [] {
+    const std::string intro = "ply\nformat binary_little_endian 1.0\n";
+    const std::string xyz = "\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
+    const std::string body(kR633Batch + 1, '\0');
+    const char *elements[] = {
+      "element vertex 1000000",
+      "element camera 1000000000000000\nproperty double a\nelement vertex 3",
+      "element camera 1\nproperty list uchar float a\nelement vertex 3",
+      "element vertex 268435457",
+      "element vertex 0",
+      "element vertex 1000000\nproperty float",
+    };
+    for (size_t i = 0; i < std::size(elements); i++) {
+      const std::string ply = intro + elements[i] + xyz + body;
+      CHECK(ply_is_point_cloud(ply));
+      const std::string path = r531_write(strprintf("r633-short-%zu.ply", i), ply);
+      ImportResult disk, borrowed;
+      CHECK(!import_ply_file(path, disk));
+      CHECK(!import_ply_point_cloud(path, ply, borrowed));
+      CHECK(disk.source == path && !disk.error.empty() && disk.error == borrowed.error && disk.notes == borrowed.notes && disk.nodes.empty());
+    }
+  });
+
+  test("PLY disk import: large ASCII point files and binary triangle files keep their existing dispatch", [] {
+    std::string ascii = r531_ply(0, 3, 0);
+    ascii.append(kR633Batch, ' ');
+    r633_compare_ply("r633-ascii", ascii, 3, 0, true);
+
+    std::string triangle = "ply\nformat binary_little_endian 1.0\nelement vertex 3\n"
+                           "property float x\nproperty float y\nproperty float z\nelement face 1\n"
+                           "property list uchar int vertex_indices\nend_header\n";
+    triangle += r531e_floats({0, 0, 0, 1, 0, 0, 0, 1, 0});
+    r531e_put(triangle, "uchar", 3, 1);
+    for (int i : {0, 1, 2}) r531e_put(triangle, "int", i, 1);
+    triangle.append(kR633Batch, '\0');
+    ImportResult mesh;
+    CHECK(import_ply_file(r531_write("r633-triangle.ply", triangle), mesh));
+    CHECK(mesh.nodes.size() == 1 && !mesh.nodes[0].points && mesh.nodes[0].mesh && mesh.nodes[0].mesh->face_count() == 1);
+  });
+
+  test("PLY disk import: the editor command creates a named points object in one undo step", [] {
+    std::string ply = "ply\nformat binary_little_endian 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\n"
+                    + std::string("element user_data ") + std::to_string(kR633Batch) + "\nproperty uchar value\nend_header\n";
+    ply += r531e_floats({1, 2, 3, 4, 5, 6});
+    ply.append(kR633Batch, '\0');
+    const std::string path = r531_write("r633-editor-points.ply", ply);
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("import " + path);
+    ed.step_frame_headless();
+    GameObject *g = r530_find_cloud(ed);
+    CHECK(g && g->name == "r633-editor-points" && r530_count_clouds(ed) == 1);
+    const PointCloudPtr cloud = g ? g->get<PointCloudObject>()->data : nullptr;
+    CHECK(cloud && !cloud->is_splats() && cloud->count() == 2);
+    if (cloud && cloud->count() == 2)
+      CHECK(cloud->position[1].x == -4 && cloud->position[1].y == 6 && cloud->position[1].z == -5);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
@@ -1814,4 +2015,5 @@ void run_splats_tests() {
   tests_round561();
   tests_round567();
   tests_round619();
+  tests_round633();
 }
