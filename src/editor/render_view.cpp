@@ -1675,6 +1675,23 @@ void Editor::set_quality_tier(int tier) {
   struct Tier { float scale; int shadow, rays, rsm, fps; };
   static const Tier kTiers[3] = {{0.67f, 1024, 4, 128, 60}, {0.85f, 2048, 8, 256, 120}, {1.0f, 0, 0, 0, 144}};
   const Tier &t = kTiers[quality_tier_];
+  if (quality_tier_ == TierLow && (tier_shadow_cap_ == 0 || t.shadow < tier_shadow_cap_)) {
+    const size_t max_depth = (size_t)t.shadow * t.shadow;
+    auto trim = [&](auto &entry) {
+      if (entry.map.size > t.shadow) {
+        entry = {};
+      } else if (entry.map.depth.capacity() > max_depth) {
+        /* A smaller map may have inherited an oversized plane from the rasterizer. Keep its depth and cache key. */
+        auto &depth = entry.map.depth;
+        if (!entry.map.valid()) depth.clear();
+        std::vector<float>(depth).swap(depth);
+      }
+    };
+    for (ShadowEntry &e : shadow_cache_) trim(e);
+    for (ShadowLayer &l : shadow_static_) trim(l);
+    /* The viewport flushes before the editor can change tier. Interactive F12 has its own map and thread. */
+    trim_shadow_map_scratch(max_depth);
+  }
   view_scale_ = t.scale;
   tier_shadow_cap_ = t.shadow;
   tier_gi_rays_cap_ = t.rays;

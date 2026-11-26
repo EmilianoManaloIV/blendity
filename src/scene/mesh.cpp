@@ -3283,10 +3283,12 @@ void recalc_normals_outside(Mesh &m) {
    *    manifold edge must use it in opposite directions (BFS, Blender's
    *    bmo_recalc_face_normals does the same with a face stack). */
   std::vector<int> comp(nf, -1);
+  std::vector<uint8_t> closed;
   int ncomp = 0;
   std::vector<uint32_t> stack;
   for (size_t s = 0; s < nf; s++) {
     if (comp[s] >= 0) continue;
+    bool shell_closed = true;
     comp[s] = ncomp;
     stack.assign(1, (uint32_t)s);
     while (!stack.empty()) {
@@ -3297,7 +3299,10 @@ void recalc_normals_outside(Mesh &m) {
       for (uint32_t i = 0; i < n; i++) {
         uint32_t a = v[i], b = v[(i + 1) % n];
         const FaceList fs = ef.at(a, b);
-        if (fs.size() != 2) continue;
+        if (fs.size() != 2) {
+          shell_closed = false;
+          continue;
+        }
         uint32_t g = fs[0] == f ? fs[1] : fs[0];
         if (comp[g] >= 0) continue;
         comp[g] = ncomp;
@@ -3306,6 +3311,7 @@ void recalc_normals_outside(Mesh &m) {
         v = m.face_verts(f);
       }
     }
+    closed.push_back(shell_closed);
     ncomp++;
   }
   /* 2. Point each component outward: signed volume for closed shells,
@@ -3320,29 +3326,29 @@ void recalc_normals_outside(Mesh &m) {
     csum[comp[f]] += m.face_center(f);
     ccount[comp[f]]++;
   }
-  std::vector<uint8_t> closed(ncomp, 1);
-  for (size_t f = 0; f < nf; f++) {
-    const uint32_t *v = m.face_verts(f);
-    for (uint32_t i = 0; i < m.face_size(f); i++)
-      if (ef.at(v[i], v[(i + 1) % m.face_size(f)]).size() != 2) closed[comp[f]] = 0;
+  std::vector<uint8_t> use_volume(ncomp);
+  std::vector<uint8_t> flip(ncomp);
+  bool needs_fallback = false;
+  for (int c = 0; c < ncomp; c++) {
+    use_volume[c] = closed[c] && std::fabs(vol[c]) > 1e-12;
+    flip[c] = use_volume[c] && vol[c] < 0;
+    needs_fallback |= !use_volume[c];
   }
-  std::vector<float> far_d(ncomp, -1.0f);
-  std::vector<float> far_sign(ncomp, 1.0f);
-  for (size_t f = 0; f < nf; f++) {
-    int c = comp[f];
-    Vec3 ctr = csum[c] / (float)ccount[c];
-    Vec3 d = m.face_center(f) - ctr;
-    float l = length_sq(d);
-    if (l > far_d[c]) {
+  if (needs_fallback) {
+    std::vector<float> far_d(ncomp, -1.0f);
+    for (size_t f = 0; f < nf; f++) {
+      int c = comp[f];
+      if (use_volume[c]) continue;
+      Vec3 ctr = csum[c] / (float)ccount[c];
+      Vec3 d = m.face_center(f) - ctr;
+      float l = length_sq(d);
+      if (!(l > far_d[c])) continue;
       far_d[c] = l;
-      far_sign[c] = dot(m.face_normal(f), d) >= 0 ? 1.0f : -1.0f;
+      flip[c] = !(dot(m.face_normal(f), d) >= 0);
     }
   }
-  for (size_t f = 0; f < nf; f++) {
-    int c = comp[f];
-    bool flip = closed[c] && std::fabs(vol[c]) > 1e-12 ? vol[c] < 0 : far_sign[c] < 0;
-    if (flip) reverse_face(m, f);
-  }
+  for (size_t f = 0; f < nf; f++)
+    if (flip[comp[f]]) reverse_face(m, f);
   m.touch();
 }
 

@@ -12843,6 +12843,141 @@ static void tests_round621() {
   });
 }
 
+static void tests_round632() {
+  test("round 632 recalculate normals: mixed components keep exact winding and corner attributes", [] {
+    Mesh m;
+    m.positions = {
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1},
+        {0, 0, 9}, {0, -9, 18}, {9, 0, 9}, {0, 9, 9}, {-9, 0, 0},
+        {5, 0, 0}, {5, 2, 0}, {5, 0, 2}, {5, 0, -2}, {7, 0, 0},
+        {0, 0, 0}, {1e-12f, 0, 0}, {0, 1e-12f, 0}, {0, 0, 1e-12f},
+    };
+    /* Closed tetrahedron, with only its first face inward. */
+    m.add_face({1, 2, 0});
+    m.add_face({0, 1, 3});
+    m.add_face({0, 3, 2});
+    m.add_face({1, 2, 3});
+    /* In this open fan the first and last faces tie for farthest from the center.
+     * The first points toward it and the last points away. The first wins the tie,
+     * and the middle face's two reversals leave it in its original order. */
+    m.add_face({4, 5, 6});
+    m.add_face({7, 6, 4});
+    m.add_face({4, 7, 8});
+    /* Three faces on one edge. Each has its own component and center. */
+    m.add_face({9, 11, 10});
+    m.add_face({9, 10, 12});
+    m.add_face({9, 10, 13});
+    /* Inward tiny closed tetrahedron. Its volume is below the cutoff and its
+     * face normals round to zero, so the fallback keeps its input winding. */
+    m.add_face({15, 16, 14});
+    m.add_face({17, 15, 14});
+    m.add_face({16, 17, 14});
+    m.add_face({17, 16, 15});
+
+    m.uvs.resize(m.corner_count());
+    m.color_attributes.push_back(m.make_color("Corners", ColorAttribute::Domain::Corner, {}));
+    for (size_t k = 0; k < m.corner_count(); k++) {
+      const float n = float(k + 1) / 64.0f;
+      m.uvs[k] = {n, 1 - n};
+      m.color_attributes.front().rgba[k] = {n, 1 - n, 0.25f, 1};
+    }
+    const Mesh before = m;
+    meshops::recalc_normals_outside(m);
+    CHECK(m.positions == before.positions);
+    CHECK(m.face_offsets == before.face_offsets);
+    const bool corner_layers_fit = m.has_uvs() && m.color_attributes.size() == 1 &&
+                                   m.color_fits(m.color_attributes.front());
+    CHECK(corner_layers_fit);
+    if (!corner_layers_fit || m.corner_count() != before.corner_count() || m.face_offsets != before.face_offsets) return;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const bool reversed = f == 0 || f == 4 || f == 6;
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) {
+        const uint32_t src = reversed ? m.face_offsets[f + 1] - 1 - (k - m.face_offsets[f]) : k;
+        CHECK(m.corner_verts[k] == before.corner_verts[src]);
+        CHECK(m.uvs[k].x == before.uvs[src].x && m.uvs[k].y == before.uvs[src].y);
+        CHECK(m.color_attributes.front().corners[k] == before.color_attributes.front().corners[src]);
+        const Vec4 got = m.color_attributes.front().rgba[k], want = before.color_attributes.front().rgba[src];
+        CHECK(got.xyz() == want.xyz() && got.w == want.w);
+      }
+    }
+    Mesh empty;
+    meshops::recalc_normals_outside(empty);
+    CHECK(empty.face_count() == 0 && empty.corner_count() == 0);
+  });
+
+  test("round 632 recalculate normals: a shell with a nonfinite vertex keeps its winding and UVs", [] {
+    Mesh m = *primitives::cube();
+    meshops::flip_normals(m);
+    m.positions[0].x = std::numeric_limits<float>::quiet_NaN();
+    const Mesh original = m;
+    meshops::recalc_normals_outside(m);
+    CHECK(m.positions.size() == original.positions.size() &&
+          std::memcmp(m.positions.data(), original.positions.data(), original.positions.size() * sizeof(Vec3)) == 0);
+    CHECK(m.face_offsets == original.face_offsets);
+    CHECK(m.corner_verts == original.corner_verts);
+    CHECK(m.uvs.size() == original.uvs.size());
+    for (size_t k = 0; k < std::min(m.uvs.size(), original.uvs.size()); k++)
+      CHECK(m.uvs[k].x == original.uvs[k].x && m.uvs[k].y == original.uvs[k].y);
+  });
+
+  for (const char *preset : {"Unity", "Blender"}) {
+    const std::string name = strprintf("round 632 recalculate normals: Shift+N corrects winding and Undo restores it (%s)", preset);
+    test(name.c_str(), [preset] {
+      Editor ed;
+      r34_open(ed);
+      ed.command(std::string("keymap ") + preset);
+      const MeshPtr outward = primitives::cube();
+      const MeshPtr inward = std::make_shared<Mesh>(*outward);
+      meshops::flip_normals(*inward);
+      const Mesh original = *inward;
+      GameObject *object = ed.scene().create("Normals fixture");
+      const auto id = object->id;
+      object->add<MeshFilter>()->mesh = inward;
+      object->add<MeshRenderer>();
+      ed.commit_change("Add normals fixture");
+      ed.step_frame_headless();
+      ed.command("select Normals fixture");
+      ed.command("edit face");
+      ed.step_frame_headless();
+      CHECK(ed.in_edit_mode());
+
+      const Recti view = ed.scene_view_rect();
+      const int x = view.x + view.w / 2, y = view.y + view.h / 2;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+      const auto press = [&](int key, int mods) {
+        platform::Event e;
+        e.type = R34ET::KeyDown;
+        e.key = key;
+        e.mods = mods;
+        ed.step_frame_headless({e});
+        e.type = R34ET::KeyUp;
+        e.mods = 0;
+        ed.step_frame_headless({e});
+      };
+      const auto check_mesh = [&](const Mesh &expected) {
+        const GameObject *current = ed.scene().find(id);
+        const MeshFilter *filter = current ? current->get<MeshFilter>() : nullptr;
+        CHECK(filter && filter->mesh);
+        if (!filter || !filter->mesh) return;
+        const Mesh &mesh = *filter->mesh;
+        CHECK(mesh.positions == expected.positions);
+        CHECK(mesh.face_offsets == expected.face_offsets);
+        CHECK(mesh.corner_verts == expected.corner_verts);
+        CHECK(mesh.uvs.size() == expected.uvs.size());
+        for (size_t k = 0; k < std::min(mesh.uvs.size(), expected.uvs.size()); k++)
+          CHECK(mesh.uvs[k].x == expected.uvs[k].x && mesh.uvs[k].y == expected.uvs[k].y);
+      };
+
+      press(platform::KEY_N, platform::MOD_SHIFT);
+      check_mesh(*outward);
+      CHECK(inward->corner_verts == original.corner_verts);
+      press(platform::KEY_Z, platform::MOD_CTRL);
+      CHECK(ed.in_edit_mode());
+      check_mesh(original);
+    });
+  }
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -12900,4 +13035,5 @@ void run_modeling_tests() {
   run_vertex_paint_tests();
   tests_round549();
   tests_round621();
+  tests_round632();
 }
