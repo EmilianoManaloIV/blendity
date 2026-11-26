@@ -785,6 +785,11 @@ void Editor::paint_end_stroke() {
     l->stamp = l->stamp == std::numeric_limits<int>::max() ? 0 : l->stamp + 1;
     paint_delta_->stamp_after = l->stamp;
     paint_surface_->touch();
+    // Replacing an undone stroke can reuse the old stamp before the worker has seen the undo.
+    const std::string &asset = paint_surface_->asset_path;
+    const uint64_t hash = procedural_texture_cache_hash(*paint_surface_);
+    if (surface_job_ && surface_job_->path == asset && surface_job_->hash == hash) surface_job_->cancel.store(true, std::memory_order_relaxed);
+    if (procedural_texture_cached(asset, hash) || procedural_texture_trimmed(asset, hash)) procedural_texture_cache_forget(asset);
   }
   commit_undo();  // (a change made during the stroke is its own step, before this one)
   UndoState s;

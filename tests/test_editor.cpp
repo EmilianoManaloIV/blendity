@@ -16967,7 +16967,8 @@ static void tests_round639_paint_undo() {
     ed.command("paint size 20");
     ed.command("window Textures");
     r34_steps(ed, 2);
-    ed.command(strprintf("layout H(0.42,L(%d:0),L(%d:0))", (int)WindowKind::Scene, (int)WindowKind::Textures));
+    const std::string texture_layout = strprintf("layout H(0.42,L(%d:0),L(%d:0))", (int)WindowKind::Scene, (int)WindowKind::Textures);
+    ed.command(texture_layout);
     r34_steps(ed, 2);
 
     const auto painted = ed.texture_selected_for_test();
@@ -17087,12 +17088,33 @@ static void tests_round639_paint_undo() {
     history(platform::KEY_Y);
     same(second, "both strokes redone", 2);
 
+    ed.command("perf wait");
+    const uint64_t second_hash = painted->hash();
+    ed.command(strprintf("layout L(%d:0)", (int)WindowKind::Scene));
+    ed.step_frame_headless();
+    CHECK(card("R639Painted").empty());
     history(platform::KEY_Z);
     ed.command("paint color 0 1 0");
-    r34_click(ed, pane.x + pane.w * 3 / 4, pane.y + pane.h / 4);
-    ed.step_frame_headless();
-    const State new_branch = state("different second stroke", 2);
+    ed.command("paint 2d dab 0.75 0.75");
+    CHECK(painted->hash() == second_hash && card("R639Painted").empty());
+    ed.command(texture_layout);
+    r34_steps(ed, 2);
+    const State new_branch = state("reopened after a different second stroke", 2);
     CHECK(new_branch.card != second.card && new_branch.albedo != second.albedo);
+    ed.command("perf wait");
+    ed.step_frame_headless();
+    const Recti reopened = ed.texture_ui_rect_for_test("preview");
+    CHECK(!reopened.empty() && new_branch.albedo.size() == 64 * 64 * 4);
+    if (!reopened.empty() && new_branch.albedo.size() == 64 * 64 * 4) {
+      // Check centers of the discarded, retained, and replacement marks in the selected preview.
+      for (int quarter : {1, 2, 3}) {
+        const int sx = reopened.w * quarter / 4, sy = reopened.h / 4;
+        const size_t i = ((size_t)(sy * 64 / reopened.h) * 64 + sx * 64 / reopened.w) * 4;
+        const uint8_t *p = &new_branch.albedo[i];
+        const uint32_t expected = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+        CHECK(ed.framebuffer().row(reopened.y + sy)[reopened.x + sx] == expected);
+      }
+    }
     history(platform::KEY_Y);
     same(new_branch, "discarded stroke cannot be redone", 2);
   });

@@ -110,9 +110,9 @@ void collect_texture_paths(const stdfs::path &dir, const std::string &root_lower
   }
 }
 
-/* A small picture of one output, re-made when the texture's hash changes. */
+/* A small picture of one output. A replacement Paint stroke can reuse the undone stroke's hash. */
 struct TexThumb {
-  uint64_t hash = 0;
+  uint64_t hash = 0, version = 0;
   int which = -1, size = 0;
   std::vector<uint32_t> px;
 };
@@ -149,8 +149,8 @@ TexThumb &texture_thumb_slot(const ProceduralTexture &t, int which, int size) {
   return cache[t.asset_path + "#" + std::to_string(which) + "@" + std::to_string(size)];
 }
 
-bool thumb_current(const TexThumb &th, uint64_t hash, int which, int size) {
-  return th.hash == hash && th.size == size && th.which == which && !th.px.empty();
+bool thumb_current(const TexThumb &th, const ProceduralTexture &t, uint64_t hash, int which, int size) {
+  return th.hash == hash && th.version == t.version && th.size == size && th.which == which && !th.px.empty();
 }
 
 void update_thumb(TexThumb &th, const ProceduralTexture &t, uint64_t hash, int which, int size) {
@@ -160,6 +160,7 @@ void update_thumb(TexThumb &th, const ProceduralTexture &t, uint64_t hash, int w
   small.width = small.height = size;
   to_argb(small.output(which), th.px);
   th.hash = hash;
+  th.version = t.version;
   th.size = size;
   th.which = which;
 }
@@ -167,7 +168,7 @@ void update_thumb(TexThumb &th, const ProceduralTexture &t, uint64_t hash, int w
 const TexThumb &texture_thumb(ProceduralTexture &t, int which, int size) {
   const uint64_t hash = t.hash();
   TexThumb &th = texture_thumb_slot(t, which, size);
-  if (!thumb_current(th, hash, which, size)) update_thumb(th, t, hash, which, size);
+  if (!thumb_current(th, t, hash, which, size)) update_thumb(th, t, hash, which, size);
   return th;
 }
 
@@ -464,7 +465,7 @@ void Editor::draw_textures_window(const Recti &r) {
     ProceduralTexture &t = *list[i];
     TexThumb &th = texture_thumb_slot(t, 0, kGridThumbSize);
     const uint64_t hash = t.hash();
-    if (!thumb_current(th, hash, 0, kGridThumbSize) && queued.insert(&th).second) {
+    if (!thumb_current(th, t, hash, 0, kGridThumbSize) && queued.insert(&th).second) {
       const PendingGridThumb work{&th, &t, hash};
       // Decode file-backed layers one thumbnail at a time. Loading full-size
       // images across the whole batch can multiply transient memory and I/O.
