@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: Low-end Linux VM profiles
+on:
+  push:
+    branches: [diagnostics/0622-low-end-vm]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: low-end-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            first: pi-sbc
+            second: arm-notebook
+          - runner: ubuntu-24.04
+            arch: x86_64
+            first: school-laptop
+            second: thin-client
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      BLENDITY_NO_LIBS: '1'
+      BLENDITY_NO_OPTIX: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identify native runner and capture build provenance
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          RESULTS="$RUNNER_TEMP/low-end-vm"
+          echo "RESULTS=$RESULTS" >> "$GITHUB_ENV"
+          mkdir "$RESULTS"
+          {
+            git rev-parse HEAD HEAD^{tree}
+            uname -a
+            lscpu
+            c++ --version
+            cat /etc/os-release
+            echo "image=$ImageOS version=$ImageVersion run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+          } > "$RESULTS/runner.txt"
+      - name: Supply approved ARM64 headers when absent
+        if: matrix.arch == 'aarch64'
+        run: |
+          if [[ ! -r /usr/include/X11/Xlib.h ]]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libx11-dev
+          fi
+      - name: Build dependency-free release editor
+        run: bash build.sh release app
+      - name: Measure first profile
+        id: first
+        run: python3 tools/dev/low_end_vm.py "${{ matrix.first }}" "$PWD/dist/linux/Blendity" "$RESULTS/${{ matrix.first }}"
+      - name: Measure second profile
+        if: success() || failure() && steps.first.outcome == 'failure'
+        run: python3 tools/dev/low_end_vm.py "${{ matrix.second }}" "$PWD/dist/linux/Blendity" "$RESULTS/${{ matrix.second }}"
+      - name: Preserve profile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: low-end-vm-${{ matrix.arch }}
+          path: ${{ runner.temp }}/low-end-vm/
+          retention-days: 7
+          if-no-files-found: error
