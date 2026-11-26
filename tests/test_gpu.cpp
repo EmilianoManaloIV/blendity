@@ -2,6 +2,8 @@
 // blendity_tests: the gpu tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/core/view_perf.h"
+#include "../src/render/gpu_corner_arena.h"
+#include "../src/render/gpu_vk.h"
 #include <cstring>
 #include <numeric>
 #include <thread>
@@ -8545,6 +8547,84 @@ inline bool draw(Rig &r, const std::vector<gpu::RasterInstance> &inst, const gpu
 
 }  // namespace r565
 
+static void tests_round614_gpu() {
+  test("round 614: a still transparent editor view skips corner comparison and upload, while an orbit changes the drawn picture", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r471_world(ed, 24, 4);
+    auto *r = ed.gpu_raster_for_test();
+    if (!r || !r->can_draw_see_through()) return;
+    ed.command("camera 0 6 9 0 0 0");
+    r34_steps(ed, 2);
+    const auto before = r->detail();
+    const auto still = r471_pic(ed);
+    ed.scene_cache_reset_for_test();
+    r34_steps(ed, 1);
+    const auto after = r->detail();
+    CHECK(after.see_generation_hits > before.see_generation_hits);
+    CHECK(after.see_compared == before.see_compared && after.see_sent == before.see_sent);
+    CHECK(r471_pic(ed) == still);
+    CHECK(ed.scene_on_gpu_for_test());
+    CHECK(r471_whole_differs(ed) == 0);
+    ed.command("camera 4 6 9 0 0 0");
+    r34_steps(ed, 1);
+    CHECK(r->detail().see_sent > after.see_sent && r471_pic(ed) != still);
+    CHECK(r471_whole_differs(ed) == 0);
+  });
+}
+
+static void tests_round610_gpu() {
+  test("filtered camera lighting: display, depth, IDs and linear light match separate lighting on the same card (round 610)", [] {
+    r565::Rig rig;
+    const bool require_pair = std::getenv("BLENDITY_TEST_REQUIRE_PAIRED_LIGHTING") != nullptr;
+    const bool require_ray = std::getenv("BLENDITY_TEST_REQUIRE_TRACED_SHADOWS") != nullptr;
+    if (!rig.open() || !rig.g->can_draw_hdr()) {
+      CHECK(!require_pair && !require_ray);
+      return;
+    }
+    const auto instances = rig.plain(6);
+    auto frame = rig.frame(r565::Rig::three_lights(), 512, true);
+    frame.want_hdr = true;
+    r565::Pic separate, candidate;
+    std::vector<float> linear((size_t)rig.W * rig.H * 4), reference(linear.size());
+    std::string err;
+    const bool ray_capable = rig.g->can_trace_shadows();
+    if (require_ray) CHECK(ray_capable);
+    for (int variant = 0; variant < (ray_capable ? 3 : 1); ++variant) {
+      frame.rt_shadows = variant != 0;
+      const bool missing_traced_hdr = variant == 2;
+      for (int background : {0, 1, 2}) {
+        frame.background = background;
+        rig.g->separate_lighting_for_test(true, missing_traced_hdr);
+        uint64_t start = rig.g->detail().lighting_draws;
+        CHECK(r565::draw(rig, instances, frame, separate));
+        const bool traced = frame.rt_shadows && rig.g->can_trace_shadows() && rig.g->rt_shadow_stats().tlas_builds > 0;
+        if (require_ray && frame.rt_shadows) CHECK(traced);
+        CHECK(rig.g->detail().lighting_draws == start + 2);
+        CHECK(rig.g->read_hdr(frame.slot, reference.data(), &err));
+        rig.g->separate_lighting_for_test(false, missing_traced_hdr);
+        start = rig.g->detail().lighting_draws;
+        CHECK(r565::draw(rig, instances, frame, candidate));
+        const uint64_t draws = rig.g->detail().lighting_draws - start;
+        std::printf("    ray variant %d, background %d: %llu lighting draw(s) with optional paired targets\n", variant, background, (unsigned long long)draws);
+        if (traced && missing_traced_hdr) CHECK(draws == 2);
+        else if (require_pair) CHECK(draws == 1);
+        else CHECK(draws == 1 || draws == 2);  // Optional on other drivers.
+        CHECK(rig.g->read_hdr(frame.slot, linear.data(), &err));
+        CHECK(candidate.shows_objects() && separate.same(candidate));
+        CHECK(linear == reference);
+      }
+    }
+    frame.want_hdr = false;
+    const uint64_t start = rig.g->detail().lighting_draws;
+    CHECK(r565::draw(rig, instances, frame, candidate));
+    CHECK(rig.g->detail().lighting_draws == start + 1);
+  });
+}
+
 static void tests_round565_gpu() {
   test("a card frame's parts are counted: frames, draws, binds, instances, lights and pixels rise by what each frame held, the card's and the host's times are finite and never fall, and the parts add up to the frame's own time (round 565; skipped without a GPU)", [] {
     r565::Rig rig;
@@ -8667,10 +8747,11 @@ static void tests_round565_gpu() {
       return v;
     };
     /* Draws the corners in a slot of a raster. */
-    const auto draw = [&](r565::Rig &r, const std::vector<gpu::SeeCorner> &see, int slot, r565::Pic &pic) {
+    const auto draw = [&](r565::Rig &r, const std::vector<gpu::SeeCorner> &see, int slot, r565::Pic &pic, uint64_t generation = 0) {
       gpu::RasterFrame fr = r.frame({r565::Rig::three_lights()[0]}, 0, false);
       fr.slot = slot;
       fr.see_through = see;
+      fr.see_generation = generation;
       return r565::draw(r, inst, fr, pic);
     };
     const auto counts = [](const r565::Rig &r) { return std::make_pair((uint64_t)r.g->detail().see_sent, (uint64_t)r.g->detail().see_kept); };
@@ -8782,6 +8863,67 @@ static void tests_round565_gpu() {
     CHECK(draw(keep, A, 0, pa8));  // (and now it is held)
     const auto c8c = counts(keep);
     CHECK(c8c.first == c8b.first && c8c.second == c8b.second + 1);
+    // Round 614: a different generation may still be byte-identical. Once verified, the
+    // next use of that generation needs neither a host comparison nor an upload.
+    const auto unkeyed = keep.g->detail();
+    CHECK(draw(keep, A, 0, pa, 11));
+    const auto adopted = keep.g->detail();
+    CHECK(adopted.see_compared == unkeyed.see_compared + 1 && adopted.see_sent == unkeyed.see_sent);
+    CHECK(adopted.see_generation_hits == unkeyed.see_generation_hits && pa.same(ra8));
+    CHECK(draw(keep, none, 0, empty0) && draw(keep, B, 1, pb, 12));
+    const auto other = keep.g->detail();
+    CHECK(draw(keep, A, 0, pa2, 11));
+    auto next = keep.g->detail();
+    CHECK(next.see_generation_hits == other.see_generation_hits + 1 && next.see_compared == other.see_compared && next.see_sent == other.see_sent);
+    CHECK(pa2.same(ra8) && pb.same(rpb));
+    keep.g->fail_next_frame_for_test();
+    CHECK(!draw(keep, B, 0, lost, 12));
+    const auto failed = keep.g->detail();
+    CHECK(draw(keep, B, 0, pb, 12));
+    next = keep.g->detail();
+    CHECK(next.see_sent == failed.see_sent + 1 && next.see_generation_hits == failed.see_generation_hits && pb.same(rpb));
+    CHECK(draw(keep, A, 0, pa, 0));
+    CHECK(draw(keep, B, 0, pb, 12));
+    next = keep.g->detail();
+    CHECK(next.see_sent == failed.see_sent + 3 && pa.same(ra8) && pb.same(rpb));
+    const auto resend_before = resend.g->detail();
+    CHECK(draw(resend, A, 0, pa, 11) && draw(resend, A, 0, pa2, 11));
+    const auto resend_after = resend.g->detail();
+    CHECK(resend_after.see_sent == resend_before.see_sent + 2 && resend_after.see_compared == resend_before.see_compared);
+    CHECK(resend_after.see_generation_hits == 0 && pa.same(ra8) && pa2.same(ra8));
+
+    /* The card stages the new corners before checking instance index ranges. A refused frame never records the copy. */
+    auto invalid = inst;
+    invalid[0].first_index = 100;
+    invalid[0].index_count = 3;  // past the single-quad floor mesh
+    gpu::RasterFrame retry = keep.frame({r565::Rig::three_lights()[0]}, 0, false);
+    retry.slot = 0;
+    retry.see_through = A;
+    retry.see_generation = 11;
+    keep.g->set_instances(invalid);
+    std::string refusal;
+    const auto before_refusal = keep.g->detail();
+    const auto before_recording = keep.g->submits();
+    CHECK(!keep.g->render_async(retry, &refusal));
+    CHECK(refusal.find("part past its mesh") != std::string::npos);
+    const auto refused = keep.g->detail();
+    CHECK(refused.see_sent == before_refusal.see_sent + 1 && keep.g->submits() == before_recording);
+
+    /* Abort the repaired frame after recording, then submit the same generation and read it back. */
+    keep.g->set_instances(inst);
+    keep.g->fail_next_frame_for_test();
+    CHECK(!keep.g->render_async(retry, &refusal));
+    const auto aborted = keep.g->detail();
+    CHECK(aborted.see_sent == refused.see_sent + 1 && keep.g->submits() == before_recording);
+    CHECK(keep.g->render_async(retry, &refusal));
+    const auto submitted = keep.g->detail();
+    CHECK(submitted.see_sent == aborted.see_sent + 1 && keep.g->submits() == before_recording + 1);
+    CHECK(draw(keep, A, 0, pa, 11) && pa.same(ra8));
+    const auto read_back = keep.g->detail();
+    CHECK(read_back.see_generation_hits == submitted.see_generation_hits + 1);
+    CHECK(read_back.see_sent == submitted.see_sent && read_back.see_compared == submitted.see_compared);
+    CHECK(draw(keep, B, 1, pb, 12) && pb.same(rpb));
+    CHECK(keep.g->detail().see_generation_hits == read_back.see_generation_hits + 1);
     /* The resend raster never keeps. */
     const auto r2 = counts(resend);
     CHECK(r2.second == r0.second);
@@ -9095,6 +9237,179 @@ static void tests_round564_gpu() {
   });
 }
 
+static void tests_round616_gpu() {
+  test("Vulkan device creation requests the advertised portability subset and preserves swapchain support (round 616)", [] {
+    using gpu::vk::base_device_extensions;
+    auto names = [](bool portability_subset, bool swapchain) {
+      const auto extensions = base_device_extensions(portability_subset, swapchain);
+      return std::vector<std::string>(extensions.begin(), extensions.end());
+    };
+    CHECK(names(false, false).empty());
+    CHECK((names(false, true) == std::vector<std::string>{"VK_KHR_swapchain"}));
+    CHECK((names(true, false) == std::vector<std::string>{"VK_KHR_portability_subset"}));
+    CHECK((names(true, true) == std::vector<std::string>{"VK_KHR_swapchain", "VK_KHR_portability_subset"}));
+  });
+}
+
+/* Supply the actual triangle positions and a nonuniform lightmap coordinate on every corner. */
+static std::vector<float> r620_baked_corners(const RenderMesh &mesh, float u) {
+  std::vector<float> corners;
+  corners.reserve(mesh.indices.size() * 8);
+  for (uint32_t i : mesh.indices) {
+    const Vec3 p = mesh.positions[i];
+    corners.insert(corners.end(), {p.x, p.y, p.z, u + p.x * 0.1f, 0.5f, 0.0f, 0.0f, 0.0f});
+  }
+  return corners;
+}
+
+static void tests_round620_gpu() {
+  test("baked corner arena: a small request uses compact storage on constrained devices and keeps the large-card reserve (round 620)", [] {
+    constexpr uint64_t mib = 1ull << 20;
+    constexpr uint64_t triangle = 24 * sizeof(float);
+    CHECK(gpu::corner_arena_compact(true, 16384));
+    CHECK(gpu::corner_arena_compact(false, 4096));
+    CHECK(!gpu::corner_arena_compact(false, 4097));
+    CHECK(!gpu::corner_arena_compact(false, 0));
+    CHECK((gpu::corner_arena_sizes(triangle, 0, 128 * mib, true) == std::array<uint64_t, 3>{mib, triangle, triangle}));
+    CHECK((gpu::corner_arena_sizes(triangle, 0, 128 * mib, false) == std::array<uint64_t, 3>{64 * mib, 16 * mib, triangle}));
+
+    const uint64_t need = mib + triangle;
+    CHECK(gpu::corner_arena_sizes(need, mib, 128 * mib, true)[0] == 2 * mib);
+    CHECK(gpu::corner_arena_sizes(need, mib, 128 * mib, false)[0] == 64 * mib);
+    const uint64_t limit = need + triangle;
+    for (bool compact : {true, false}) {
+      const auto sizes = gpu::corner_arena_sizes(need, mib, limit, compact);
+      CHECK(sizes.front() == limit);
+      CHECK(sizes.back() == need);
+      CHECK(std::all_of(sizes.begin(), sizes.end(), [=](uint64_t size) { return size >= need && size <= limit; }));
+      const auto exact = gpu::corner_arena_sizes(need, mib, need, compact);
+      CHECK(std::all_of(exact.begin(), exact.end(), [=](uint64_t size) { return size == need; }));
+    }
+  });
+
+  test("baked corner arena: only requests through 4 MiB use compact growth (round 620)", [] {
+    constexpr uint64_t mib = 1ull << 20;
+    constexpr uint64_t boundary = 4 * mib;
+    constexpr uint64_t device_limit = 128 * mib;
+    /* An earlier exact-size retry can leave a capacity whose double exceeds the compact ceiling. */
+    for (uint64_t need : {boundary - 1, boundary}) {
+      const auto sizes = gpu::corner_arena_sizes(need, 3 * mib, device_limit, true);
+      CHECK((sizes == std::array<uint64_t, 3>{boundary, need, need}));
+    }
+
+    const uint64_t above = boundary + 1;
+    const auto transition = gpu::corner_arena_sizes(above, boundary, device_limit, true);
+    CHECK((transition == std::array<uint64_t, 3>{64 * mib, 16 * mib, above}));
+    const auto limited = gpu::corner_arena_sizes(above, boundary, 8 * mib, true);
+    CHECK((limited == std::array<uint64_t, 3>{8 * mib, 8 * mib, above}));
+
+    constexpr uint64_t large_first = 40 * mib;
+    const auto first = gpu::corner_arena_sizes(large_first, 4096, device_limit, true);
+    CHECK((first == std::array<uint64_t, 3>{80 * mib, 80 * mib, large_first}));
+    CHECK(first == gpu::corner_arena_sizes(large_first, 4096, device_limit, false));
+  });
+
+  test("baked corner arena: split blocks keep their own lightmap pixels while neighbours are reused and retired (round 620)", [] {
+    r565::Rig rig;
+    if (!rig.open()) return;
+    if (!rig.g->can_highlight_faces()) {
+      std::printf("    no fragment primitive IDs for baked lighting: skipped\n");
+      return;
+    }
+
+    std::string err;
+    Texture tex;
+    tex.srgb = false;
+    tex.is_float = true;
+    tex.width = 2;
+    tex.height = 1;
+    tex.levels.push_back({2, 1, {}, {{2.0f, 0.1f, 0.1f, 1.0f}, {0.1f, 0.1f, 2.0f, 1.0f}}});
+    const int page = rig.g->add_texture(tex, &err);
+    CHECK(page >= 0);
+    if (page < 0) return;
+
+    const MeshPtr cube = primitives::cube(1.0f);
+    const std::vector<float> red = r620_baked_corners(cube->render_mesh(), 0.25f);
+    const std::vector<float> blue = r620_baked_corners(cube->render_mesh(), 0.75f);
+    const int tris = (int)(red.size() / 24);
+    std::vector<float> hole = red;
+    hole.insert(hole.end(), blue.begin(), blue.end());
+    hole.insert(hole.end(), red.begin(), red.end());
+    const auto upload = [&](const std::vector<float> &corners) {
+      const int base = rig.g->add_corners(corners.data(), corners.size(), &err);
+      if (base < 0) std::printf("    add_corners failed: %s\n", err.c_str());
+      return base;
+    };
+
+    std::vector<gpu::RasterInstance> inst = {
+        rig.make(rig.cube, {-1, 0, 0}, {1, 1, 1}, 1),
+        rig.make(rig.cube, {1, 0, 0}, {1, 1, 1}, 2),
+    };
+    for (gpu::RasterInstance &in : inst) {
+      in.baked = true;
+      in.lightmap = page;
+    }
+    const gpu::RasterFrame frame = rig.frame({}, 0, false);
+    const auto draw = [&](int left, int right, r565::Pic &pic) {
+      inst[0].corner_base = left;
+      inst[1].corner_base = right;
+      return r565::draw(rig, inst, frame, pic);
+    };
+
+    const int first = upload(hole), last = upload(blue);
+    CHECK(first == 0 && last == 3 * tris);
+    if (first != 0 || last != 3 * tris) return;
+    r565::Pic reference, changed, reset, after;
+    const bool drew = draw(first, last, reference) && draw(first + tris, first, changed) && draw(last, last, reset);
+    CHECK(drew);
+    if (!drew) return;
+    /* Make sure a bad block changes both visible objects in this fixture. */
+    CHECK(reference.shows_objects() && reference.ids == changed.ids && reference.depth == changed.depth);
+    bool changed_left = false, changed_right = false;
+    for (size_t i = 0; i < reference.color.size(); i++) {
+      if (reference.color[i] == changed.color[i]) continue;
+      changed_left |= reference.ids[i] == 1;
+      changed_right |= reference.ids[i] == 2;
+    }
+    CHECK(changed_left && changed_right);
+
+    /* Rejected lengths must leave the live blocks readable. The oversize request must be rejected before reading data. */
+    const size_t beyond_limit = ((size_t{1} << 31) / sizeof(float) / 24 + 1) * 24;
+    for (size_t invalid : {size_t{23}, beyond_limit}) {
+      err.clear();
+      CHECK(rig.g->add_corners(red.data(), invalid, &err) < 0 && !err.empty());
+    }
+    CHECK(draw(first, last, after) && reference.same(after));
+
+    for (int pass = 0; pass < 6; pass++) {
+      rig.g->remove_corners(first, hole.size());
+      const int left = upload(red), neighbour = upload(blue), end = upload(red);
+      CHECK(left == first && neighbour == first + tris && end == first + 2 * tris);
+      if (left != first || neighbour != first + tris || end != first + 2 * tris) return;
+      const int extra = upload(red);
+      CHECK(extra == last + tris);
+      if (extra != last + tris) return;
+      CHECK(draw(left, last, after) && reference.same(after));
+      CHECK(draw(neighbour, end, after) && changed.same(after));
+      CHECK(draw(neighbour, extra, after) && changed.same(after));
+      /* Retire the split blocks in a different order from their allocation. */
+      rig.g->remove_corners(extra, red.size());
+      rig.g->remove_corners(neighbour, blue.size());
+      rig.g->remove_corners(left, red.size());
+      rig.g->remove_corners(end, red.size());
+      const int merged = upload(hole);
+      CHECK(merged == first);
+      if (merged != first) return;
+    }
+
+    rig.g->remove_corners(first, hole.size());
+    rig.g->remove_corners(last, blue.size());
+    const int again = upload(blue);
+    CHECK(again == first);
+    if (again == first) CHECK(draw(again, again, after) && reset.same(after));
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -9144,6 +9459,10 @@ void run_gpu_tests() {
   tests_round520_gpu();
   tests_round521_gpu();
   tests_round565_gpu();
+  tests_round610_gpu();
+  tests_round614_gpu();
   tests_round563_gpu();
   tests_round564_gpu();
+  tests_round616_gpu();
+  tests_round620_gpu();
 }

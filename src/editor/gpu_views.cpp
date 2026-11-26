@@ -2227,8 +2227,15 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
      * frame's (taken back from the frame after the render; a refusal in between leaves none kept). */
     const bool see_same = by_rows && rows.valid && rows.see_frame_ok && see_jobs.empty() && layout_same && !see.empty() && rows.see_frame.size() == see.size() * 3;
     rows.see_frame_ok = false;
-    if (see_same) fr.see_through.swap(rows.see_frame), see_frames_kept_++;
-    else see_through_to_frame(see, fr.see_through);
+    if (see_same) {
+      fr.see_through.swap(rows.see_frame);
+      fr.see_generation = rows.see_frame_generation;
+      see_frames_kept_++;
+    }
+    else if (!see.empty()) {
+      see_through_to_frame(see, fr.see_through);
+      fr.see_generation = gpu_calls_;  // unique to this draw on the editor-owned raster
+    }
     ms_see += sort_timer.ms();
   }
   prof_.ms_gpu_see += ms_see;
@@ -2333,7 +2340,11 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.ms_gpu_render += render_timer.ms();
   }
   if (splats) scene_splats_release_keep(slot);  // (the frame is written: the static set's host copy is no longer needed)
-  if (ok && rows.valid && !fr.see_through.empty()) rows.see_frame = std::move(fr.see_through), rows.see_frame_ok = true;  // (round 471)
+  if (ok && rows.valid && !fr.see_through.empty()) {
+    rows.see_frame = std::move(fr.see_through);
+    rows.see_frame_generation = fr.see_generation;
+    rows.see_frame_ok = true;
+  }
   if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
   if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)
     const gpu::RasterTimes at = g->take_async_times();

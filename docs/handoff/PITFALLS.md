@@ -45,6 +45,7 @@ for a full group goes in a new `tests/*.cpp`, declared and called from the group
 `%TEMP%\blendity_tests` folder for every run on the machine, never emptied (one test found 2,054 leftover
 materials), and the headless editors read the owner's real `~/.blendity/prefs.txt`. A card test read 2.281/255
 in some runs and 0.203 in others. Rounds 550 and 556 fixed both defaults (a folder per run; scratch prefs).
+Place the test directory outside the checkout and any project tree. The installer test searches its ancestors for an `Assets` directory, so a scratch folder under the build tree can make its missing-project case fail. On Linux, a fresh `mktemp -d` under `/tmp` kept that case isolated in rounds 614 and 615.
 *Do:* still give each run its own `BLENDITY_TEST_DIR` and `BLENDITY_PREFS_DIR`; do not set
 `BLENDITY_CACHE_DIR` for ordinary runs; never let two runs share a test dir (one wiped the other's log on
 11-18). `BLENDITY_PROJECT` / `BLENDITY_TRASH` are for the app and stress; the test runner sets its own.

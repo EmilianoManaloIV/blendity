@@ -8,7 +8,7 @@
   `blender-main/blendity/`. Open or start Codex in `blendity/` so that the working directory contains
   `AGENTS.md` and `.codex/`. For example, from the outer Git root use `codex -C blendity`. Keep
   subtree publication through `blendity-root`. Use a worktree of the published branch if the client only
-  permits selecting the outer Git root.
+  permits selecting the outer Git root. If the selected checkout lacks either `AGENTS.md` or `.codex/agents/`, start from a published-branch worktree that contains both. Changing the working directory alone cannot supply files missing from an older checkout.
 - **Trust and discovery.** Inspect the tracked project settings before trusting the worktree in the client.
   A project-aware Codex CLI can run `codex debug prompt-input` there to verify the Blendity engineering
   instructions are present. Inspect the named-agent selector when the client exposes it. Verify the
@@ -55,11 +55,13 @@ The hub or assigned task lead sends a fresh brief for each role in the
 
 - Give the role, task ID and approved spec path, worktree and base revision, owned files and limits,
   acceptance criteria or their section in the spec, relevant evidence links, and the next dependency.
+  Point to the [template audit](METHOD.md#documentation-template-audit) and any applicable subsystem format.
 - Give the implementer the approval and any existing reproduction or constraints. After implementation,
   give the test engineer the spec and scratch inputs first. The tester records expectations and cases
   from the spec before opening the diff, then verifies the candidate and returns results tied to it.
 - Give a separate reviewer the tested candidate, final diff, test evidence and gaps. If the candidate
-  changes after testing, send it through the affected tests before asking for a new review.
+  changes after testing, send it through the affected tests before asking for a new review. Include the
+  documentation and any PR draft available for review.
 
 Keep the last consumed cursor and candidate head in the hub's task record. Keep each cursor with the
 chat or observation source that returned it. For an uncommitted candidate, save the complete diff,

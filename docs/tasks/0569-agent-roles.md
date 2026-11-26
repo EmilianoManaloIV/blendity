@@ -1,9 +1,9 @@
 # 0569 — Define Blendity's Codex worker roles (round 587)
 
-- **Status** — in review
+- **Status** — done
 - **Requirements** — Preserve the three agent responsibilities in AGENTS.md and .claude/agents/.
 - **Decisions** — Existing workflow and ADR 0123
-- **PR** — Pending
+- **PR** — [#479](https://github.com/EmilianoManaloIV/blendity/pull/479), recorded merge `3f05393a`
 
 ## Goal
 

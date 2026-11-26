@@ -23,6 +23,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <new>
 
 #ifdef BL_WITH_ZSTD
@@ -193,7 +195,7 @@ struct PlyElem {
   uint64_t count = 0;
   std::vector<PlyProp> props;
   size_t stride = 0;  // (scalar-only elements)
-  bool lists = false;
+  bool lists = false, incomplete = false;
 };
 struct PlyHeader {
   int format = -1;  // 0 ascii, 1 little endian, 2 big endian
@@ -202,10 +204,13 @@ struct PlyHeader {
   std::string error;
 };
 
+constexpr size_t kPlyHeaderLimit = 1u << 20;
+constexpr size_t kPlyBatchBytes = 8u << 20;
+
 PlyHeader parse_ply_header(const std::string &data) {
   PlyHeader h;
   const size_t end = data.find("end_header");
-  if (data.compare(0, 3, "ply") != 0 || end == std::string::npos || end > (1u << 20)) {
+  if (data.compare(0, 3, "ply") != 0 || end == std::string::npos || end > kPlyHeaderLimit) {
     h.error = "not a PLY file";
     return h;
   }
@@ -245,6 +250,7 @@ PlyHeader parse_ply_header(const std::string &data) {
         }
         el.stride += ply_size(p.ty);
       }
+      else el.incomplete = true;
       el.props.push_back(p);
     }
   }
@@ -262,6 +268,27 @@ const PlyElem *ply_vertex(const PlyHeader &h) {
   for (const PlyElem &el : h.elems)
     if (el.name == "vertex") return &el;
   return nullptr;
+}
+
+/* The file importer dispatches the same layouts to the cloud reader from disk or from bytes. */
+const PlyElem *ply_cloud_vertex(const PlyHeader &h) {
+  if (!h.error.empty()) return nullptr;
+  const PlyElem *v = ply_vertex(h);
+  if (!v || v->lists || find_prop(*v, "x") < 0 || find_prop(*v, "y") < 0 || find_prop(*v, "z") < 0) return nullptr;
+  for (const PlyElem &el : h.elems)
+    if ((el.name == "face" || el.name == "edge" || el.name == "tristrips") && el.count > 0) return nullptr;
+  return v;
+}
+
+bool ply_can_stream(const PlyHeader &h) {
+  if (h.format <= 0) return false;
+  const PlyElem *v = ply_cloud_vertex(h);
+  if (!v || v->incomplete) return false;
+  for (const PlyElem &el : h.elems) {
+    if (&el == v) return true;
+    if (el.count && (el.incomplete || el.lists || el.stride == 0)) return false;
+  }
+  return false;
 }
 
 double ply_scalar(const char *q, PlyTy t, bool swap) {
@@ -308,6 +335,26 @@ PlyRoles ply_roles(const PlyElem &v) {
   return r;
 }
 
+/* An incomplete declaration keeps its old slot in the property index without adding bytes to
+ * the stride. On the whole-file path, check the last byte the decoder will actually use. */
+size_t ply_required_binary_width(const PlyElem &v, const PlyRoles &roles, size_t keep, size_t per_channel) {
+  int last = std::max({roles.x, roles.y, roles.z});
+  if (roles.splats) {
+    last = std::max({last, roles.opacity, *std::max_element(roles.dc, roles.dc + 3),
+                     *std::max_element(roles.scale, roles.scale + 3), *std::max_element(roles.rot, roles.rot + 4)});
+    for (size_t channel = 0; keep && channel < 3; channel++) {
+      const auto begin = roles.rest.begin() + channel * per_channel;
+      last = std::max(last, *std::max_element(begin, begin + keep));
+    }
+  }
+  else if (roles.rgb[0] >= 0 && roles.rgb[1] >= 0 && roles.rgb[2] >= 0)
+    last = std::max(last, *std::max_element(roles.rgb, roles.rgb + 3));
+
+  size_t width = 0;
+  for (int k = 0; k <= last; k++) width += ply_size(v.props[(size_t)k].ty);
+  return width;
+}
+
 /* A colour property's scale to 0..1 (integers from their range, read as sRGB; floats as they are). */
 float ply_color(PlyTy t, double val) {
   if (t == PlyTy::U8) return ply_srgb_to_linear((float)val / 255.0f);
@@ -346,12 +393,12 @@ template<class Val> void ply_store_point(const PlyTarget &t, size_t i, const Val
 
 /* Binary records whose every property is a little-endian float - what a 3DGS trainer writes: each value straight
  * from the record (round 567: before, every one went through a double and a switch on its type). */
-void ply_read_floats(const PlyTarget &t, const char *records, size_t n) {
+void ply_read_floats(const PlyTarget &t, const char *records, size_t first, size_t n) {
   const size_t stride = t.v->stride;
   JobSystem::global().parallel_for((int64_t)n, kSplatGrain, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       const char *rec = records + (size_t)i * stride;
-      ply_store_point(t, (size_t)i, [rec](int k) {
+      ply_store_point(t, first + (size_t)i, [rec](int k) {
         float f;
         std::memcpy(&f, rec + 4 * (size_t)k, 4);
         return f;
@@ -361,17 +408,59 @@ void ply_read_floats(const PlyTarget &t, const char *records, size_t n) {
 }
 
 /* Binary records of any types, either byte order. */
-void ply_read_binary(const PlyTarget &t, const char *records, size_t n, bool swap) {
+void ply_read_binary(const PlyTarget &t, const char *records, size_t first, size_t n, const std::vector<size_t> &off, bool swap) {
   const std::vector<PlyProp> &props = t.v->props;
-  std::vector<size_t> off(props.size(), 0);
-  for (size_t k = 1; k < props.size(); k++) off[k] = off[k - 1] + ply_size(props[k - 1].ty);
   const size_t stride = t.v->stride;
   JobSystem::global().parallel_for((int64_t)n, kSplatGrain, [&](int64_t b, int64_t e) {
     for (int64_t i = b; i < e; i++) {
       const char *rec = records + (size_t)i * stride;
-      ply_store_point(t, (size_t)i, [&](int k) { return ply_scalar(rec + off[(size_t)k], props[(size_t)k].ty, swap); });
+      ply_store_point(t, first + (size_t)i, [&](int k) { return ply_scalar(rec + off[(size_t)k], props[(size_t)k].ty, swap); });
     }
   });
+}
+
+/* Seek past the preceding elements and reuse one batch after all workers have decoded it
+ * into the final arrays. */
+bool ply_read_binary_vertices(const PlyTarget &target, const std::string &data, std::istream *file,
+                              uint64_t offset, int format, SplatReadReport &report) {
+  const PlyElem &v = *target.v;
+  const size_t n = (size_t)v.count;
+  const bool all_float = format == 1 && std::all_of(v.props.begin(), v.props.end(), [](const PlyProp &p) { return p.ty == PlyTy::F32; });
+  std::vector<size_t> offsets;
+  if (!all_float) {
+    offsets.resize(v.props.size());
+    for (size_t k = 1; k < v.props.size(); k++) offsets[k] = offsets[k - 1] + ply_size(v.props[k - 1].ty);
+  }
+
+  auto decode = [&](const char *records, size_t first, size_t count) {
+    if (all_float) ply_read_floats(target, records, first, count);
+    else ply_read_binary(target, records, first, count, offsets, format == 2);
+  };
+  if (!file) {
+    decode(data.data() + (size_t)offset, 0, n);
+    return true;
+  }
+
+  const size_t batch_count = std::min(n, std::max<size_t>(1, kPlyBatchBytes / v.stride));
+  std::string batch;
+  try {
+    batch.resize(batch_count * v.stride);
+  }
+  catch (const std::bad_alloc &) {
+    report.error = "PLY: not enough memory for the points";
+    return false;
+  }
+  file->seekg((std::streamoff)offset);
+  for (size_t first = 0; first < n;) {
+    const size_t count = std::min(batch_count, n - first);
+    if (!file->read(batch.data(), (std::streamsize)(count * v.stride))) {
+      report.error = "PLY: the file ends before its points do";
+      return false;
+    }
+    decode(batch.data(), first, count);
+    first += count;
+  }
+  return true;
 }
 
 /* One line of text into `vals`, a number a property; false when the line has fewer. */
@@ -405,17 +494,11 @@ bool ply_read_text(const PlyTarget &t, const std::vector<std::pair<const char *,
 
 bool ply_is_point_cloud(const std::string &data) {
   const PlyHeader h = parse_ply_header(data);
-  if (!h.error.empty()) return false;
-  const PlyElem *v = ply_vertex(h);
-  if (!v || v->lists || find_prop(*v, "x") < 0 || find_prop(*v, "y") < 0 || find_prop(*v, "z") < 0) return false;
-  for (const PlyElem &el : h.elems)
-    if ((el.name == "face" || el.name == "edge" || el.name == "tristrips") && el.count > 0) return false;
-  return true;
+  return ply_cloud_vertex(h) != nullptr;
 }
 
-PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &report) {
-  const double started = now_seconds();
-  const PlyHeader h = parse_ply_header(data);
+static PointCloudPtr read_ply_cloud(const PlyHeader &h, const std::string &data, std::istream *file,
+                                    uint64_t size, double started, SplatReadReport &report) {
   if (!h.error.empty()) {
     report.error = "PLY: " + h.error;
     return nullptr;
@@ -440,19 +523,19 @@ PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &rep
   }
   /* Where the vertex records start, and the check that they are all there - before anything the size of the count is
    * allocated. (Elements before the vertices are skipped by their stride; one with lists can't be.) */
-  const char *p = data.data() + h.body, *e = data.data() + data.size();
+  uint64_t offset = h.body;
   std::vector<std::pair<const char *, const char *>> lines;  // (ASCII: the vertex records' lines)
   if (h.format != 0) {
     for (const PlyElem &el : h.elems) {
       if (&el == v) break;
       if (el.count == 0) continue;
-      if (el.lists || el.count > (uint64_t)(e - p) / std::max<size_t>(1, el.stride)) {
+      if (el.lists || el.count > (size - offset) / std::max<size_t>(1, el.stride)) {
         report.error = "PLY: an element before the vertices can't be skipped";
         return nullptr;
       }
-      p += el.count * el.stride;
+      offset += el.count * el.stride;
     }
-    if (v->stride == 0 || v->count > (uint64_t)(e - p) / v->stride) {
+    if (v->stride == 0 || v->count > (size - offset) / v->stride) {
       report.error = "PLY: the file ends before its points do";
       return nullptr;
     }
@@ -463,7 +546,8 @@ PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &rep
       if (&el == v) break;
       skip += el.count;
     }
-    for (const char *q = p; q < e && lines.size() < skip + v->count;) {
+    const char *e = data.data() + data.size();
+    for (const char *q = data.data() + h.body; q < e && lines.size() < skip + v->count;) {
       const char *nl = (const char *)std::memchr(q, '\n', (size_t)(e - q));
       const char *le = nl ? nl : e;
       const char *a = q;
@@ -489,6 +573,12 @@ PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &rep
     }
   }
   const size_t n = (size_t)v->count;
+  const size_t keep = (size_t)splat_sh_rest_count(degree);
+  if (h.format != 0 && v->incomplete &&
+      ply_required_binary_width(*v, roles, keep, (size_t)per_channel) > size - offset - (v->count - 1) * v->stride) {
+    report.error = "PLY: the file ends before its points do";
+    return nullptr;
+  }
   PointCloudPtr pc = new_cloud(roles.splats ? PointCloudType::GaussianSplats : PointCloudType::Points, degree, n, report);
   if (!pc) {
     report.error = "PLY: " + report.error;
@@ -499,14 +589,18 @@ PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &rep
   report.times.setup_ms = (decoding - started) * 1000.0;
   PlyTarget target;
   target.pc = pc.get(), target.v = v, target.roles = &roles;
-  target.keep = (size_t)splat_sh_rest_count(degree), target.per_channel = (size_t)per_channel;
-  bool all_float = h.format == 1;
-  for (const PlyProp &prop : v->props) all_float = all_float && prop.ty == PlyTy::F32;
-  if (all_float) ply_read_floats(target, p, n);
-  else if (h.format != 0) ply_read_binary(target, p, n, h.format == 2);
+  target.keep = keep, target.per_channel = (size_t)per_channel;
+  if (h.format != 0) {
+    if (!ply_read_binary_vertices(target, data, file, offset, h.format, report)) return nullptr;
+  }
   else if (!ply_read_text(target, lines, n)) report.notes.push_back("PLY: some lines have fewer numbers than properties");
   report.times.decode_ms = (now_seconds() - decoding) * 1000.0;
   return axes_and_finish(pc, kFromZUp, report, "PLY");
+}
+
+PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &report) {
+  const double started = now_seconds();
+  return read_ply_cloud(parse_ply_header(data), data, nullptr, data.size(), started, report);
 }
 
 /* ------------------------------------------------------------------- SPZ */
@@ -622,21 +716,29 @@ void spz_sizes(SpzLayout &L) {
   L.sh_coeffs = (size_t)(L.sh_degree == 0 ? 0 : L.sh_degree == 1 ? 3 : L.sh_degree == 2 ? 8 : L.sh_degree == 3 ? 15 : 24);
 }
 
-PointCloudPtr spz_gzip(const std::string &bytes, SplatReadReport &report) {
+bool spz_is_gzip(const std::string &bytes) {
+  return bytes.size() >= 2 && (uint8_t)bytes[0] == 0x1f && (uint8_t)bytes[1] == 0x8b;
+}
+
+bool spz_unpack_gzip(const std::string &bytes, std::vector<uint8_t> &raw, SplatReadReport &report) {
   const double started = now_seconds();
-  std::string raw, why;
+  std::string why;
   /* Deflate packs at most about 1032:1; a bigger promise is a damaged or hostile file. */
   const size_t limit = (size_t)std::min<uint64_t>((uint64_t)3 << 30, (uint64_t)bytes.size() * 1100 + 4096);
   if (!gunzip(bytes, raw, why, limit)) {
     report.error = "SPZ: the gzip stream can't be read (" + why + ")";
-    return nullptr;
+    return false;
   }
   report.times.unpack_ms = (now_seconds() - started) * 1000.0;
+  return true;
+}
+
+PointCloudPtr spz_decode_gzip(const std::vector<uint8_t> &raw, SplatReadReport &report) {
   if (raw.size() < 16) {
     report.error = "SPZ: the header is cut short";
     return nullptr;
   }
-  const uint8_t *h = (const uint8_t *)raw.data();
+  const uint8_t *h = raw.data();
   SpzLayout L;
   L.version = le32(h + 4), L.n = le32(h + 8), L.sh_degree = h[12], L.fractional_bits = h[13], L.flags = h[14];
   if (!spz_check(L, le32(h), 1, 3, report)) return nullptr;
@@ -725,7 +827,11 @@ PointCloudPtr spz_ngsp(const std::string &bytes, SplatReadReport &report) {
 
 PointCloudPtr read_spz(const std::string &bytes, SplatReadReport &report) {
   if (bytes.size() >= 4 && le32((const uint8_t *)bytes.data()) == kSpzMagic) return spz_ngsp(bytes, report);
-  if (bytes.size() >= 2 && (uint8_t)bytes[0] == 0x1f && (uint8_t)bytes[1] == 0x8b) return spz_gzip(bytes, report);
+  if (spz_is_gzip(bytes)) {
+    std::vector<uint8_t> raw;
+    if (!spz_unpack_gzip(bytes, raw, report)) return nullptr;
+    return spz_decode_gzip(raw, report);
+  }
   report.error = "SPZ: not an SPZ file (neither gzip nor NGSP)";
   return nullptr;
 }
@@ -933,16 +1039,68 @@ bool import_ply_point_cloud(const std::string &path, const std::string &data, Im
   return cloud_node(pc, path, report, out);
 }
 
+/* Read the existing parser's first marker and the rest of its line. Usually the first few KiB
+ * suffice. An unusually long terminator line uses the original byte path. */
+static PlyHeader probe_ply_header(std::istream &file) {
+  constexpr size_t kProbeLimit = kPlyHeaderLimit + 4096;
+  std::string prefix;
+  file.seekg(0);
+  while (prefix.size() < kProbeLimit) {
+    const size_t start = prefix.size();
+    prefix.resize(std::min(kProbeLimit, std::max<size_t>(4096, start * 2)));
+    if (!file.read(prefix.data() + start, (std::streamsize)(prefix.size() - start))) break;
+    if (prefix.compare(0, 3, "ply") != 0) break;
+    const size_t end = prefix.find("end_header");
+    if (end == std::string::npos) continue;
+    if (end > kPlyHeaderLimit) break;
+    if (prefix.find('\n', end) != std::string::npos) return parse_ply_header(prefix);
+  }
+  return {};
+}
+
+std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, std::string &data, ImportResult &out) {
+  const auto disk_path = std::filesystem::u8path(path);
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(disk_path, ec)) return std::nullopt;
+  std::ifstream file(disk_path, std::ios::binary | std::ios::ate);
+  const std::streamoff size = file ? (std::streamoff)file.tellg() : -1;
+  if (size <= 0) return std::nullopt;
+
+  if ((uint64_t)size > kPlyBatchBytes) {
+    const double started = now_seconds();
+    const PlyHeader h = probe_ply_header(file);
+    if (ply_can_stream(h)) {
+      if (out.source.empty()) out.source = path;
+      SplatReadReport report;
+      PointCloudPtr pc = read_ply_cloud(h, data, &file, (uint64_t)size, started, report);
+      return cloud_node(pc, path, report, out);
+    }
+  }
+
+  // Reuse the open file for the byte importer. Unseekable inputs and short reads use fs::read_file.
+  if ((uint64_t)size >= data.max_size()) return std::nullopt;
+  file.clear();
+  file.seekg(0);
+  data.resize((size_t)size);
+  if (!file.read(data.data(), (std::streamsize)size)) data.clear();
+  return std::nullopt;
+}
+
 bool import_spz_file(const std::string &path, ImportResult &out) {
   if (out.source.empty()) out.source = path;
-  std::string bytes;
-  if (!fs::read_file(path, bytes)) {
-    out.error = "cannot read " + path;
-    return false;
-  }
   SplatReadReport report;
-  PointCloudPtr pc = read_spz(bytes, report);
-  return cloud_node(pc, path, report, out);
+  std::vector<uint8_t> raw;
+  {
+    std::string bytes;
+    if (!fs::read_file(path, bytes)) {
+      out.error = "cannot read " + path;
+      return false;
+    }
+    if (!spz_is_gzip(bytes)) return cloud_node(read_spz(bytes, report), path, report, out);
+    if (!spz_unpack_gzip(bytes, raw, report)) return cloud_node(nullptr, path, report, out);
+  }
+  // Release the file buffer before allocating the decoded cloud's attributes.
+  return cloud_node(spz_decode_gzip(raw, report), path, report, out);
 }
 
 }  // namespace bl
