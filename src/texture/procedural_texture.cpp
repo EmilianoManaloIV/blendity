@@ -290,6 +290,7 @@ struct LayerPrefixReflector : Reflector {
   std::string n(const char *name) const { return prefix + name; }
   bool all_fields() const override { return in.all_fields(); }
   bool hashing() const override { return in.hashing(); }
+  bool serializing() const override { return in.serializing(); }
   bool group(const char *name, bool open) override { return in.group(name, open); }
   void group_end() override { in.group_end(); }
   void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
