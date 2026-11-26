@@ -18,6 +18,7 @@ namespace bl {
 
 namespace {
 thread_local bool tl_background = false;  // inside run_background on the built-in pool (and on the background pool's workers): loops go to the background pool
+thread_local bool tl_serial = false;
 }
 
 struct JobSystem::TbbState {
@@ -186,8 +187,21 @@ void JobSystem::run_background(const std::function<void()> &fn) {
   tl_background = was;
 }
 
+void run_job_loops_serial(const std::function<void()> &fn) {
+  struct Restore {
+    bool previous = tl_serial;
+    ~Restore() { tl_serial = previous; }
+  } restore;
+  tl_serial = true;
+  fn();
+}
+
 void JobSystem::parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn) {
   if (count <= 0) return;
+  if (tl_serial) {
+    fn(0, count);
+    return;
+  }
   grain = std::max<int64_t>(1, grain);
   if (tl_background && backend_ != Backend::TBB && !is_background_) {
     if (thread_count() <= 3) {

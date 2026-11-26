@@ -99,4 +99,7 @@ class JobSystem {
   std::shared_ptr<JobSystem> background_pool();
 };
 
+/* Runs this thread's loops inline when it already has an independent item of parallel work. */
+void run_job_loops_serial(const std::function<void()> &fn);
+
 }  // namespace bl

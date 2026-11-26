@@ -16395,6 +16395,187 @@ static void tests_round623() {
 #endif
 }
 
+/* Round 630 (task 0612): the texture grid draws fresh pixels on the first open, scroll or edit frame. */
+namespace r630 {
+static Recti picture(const Editor &ed, const Recti &cell) {
+  const int inset = ed.ui_for_test().px(4);
+  const int side = cell.w - 2 * inset;
+  // The upper half of the image excludes the label and the unused-asset badge.
+  return cell.empty() ? Recti{} : Recti{cell.x + inset, cell.y + inset, side, side / 2};
+}
+
+static std::vector<uint32_t> pixels(const Editor &ed, const std::string &name) {
+  Recti cell;
+  if (!ed.button_rect_for_test("tex:" + name, cell)) return {};
+  const Image &fb = ed.framebuffer();
+  return r34_crop(ed, picture(ed, cell).intersect({0, 0, fb.width, fb.height}));
+}
+
+static std::vector<uint32_t> expected(const Editor &ed, const ProceduralTexture &t, const Bitmap &albedo) {
+  Recti cell;
+  if (!ed.button_rect_for_test("tex:" + t.name, cell) || albedo.rgba8.empty()) return {};
+  const Recti r = picture(ed, cell);
+  std::vector<uint32_t> result;
+  for (int y = 0; y < r.h; y++) {
+    for (int x = 0; x < r.w; x++) {
+      const int sx = x * albedo.width / r.w, sy = y * albedo.height / r.w;
+      const uint8_t *p = &albedo.rgba8[((size_t)sy * albedo.width + sx) * 4];
+      result.push_back(0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]);
+    }
+  }
+  return result;
+}
+
+static Bitmap albedo(ProceduralTexture t) {
+  t.width = t.height = 64;
+  TexPlanes planes;
+  t.evaluate(planes);
+  return t.output(0, planes);
+}
+}  // namespace r630
+
+static void tests_round630() {
+  test("Textures window (round 630): thumbnail workers keep their inner loops local and leave other jobs parallel", [] {
+    JobSystem pool(2);
+    pool.set_backend(JobSystem::Backend::Builtin);
+    auto chunks = [&] {
+      std::atomic<int> calls{0};
+      pool.parallel_for(8, 1, [&](int64_t, int64_t) { ++calls; });
+      return calls.load();
+    };
+    CHECK(chunks() == 8);
+    run_job_loops_serial([&] {
+      CHECK(chunks() == 1);
+      run_job_loops_serial([&] { CHECK(chunks() == 1); });
+      CHECK(chunks() == 1);
+      int other_chunks = 0;
+      std::thread other([&] { other_chunks = chunks(); });
+      other.join();
+      CHECK(other_chunks == 8);
+    });
+    CHECK(chunks() == 8);
+    struct Interrupt {};
+    bool interrupted = false;
+    try {
+      run_job_loops_serial([] { throw Interrupt{}; });
+    } catch (const Interrupt &) {
+      interrupted = true;
+    }
+    CHECK(interrupted && chunks() == 8);
+  });
+
+  test("Textures window (round 630): an empty grid opens and a single texture has pixels on its first frame", [] {
+    {
+      r594::Project project("r630-empty-textures");
+      Editor ed;
+      r594::init(ed);
+      ed.command("window Textures");
+      ed.step_frame_headless();
+      CHECK(!ed.window_rect_for_test(WindowKind::Textures).empty());
+      CHECK(ed.texture_count_shown_for_test() == 0 && !ed.texture_selected_for_test());
+    }
+    r594::Project project("r630-one-texture");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture noise = r49_tex("Noise", 128);
+    noise.name = "OnlyNoise";
+    CHECK(r594::write("Assets/OnlyNoise.ptex", noise));
+    ed.command("window Textures");
+    ed.step_frame_headless();
+    CHECK(ed.texture_count_shown_for_test() == 1);
+    const auto first = r630::pixels(ed, noise.name);
+    CHECK(!first.empty() && first == r630::expected(ed, noise, r630::albedo(noise)));
+    ed.step_frame_headless();
+    CHECK(r630::pixels(ed, noise.name) == first);
+  });
+
+  test("Textures window (round 630): distinct layer stacks, a first scroll and a layer edit all draw immediately", [] {
+    r594::Project project("r630-distinct-textures");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture tile = r49_tex("Leaves", 128);
+    tile.name = "LeafCover";
+    tile.alpha_from_cover = true;
+    CHECK(tile.add("Tile") && r49_set(tile, "L1 Across", "2"));
+    ProceduralTexture brick = r49_tex("Brick", 128);
+    brick.name = "ChangedBrick";
+    CHECK(brick.add("Blur"));
+    ProceduralTexture unseen = r49_tex("Noise", 128);
+    unseen.name = "Unseen";
+    CHECK(unseen.add("Warp"));
+    CHECK(r594::write("Assets/00/LeafCover.ptex", tile));
+    CHECK(r594::write("Assets/00/ChangedBrick.ptex", brick));
+    CHECK(r594::write("Assets/02/Unseen.ptex", unseen));
+    ProceduralTexture placeholder;
+    for (int i = 0; i < 144; i++) CHECK(r594::write(strprintf("Assets/01/Filler%03d.ptex", i), placeholder));
+
+    ed.command("window Textures");
+    ed.step_frame_headless();
+    CHECK(ed.texture_count_shown_for_test() == 147);
+    const Bitmap leaf_image = r630::albedo(tile);
+    bool clear = false, opaque = false;
+    for (size_t i = 3; i < leaf_image.rgba8.size(); i += 4) {
+      clear |= leaf_image.rgba8[i] < 128;
+      opaque |= leaf_image.rgba8[i] >= 128;
+    }
+    CHECK(clear && opaque);
+    const auto leaf_pixels = r630::pixels(ed, tile.name), brick_pixels = r630::pixels(ed, brick.name);
+    CHECK(!leaf_pixels.empty() && leaf_pixels == r630::expected(ed, tile, leaf_image));
+    CHECK(!brick_pixels.empty() && brick_pixels == r630::expected(ed, brick, r630::albedo(brick)));
+    CHECK(leaf_pixels != brick_pixels && r630::pixels(ed, unseen.name).empty());
+
+    ed.command("settex Assets/00/ChangedBrick.ptex L0Rows 3");
+    CHECK(r49_set(brick, "L0 Rows", "3"));
+    ed.step_frame_headless();
+    const auto changed = r630::pixels(ed, brick.name);
+    CHECK(!changed.empty() && changed != brick_pixels && changed == r630::expected(ed, brick, r630::albedo(brick)));
+    CHECK(r630::pixels(ed, tile.name) == leaf_pixels);
+
+    const Recti card = r594::thumb(ed, tile.name), search = r594::search(ed);
+    CHECK(!card.empty() && !search.empty());
+    if (card.empty() || search.empty()) return;
+    const auto toolbar = r34_crop(ed, search);
+    r594::wheel(ed, card, -100.0f);
+    const auto scrolled = r630::pixels(ed, unseen.name);
+    CHECK(!scrolled.empty() && scrolled == r630::expected(ed, unseen, r630::albedo(unseen)));
+    CHECK(r34_crop(ed, search) == toolbar);
+    ed.step_frame_headless();
+    CHECK(r630::pixels(ed, unseen.name) == scrolled);
+  });
+
+  test("Textures window (round 630): painting the canvas updates the selected card on the next frame", [] {
+    r594::Project project("r630-paint-preview");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture neighbor = r49_tex("Noise", 128);
+    neighbor.name = "Neighbor";
+    CHECK(r594::write("Assets/Neighbor.ptex", neighbor));
+    ed.command("select Cube");
+    ed.command("surface new PaintedCard");
+    ed.command("settex PaintedCard Width 128");
+    ed.command("settex PaintedCard Height 128");
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    r594::open(ed);
+    const auto selected = ed.texture_selected_for_test();
+    CHECK(ed.paint_for_test() && selected && selected->name == "PaintedCard");
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(!pane.empty());
+    if (pane.empty() || !selected) return;
+    const auto before = r630::pixels(ed, selected->name), other = r630::pixels(ed, neighbor.name);
+    CHECK(!before.empty() && !other.empty());
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    ed.step_frame_headless();
+    const auto after = r630::pixels(ed, selected->name);
+    CHECK(!after.empty() && after != before && after == r630::expected(ed, *selected, r630::albedo(*selected)));
+    CHECK(ed.texture_selected_for_test() == selected && r630::pixels(ed, neighbor.name) == other);
+    const auto images = ed.paint_images_for_test();
+    CHECK(images && std::any_of(images->cover.begin(), images->cover.end(), [](uint8_t alpha) { return alpha > 0; }));
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -16464,4 +16645,5 @@ void run_assets_tests() {
   tests_round594();
   tests_round617();
   tests_round623();
+  tests_round630();
 }
