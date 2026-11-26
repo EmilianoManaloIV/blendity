@@ -17112,7 +17112,8 @@ static void tests_round639_paint_undo() {
         const size_t i = ((size_t)(sy * 64 / reopened.h) * 64 + sx * 64 / reopened.w) * 4;
         const uint8_t *p = &new_branch.albedo[i];
         const uint32_t expected = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
-        CHECK(ed.framebuffer().row(reopened.y + sy)[reopened.x + sx] == expected);
+        const Image &frame = ed.framebuffer();
+        CHECK(frame.pixels[(size_t)(reopened.y + sy) * frame.width + reopened.x + sx] == expected);
       }
     }
     history(platform::KEY_Y);
