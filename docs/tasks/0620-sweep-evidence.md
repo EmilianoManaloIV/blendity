@@ -5,7 +5,7 @@
 - **Requirements:** Q-06 responsiveness, C-01 / C-02 builds.
 - **Decisions:** ADR 0056, 0105, 0123.
 - **Implementation:** planning task for cross-program verification.
-- **PR:** Hub publication.
+- **PR:** [#504](https://github.com/EmilianoManaloIV/blendity/pull/504) against main. First published head 2caef8084bd9e48998bef2525796d79fafcf4068.
 
 ## Goal
 

@@ -5,7 +5,7 @@
 - **Requirements:** R-05, U-04, U-07
 - **Decisions:** ADR 0026, 0036, 0060, 0085 and 0145
 - **Implementation:** project implementer
-- **PR:** Hub publication after local handoff
+- **PR:** [#504](https://github.com/EmilianoManaloIV/blendity/pull/504) against main. First published head 2caef8084bd9e48998bef2525796d79fafcf4068.
 
 ## Goal
 An artist who wants to make the Scene view cheaper while editing can find and apply Low viewport quality by name, then return to Medium or High by the same route. The base palette includes Preferences but has no entries for these presets. Its search matches entry names and categories.

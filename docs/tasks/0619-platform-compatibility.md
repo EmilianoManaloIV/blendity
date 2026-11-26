@@ -5,7 +5,7 @@
 - **Requirements:** C-02 (dependency-free fallback).
 - **Decisions:** ADR 0001, ADR 0134.
 - **Implementation:** project implementer, independent test engineer and reviewer, sequentially.
-- **PR:** Hub owns publication after local review.
+- **PR:** [#504](https://github.com/EmilianoManaloIV/blendity/pull/504) against main. First published head 2caef8084bd9e48998bef2525796d79fafcf4068.
 
 ## Goal
 

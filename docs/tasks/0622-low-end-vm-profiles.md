@@ -5,7 +5,7 @@
 - **Requirements:** Q-06 (responsiveness)
 - **Decisions:** ADR 0026, 0105
 - **Implementation:** planning lead owns diagnostic workflow and integration, implementer owns Linux measurement tooling.
-- **PR:** pending Hub publication
+- **PR:** [#504](https://github.com/EmilianoManaloIV/blendity/pull/504) against main. First published head 2caef8084bd9e48998bef2525796d79fafcf4068.
 
 ## Goal
 Measure a reproducible CPU editor journey under four restricted Linux VM profiles.

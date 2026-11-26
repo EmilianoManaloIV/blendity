@@ -5,7 +5,7 @@
 - **Requirements:** Q-05
 - **Decisions:** [ADR 0081](../decisions/0081-projection-painting-and-tile-undo.md) for the existing tile-based paint history.
 - **Implementation:** project implementer.
-- **PR:** local handoff to Hub.
+- **PR:** [#504](https://github.com/EmilianoManaloIV/blendity/pull/504) against main. First published head 2caef8084bd9e48998bef2525796d79fafcf4068.
 
 ## Goal
 Undo the first stroke on a fill-only surface and see its original texture in the Textures browser. Redo restores the painted result.
