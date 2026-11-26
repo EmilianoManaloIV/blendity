@@ -2732,6 +2732,18 @@ Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds) {
   return Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f) * Mat4::look_at(c - d * r * 2.0f, c, up);
 }
 
+static RenderTarget &shadow_depth_target() {
+  static thread_local RenderTarget rt;
+  return rt;
+}
+
+size_t shadow_map_scratch_bytes() { return shadow_depth_target().depth.capacity() * sizeof(float); }
+
+void trim_shadow_map_scratch(size_t max_depth_values) {
+  auto &depth = shadow_depth_target().depth;
+  if (depth.capacity() > max_depth_values) std::vector<float>().swap(depth);
+}
+
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds, int res,
                        const ShadowMap *base) {
   out.size = 0;
@@ -2743,7 +2755,7 @@ void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec
   Vec3 up = std::fabs(d.y) > 0.99f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
   Mat4 view = Mat4::look_at(c - d * r * 2.0f, c, up);
   Mat4 proj = Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f);  // (shadow_view_proj below: the same, kept in step)
-  static thread_local RenderTarget rt;
+  RenderTarget &rt = shadow_depth_target();
   static thread_local Renderer3D r3d;
   rt.make_depth_only(res, res);
   RasterOptions opt;

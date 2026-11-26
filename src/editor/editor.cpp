@@ -2409,7 +2409,7 @@ static size_t realtime_lightmaps_bytes(const RealtimeLightmaps &r) {
 }
 
 std::vector<Editor::MemoryAccount> Editor::memory_accounts() const {
-  size_t planes = 0, pictures = 0, shadows = 0;
+  size_t planes = 0, pictures = 0, shadows = shadow_map_scratch_bytes();
   for (const RenderTarget *rt : {&scene_rt_, &game_rt_, &pilot_rt_, &draw_rt_, &pad_rt_, &cam_preview_rt_, &ipv_rt_, &vr_rt_, &scene_vs_.rt, &game_vs_.rt, &preview_vs_.rt})
     planes += rt->plane_bytes();
   for (const ViewCache *c : {&scene_cache_, &game_cache_, &draw_cache_}) pictures += c->img.pixels.capacity() * sizeof(uint32_t);
