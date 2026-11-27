@@ -24,6 +24,14 @@ struct SplatReadTimes {
   double axes_ms = 0.0;      // pointcloud_change_axes
   double validate_ms = 0.0;  // pointcloud_validate
 };
+
+/* Opt-in accounting for the vertex stream. Header probing is part of phases.setup_ms. */
+struct DiskPlyTimes {
+  SplatReadTimes phases;
+  double read_ms = 0.0;
+  uint64_t read_bytes = 0;
+  size_t read_batches = 0;
+};
 /* What a reader leaves besides the cloud: why it refused (`error`), and what it dropped or guessed (`notes`). */
 struct SplatReadReport {
   std::string error;
@@ -63,5 +71,8 @@ bool import_spz_file(const std::string &path, ImportResult &out);
 bool import_ply_point_cloud(const std::string &path, const std::string &data, ImportResult &out);
 /* Handles large fixed-width binary clouds. On fallback, empty data means the caller must read the file. */
 std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, std::string &data, ImportResult &out);
+/* Asking for times separates the vertex stream's read and decode calls. */
+std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, std::string &data, ImportResult &out,
+                                                     DiskPlyTimes *times);
 
 }  // namespace bl

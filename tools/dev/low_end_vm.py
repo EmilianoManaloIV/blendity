@@ -187,11 +187,20 @@ def observe_editor(pid, expected_file):
 
 def run_stage(exe, out, env, name, commands, membership, cpus):
     png = out / f"{name}.png"
-    log = out / f"{name}.log"
     args = [str(exe), "--no-libs", "--headless-screenshot", str(png), "--size", f"{WIDTH}x{HEIGHT}", "--frames", "1"]
     for command in ("update auto off", "viewport device cpu", "quality low", "shading shaded", *commands,
                     "viewport status", "perf memory"):
         args.extend(("--cmd", command))
+    transcript, metrics = run_process(exe, out, env, name, args, membership, cpus)
+    for line in ("Views: CPU (Viewport Device)", "Quality: low (views at 67%)", f"wrote {png} ({WIDTH}x{HEIGHT})"):
+        require(line in transcript, f"{name} missing {line!r}; see {name}.log")
+    error = re.search(r"^error: .+", transcript, re.MULTILINE)
+    require(error is None, f"{name}: {error[0] if error else ''}")
+    return transcript, metrics
+
+
+def run_process(exe, out, env, name, args, membership, cpus):
+    log = out / f"{name}.log"
     write_json(out / f"{name}.command.json", args)
     samples = []
     expected_file = exe.stat()
@@ -216,10 +225,6 @@ def run_stage(exe, out, env, name, commands, membership, cpus):
     require(all(row["affinity"] == cpus and row["cgroup"] == membership for row in samples),
             f"{name} ran outside the verified affinity or cgroup")
     transcript = log.read_text(encoding="utf-8", errors="replace")
-    for line in ("Views: CPU (Viewport Device)", "Quality: low (views at 67%)", f"wrote {png} ({WIDTH}x{HEIGHT})"):
-        require(line in transcript, f"{name} missing {line!r}; see {log.name}")
-    error = re.search(r"^error: .+", transcript, re.MULTILINE)
-    require(error is None, f"{name}: {error[0] if error else ''}")
     return transcript, {key: value for key, value in metrics.items() if key != "process_samples"}
 
 
@@ -400,14 +405,18 @@ def inside(out):
     verify_host(exe, profile)
     membership, leaf, evidence = verify_constraints(out, profile, cpus, request["system"], request["uid"], request["unit"])
     digest = sha256(exe)
-    result = journey(exe, out, cpus, membership, leaf)
+    if "import_probe" in request:
+        from constrained_imports import measure_imports
+        result = measure_imports(exe, out, cpus, membership, leaf, request)
+    else:
+        result = journey(exe, out, cpus, membership, leaf)
     require(sha256(exe) == digest, "executable changed during the journey")
     write_json(out / "result.json", {"profile": profile, "architecture": os.uname().machine,
                                     "elf_machine": PROFILES[profile][1], "executable": str(exe),
                                     "exe_sha256": digest, "constraints": evidence, **result})
 
 
-def launch(profile, exe, out, user):
+def launch(profile, exe, out, user, import_probe=None, ply_fixture=None):
     cores, memory = verify_host(exe, profile)
     available = sorted(os.sched_getaffinity(0))
     require(len(available) >= cores, f"{profile} needs {cores} CPUs, launcher affinity is {available}")
@@ -416,6 +425,9 @@ def launch(profile, exe, out, user):
     out.mkdir(mode=0o700)
     request = {"profile": profile, "executable": str(exe), "cpus": cpus, "uid": os.getuid(),
                "unit": unit, "system": not user}
+    if import_probe is not None:
+        verify_host(import_probe, profile)
+        request.update(import_probe=str(import_probe), ply_fixture=str(ply_fixture))
     write_json(out / "request.json", request)
     args = ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--service-type=exec", f"--unit={unit}",
             f"--property=MemoryMax={memory}", "--property=MemorySwapMax=0", "--property=RuntimeMaxSec=180s",
@@ -443,10 +455,13 @@ def main():
     parser.add_argument("exe", type=Path, metavar="ABSOLUTE_EXE")
     parser.add_argument("output", type=Path, metavar="ABSOLUTE_NEW_OUTPUT")
     parser.add_argument("--user", action="store_true", help="use an existing unprivileged systemd user manager")
+    parser.add_argument("--imports", nargs=2, type=Path, metavar=("PLY_PROBE", "MILLION_PLY"),
+                        help="measure a million-record PLY and a generated Unity scene instead of the orbit journey")
     args = parser.parse_args()
     require(args.exe.is_absolute() and args.output.is_absolute(), "executable and output paths must be absolute")
     require(not args.output.exists() and not args.output.is_symlink(), "output must be a new directory")
-    launch(args.profile, args.exe.resolve(strict=True), args.output.resolve(), args.user)
+    inputs = [p.resolve(strict=True) for p in args.imports] if args.imports else []
+    launch(args.profile, args.exe.resolve(strict=True), args.output.resolve(), args.user, *inputs)
 
 
 if __name__ == "__main__":
