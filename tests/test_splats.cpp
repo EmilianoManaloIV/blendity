@@ -2008,6 +2008,23 @@ static void tests_round633() {
   });
 }
 
+static void tests_round659() {
+  test("PLY disk diagnostics count complete vertex batches and preserve the same imported cloud", [] {
+    const size_t count = kR633Batch / kR633MixedStride + 1;
+    const std::string path = r531_write("r659-disk-telemetry.ply", r633_mixed_points(1, count));
+    std::string fallback;
+    ImportResult unmeasured, measured;
+    DiskPlyTimes times;
+    CHECK(import_ply_file(path, unmeasured));
+    CHECK(try_import_binary_ply_point_cloud(path, fallback, measured, &times) == std::optional<bool>(true));
+    CHECK(fallback.empty() && times.read_bytes == count * kR633MixedStride && times.read_batches == 2);
+    CHECK(measured.source == unmeasured.source && measured.notes == unmeasured.notes && measured.summary == unmeasured.summary);
+    CHECK(measured.nodes.size() == 1 && measured.nodes[0].points);
+    if (measured.nodes.size() == 1 && measured.nodes[0].points && unmeasured.nodes.size() == 1 && unmeasured.nodes[0].points)
+      r619_check_cloud(*measured.nodes[0].points, *unmeasured.nodes[0].points);
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
@@ -2016,4 +2033,5 @@ void run_splats_tests() {
   tests_round567();
   tests_round619();
   tests_round633();
+  tests_round659();
 }

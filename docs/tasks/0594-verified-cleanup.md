@@ -53,3 +53,9 @@ The remote helper declined 47 candidate branches. In 39 cases GitHub's recorded 
 The closing audit compared both inventories against every receipt and rechecked the merge ancestry of all 97 retired remote heads. It found every reported path and ref absent and no unexplained disappearance. The scratch evidence is in `C:/blab/cleanup612/`: `manifest.json`, `rebuildable.json`, the three receipt files, and `after.json`. The recovered allocation excludes shared files and Git object storage.
 
 The published task record is in [#498](https://github.com/EmilianoManaloIV/blendity/pull/498), carried by [#499](https://github.com/EmilianoManaloIV/blendity/pull/499). PR #498 was open at head `22d735b345c40947cbefd3455923bdc212cd2b82` when checked on November 20, 2026. The cumulative PR #499 was open at head `66feaeb3adee0f85c373f304a181c2ce0e23b6ce`.
+
+### November 27 follow-up
+
+The owner requested another stale-worktree cleanup while Pass 37 was running. The Hub checked the 187 registered worktrees against current branches, open PRs, active consumers, local changes, filesystem links and build-output signatures. It removed 65 verified inactive checkouts and pruned four registrations for missing directories. One checkout was registered during the audit, leaving 119. All branch refs attached to removed checkouts retained their original tips. A local archive ref preserves the detached commit from the missing `r189` checkout.
+
+The removed single-link files totaled 157,791,896,571 logical bytes (146.96 GiB). This total counts file lengths rather than measured free-space change. The Hub restored 59 historical evidence files at their original paths and compared them with their preserved copies. No GitHub branch was deleted. See the [closing audit](C:/blab/pass37-hub/cleanup/closing-audit.json) for each removed path and retained exception.

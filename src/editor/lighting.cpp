@@ -48,6 +48,7 @@ uint64_t Editor::lightmap_hash_of(const GameObject &g, const Mesh &m) { return l
 /* What the baked lighting depends on: the contributing objects (shape, place, material colours),
  * the Baked and Mixed lights, the world and the lighting settings. Different from the bake's = out of date. */
 uint64_t Editor::lightmap_scene_key() {
+  bool directional_sun = false;
   uint64_t h = kFnvBasisLegacy;  // (saved with every bake: a new value would mark them all out of date)
   auto mix = [&](uint64_t v) { h = hash_mix(h, v); };
   auto mixf = [&](const float *p, size_t n) {
@@ -75,13 +76,18 @@ uint64_t Editor::lightmap_scene_key() {
         }
     }
     if (auto *l = g.light()) {
+      if (l->enabled && l->type == 0) directional_sun = true;
       if (!l->enabled || l->mode == 0) return;
       mix(g.id);
       mix(hash_component(*l));
       mixf(g.world_matrix().m, 16);
     }
   });
-  mix(hash_reflect([this](Reflector &r) { scene_->environment.reflect(r); }));
+  // A saved bake must keep its historical key unless the new angles change its sky.
+  auto &world = scene_->environment;
+  const bool use_angles = world.mode == 1 && !directional_sun && finite_bits(world.sun_elevation) && finite_bits(world.sun_rotation) &&
+                          (world.sun_elevation != world.default_sun_elevation || world.sun_rotation != world.default_sun_rotation);
+  mix(hash_reflect([&](Reflector &r) { world.reflect(r, use_angles); }));
   /* The settings a bake depends on (not Realtime GI's or Auto Generate). */
   const LightingSettings &ls = scene_->lighting;
   mix(ls.baked_gi);

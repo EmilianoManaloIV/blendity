@@ -724,18 +724,17 @@ void pack_islands(Mesh &m, const Mask *mask, float margin, bool rotate) {
     float w, h;
   };
   std::vector<Box> boxes;
-  std::vector<std::vector<uint32_t>> corners(islands.size());
+  auto each_corner = [&](size_t island, auto visit) {
+    for (uint32_t f : islands[island])
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) visit(c);
+  };
   for (size_t i = 0; i < islands.size(); i++) {
-    std::vector<Vec2> pts;
-    for (uint32_t f : islands[i])
-      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
-        corners[i].push_back(c);
-        pts.push_back(m.uvs[c]);
-      }
     /* Rotate to the minimum-area bounding box (rotating calipers on the hull). */
     float best_angle = 0;
-    if (rotate && pts.size() >= 3) {
-      std::vector<Vec2> hull = convex_hull(pts);
+    if (rotate) {
+      std::vector<Vec2> pts;
+      each_corner(i, [&](uint32_t c) { pts.push_back(m.uvs[c]); });
+      std::vector<Vec2> hull = pts.size() >= 3 ? convex_hull(pts) : std::vector<Vec2>();
       float best = 1e30f;
       for (size_t k = 0; k < hull.size(); k++) {
         Vec2 e = hull[(k + 1) % hull.size()] - hull[k];
@@ -752,24 +751,24 @@ void pack_islands(Mesh &m, const Mask *mask, float margin, bool rotate) {
     }
     float ca = std::cos(best_angle), sa = std::sin(best_angle);
     Vec2 lo{1e30f, 1e30f}, hi{-1e30f, -1e30f};
-    for (uint32_t c : corners[i]) {
+    each_corner(i, [&](uint32_t c) {
       Vec2 p = m.uvs[c];
       Vec2 q{p.x * ca - p.y * sa, p.x * sa + p.y * ca};
       m.uvs[c] = q;
       lo = {std::min(lo.x, q.x), std::min(lo.y, q.y)};
       hi = {std::max(hi.x, q.x), std::max(hi.y, q.y)};
-    }
+    });
     /* Taller-than-wide islands lie down (better shelf packing). */
     if (hi.y - lo.y > hi.x - lo.x) {
-      for (uint32_t c : corners[i]) m.uvs[c] = {m.uvs[c].y, -m.uvs[c].x};
+      each_corner(i, [&](uint32_t c) { m.uvs[c] = {m.uvs[c].y, -m.uvs[c].x}; });
       lo = {1e30f, 1e30f};
       hi = {-1e30f, -1e30f};
-      for (uint32_t c : corners[i]) {
+      each_corner(i, [&](uint32_t c) {
         lo = {std::min(lo.x, m.uvs[c].x), std::min(lo.y, m.uvs[c].y)};
         hi = {std::max(hi.x, m.uvs[c].x), std::max(hi.y, m.uvs[c].y)};
-      }
+      });
     }
-    for (uint32_t c : corners[i]) m.uvs[c] = m.uvs[c] - lo;
+    each_corner(i, [&](uint32_t c) { m.uvs[c] = m.uvs[c] - lo; });
     boxes.push_back({i, std::max(hi.x - lo.x, 1e-9f), std::max(hi.y - lo.y, 1e-9f)});
   }
   std::sort(boxes.begin(), boxes.end(), [](const Box &a, const Box &b) { return a.h > b.h; });
@@ -800,7 +799,7 @@ void pack_islands(Mesh &m, const Mask *mask, float margin, bool rotate) {
     scale = (1.0f - margin) / std::max(side, 1e-9f);
   }
   for (size_t i = 0; i < boxes.size(); i++)
-    for (uint32_t c : corners[boxes[i].island]) m.uvs[c] = (m.uvs[c] + pos[i]) * scale + Vec2(margin * 0.5f, margin * 0.5f);
+    each_corner(boxes[i].island, [&](uint32_t c) { m.uvs[c] = (m.uvs[c] + pos[i]) * scale + Vec2(margin * 0.5f, margin * 0.5f); });
   m.touch();
 }
 

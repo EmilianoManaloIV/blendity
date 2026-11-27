@@ -3539,7 +3539,9 @@ void Editor::draw_last_op_panel(const Recti &view) {
     last_op_open_ = !last_op_open_;
     u.consume_click();
   }
-  u.tooltip("Adjust Last Operation (Blender: F9). Changing a value re-runs the operator\non the mesh as it was before it, as one undo step.");
+  u.mark_widget(hr);
+  const std::string chord = shortcut_text("edit.adjust_last");
+  u.tooltip("Adjust Last Operation" + (chord.empty() ? std::string() : " (" + chord + ")") + ". Changing a value re-runs the operator\non the mesh as it was before it, as one undo step.");
   if (!last_op_open_) return;
   u.push_id("last_op");
   const int off = place.scrolls ? u.begin_scroll(u.id("scroll_" + L.op), place.body, body_h) : 0;  // (each operator opens at its first row)

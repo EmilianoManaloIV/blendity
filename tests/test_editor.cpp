@@ -7,6 +7,7 @@
 #include "../src/core/view_perf.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
+#include "../src/render/colormanagement.h"
 #include "../src/scene/budget.h"
 #include "../src/scene/unity_package.h"
 #include "../src/texture/smart_material.h"
@@ -11595,16 +11596,9 @@ static void tests_round468() {
     CHECK(length(ed.scene_eye() - eye0) < 1e-3f);
   });
 
-  /* Round 568: this test counted the view's renders over 24 frames paced 17 ms apart and asked for at least half as many
-   * with the Centre of Mass shown as hidden. A clip plays by the real clock, and the perf clip moves for its first 30
-   * frames of 60 (half a second in every second): how many of the 24 frames fell in the moving half was the machine's
-   * speed, in both runs separately - 11 hidden / 5 shown in a sanitizer shard, 20 / 12 and 10 / 17 here under load,
-   * with the view drawing every frame the avatar moved in all of them. Now the clip is slowed to a frame a second, so its
-   * rising half (frames 0 to 15: every bone turning one way) lasts 15 s, and exactly 24 frames are stepped: each one
-   * whose playhead moved on inside that half - all 24 unless the 26 steps together take over 15 s - must draw the view, hidden
-   * and shown. That is stricter than the old ratio (every moving frame, not half of them) and no longer a measurement.
-   * The editor's own clock is pinned (the toasts, the measured rate); the clip's is the real one and cannot be, so each
-   * frame is given 5 ms for the playhead to move: a floor a slow machine only raises. */
+  /* Round 568 checked that every moving frame draws the Scene view with Centre of Mass hidden and shown.
+   * Preview now follows the editor clock. Step it explicitly so all 24 frames stay inside the clip's rising half
+   * regardless of host speed and both cases see the same playhead sequence. */
   test("a clip playing with Centre of Mass shown (round 468): the Scene view still draws the moving avatar - every stepped frame the clip moved it in, as with it hidden (the stress row 'Centre of Mass shown: the clip playing' read NO VIEW)", [] {
     const int kFrames = 24;
     int moved[2] = {0, 0}, drawn[2] = {0, 0};
@@ -11624,21 +11618,25 @@ static void tests_round468() {
       if (!clip) return;
       clip->frame_rate = 1.0f;  // (the perf clip's keys: 0, 15, 30 - the rising half is 15 s long now)
       const float rising_end = 15.0f;
-      ed.set_clock_for_test(100.0);
+      double clock = 100.0;
+      ed.set_clock_for_test(clock);
       ed.command("anim play");
+      const auto step = [&] {
+        clock += 0.01;
+        ed.set_clock_for_test(clock);
+        ed.step_frame_headless();
+      };
       /* Two frames first, as before: the pose a frame draws may be the one the frame before applied, so a frame counts
        * as "moved" when the playhead rose over both of the last two steps. */
       float before = ed.anim_frame_for_test(), last = before;
       for (int i = 0; i < 2; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        ed.step_frame_headless();
+        step();
         before = last, last = ed.anim_frame_for_test();
       }
       const PoseCounts c0 = ed.pose_counts_total_for_test();
       for (int i = 0; i < kFrames; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         const uint64_t r0 = ed.frame_profile_totals().view_renders;
-        ed.step_frame_headless();
+        step();
         const uint64_t r = ed.frame_profile_totals().view_renders - r0;
         const float now = ed.anim_frame_for_test();
         const bool moving = before < last && last < now && now <= rising_end;
@@ -11652,7 +11650,7 @@ static void tests_round468() {
       ed.command("anim stop");
       std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
     }
-    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] > 0 && drawn[shown] == moved[shown]);
+    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] == kFrames && drawn[shown] == moved[shown]);
   });
 
   test("perf drag key with nothing under it (round 468): an origin off the Scene view (behind the camera, far to the side) is refused and the key never left pressed; with no active object likewise", [r468t_clean, r468t_click_selects, r468t_settle] {
@@ -15628,6 +15626,8 @@ static void tests_round542() {
     /* Each change made straight on the settings, no undo step: only the keep's key can see it. */
     const std::pair<const char *, std::function<void()>> edits[] = {
         {"Sun Lights Scene off", [&] { es.sun_lights_scene = false; }},
+        {"Sky elevation with ambient alone", [&] { es.sun_elevation = 15.0f; }},
+        {"Sky rotation with ambient alone", [&] { es.sun_rotation = 90.0f; }},
         {"Sun Lights Scene on", [&] { es.sun_lights_scene = true; }},
         {"Sun Intensity 3", [&] { es.sun_intensity = 3.0f; }},
         {"Turbidity 8", [&] { es.turbidity = 8.0f; }},
@@ -15666,8 +15666,8 @@ static void tests_round542() {
         p = end == std::string::npos ? body.size() : end;
       }
     }
-    CHECK(tries.size() == 3);
-    if (tries.size() != 3) return;
+    CHECK(tries.size() == 4);
+    if (tries.size() != 4) return;
     Editor ed;
     ed.init_headless(800, 600);
     auto strip = [](std::string s) {
@@ -15699,6 +15699,18 @@ static void tests_round542() {
     run(tries[2]);
     CHECK(ed.scene().environment.sun_lights_scene && ed.scene().environment.sun_intensity == 2.0f);
     CHECK(suns(&i2) == 1 && std::fabs(i2 - 2.0f * i1) < 1e-4f * i1);
+    run(tries[3]);
+    const auto env = ed.make_lighting_for_test();
+    const Vec3 expected{std::cos(15.0f * kDeg2Rad), std::sin(15.0f * kDeg2Rad), 0.0f};
+    CHECK(env.environment && length(env.environment->sun_dir - expected) < 1e-5f);
+    for (const auto &l : env.lights)
+      if (l.type == RenderLight::Directional) CHECK(length(l.direction + expected) < 1e-5f);
+    const std::string path = fs::join(test_dir(), "sky-orientation.scene");
+    CHECK(save_scene(ed.scene(), path));
+    Scene reopened;
+    std::string err;
+    CHECK(load_scene(path, reopened, err));
+    CHECK(reopened.environment.sun_elevation == 15.0f && reopened.environment.sun_rotation == 90.0f);
     std::printf("    the sky's sun: intensity %.3f, at Sun Intensity 2: %.3f\n", i1, i2);
   });
 }
@@ -17224,6 +17236,98 @@ static void tests_round639_paint_undo() {
   });
 }
 
+static void tests_round653_flip_rotate() {
+  test("Flip / Rotate (round 653): quarter turns preserve every RGBA word on and across tile edges", [] {
+    for (const auto &[width, height] : {std::pair<int, int>{1, 33}, {33, 1}, {16, 17}, {17, 16}, {33, 47}}) {
+      edit::Image input;
+      input.resize(width, height);
+      constexpr uint32_t words[] = {0x7fc01234u, 0x7fa05678u, 0x7f800000u, 0xff800000u, 0x80000000u, 1u, 0x7f7fffffu};
+      for (size_t i = 0; i < input.px.size(); ++i) {
+        const uint32_t word = i % 19 < std::size(words) ? words[i % 19] : 0x3f000000u | ((uint32_t)i * 2654435761u & 0x00ffffffu);
+        std::memcpy(&input.px[i], &word, sizeof(word));
+      }
+      edit::FilterKeep keep;
+      for (int quarter : {1, 3}) {
+        for (int flips = 0; flips < 4; ++flips) {
+          const bool horizontal = (flips & 1) != 0, vertical = (flips & 2) != 0;
+          edit::Adjustment adjustment = edit::make_adjustment("Flip / Rotate");
+          adjustment.set("Flip Horizontal", horizontal ? 1.0f : 0.0f);
+          adjustment.set("Flip Vertical", vertical ? 1.0f : 0.0f);
+          adjustment.set("Quarter Turns", (float)quarter);
+          edit::Image actual, expected;
+          expected.resize(height, width);
+          for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+              const int sx = horizontal ? width - 1 - x : x, sy = vertical ? height - 1 - y : y;
+              const int dx = quarter == 1 ? height - 1 - sy : sy, dy = quarter == 1 ? sx : width - 1 - sx;
+              std::memcpy(expected.at(dx, dy), input.at(x, y), 4 * sizeof(float));
+            }
+          }
+          edit::apply(adjustment, input, actual, 1.0f, &keep);
+          CHECK(r508te::same_bits(actual, expected));
+        }
+      }
+    }
+  });
+}
+
+static void tests_round657_view_transform() {
+  test("round 657: the console explains an unavailable Render view transform and keeps the current setting", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.clear_scene_dirty_for_test();
+    ed.command("set Render.ViewTransform ACES (built-in)");
+    CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::ACES));
+    CHECK(ed.scene_dirty_for_test());
+
+    const auto reject = [&](const std::string &requested) {
+      const int transform = ed.scene().render.view_transform;
+      const bool dirty = ed.scene_dirty_for_test();
+      const size_t undo_steps = ed.undo_steps_for_test();
+      const size_t before = r468_log_mark();
+      ed.command("set Render.ViewTransform " + requested);
+      std::vector<LogEntry> entries;
+      Log::fetch(before, entries);
+      CHECK(std::any_of(entries.begin(), entries.end(), [&](const LogEntry &entry) {
+        return entry.level == LogLevel::Warning && entry.text.find("View Transform") != std::string::npos &&
+               entry.text.find(requested) != std::string::npos && entry.text.find("unavailable") != std::string::npos;
+      }));
+      CHECK(ed.scene().render.view_transform == transform);
+      CHECK(ed.scene_dirty_for_test() == dirty);
+      CHECK(ed.undo_steps_for_test() == undo_steps);
+    };
+
+    reject("Missing Test Transform");
+    ed.clear_scene_dirty_for_test();
+    reject("Missing Test Transform");
+    reject("35mm Film");
+    reject("999999999999999999999999 Film");
+
+    const int agx = colormanagement::view_index("AgX");
+    if (agx < 0) {
+      reject("AgX");
+    } else {
+      ed.command("set Render.ViewTransform AgX");
+      const auto expected = static_cast<ViewTransform>(static_cast<int>(ViewTransform::OcioView) + agx);
+      CHECK(ed.scene().render.view_transform == view_transform_setting(expected));
+      CHECK(ed.scene_dirty_for_test());
+    }
+
+    ed.clear_scene_dirty_for_test();
+    ed.command("set Render.ViewTransform 0 \t ");
+    CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::Standard));
+    CHECK(ed.scene_dirty_for_test());
+
+    for (const char *index : {"999", "999999999999999999999999"}) {
+      ed.command("set Render.ViewTransform 0");
+      ed.clear_scene_dirty_for_test();
+      ed.command(std::string("set Render.ViewTransform ") + index);
+      CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::AcesFull));
+      CHECK(ed.scene_dirty_for_test());
+    }
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -17343,5 +17447,7 @@ void run_editor_tests() {
   tests_round556();
   tests_round622_editor();
   tests_round639_paint_undo();
+  tests_round653_flip_rotate();
+  tests_round657_view_transform();
   coverage_tests();
 }

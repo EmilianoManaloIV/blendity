@@ -2,6 +2,8 @@
 
 The reference revision is 90136ffc072f5b9b1c8be2be4ab2e2413b97fdd4. Read the register by exact key when deciding whether a user's operation has a checked effect. A console command, a toolbar click and a keyboard shortcut can share a handler while having different selection, focus and enablement requirements. [Coverage register](0630-inventory.tsv) · [Extractor](../../tools/dev/tool_inventory_0630.py)
 
+The counts below describe the Pass 36 snapshot. The [Pass 37 input sweep](0640-input-sweep.md) records later additions, checks and remaining gaps in the current register.
+
 ## What the register verifies
 
 Of 5,871 exposed entries, 92 have measured workloads, 758 have a checked effect without an attributed timing, 742 reached dispatch only, and 5 have a failed outcome check. The remaining 4,274 entries carry a named gap. Counts describe source entries, so a console spelling and a toolbar control for the same operation count separately. A gap can mean an untested gesture on an available control, an external installation outside the pass, or a retired entry. Physical headset and pen input, live external-engine interoperability and individual Inspector gestures still have gaps. The TSV identifies the route and evidence for each entry.

@@ -13944,6 +13944,142 @@ static void tests_round647() {
   });
 }
 
+static void tests_round652() {
+  test("deferred shading keeps each face's material, highlight and picking when bindings change between frames", [] {
+    constexpr int width = 160, height = 96;
+    constexpr size_t triangle_count = 6;
+    const std::string first_map = fs::join(test_dir(), "r652-first.png");
+    const std::string next_map = fs::join(test_dir(), "r652-next.png");
+    const uint32_t first_texels[] = {0xFF3030F0u, 0xFF40C030u, 0xFFF04040u, 0xFF808080u};
+    const uint32_t next_texels[] = {0xFFE0E030u, 0xFF7020D0u, 0xFF20B0C0u, 0xFF303030u};
+    if (!write_png(first_map, first_texels, 2, 2, 2, false) || !write_png(next_map, next_texels, 2, 2, 2, false)) {
+      CHECK(false);
+      return;
+    }
+    auto plain = make_material("Solid", {0.7f, 0.24f, 0.13f});
+    auto textured = make_material("Mapped", {0.86f, 0.91f, 0.94f});
+    textured->base_map = TextureRef{first_map, false};
+    textured->vertex_color = true;
+    std::vector<MaterialPtr> materials{plain, textured, nullptr};
+    std::vector<uint8_t> highlights{0, 1, 0, 1, 0, 0};
+    std::vector<Vec4> colors;
+    RenderMesh mesh;
+    mesh.tri_material = {0, 0, 1, 0, 1, 9};  // slot 9 clamps to the empty last slot
+    const float spans[triangle_count][2] = {{-1.6f, -1.03f}, {-0.93f, -0.83f}, {-0.74f, -0.12f},
+                                             {0.0f, 0.59f}, {0.70f, 1.0f}, {1.12f, 1.61f}};
+    for (uint32_t i = 0; i < triangle_count; i++) {
+      const float left = spans[i][0], right = spans[i][1];
+      const Vec3 triangle[] = {{left, -0.70f, 3.0f}, {(left + right) * 0.5f, 0.70f, 3.0f}, {right, -0.70f, 3.0f}};
+      for (Vec3 p : triangle) {
+        mesh.indices.push_back((uint32_t)mesh.positions.size());
+        mesh.positions.push_back(p);
+        mesh.normals.push_back({0.0f, 0.0f, -1.0f});
+        mesh.bounds.add(p);
+      }
+      mesh.uvs.insert(mesh.uvs.end(), {{0.0f, 0.0f}, {0.5f, 1.0f}, {1.0f, 0.0f}});
+      colors.insert(colors.end(), {{0.4f, 0.9f, 0.6f, 1.0f}, {0.9f, 0.5f, 0.7f, 1.0f}, {0.7f, 0.6f, 0.8f, 1.0f}});
+      mesh.tri_face.push_back(i);
+    }
+    std::array<RenderMesh, triangle_count> separate;
+    for (size_t i = 0; i < triangle_count; i++) {
+      separate[i] = mesh;
+      separate[i].indices.assign(mesh.indices.begin() + i * 3, mesh.indices.begin() + (i + 1) * 3);
+      separate[i].tri_face = {(uint32_t)i};
+      separate[i].tri_material.clear();
+    }
+
+    DrawItem item;
+    item.mesh = &mesh;
+    item.id = 37;
+    item.materials = &materials;
+    item.face_highlight = &highlights;
+    item.material_colors = &colors;
+    LightingEnv env;
+    RenderLight fill;
+    fill.direction = {0.0f, 0.0f, 1.0f};
+    env.lights = {fill};
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    opt.affine_uv = true;
+    opt.backface_culling = false;
+    const Mat4 view = Mat4::look_at({0, 0, 0}, {0, 0, 3}, {0, 1, 0});
+    const Mat4 projection = Mat4::ortho(1.0f, (float)width / height, 0.1f, 10.0f);
+    Image images[2];
+    RenderTarget targets[2];
+    Renderer3D renderers[2];
+    for (int i = 0; i < 2; i++) {
+      images[i].resize(width, height);
+      targets[i].attach(images[i], {0, 0, width, height});
+      targets[i].want_hdr = true;
+    }
+    auto begin = [&](int i) {
+      renderers[i].begin(&targets[i], view, projection, env, opt);
+      renderers[i].clear(0xFF000000u);
+    };
+    auto check_frame = [&] {
+      begin(0);
+      renderers[0].add(item);
+      renderers[0].flush();
+
+      // Give the reference triangles independent bindings and distinct IDs to identify their pixels.
+      std::array<std::vector<MaterialPtr>, triangle_count> bindings;
+      begin(1);
+      for (size_t i = 0; i < triangle_count; i++) {
+        DrawItem reference = item;
+        reference.mesh = &separate[i];
+        reference.id = (uint32_t)i + 1;
+        if (mesh.tri_material[i] < materials.size()) bindings[i] = {materials[mesh.tri_material[i]]};
+        reference.materials = &bindings[i];
+        renderers[1].add(reference);
+      }
+      renderers[1].flush();
+      CHECK(images[0].pixels == images[1].pixels);
+      CHECK(targets[0].depth == targets[1].depth);
+      CHECK(targets[0].hdr.size() == (size_t)width * height && targets[1].hdr.size() == targets[0].hdr.size() &&
+            std::memcmp(targets[0].hdr.data(), targets[1].hdr.data(), targets[0].hdr.size() * sizeof(Vec3)) == 0);
+      std::array<size_t, triangle_count> coverage{};
+      std::array<size_t, triangle_count> widest{};
+      bool picks_match = true;
+      for (int y = 0; y < height; y++) {
+        std::array<size_t, triangle_count> row{};
+        for (int x = 0; x < width; x++) {
+          const uint32_t id = targets[1].id_at(x, y);
+          picks_match &= targets[0].id_at(x, y) == (id ? item.id : 0);
+          if (id > 0 && id <= triangle_count) {
+            row[id - 1]++;
+            coverage[id - 1]++;
+          }
+        }
+        for (size_t i = 0; i < triangle_count; i++) widest[i] = std::max(widest[i], row[i]);
+      }
+      CHECK(picks_match && std::all_of(coverage.begin(), coverage.end(), [](size_t count) { return count > 32; }));
+      CHECK(widest[0] >= 8 && widest[1] > 0 && widest[1] < 8);
+      if (cpu::features().avx2) CHECK(renderers[0].stats().pixels_simd > 0);
+    };
+    CHECK(textured->textures().base != nullptr);
+    check_frame();
+    const auto first = images[0].pixels;
+    textured->base_map.path = next_map;
+    textured->touch();
+    CHECK(textured->textures().base != nullptr);
+    check_frame();
+    bool plain_unchanged = true;
+    size_t texture_changes = 0;
+    for (size_t i = 0; i < first.size(); i++) {
+      const uint32_t face = targets[1].ids[i];
+      if (face == 3 || face == 5) texture_changes += first[i] != images[0].pixels[i];
+      else plain_unchanged &= first[i] == images[0].pixels[i];
+    }
+    CHECK(plain_unchanged && texture_changes > 100);
+
+    const auto before_rebinding = images[0].pixels;
+    std::swap(materials[0], materials[1]);
+    highlights[0] = 1;
+    check_frame();
+    CHECK(images[0].pixels != before_rebinding);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -14006,4 +14142,5 @@ void run_render_tests() {
   tests_round597();
   tests_round631();
   tests_round647();
+  tests_round652();
 }

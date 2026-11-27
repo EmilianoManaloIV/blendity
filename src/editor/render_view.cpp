@@ -841,6 +841,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   mix((uint64_t)rasterized | (uint64_t)unity_lights_gamma() << 1 | (uint64_t)scene_->lighting.baked_gi << 2);
   mix((uint64_t)(uintptr_t)&ld), mix((uint64_t)ld.light_modes.size()), mix(lighting_gen_);
   mix((uint64_t)reflection_probe_bakes_.size()), mix(reflection_probe_gen_);
+  mix(sky_world_orientation_key(es));
   mix(sky_sun_key(es));  // (round 542: the sky's sun is in the list)
   for (const auto &[id, bake] : reflection_probe_bakes_) mix(id), mix((uint64_t)(uintptr_t)&bake);
   const uint64_t epoch = edit_epoch::now(), structure = edit_epoch::structure();  // (read before the walks: a bump during them walks again next frame)
@@ -944,13 +945,13 @@ std::vector<RenderProbe> Editor::render_reflection_probes() {
 
 void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   const EnvironmentSettings &es = scene_->environment;
-  Vec3 sun{0.35f, 0.75f, -0.55f};
-  if (sun_in) sun = *sun_in;  // (round 506: make_lighting's keep holds the sun; no walk)
-  else
+  Vec3 sun = sun_in ? *sun_in : sky_world_sun(es);
+  if (!sun_in) {
     scene_->for_each([&](GameObject &g) {
       if (auto *l = g.get<Light>())
         if (l->enabled && l->type == 0 && g.active_in_hierarchy()) sun = -normalize(g.world_rotation().rotate({0, 0, 1}));
     });
+  }
   if (sun_out) *sun_out = sun;
   /* Cache key: everything the baked environment depends on. */
   uint64_t key = kFnvBasis;
@@ -1207,6 +1208,8 @@ uint64_t Editor::scene_hash_tail() {
   mix(&es.turbidity, 4);
   const uint64_t sky_sun = sky_sun_key(es);  // (round 542)
   mix(&sky_sun, 8);
+  const uint64_t orientation = sky_world_orientation_key(es);
+  mix(&orientation, sizeof(orientation));
   mix(&es.color, sizeof(Vec3));
   mix(&es.sky, sizeof(Vec3) * 3);
   mix(es.hdri.path.data(), es.hdri.path.size());

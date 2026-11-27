@@ -1814,7 +1814,7 @@ class Editor {
   struct GlossJob {
     struct Item {
       std::string guid, path, table;  // (the texture's GUID, its file, its package's folder - "" when it has none)
-      std::set<std::string> materials;  // (the .mat files that asked for its mean: read again when it lands, and no others)
+      std::map<std::string, float> materials;  // requesting .mat path and its original provisional roughness; main thread only
       float mean[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       int width = 0, height = 0;
       uint64_t bytes = 0;
@@ -1829,11 +1829,13 @@ class Editor {
   void poll_unity_gloss();
   void land_unity_gloss();
   size_t unity_rematerials();
-  /* The Unity materials the library holds under `under` ("" - all; `only`: of those, the ones at these paths) read
+  /* The Unity materials the library holds under `under` ("" - all) read
    * again from their files, in place; the copies the undo and redo states, the last committed state and the scene Stop
    * brings back keep of them take the new reading too - reading a file again is not an edit, and neither an Undo back
    * past this moment nor a Stop may bring the old reading back. How many changed. */
-  size_t reread_unity_materials(const std::string &under = std::string(), const std::set<std::string> *only = nullptr);
+  size_t reread_unity_materials(const std::string &under = std::string());
+  size_t apply_measured_unity_gloss(const std::map<std::string, std::map<std::string, float>> &requests);
+  void visit_material_states(const std::function<void(Material &)> &visit);
   bool unity_gloss_running_for_test() const { return gloss_job_ != nullptr; }
   /* A job as a worker left it - cancelled part way, say - landed on this thread: a headless editor runs its own jobs
    * to their end before anything can cancel them. */

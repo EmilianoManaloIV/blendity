@@ -409,6 +409,7 @@ screens themselves.
 | A texture layer's or material's field pushed too far had no way back but remembering its value or undoing every step. | Right-click its name > Reset to Default: the value a new one starts with (round 332). |
 | Add Layer listed 48 layers under two headings; finding one meant reading the list. | A search field first, and Blender's node groups (Texture, Pattern, Color, Converter, Filter, Mask & Wear...) (round 332). |
 | What one layer added to the texture couldn't be seen without switching every layer above it off. | Alt+click its name: the preview up to it, and again for all (round 332). |
+| Asking for an unavailable camera view transform silently kept the displayed image and marked the scene changed. | The console names the unavailable choice and preserves the current view and scene modification state (round 657). |
 | A layer at Opacity 0 or with no targets looked broken: on, and doing nothing. | Its row says why: "Opacity 0", "Writes nothing" (round 332). |
 | The Materials window couldn't make a material of a type (Glass, Toon, a fog); the slot's list was one flat list of 12. | Of Type... beside New Material Asset, and both lists grouped: Basic, Glass, Metal, Stylized, Volume (round 332). |
 | A 3D character close to the camera looked like a 3D model, not a drawing: perspective swelled the nose and a hand reaching forward. | Camera Flatten: the depth squashed toward the camera about the body or the head, shaded as modelled, in the Game view and renders - the Scene view keeps the true shape (round 334). |
@@ -632,3 +633,7 @@ the artist-facing half of Pass 25; their numbers are in `docs/PERFORMANCE.md`, "
 ## Baked light on the GPU (round 620)
 
 When baked corners outgrow the initial 4 KiB buffer, integrated GPUs and GPUs with up to 4 GiB of device-local memory grow it from a smaller minimum. Reusing a freed range preserves the corner data of other meshes.
+
+### Round 668: Unity material edits during gloss loading
+
+An automatic gloss measurement preserves edited material fields. Reimport Unity Materials explicitly rereads the source.

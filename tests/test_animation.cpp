@@ -15821,6 +15821,127 @@ static void tests_round646() {
   });
 }
 
+/* ===================================================================== */
+/* Round 656 (task 0638): partially trusted weights and Preview transport */
+/* ===================================================================== */
+
+static void tests_round656() {
+  test("round 656: Transfer Weights fills the masked part of the skin and keeps a detached vertex's surface match", [] {
+    Mesh source;
+    source.add_vert({0, 0, 0});
+    source.add_vert({8, 0, 0});
+    source.add_vert({0, 8, 0});
+    source.add_face({0, 1, 2});
+    source.vertex_groups = {{"Low", {1, 1, 0}}, {"High", {0, 0, 1}}, {"Unused", {0, 0, 0}}, {kInpaintMask, {1, 1, 1}}};
+    Mesh target;
+    target.add_vert({1, 1, 0.0625f});
+    target.add_vert({3, 1, 0.0625f});
+    target.add_vert({2, 3, 0.0625f});
+    target.add_vert({4, 2, 0.0625f});
+    target.add_face({0, 1, 2});
+    const std::vector<float> mask = {0.5f, 0, 1, 1};
+    const std::vector<float> custom = {0, 0.25f, 0.5f, 0.75f};
+    target.vertex_groups = {{kInpaintMask, mask}, {"Custom", custom}};
+
+    std::atomic<float> progress{0.0f};
+    InpaintOptions opts;
+    opts.progress = &progress;
+    InpaintReport report;
+    std::string error;
+    const bool ok = transfer_skin_weights(source, target, opts, &report, &error);
+    std::printf("    transfer: %zu trusted, %zu solved, %zu fallback, %zu active groups (%s) %s\n",
+                report.known, report.inpainted, report.fallback, report.groups, report.solver, error.c_str());
+    CHECK(ok && error.empty() && progress.load() == 1.0f);
+    if (!ok) return;
+    CHECK(report.known == 2 && report.inpainted == 1 && report.fallback == 1 && report.groups == 2);
+    CHECK(*report.solver && report.converged && report.ms >= 0.0);
+    CHECK(target.groups_fit() && target.vertex_groups.size() == 5);
+    const int mask_group = target.find_group(kInpaintMask), custom_group = target.find_group("Custom");
+    CHECK(mask_group == 0 && target.vertex_groups[0].weights == mask);
+    CHECK(custom_group == 1 && target.vertex_groups[1].weights == custom);
+    // Low and High vary with Y. Both trusted anchors agree, so their connected hole takes the same weights.
+    for (size_t v : {0u, 1u}) {
+      CHECK(r81_weight(target, "Low", v) == 0.875f && r81_weight(target, "High", v) == 0.125f);
+    }
+    CHECK_NEAR(r81_weight(target, "Low", 2), 0.875f, 1e-6f);
+    CHECK_NEAR(r81_weight(target, "High", 2), 0.125f, 1e-6f);
+    CHECK(r81_weight(target, "Low", 3) == 0.75f && r81_weight(target, "High", 3) == 0.25f);
+    for (size_t v = 0; v < target.vert_count(); v++) {
+      CHECK(r81_weight(target, "Unused", v) == 0.0f);
+      CHECK_NEAR(r81_weight(target, "Low", v) + r81_weight(target, "High", v), 1.0f, 1e-6f);
+    }
+  });
+
+  test("round 656: Preview Play, ruler scrub and resume, and console Play use the editor clock", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(9000.0);
+    std::remove(resolve_asset_path("Assets/Animations/R656PreviewClock.anim").c_str());
+    GameObject *root = ed.scene().create("R656Rig");
+    GameObject *bone = ed.scene().create("Slider", root);
+    bone->add<Bone>();
+    ed.command("select R656Rig");
+    ed.mark_changed_for_test("R656 preview fixture");
+    ed.command("layout Animation");
+    ed.command("anim new R656PreviewClock");
+    ed.command("anim key Slider Position 0 0 0");
+    ed.command("anim key Slider Position 0 60 6");
+    ed.command("anim interp Slider Position 0 0 linear");
+    ed.command("anim frame 10");
+    r34_steps(ed, 3);
+
+    Recti play, ruler;
+    const bool ready = ed.button_rect_for_test("anim:Play", play) && ed.button_rect_for_test("anim_ruler", ruler);
+    CHECK(ready && ed.anim_clip_for_test() && ed.anim_clip_for_test()->frame_rate == 60.0f);
+    if (!ready || !ed.anim_clip_for_test()) return;
+    const auto expect = [&](const char *stage, float frame) {
+      std::printf("    %s: frame %.4f (want %.4f), bone X %.4f\n", stage, ed.anim_frame_for_test(), frame, bone->local().position.x);
+      CHECK_NEAR(ed.anim_frame_for_test(), frame, 1e-3f);
+      CHECK_NEAR(bone->local().position.x, frame * 0.1f, 1e-4f);
+    };
+    r34_click(ed, play.x + play.w / 2, play.y + play.h / 2);
+    CHECK(ed.anim_for_test().playing && ed.anim_preview_for_test());
+    ed.set_clock_for_test(9000.25);
+    ed.step_frame_headless();
+    expect("toolbar Play after 15 frames", 25.0f);
+    r34_steps(ed, 2);
+    expect("toolbar Play with clock held", 25.0f);
+
+    const int y = ruler.y + ruler.h / 2;
+    const int first = ruler.x + ruler.w / 3, last = ruler.x + ruler.w / 2;
+    const float scrubbed = std::round(ed.anim_frame_at_for_test(last));
+    CHECK(scrubbed > 25.0f && scrubbed + 7.5f < 60.0f);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, first, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, first, y)});
+    CHECK(!ed.anim_for_test().playing && ed.anim_for_test().scrub_resume);
+    ed.set_clock_for_test(9004.25);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, last, y)});
+    expect("ruler held during a long clock step", scrubbed);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, last, y)});
+    CHECK(ed.anim_for_test().playing && !ed.anim_for_test().scrub_resume);
+    ed.set_clock_for_test(9004.375);
+    ed.step_frame_headless();
+    expect("ruler resumes by 7.5 frames", scrubbed + 7.5f);
+    r34_click(ed, play.x + play.w / 2, play.y + play.h / 2);
+    CHECK(!ed.anim_for_test().playing);
+    ed.set_clock_for_test(9010.0);
+    ed.step_frame_headless();
+    expect("toolbar Pause holds the pose", scrubbed + 7.5f);
+
+    ed.command("anim frame 45");
+    ed.command("anim play");
+    ed.set_clock_for_test(9010.5);
+    ed.step_frame_headless();
+    expect("console Play wraps past frame 60", 15.0f);
+    ed.command("anim stop");
+    ed.set_clock_for_test(9012.0);
+    ed.step_frame_headless();
+    CHECK(!ed.anim_for_test().playing);
+    expect("console Stop holds the pose", 15.0f);
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -15873,4 +15994,5 @@ void run_animation_tests() {
   tests_round522();
   tests_round569();
   tests_round646();
+  tests_round656();
 }

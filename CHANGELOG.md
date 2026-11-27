@@ -2,6 +2,135 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-27 (round 668): Keep Unity material edits when gloss finishes loading
+
+**Asked:** A background texture measurement reset an edited Metallic value on a Unity material.
+
+**Changed (task 0650, ADR 0157):** When a measured gloss value arrives, each affected material takes the new roughness only if it still shows the provisional value. Other fields and locally edited roughness are preserved in the current scene, undo and redo states and the scene restored after Play. Reimport Unity Materials still reloads the source file.
+
+**Checks:** The baseline reproduction saved Metallic 0.37 and then read back 1.0 after background completion. Regression fixtures cover two materials sharing a map, directly edited roughness, known and worker-supplied measurements, explicit reimport, saved scene values, Undo, Redo and Stop.
+
+## 2026-11-27 (round 666): Adjust the physical Sky world's sun direction
+
+**Asked:** Place the sky's sun without adding a Directional Light.
+
+**Added:** World settings for a Sky expose Sun Elevation and Sun Rotation in degrees. The current scene stores the angles. The sky and its direct light share the direction. An enabled Directional Light still controls both. Learn includes a low-sun example.
+
+**Checks:** Lighting, editor and Learn checks cover light precedence, changing angles with the direct sun switched off, console edits and scene persistence.
+
+## 2026-11-27 (round 665): Choose the shell build's parallel job count
+
+**Asked:** Honor a caller's job limit on Linux and macOS.
+
+**Changed:** Set `JOBS=2 ./build.sh release tests`, for example, to give the compiler dispatcher two jobs. An unset or empty count uses the detected processor count. Zero and malformed values stop the build before compilation.
+
+**Checked:** The build entry point passed one and two to the dispatcher and used the detected seven for both default cases in an isolated shell fixture. It rejected zero, all-zero digits, a negative count, text and a value containing whitespace.
+
+## 2026-11-27 (round 664): Compare fixed-size splat axis transforms
+
+**Asked:** Test whether specialized spherical-harmonic band loops accelerate the constrained PLY import.
+
+**Checked (task 0646):** The revised candidate matched the full x86 output and was slower in four of five axis-conversion pairs. Blendity retains the baseline importer. The [experiment record](docs/tasks/0646-splat-axes.md) includes the rejected NaN case, timing variance and limits of device coverage.
+
+## 2026-11-27 (round 662): Cold Textures startup in a mixed project
+
+**Asked:** Check whether skipping unrelated filenames earlier makes the Textures window open faster in a project with mixed assets.
+
+**Checked (task 0644):** In a fresh Windows release editor with 144 textures and 6,912 additional unrelated files, the median paired first-frame savings were 0.3 ms at default concurrency and 1.7 ms at two workers. Both fell below the predefined thresholds. The listed paths, panel pixels and saved edit matched. The round records the measurement and retains the original file discovery code.
+
+## 2026-11-27 (round 661): Show the current Adjust Last Operation shortcut
+
+**Asked:** Check the last shortcut written directly into the Adjust Last Operation tooltip.
+
+**Changed:** The panel header's tooltip shows the current keymap chord, including custom bindings, and omits the shortcut when unbound.
+
+**Checks:** The hard-coded shortcut audit reports zero labels. The HCI fixture checks the default, Maya, rebound and unbound cases.
+
+## 2026-11-27 (round 660): Windows release toolset verification
+
+**Asked:** Verify MSVC 14.52 against the original Windows release workloads and investigate the hosted macOS failures.
+
+**Changed (task 0642, ADRs 0133 and 0134)**
+- Recorded the original and current Windows failures with compiler versions and matching debug symbols. The two single-process unit runs stopped in different operations. The 14.51 release pin remains in effect.
+- Identified four macOS runner acquisition failures and one Preferences assertion in the reviewed jobs. Later hosted runs completed both the unit suite and quick stress.
+
+**Checked:** The pinned, dependency-free Windows build passed 132,595 checks in 3,951 tests and completed quick stress on the comparison revision. Its stock 14.52 counterpart failed both workloads. A separate three-file 14.52 trial completed quick stress but its unit process still terminated after 416 tests. See [task 0642](docs/tasks/0642-msvc-release-triage.md) for the exact source revisions, jobs and symbol evidence.
+
+## 2026-11-27 (round 659): Profile constrained Linux imports
+
+**Asked:** Measure splat and Unity import on low-end ARM64 and x86-64 CPU profiles.
+
+**Added (task 0641):**
+- A repeatable million-record PLY and generated Unity-scene workload with kernel-enforced limits, live CPU affinity, process peak RSS and separate read, decode and serial validation timings.
+
+**Checked:** See the [constrained import measurements](docs/perf/0641-constrained-imports.md).
+
+## 2026-11-27 (round 658): Input gestures in the tool register
+
+**Asked:** Continue the tool sweep with actual input, checked results and controls. Reconcile the older backlog with later measurements and fixes.
+
+**Added (task 0640)**
+- The register identifies 19 individual Paint and Sculpt panel buttons and 15 indexed LOD and Color Ramp fields. Windows replays exercise visible controls and shortcuts. Linux probes deliver key and pointer events to the contextual Wheel, Inspector, camera filter and texture layer stacks.
+- The round report links observed outcomes, outstanding gesture checks and the older open-work items.
+
+**Checked:** All 49 texture layers attached through their named menu entries. All 25 contextual Wheel choices retained the initial setting on cancellation and selected the expected setting on confirmation. Both UV Reset workloads matched their reference image. The four historical Blockout failures retain their original evidence alongside the corrected same-workload results.
+
+## 2026-11-27 (round 657): Camera view transforms, large-scene dragging and baking
+
+**Asked:** Measure large scenes with Scene and Game open, camera effects including AgX, external renderer memory and completed bakes.
+
+**Changed (task 0639)**
+- Requesting an unavailable Render view transform in the console reports the requested name, keeps the current transform and preserves the scene's modification state.
+- Added a large-scene drag measurement harness and recorded external-renderer, camera and bake measurements in [the round report](docs/perf/0639-rendering.md).
+
+**Checked:** Windows renderer/editor groups passed 40,611/4,097 checks with libraries and 40,490/4,075 without. Linux passed 40,505/4,077. A configured AgX transform changed 57,582 of 57,600 pixels against ACES. A completed MoonRay render reached 987.1 MiB in its Linux process. The warmed dual-follow drag took 85.55-86.55 ms on CPU and 5.06-5.18 ms on Vulkan across four directions. The world lighting bake saved six HDR pages mapped to 180 objects. The sphere mesh-map bake saved all six maps.
+
+## 2026-11-27 (round 656): Animation preview and skin transfer on dense rigs
+
+**Asked:** Measure partially trusted weight transfer and exercise IK, timeline scrubbing, playback and Live Link on humanoid and quadruped rigs in a dense scene.
+
+**Changed (task 0638, ADR 0028 and ADR 0127)**
+
+- Partially trusted skin transfers now build independent stiffness rows and solve weight groups in parallel. Default-worker median transfers fell from 37.3 to 29.2 ms on the humanoid and from 65.25 to 49.3 ms on the quadruped.
+- Animation Preview uses the editor clock when starting, ticking and resuming playback. This lets headless checks drive the toolbar, console and Animation ruler at exact timestamps.
+- Added reproducible dense rig and local Live Link workloads that verify edits and evaluated motion.
+
+**Checked:** Saved native poses and exported frame-60 meshes matched across isolated and dense scenes on both rigs. Measurements and verification are in `docs/perf/0638-dense-rigs.md`.
+
+## 2026-11-27 (round 655): Correct overlap checks on translated mesh faces
+
+**Asked:** Diagnose the seeded Blockout geometry failures and verify dense mesh editing and Undo.
+
+**Changed (task 0637, ADR 0056)**
+
+- The overlap checker measures clipped area relative to the triangles. This fixes false overlap reports on translated faces and preserves detection of coincident small faces.
+- The Blockout kernel stress section can select the architectural sweep and report each failing seed. Four dense editor workloads check geometry, selection and Undo.
+
+**Checked:** The seven previously flagged arrangements all fell below the existing overlap threshold under independent triangle clipping. All 900 Windows full-library cases and all 450 Linux field cases built with zero geometry problems. The Blockout, modeling and editor groups passed on all three builds. See the [round report](docs/perf/0637-mesh-blockout.md).
+
+## 2026-11-27 (round 654): Faster redraw of stacked UVs and packing of dense islands
+
+- The CPU UV Editor preserves the drawn pixels while reusing triangle coverage for stacked Reset quads. On the 1,536-face Linux fixture, mixed-winding and Stretch redraws fell from 2.22–2.28 s to 0.54–0.55 s. The clipped fixture showed no repeatable improvement.
+- Pack Islands reuses its island face lists. All eight dense axis-aligned fixtures met the preset speed threshold, as did four of eight dense rotated fixtures. Exact UV coordinates matched across 180 independent cases. See [the measurements and workload definitions](docs/perf/0636-uv.md).
+
+## 2026-11-27 (round 653): Faster 4K quarter-turn image adjustment
+
+**Asked:** Make a measured 4K image adjustment faster while preserving the original Windows pixels.
+
+**Changed (task 0635):** Flip / Rotate copies quarter-turned pixels in 16 × 16 tiles. In four Linux pairs at two workers, the preallocated square 4K apply fell from 61.29 to 33.96 ms by build median. With 32 workers it fell from 31.47 to 26.08 ms. The allocation-inclusive 32-worker result was inconclusive.
+
+**Checked:** Windows release probes matched 10,246,936 original RGBA words across 492 comparisons, including exceptional floating-point values, both directions and partial tiles. All 32 Linux timing pairs passed coordinate and whole-output checks. Windows and Linux each passed 40 focused assertions and 4,061 full editor checks.
+
+## 2026-11-27 (round 652): Faster shaded CPU frames during dense Sculpt strokes
+
+**Asked:** Reduce slow dense Sculpt strokes on low CPU counts while preserving the picture, picking, masks, geometry and undo.
+
+**Changed (task 0634, ADR 0056)**
+- Deferred CPU shading reuses plain material inputs, skips unused UV and tangent setup, and prepares eight-pixel lighting when a triangle covers a long enough run.
+- On a 500k-face mesh with two logical CPUs, standard Draw move frames fell from 73.30 to 68.62 ms and broad Draw from 81.72 to 78.54 ms. All five pairs improved for both brushes.
+
+**Checked:** The selected renderer matched the baseline's complete Scene pixels, depth, picks, geometry, masks and undo over 160 real strokes across five workloads. Render, Lighting, Sculpt and Editor passed 55,164 checks with the full Windows libraries and 54,958 checks on dependency-free Linux.
+
 ## 2026-11-27 (round 651): Dense UV Reset redraw
 
 **Asked:** Improve interaction with complex UV layouts, including the redraw after resetting thousands of overlapping faces.

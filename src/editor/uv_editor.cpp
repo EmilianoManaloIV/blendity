@@ -8,6 +8,7 @@
 #include "../scene/uv.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace bl {
@@ -143,13 +144,21 @@ void Editor::uv_op(const std::string &op) {
   else Log::info("UV %s done in %.1f ms", op.c_str(), t.ms());
 }
 
-/* Identical Reset quads redraw the same two triangles and four edges. Include the
- * ordered edge styles: their antialiased pixels blend between consecutive fills. */
+/* Identical Reset quads redraw the same two triangles and four edges. Include
+ * winding and ordered edge styles, which affect the sequence of pixel blends. */
+static constexpr int reversed_reset_quad = 1 << 8;
+
 static int reset_quad_edges(const Mesh &m, uint32_t b, const std::vector<uint8_t> &selected) {
   static const Vec2 unit[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-  for (int i = 0; i < 4; ++i)
-    if (m.uvs[b + i].x != unit[i].x || m.uvs[b + i].y != unit[i].y) return -1;
-  int styles = 0;
+  auto matches = [&](bool reverse) {
+    for (int i = 0; i < 4; ++i) {
+      const Vec2 p = unit[reverse ? ((4 - i) % 4) : i], uv = m.uvs[b + i];
+      if (uv.x != p.x || uv.y != p.y) return false;
+    }
+    return true;
+  };
+  int styles = matches(false) ? 0 : reversed_reset_quad;
+  if (styles && !matches(true)) return -1;
   for (int i = 0; i < 4; ++i) {
     const uint32_t a = b + i, z = b + ((i + 1) % 4);
     const int style = m.is_seam(m.corner_verts[a], m.corner_verts[z]) ? 2 : (selected[a] && selected[z] ? 1 : 0);
@@ -157,6 +166,53 @@ static int reset_quad_edges(const Mesh &m, uint32_t b, const std::vector<uint8_t
   }
   return styles;
 }
+
+/* The canvas truncates coverage times fill alpha per triangle. Capture that
+ * alpha using the original rasterizer, then blend both triangles in order at
+ * the shared diagonal, even if the next face has a different RGB fill. */
+struct ResetQuadFill {
+  int draws = 0;
+  uint32_t alpha = 0;
+  std::vector<uint16_t> coverage;
+
+  bool draw(Canvas &canvas, Image &mask, const Recti &r, const Vec2 *pts, uint32_t fill) {
+    if (draws < 4 && ++draws < 4) return false;
+    if (coverage.empty()) prepare(mask, r, pts, fill >> 24);
+    if (alpha != (fill >> 24)) return false;
+    const uint32_t rgb = fill & 0xFFFFFF;
+    size_t k = 0;
+    for (int y = r.y; y < r.bottom(); ++y) {
+      for (int x = r.x; x < r.right(); ++x) {
+        const uint16_t a = coverage[k++];
+        if (a & 255) canvas.blend_px_a(x, y, rgb | (uint32_t(a & 255) << 24), 1.0f);
+        if (a >> 8) canvas.blend_px_a(x, y, rgb | (uint32_t(a >> 8) << 24), 1.0f);
+      }
+    }
+    return true;
+  }
+
+  void prepare(Image &mask, const Recti &r, const Vec2 *pts, uint32_t a) {
+    if (mask.pixels.empty()) {
+      // Keep the original pixel coordinates when evaluating triangle distances.
+      mask.width = r.right();
+      mask.height = r.bottom();
+      mask.pixels.resize((size_t)mask.width * mask.height);
+    }
+    alpha = a;
+    coverage.resize((size_t)r.w * r.h);
+    Canvas cv;
+    cv.begin(&mask);
+    cv.push_clip(r);
+    cv.set_blend_max(true);
+    for (int i = 0; i < 2; ++i) {
+      for (int y = r.y; y < r.bottom(); ++y) std::fill_n(mask.row(y) + r.x, r.w, 0u);
+      cv.fill_triangle(pts[0], pts[i + 1], pts[i + 2], a << 24);
+      size_t k = 0;
+      for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) coverage[k++] |= (mask.row(y)[x] >> 24) << (8 * i);
+    }
+  }
+};
 
 void Editor::draw_uv_editor(const Recti &r) {
   auto &u = ui_;
@@ -317,6 +373,14 @@ void Editor::draw_uv_editor(const Recti &r) {
   bool settled = false;
   // The two-pixel seam stroke and its antialiasing extend beyond the UV square.
   const Recti footprint = Recti{sq.x - 4, sq.y - 4, sq.w + 8, sq.h + 8}.intersect(u.canvas.clip());
+  const size_t footprint_pixels = (size_t)footprint.w * footprint.h;
+  const size_t mask_pixels = (size_t)footprint.right() * footprint.bottom();
+  // Keep staging below 8 MiB and avoid a full-offset staging image for a narrow clipped square.
+  const bool cache_fills = check_reset_runs && footprint.w >= 32 && footprint.h >= 32 &&
+                           footprint_pixels <= 1024 * 1024 && mask_pixels <= 2 * 1024 * 1024 &&
+                           mask_pixels <= 12 * footprint_pixels;
+  std::array<ResetQuadFill, 4> fill_masks;
+  Image mask;
   std::vector<uint32_t> before;
   for (size_t f = 0; f < m.face_count(); f++) {
     if (!shown(f)) continue;
@@ -324,12 +388,13 @@ void Editor::draw_uv_editor(const Recti &r) {
     std::vector<Vec2> pts(n);
     for (uint32_t i = 0; i < n; i++) pts[i] = to_screen(m.uvs[b + i]);
     uint32_t fill = Color::hex(0x7A7A7A, 40);
+    const bool selected_fill = !uv_stretch_ && edit_mode_ && f < face_sel_.size() && face_sel_[f];
     if (uv_stretch_) {
       float d = std::fabs(std::log2(std::max(stretch[f], 1e-4f)));
       Vec3 c = d < 0.5f ? lerp(Vec3(0.2f, 0.4f, 1.0f), Vec3(0.2f, 0.9f, 0.3f), d * 2) : lerp(Vec3(0.2f, 0.9f, 0.3f), Vec3(1.0f, 0.2f, 0.1f), saturate(d - 0.5f));
       fill = Color::from(c, 0.55f);
     }
-    else if (edit_mode_ && f < face_sel_.size() && face_sel_[f]) fill = Color::hex(0xFF8C1A, 45);
+    else if (selected_fill) fill = Color::hex(0xFF8C1A, 45);
     const int edges = check_reset_runs && n == 4 ? reset_quad_edges(m, b, uv_sel_) : -1;
     if (edges < 0 || edges != previous_edges || fill != previous_fill) {
       previous_edges = edges;
@@ -349,7 +414,9 @@ void Editor::draw_uv_editor(const Recti &r) {
         std::copy_n(target.pixels.data() + offset, footprint.w, before.data() + (size_t)y * footprint.w);
       }
     }
-    for (uint32_t i = 1; i + 1 < n; i++) u.canvas.fill_triangle(pts[0], pts[i], pts[i + 1], fill);
+    const int fill_index = ((edges & reversed_reset_quad) ? 2 : 0) + (selected_fill ? 1 : 0);
+    if (!cache_fills || edges < 0 || !fill_masks[fill_index].draw(u.canvas, mask, footprint, pts.data(), fill))
+      for (uint32_t i = 1; i + 1 < n; i++) u.canvas.fill_triangle(pts[0], pts[i], pts[i + 1], fill);
     for (uint32_t i = 0; i < n; i++) {
       uint32_t j = (i + 1) % n;
       bool seam = m.is_seam(m.corner_verts[b + i], m.corner_verts[b + j]);

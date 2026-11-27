@@ -69,6 +69,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Files:** `src/render/gsplat_raster*`, `tests/test_splats_raster.cpp`.
 
 ### 7. Older named rows (L, from Pass 25's verification)
+- **Later measurements.** Round 648 measured a 100-object Unity package unpack at 608.8/537.2 ms (32/two workers) and first import of a separate 10,000-object scene at 597.8/659.9 ms. Round 650 rejected the single-control Noise Reduction candidate after comparing the floating-point output. Neither result closes the original performance target. [Import measurements](../perf/0630-survey.md) · [Noise Reduction decision](../tasks/0632-single-control-noise.md)
 - **Evidence:** `docs/perf/verify-511.md` and the PRs it names: Noise Reduction 18.3 ms, full-size camera
   filters 102 to 332 ms, Unity import 533 ms, two views or a drag at 50,000 objects, two-level card rows while
   dragging.
@@ -76,11 +77,14 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 
 ### Fresh-process Textures window still misses its 100 ms budget
 
+Task 0644 tested deferring path construction for unrelated entries in the Windows scan. The mixed-directory paired gains fell below both predeclared thresholds. The trial retained no product change. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
+
 Round 623 reduced the Windows first-open median for 2,000 procedural textures from 177.6 to 123.2 ms at default affinity and from 242.6 to 193.4 ms with two workers. The next frame took 3.7–3.8 ms. The 100 ms first-open target remains open. Profile the remaining startup work with the same nested-path, alias, search and selection controls. [Task 0599](../tasks/0599-cold-textures.md) and [task 0605](../tasks/0605-cold-texture-directory.md)
 
 ## Testability and flaky checks
 
 ### 8. `anim_tick` and playback read the real clock (M)
+- **Verified on the Pass 37 stack.** Task 0638 at `ae6c5456` routes preview playback through the editor clock. The focused comparison moved frame 10 to exactly 25 in 0.25 seconds. The Centre of Mass redraw test steps that clock explicitly and checks all 24 moving frames in both overlay states on Windows and Linux.
 - **Evidence:** round 568's fragment, "A testability gap": `Editor::anim_tick`
   (`src/editor/animation_window.cpp`) and the places that start playback set and read `anim_.play_clock` from
   `now_seconds()`, not the editor's clock, so `set_clock_for_test` cannot pin a playing clip. The Centre of Mass
@@ -129,6 +133,7 @@ Round 623 reduced the Windows first-open median for 2,000 procedural textures fr
   unit checks sharded like the sanitizers, with the minutes measured.
 
 ### 13. Four card picture checks fail in the libraries build only (M)
+- **Acceptance verified on the Pass 37 base.** The source-equivalent Windows full-library `gpu` group passed 1,836 checks across 164 fixtures with the RTX 4070 SUPER drawing actual views. The old failures remain useful history. Repeat on other hardware before drawing a cross-device conclusion. [Round 658 verification](../perf/0640-input-sweep.md#older-open-work)
 - **Evidence:** Pass 24's notes: `tests/test_gpu.cpp` picture checks (then at lines 888, 2227, 4887) failed on
   `main` with Blender's libraries on the development machine's card, with and without the round under test.
   Round 551 (`docs/tasks/0531-card-cpu-picture-tolerances.md`) dealt with three card-vs-CPU picture tests; check
@@ -166,6 +171,7 @@ Round 623 reduced the Windows first-open median for 2,000 procedural textures fr
   release defaults, with precise floating-point mode, and with link-time code generation disabled. The full
   Windows unit suite failed in all three runs. The cause remains unresolved. [Task 0564 and CI results](../tasks/0564-msvc-1452.md)
 - **Unresolved.** The 14.52 full suite failed in each tested configuration. [PR 485](https://github.com/EmilianoManaloIV/blendity/pull/485)
+- **Pass 37 compiler trial.** Task 0642 (c4292781) found that the 14.52 unit run still exited 0xc0000409 after 416 passing cases. The bounded stress run passed. Its diagnostic changes were not adopted. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
 - **Acceptance remains open.** Keep Windows CI and release builds pinned to 14.51 until the original failures
   are explained and addressed and the full Windows unit suite and quick stress both pass on the intended 14.52 release build.
 
@@ -184,7 +190,8 @@ Round 623 reduced the Windows first-open median for 2,000 procedural textures fr
   Sun Rotation on the Sky world".
 - **Done:** the two fields in the Sky world's Inspector, reachable from the console, with a Learn step.
 
-### 16. Leftovers from Pass 25 (S each; unverified)
+### 16. Leftovers from Pass 25
+- **Checked in task 0643.** The full-library README count matched the 31-group run. The native same-tick GUID rewrite and cross-project reuse fixtures passed, as did package reimport with a renamed file and removal of the obsolete GUID. Four loopback peers received seven sends over 120 paint dabs. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
 - **Evidence:** only the coordinating session's private notes of 2026-11-15 - nothing in the tree records them,
   so reproduce each before writing a spec: a Live Link painted-dab tick assert (`src/editor/livelink*`,
   `docs/LIVELINK.md`); a GUID list filled from a worker that is not pruned when a GUID is reused (the Unity
@@ -195,6 +202,7 @@ Round 623 reduced the Windows first-open median for 2,000 procedural textures fr
 - **Evidence:** `docs/tasks/0460-*` to `0464-*`, Pass 24's write-up and rounds 484-488 in `CHANGELOG.md`: a re-read replacing a typed material
   value; the direction-dependent slow Scene view; the bake's remaining specks; the bake's CPU half on the card;
   bakes over 2^23 texels depend on batch size. The original `chain.sh` assumed the shared checkout.
+- **Reproduced in task 0643.** With a missing gloss mean, automatic background completion rewrote a locally edited Metallic value from 0.37 to 1.0. Task 0650 owns the correction. Explicit Reimport Unity Materials reads values from the Unity file. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
 - **Verification chain update:** the helper now accepts a selected dependency-free checkout through `BL_W` and
   requires explicit scratch targets through `BL_MAIN` and `BL_WSL_TREE`. Use the receipt's actual command and
   test results when checking the chain. [Migration inventory](CODEX.md) · [Helper](../../tools/dev/chain.sh)
@@ -203,8 +211,7 @@ Round 623 reduced the Windows first-open median for 2,000 procedural textures fr
 ### 18. `build.sh` gaps (S)
 - **Updated:** `build.sh` now checks `tests/*.h` and `tests/fixtures/*.h` when deciding whether to rebuild test
   objects. Its dependency checks still use modification times.
-- **Remaining:** the script computes its parallel job count with `nproc` or `sysctl`. A caller-provided
-  `JOBS` override is still open. Follow the machine's WSL affinity limit. [Build script](../../build.sh) · [WSL limits](MACHINE.md#wsl-limits)
+- **Caller-provided jobs verified in Pass 37.** Task 0647, integrated at `e0bbb37b`, preserves an explicit positive `JOBS` value and passes it to `xargs -P`. An unset or empty value uses platform detection. Zero and malformed values stop before compilation. Nine shell-entry cases passed. The mtime-based dependency check and the WSL affinity limit still apply. [Build script](../../build.sh) · [WSL limits](MACHINE.md#wsl-limits)
 
 ## The owner's decisions and housekeeping
 The owner decides the open items below. Standing authorization already covers hub cleanup of verified merged

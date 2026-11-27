@@ -787,7 +787,17 @@ def audited_console_variants(inventory, sources):
 
 
 def dynamic_catalogs(inventory, sources):
-    """Expand named runtime menus backed by fixed source tables."""
+    """Expand runtime controls backed by fixed names and source tables."""
+    panels = sources["src/editor/panels.cpp"]
+    for body in panels.functions:
+        for call in body.matches(r'\brow_buttons\(lay,\s*"[^"]+",\s*\{([^}]+)\}'):
+            context = f"panels.cpp/{body.short_name}"
+            for label in re.finditer(STRING, call[1]):
+                name = literal(label[1])
+                inventory.add("panel", f"{context}/button/{name}", name, context,
+                              panels.ref(call.start(1) + label.start()),
+                              gap="No click and checked outcome for this named row button.")
+
     src = sources["src/editor/scene_view.cpp"]
     for offset, row in src.rows("ops"):
         op, label = (decode(field)[0] for field in row[:2])
@@ -1274,6 +1284,26 @@ def reflected_fields(inventory, sources):
         helper, = audit.helpers[method]
         audit.visit(helper, owner, bindings, conditional=True)
     audit.write(inventory)
+
+    # These two reflectors index fixed tables of visible labels. Keep their generic
+    # call sites and expose the separate controls that the user can actually edit.
+    scene = sources["src/scene/scene.cpp"]
+    for owner, table, kind, first in (
+        ("ColorRampEffect", "cn", "color", 0),
+        ("ColorRampEffect", "pn", "field", 0),
+        ("LODGroupComponent", "kScreen", "field", 0),
+        ("LODGroupComponent", "kRatio", "field", 1),  # LOD0 uses the original mesh.
+    ):
+        body, = (item for item in scene.functions if item.name == owner + "::reflect")
+        declaration, = body.matches(rf'\b{table}\s*\[[^\]]*\]\s*=\s*\{{([^}}]*)\}}')
+        use, = body.matches(rf'\br\.{kind}\({table}\[')
+        for item in list(re.finditer(STRING, declaration[1]))[first:]:
+            label = literal(item[1])
+            context = f"{owner}::reflect / {kind} / conditional"
+            inventory.add("field", f"{owner}/{label}", label, context,
+                          scene.ref(declaration.start(1) + item.start()),
+                          gap="Number of stops or LOD levels determines visibility. No field edit joined.")
+            inventory.add("field", f"{owner}/{label}", label, context, scene.ref(use.start()))
 
     panel = sources["src/editor/panels.cpp"]
     for anchor in (
