@@ -2,8 +2,14 @@
 name: Low-end Linux VM profiles
 on:
   push:
-    branches: [diagnostics/0622-low-end-vm]
+    branches: [diagnostics/0622-low-end-vm, diagnostics/0641-constrained-imports]
   workflow_dispatch:
+    inputs:
+      workload:
+        description: Editor workload to measure
+        type: choice
+        default: orbit
+        options: [orbit, imports]
 
 permissions:
   contents: read
@@ -27,6 +33,7 @@ jobs:
     env:
       BLENDITY_NO_LIBS: '1'
       BLENDITY_NO_OPTIX: '1'
+      IMPORTS: ${{ inputs.workload == 'imports' || (github.event_name == 'push' && github.ref_name == 'diagnostics/0641-constrained-imports') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -55,12 +62,23 @@ jobs:
           fi
       - name: Build dependency-free release editor
         run: bash build.sh release app
+      - name: Build the native importer probe and create the deterministic input
+        if: env.IMPORTS == 'true'
+        run: |
+          bash tools/dev/ply_import_probe.sh "$RUNNER_TEMP/ply-probe"
+          "$RUNNER_TEMP/ply-probe" generate "$RUNNER_TEMP/million.ply" 1000000
       - name: Measure first profile
         id: first
-        run: python3 tools/dev/low_end_vm.py "${{ matrix.first }}" "$PWD/dist/linux/Blendity" "$RESULTS/${{ matrix.first }}"
+        run: |
+          args=()
+          if [[ "$IMPORTS" == true ]]; then args=(--imports "$RUNNER_TEMP/ply-probe" "$RUNNER_TEMP/million.ply"); fi
+          python3 tools/dev/low_end_vm.py "${{ matrix.first }}" "$PWD/dist/linux/Blendity" "$RESULTS/${{ matrix.first }}" "${args[@]}"
       - name: Measure second profile
         if: success() || failure() && steps.first.outcome == 'failure'
-        run: python3 tools/dev/low_end_vm.py "${{ matrix.second }}" "$PWD/dist/linux/Blendity" "$RESULTS/${{ matrix.second }}"
+        run: |
+          args=()
+          if [[ "$IMPORTS" == true ]]; then args=(--imports "$RUNNER_TEMP/ply-probe" "$RUNNER_TEMP/million.ply"); fi
+          python3 tools/dev/low_end_vm.py "${{ matrix.second }}" "$PWD/dist/linux/Blendity" "$RESULTS/${{ matrix.second }}" "${args[@]}"
       - name: Preserve profile evidence
         if: always()
         uses: actions/upload-artifact@v4

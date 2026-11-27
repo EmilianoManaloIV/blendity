@@ -146,9 +146,11 @@ PointCloudPtr new_cloud(PointCloudType type, int degree, size_t n, SplatReadRepo
 }
 
 /* Validation as every reader ends: a note for the dropped points; null when nothing usable remains. */
-PointCloudPtr finish(PointCloudPtr pc, SplatReadReport &report, const char *format) {
+PointCloudPtr finish(PointCloudPtr pc, SplatReadReport &report, const char *format, bool time_validation = false) {
   std::string why;
+  const double validating = time_validation ? now_seconds() : 0.0;
   const long long dropped = pointcloud_validate(*pc, &why);
+  if (time_validation) report.times.validate_ms = (now_seconds() - validating) * 1000.0;
   if (dropped < 0) {
     report.error = strprintf("%s: %s", format, why.c_str());
     return nullptr;
@@ -159,12 +161,14 @@ PointCloudPtr finish(PointCloudPtr pc, SplatReadReport &report, const char *form
 }
 
 /* How every reader ends (round 567: each step timed for the stress rows): the file's axes to Blendity's, then finish. */
-PointCloudPtr axes_and_finish(PointCloudPtr pc, const float m[3][3], SplatReadReport &report, const char *format) {
+PointCloudPtr axes_and_finish(PointCloudPtr pc, const float m[3][3], SplatReadReport &report, const char *format,
+                              bool time_validation = false) {
   const double t0 = now_seconds();
   pointcloud_change_axes(*pc, m);
   const double t1 = now_seconds();
-  pc = finish(std::move(pc), report, format);
-  report.times.axes_ms = (t1 - t0) * 1000.0, report.times.validate_ms = (now_seconds() - t1) * 1000.0;
+  pc = finish(std::move(pc), report, format, time_validation);
+  report.times.axes_ms = (t1 - t0) * 1000.0;
+  if (!time_validation) report.times.validate_ms = (now_seconds() - t1) * 1000.0;
   return pc;
 }
 
@@ -422,7 +426,7 @@ void ply_read_binary(const PlyTarget &t, const char *records, size_t first, size
 /* Seek past the preceding elements and reuse one batch after all workers have decoded it
  * into the final arrays. */
 bool ply_read_binary_vertices(const PlyTarget &target, const std::string &data, std::istream *file,
-                              uint64_t offset, int format, SplatReadReport &report) {
+                              uint64_t offset, int format, SplatReadReport &report, DiskPlyTimes *times) {
   const PlyElem &v = *target.v;
   const size_t n = (size_t)v.count;
   const bool all_float = format == 1 && std::all_of(v.props.begin(), v.props.end(), [](const PlyProp &p) { return p.ty == PlyTy::F32; });
@@ -453,11 +457,20 @@ bool ply_read_binary_vertices(const PlyTarget &target, const std::string &data, 
   file->seekg((std::streamoff)offset);
   for (size_t first = 0; first < n;) {
     const size_t count = std::min(batch_count, n - first);
-    if (!file->read(batch.data(), (std::streamsize)(count * v.stride))) {
+    const size_t bytes = count * v.stride;
+    const double reading = times ? now_seconds() : 0.0;
+    if (!file->read(batch.data(), (std::streamsize)bytes)) {
       report.error = "PLY: the file ends before its points do";
       return false;
     }
+    const double decoding = times ? now_seconds() : 0.0;
     decode(batch.data(), first, count);
+    if (times) {
+      report.times.decode_ms += (now_seconds() - decoding) * 1000.0;
+      times->read_ms += (decoding - reading) * 1000.0;
+      times->read_bytes += bytes;
+      times->read_batches++;
+    }
     first += count;
   }
   return true;
@@ -498,7 +511,7 @@ bool ply_is_point_cloud(const std::string &data) {
 }
 
 static PointCloudPtr read_ply_cloud(const PlyHeader &h, const std::string &data, std::istream *file,
-                                    uint64_t size, double started, SplatReadReport &report) {
+                                    uint64_t size, double started, SplatReadReport &report, DiskPlyTimes *times = nullptr) {
   if (!h.error.empty()) {
     report.error = "PLY: " + h.error;
     return nullptr;
@@ -591,11 +604,11 @@ static PointCloudPtr read_ply_cloud(const PlyHeader &h, const std::string &data,
   target.pc = pc.get(), target.v = v, target.roles = &roles;
   target.keep = keep, target.per_channel = (size_t)per_channel;
   if (h.format != 0) {
-    if (!ply_read_binary_vertices(target, data, file, offset, h.format, report)) return nullptr;
+    if (!ply_read_binary_vertices(target, data, file, offset, h.format, report, times)) return nullptr;
   }
   else if (!ply_read_text(target, lines, n)) report.notes.push_back("PLY: some lines have fewer numbers than properties");
-  report.times.decode_ms = (now_seconds() - decoding) * 1000.0;
-  return axes_and_finish(pc, kFromZUp, report, "PLY");
+  if (!times) report.times.decode_ms = (now_seconds() - decoding) * 1000.0;
+  return axes_and_finish(pc, kFromZUp, report, "PLY", times != nullptr);
 }
 
 PointCloudPtr read_ply_point_cloud(const std::string &data, SplatReadReport &report) {
@@ -1059,6 +1072,12 @@ static PlyHeader probe_ply_header(std::istream &file) {
 }
 
 std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, std::string &data, ImportResult &out) {
+  return try_import_binary_ply_point_cloud(path, data, out, nullptr);
+}
+
+std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, std::string &data, ImportResult &out,
+                                                     DiskPlyTimes *times) {
+  if (times) *times = {};
   const auto disk_path = std::filesystem::u8path(path);
   std::error_code ec;
   if (!std::filesystem::is_regular_file(disk_path, ec)) return std::nullopt;
@@ -1072,7 +1091,8 @@ std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, s
     if (ply_can_stream(h)) {
       if (out.source.empty()) out.source = path;
       SplatReadReport report;
-      PointCloudPtr pc = read_ply_cloud(h, data, &file, (uint64_t)size, started, report);
+      PointCloudPtr pc = read_ply_cloud(h, data, &file, (uint64_t)size, started, report, times);
+      if (times) times->phases = report.times;
       return cloud_node(pc, path, report, out);
     }
   }
