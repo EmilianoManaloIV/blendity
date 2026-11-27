@@ -2,6 +2,15 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-27 (round 651): Dense UV Reset redraw
+
+**Asked:** Improve interaction with complex UV layouts, including the redraw after resetting thousands of overlapping faces.
+
+**Changed (task 0633, ADR 0056)**
+- The UV editor skips repeated Reset quads after confirming that another identical draw leaves the visible pixels unchanged.
+
+**Checked:** Compared ordinary, overlapping, selected, mixed-winding, stretched and offscreen layouts. Measurements and pixel comparisons are in the round report.
+
 ## 2026-11-27 (round 650): Measuring single-control Noise Reduction
 
 **Asked:** Determine whether skipping the unused Noise Reduction channel speeds up editing while preserving floating-point output and cache behavior.

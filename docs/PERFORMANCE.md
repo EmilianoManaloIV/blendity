@@ -4700,3 +4700,7 @@ An 800×600 CPU viewport displayed a grid of 8×8 placements referencing one ima
 ## Round 650: single-control Noise Reduction
 
 On a 4096² image, skipping an inactive channel reduced Linux cold apply time for Luminance and Color. The Windows release candidate changed raw floating-point output, including with both controls enabled. The existing kernel remains in place. See [gesture, cache and output comparisons](perf/0632-single-control-noise.md).
+
+## Round 651: dense UV Reset redraw
+
+The [UV redraw measurements](perf/0633-uv-redraw.md) compare command-to-frame time and pane pixels across nine layouts, including a 4K offscreen control.
