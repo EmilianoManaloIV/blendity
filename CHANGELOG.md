@@ -2,6 +2,12 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-27 (round 650): Measuring single-control Noise Reduction
+
+**Asked:** Determine whether skipping the unused Noise Reduction channel speeds up editing while preserving floating-point output and cache behavior.
+
+**Checked (task 0632, ADR 0056):** Two prototypes improved Linux 4K single-control apply. The revised prototype saved 246 / 208 ms for Luminance and 52 / 421 ms for Color with 32 / two workers. Three paired runs per setting also exercised real slider drags and warm previews. A direct Windows release comparison found 668 changed channel words for Luminance and 182 with both controls enabled on a finite HDR image. Both prototypes were rejected. The existing filter is retained.
+
 ## 2026-11-26 (round 649): Redrawing images on the Reference Board
 
 **Asked:** Investigate the delay after duplicating hundreds of visible image placements.

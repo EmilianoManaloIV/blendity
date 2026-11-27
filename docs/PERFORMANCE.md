@@ -4696,3 +4696,7 @@ An 800×600 CPU viewport displayed a grid of 8×8 placements referencing one ima
 |---|---:|---:|
 | 2 → 4 | 0.6 ms | 0.3 ms |
 | 512 → 1,024 | 66.7 ms | 5.4 ms |
+
+## Round 650: single-control Noise Reduction
+
+On a 4096² image, skipping an inactive channel reduced Linux cold apply time for Luminance and Color. The Windows release candidate changed raw floating-point output, including with both controls enabled. The existing kernel remains in place. See [gesture, cache and output comparisons](perf/0632-single-control-noise.md).
