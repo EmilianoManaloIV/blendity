@@ -583,6 +583,30 @@ bool all_say(const Lines &l, const char *state, const char *want, const char *ne
 }  // namespace R570
 
 void tests_round570_adjust_key() {
+  test("Adjust Last Operation panel header shows the active shortcut, including rebound and unbound keys", [] {
+    Editor ed;
+    ed.init_headless(1024, 768);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("create Cube");
+    const auto edge = ed.selected_object()->get<MeshFilter>()->mesh->edge_cache()[0];
+    ed.command(strprintf("esel %u %u", edge.first, edge.second));
+    ed.command("editop bevel");
+    const auto header = [&]() {
+      ed.step_frame_headless();
+      for (const auto &entry : ed.ui_for_test().tooltip_texts)
+        if (entry.second.find("Changing a value re-runs the operator") != std::string::npos) return entry.second;
+      return std::string();
+    };
+    CHECK(header().find("Adjust Last Operation (F9).") == 0);
+    ed.command("keymap Maya");
+    CHECK(header().find("Adjust Last Operation (Ctrl+F9).") == 0);
+    ed.set_binding("edit.adjust_last", {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}});
+    CHECK(header().find("Adjust Last Operation (Ctrl+Shift+U).") == 0);
+    ed.set_binding("edit.adjust_last", {});
+    CHECK(header().find("Adjust Last Operation. Changing") == 0);
+  });
+
   test("hci: the log lines that point at Adjust Last Operation - an operator's 'done', the drag helper's, a box, a cone and a Push/Pull from construction lines - name the keymap's key: F9, Ctrl+F9 in Maya's preset, a rebound chord (round 570, task 0552)", [] {
     CHECK(R570::all_say(R570::run([](Editor &) {}), "default", "F9", "Ctrl+"));
     CHECK(R570::all_say(R570::run([](Editor &ed) { ed.command("keymap Maya"); }), "Maya", "Ctrl+F9", nullptr));
