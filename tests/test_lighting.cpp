@@ -12579,6 +12579,33 @@ static void tests_round549() {
   });
 }
 
+static void tests_round672() {
+  test("A generated World HDRI renders its selected grid and orientation", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ed.command("set Render.ResolutionX 128");
+    ed.command("set Render.ResolutionY 72");
+    auto render = [&] {
+      ed.command("render wait");
+      return ed.render_image_for_test().pixels;
+    };
+    const auto empty = render();
+    CHECK(empty.size() == 128 * 72);
+    ed.command("world hdri generated:UV Grid");
+    const auto uv = render();
+    CHECK(uv.size() == empty.size() && uv != empty);
+    ed.command("world hdri generated:Color Grid");
+    const auto colors = render();
+    CHECK(colors.size() == uv.size() && colors != uv && colors != empty);
+    ed.command("set World.Rotation 45");
+    const auto rotated = render();
+    CHECK(rotated.size() == colors.size() && rotated != colors);
+    CHECK(render() == rotated);
+    ed.command("world hdri missing-0654.hdr");
+    CHECK(render() == empty);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -12628,4 +12655,5 @@ void run_lighting_tests() {
   tests_round542();
   tests_round545b2();
   tests_round549();
+  tests_round672();
 }

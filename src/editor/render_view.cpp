@@ -985,7 +985,8 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   }
   else if (es.mode == 2 && !es.hdri.empty()) {
     std::string err;
-    env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
+    env_.map = generated_grid_texture(es.hdri.path);
+    if (!env_.map) env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
     if (!env_.map) Log::warn("World HDRI: %s", err.c_str());
   }
   if ((es.mode == 1 || es.mode == 2) && !env_.map) env_.mode = Environment::Gradient;
