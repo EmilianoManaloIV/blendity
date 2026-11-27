@@ -1,11 +1,11 @@
 # 0633: Redraw stacked Reset UV faces
 
-- **Status:** approved
+- **Status:** in review
 - **Authorization:** Pass 36 Hub assignment, round 651 on ccb2fc2e; diagnostic receipt 0626/uvreset.
 - **Requirements:** R-04, Q-06
 - **Decisions:** ADR 0056, 0134
 - **Implementation:** planning task, one bounded candidate under shared weekly cap
-- **PR:** Hub owns publication
+- **PR:** Assigned to the [cumulative performance PR #505](https://github.com/EmilianoManaloIV/blendity/pull/505) after combined verification.
 
 ## Goal
 Reduce time until a dense Reset UV map is visible, preserving every displayed pixel.
@@ -31,4 +31,4 @@ Nonopaque pixels, antialiased boundaries, draw order, seam and selection styles,
 Record effect and limits in a round fragment if the experiment passes.
 
 ## Outcome
-Pending.
+The independently reviewed candidate reduced the Linux dense Reset median from 3,803.433 to 62.607 ms. All 27 pane captures in the final nine-case comparison matched. The 4K offscreen control measured 551.136 ms before and 542.625 ms after the change. See the [round measurements and scope](../perf/0633-uv-redraw.md).
