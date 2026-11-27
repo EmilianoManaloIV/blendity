@@ -655,14 +655,18 @@ static void project_round(Mesh &m, const Mask *mask, bool sphere) {
   for (size_t f = 0; f < m.face_count(); f++) {
     if (!in_mask(mask, f)) continue;
     uint32_t b = m.face_offsets[f], n = m.face_size(f);
-    std::vector<float> us(n);
+    float lo = 0.0f, hi = 0.0f;
     for (uint32_t i = 0; i < n; i++) {
       Vec3 d = m.positions[m.corner_verts[b + i]] - c;
-      us[i] = 0.5f + std::atan2(d.z, d.x) / (2 * kPi);
+      const float u = 0.5f + std::atan2(d.z, d.x) / (2 * kPi);
+      if (i == 0) lo = hi = u;
+      else {
+        lo = std::min(lo, u);
+        hi = std::max(hi, u);
+      }
       float v = sphere ? 0.5f + std::asin(clampf(d.y / std::max(1e-6f, length(d)), -1, 1)) / kPi : (d.y / h + 0.5f);
-      m.uvs[b + i] = {us[i], v};
+      m.uvs[b + i] = {u, v};
     }
-    float lo = *std::min_element(us.begin(), us.end()), hi = *std::max_element(us.begin(), us.end());
     if (hi - lo > 0.5f)
       for (uint32_t i = 0; i < n; i++)
         if (m.uvs[b + i].x < 0.5f) m.uvs[b + i].x += 1.0f;
@@ -720,18 +724,17 @@ void pack_islands(Mesh &m, const Mask *mask, float margin, bool rotate) {
     float w, h;
   };
   std::vector<Box> boxes;
-  std::vector<std::vector<uint32_t>> corners(islands.size());
+  auto each_corner = [&](size_t island, auto visit) {
+    for (uint32_t f : islands[island])
+      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) visit(c);
+  };
   for (size_t i = 0; i < islands.size(); i++) {
-    std::vector<Vec2> pts;
-    for (uint32_t f : islands[i])
-      for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
-        corners[i].push_back(c);
-        pts.push_back(m.uvs[c]);
-      }
     /* Rotate to the minimum-area bounding box (rotating calipers on the hull). */
     float best_angle = 0;
-    if (rotate && pts.size() >= 3) {
-      std::vector<Vec2> hull = convex_hull(pts);
+    if (rotate) {
+      std::vector<Vec2> pts;
+      each_corner(i, [&](uint32_t c) { pts.push_back(m.uvs[c]); });
+      std::vector<Vec2> hull = pts.size() >= 3 ? convex_hull(pts) : std::vector<Vec2>();
       float best = 1e30f;
       for (size_t k = 0; k < hull.size(); k++) {
         Vec2 e = hull[(k + 1) % hull.size()] - hull[k];
@@ -748,24 +751,24 @@ void pack_islands(Mesh &m, const Mask *mask, float margin, bool rotate) {
     }
     float ca = std::cos(best_angle), sa = std::sin(best_angle);
     Vec2 lo{1e30f, 1e30f}, hi{-1e30f, -1e30f};
-    for (uint32_t c : corners[i]) {
+    each_corner(i, [&](uint32_t c) {
       Vec2 p = m.uvs[c];
       Vec2 q{p.x * ca - p.y * sa, p.x * sa + p.y * ca};
       m.uvs[c] = q;
       lo = {std::min(lo.x, q.x), std::min(lo.y, q.y)};
       hi = {std::max(hi.x, q.x), std::max(hi.y, q.y)};
-    }
+    });
     /* Taller-than-wide islands lie down (better shelf packing). */
     if (hi.y - lo.y > hi.x - lo.x) {
-      for (uint32_t c : corners[i]) m.uvs[c] = {m.uvs[c].y, -m.uvs[c].x};
+      each_corner(i, [&](uint32_t c) { m.uvs[c] = {m.uvs[c].y, -m.uvs[c].x}; });
       lo = {1e30f, 1e30f};
       hi = {-1e30f, -1e30f};
-      for (uint32_t c : corners[i]) {
+      each_corner(i, [&](uint32_t c) {
         lo = {std::min(lo.x, m.uvs[c].x), std::min(lo.y, m.uvs[c].y)};
         hi = {std::max(hi.x, m.uvs[c].x), std::max(hi.y, m.uvs[c].y)};
-      }
+      });
     }
-    for (uint32_t c : corners[i]) m.uvs[c] = m.uvs[c] - lo;
+    each_corner(i, [&](uint32_t c) { m.uvs[c] = m.uvs[c] - lo; });
     boxes.push_back({i, std::max(hi.x - lo.x, 1e-9f), std::max(hi.y - lo.y, 1e-9f)});
   }
   std::sort(boxes.begin(), boxes.end(), [](const Box &a, const Box &b) { return a.h > b.h; });
@@ -796,7 +799,7 @@ void pack_islands(Mesh &m, const Mask *mask, float margin, bool rotate) {
     scale = (1.0f - margin) / std::max(side, 1e-9f);
   }
   for (size_t i = 0; i < boxes.size(); i++)
-    for (uint32_t c : corners[boxes[i].island]) m.uvs[c] = (m.uvs[c] + pos[i]) * scale + Vec2(margin * 0.5f, margin * 0.5f);
+    each_corner(boxes[i].island, [&](uint32_t c) { m.uvs[c] = (m.uvs[c] + pos[i]) * scale + Vec2(margin * 0.5f, margin * 0.5f); });
   m.touch();
 }
 

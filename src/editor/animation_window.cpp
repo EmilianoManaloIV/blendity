@@ -523,7 +523,7 @@ void Editor::anim_tick() {
     return;
   }
   const float end = std::max(1.0f, clip->end_frame());
-  const float f = anim_.play_from + (float)(now_seconds() - anim_.play_clock) * clip->frame_rate;
+  const float f = anim_.play_from + (float)(clock_now() - anim_.play_clock) * clip->frame_rate;
   anim_.frame = std::fmod(f, end);
   anim_apply();
   ui_.redraw = true;
@@ -568,7 +568,7 @@ void Editor::anim_key_all() {
 void Editor::anim_toggle_play() {
   if (!anim_clip()) return refuse("Play the clip: select an animated object first", "window Animation", "open Animation");
   anim_.playing = !anim_.playing;
-  if (anim_.playing) anim_set_preview(true), anim_.play_from = anim_.frame, anim_.play_clock = now_seconds();
+  if (anim_.playing) anim_set_preview(true), anim_.play_from = anim_.frame, anim_.play_clock = clock_now();
 }
 
 void Editor::anim_toggle_record() {
@@ -742,7 +742,7 @@ void Editor::anim_scrub_end() {
   anim_.scrub_resume = false;
   anim_.playing = true;
   anim_.play_from = anim_.frame;
-  anim_.play_clock = now_seconds();
+  anim_.play_clock = clock_now();
 }
 
 /* ---------------------------------------------------------------- the window */
@@ -1836,7 +1836,7 @@ void Editor::anim_command(const std::vector<std::string> &t) {
   }
   if (verb == "play") {
     anim_set_preview(true);
-    anim_.playing = true, anim_.play_from = anim_.frame, anim_.play_clock = now_seconds();
+    anim_.playing = true, anim_.play_from = anim_.frame, anim_.play_clock = clock_now();
     return;
   }
   if (verb == "stop") return (void)(anim_.playing = anim_.scrub_resume = false);  // (a scrub held meanwhile: its release does not start it again)

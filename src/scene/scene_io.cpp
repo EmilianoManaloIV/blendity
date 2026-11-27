@@ -1767,6 +1767,16 @@ std::unordered_map<std::string, TexEntry> &texture_library() {
   static std::unordered_map<std::string, TexEntry> lib;
   return lib;
 }
+
+ProceduralTexturePtr read_texture_asset(const std::string &path) {
+  std::string text;
+  if (!fs::read_file(resolve_asset_path(path), text)) return nullptr;
+  auto texture = std::make_shared<ProceduralTexture>();
+  if (!load_texture_text(text, *texture)) return nullptr;
+  texture->name = fs::stem(path);
+  texture->asset_path = path;
+  return texture;
+}
 }  // namespace
 
 ProceduralTexturePtr texture_asset(const std::string &path_in) {
@@ -1776,14 +1786,40 @@ ProceduralTexturePtr texture_asset(const std::string &path_in) {
   auto &lib = texture_library();
   auto it = lib.find(path);
   if (it != lib.end()) return it->second.t;
-  std::string text;
-  if (!fs::read_file(resolve_asset_path(path), text)) return nullptr;
-  auto t = std::make_shared<ProceduralTexture>();
-  if (!load_texture_text(text, *t)) return nullptr;
-  t->name = fs::stem(path);
-  t->asset_path = path;
-  lib[path] = {t, t->version};
+  const auto t = read_texture_asset(path);
+  if (t) lib.emplace(path, TexEntry{t, t->version});
   return t;
+}
+
+std::vector<ProceduralTexturePtr> texture_assets_for_browser(const std::vector<std::string> &paths) {
+  auto &lib = texture_library();
+  std::vector<ProceduralTexturePtr> result(paths.size());
+  std::unordered_map<std::string, size_t> pending;
+  std::vector<std::string> keys;
+  std::vector<std::pair<size_t, size_t>> missing;
+  for (size_t i = 0; i < paths.size(); ++i) {
+    std::string key = follow_redirects(asset_key(paths[i]));
+    if (key.empty()) continue;
+    const auto loaded = lib.find(key);
+    if (loaded != lib.end()) {
+      result[i] = loaded->second.t;
+      continue;
+    }
+    const auto [entry, added] = pending.emplace(key, keys.size());
+    if (added) keys.push_back(std::move(key));
+    missing.emplace_back(i, entry->second);
+  }
+  std::vector<ProceduralTexturePtr> decoded(keys.size());
+  // Workers read and decode independent assets. Redirects, aliases and cache publication
+  // stay on the caller so every reference to one asset keeps the same identity.
+  if (!keys.empty())
+    JobSystem::global().parallel_for((int64_t)keys.size(), 8, [&](int64_t begin, int64_t end) {
+      for (int64_t i = begin; i < end; ++i) decoded[(size_t)i] = read_texture_asset(keys[(size_t)i]);
+    });
+  for (size_t i = 0; i < keys.size(); ++i)
+    if (decoded[i]) lib.emplace(keys[i], TexEntry{decoded[i], decoded[i]->version});
+  for (const auto &[row, index] : missing) result[row] = decoded[index];
+  return result;
 }
 
 ProceduralTexturePtr create_texture_asset(const ProceduralTexture &src, const std::string &path_in) {
@@ -2002,7 +2038,8 @@ size_t forget_material_assets(const std::string &path_in) {
   return n;
 }
 
-size_t reload_foreign_materials(const std::string &under_in, std::vector<MaterialPtr> *changed_out, const std::set<std::string> *only) {
+size_t reload_foreign_materials(const std::string &under_in, std::vector<MaterialPtr> *changed_out, const std::set<std::string> *only,
+                                std::vector<MaterialPtr> *reread) {
   const std::string under = asset_key(under_in);
   if (!foreign_loader()) return 0;
   size_t changed = 0;
@@ -2021,6 +2058,7 @@ size_t reload_foreign_materials(const std::string &under_in, std::vector<Materia
     fresh.name = fs::stem(kv.first);
     if (!foreign_loader()(text, kv.first, fresh)) continue;
     fresh.name = fs::stem(kv.first), fresh.asset_path = kv.first, fresh.foreign = true;
+    if (reread) reread->push_back(e.m);  // historical copies can differ even when the library asset matches the file
     if (!stand_in && save_material_text(fresh) == save_material_text(*e.m)) continue;  // (read as before: nothing to tell its users)
     const uint64_t version = std::max(e.m->version, fresh.version) + 1;
     *e.m = fresh;

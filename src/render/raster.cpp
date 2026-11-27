@@ -544,14 +544,14 @@ static bool aabb_outside_frustum(const AABB &box, const Mat4 &mvp) {
 }
 
 /* The material of one triangle of a draw item (slot clamped like Unity). */
-static const Material *item_material(const DrawItem &it, uint32_t prim) {
+static const Material *item_material(const DrawItem &it, uint32_t prim, const Material *fallback = nullptr) {
   const RenderMesh &rm = *it.mesh;
   int slot = rm.tri_material.empty() ? 0 : rm.tri_material[prim];
   if (it.materials && !it.materials->empty()) {
     const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
     if (mp) return mp.get();
   }
-  return default_material().get();
+  return fallback ? fallback : default_material().get();
 }
 
 /* Task 0419: a point without a lightmap in a baked VRC Light Volume takes the volume's light as its ambient (as VRChat's
@@ -1753,8 +1753,11 @@ void Renderer3D::shade_deferred() {
     fallback_env.ground = env_.ground;
   }
   const Vec3 eye = env_.camera_pos;
+  const Material *const default_mat = default_material().get();
   /* Everything about a visible triangle that does not vary per pixel. */
   struct TriSetup {
+    const bool streaming = texture_streaming();
+    bool refresh_streamed = false;
     uint32_t ref = 0;
     bool valid = false, has_uv = false, has_tangent = false, highlighted = false;
     const DrawItem *item = nullptr;
@@ -1776,13 +1779,13 @@ void Renderer3D::shade_deferred() {
     Vec4 vc[3];
     bool live = false;  // a live procedural texture somewhere in its material: each pixel's footprint is needed
     bool footprint = false;  // (task 0164) the footprint is read: a live texture, a Box / Generated mapping, a procedural
-    /* Its material is the same everywhere but for the normal (task 0088): evaluated once here, each pixel takes it
-     * with its own normal - what evaluate_material would give it - and skips the texture-space work nothing reads. */
+    /* Keep the last material's setup in each worker's triangle state. A uniform surface supplies the material
+     * values; each pixel still supplies its own normal. */
     bool uniform = false;
     SurfaceSample surface;
 #ifdef BL_RASTER_X86
     /* Its pixels can be lit 8 at a time (task 0091): a plain material, not unlit or toon, nothing baked or probed. */
-    bool fast = false;
+    bool fast = false, fast_ready = false;
     SurfaceSample fast_surface;  // `surface` as the pixel takes it (highlighted, if the face is)
     Shade8Tri s8;
 #endif
@@ -1809,15 +1812,33 @@ void Renderer3D::shade_deferred() {
     }
     T.nc = st.c[0] * st.iw[0];
     T.sc = st.iw[0];
-    if (opt_.affine_uv) {
-      T.aa = st.c[0] * a[0] + st.c[1] * a[1] + st.c[2] * a[2];
-      T.ab = st.c[0] * b[0] + st.c[1] * b[1] + st.c[2] * b[2];
-      T.ac = st.c[0];
-    }
     const DrawItem &it = items_[st.item];
     const RenderMesh &rm = *it.mesh;
     const Mat4 &nm = normal_mats_[st.item];
     const uint32_t *tri = &rm.indices[(size_t)st.prim * 3];
+    const Material *mat = item_material(it, st.prim, default_mat);
+    const bool material_changed = mat != T.mat;
+    if (material_changed && T.streaming) {
+      /* Plain PBR with empty image refs cannot leave an image for the stream. Keep
+       * refreshing every other non-frozen material when the stream is active. */
+      T.refresh_streamed = !mat->textures_frozen() &&
+                           (mat->shading_model != 0 || mat->axis_mode != 0 || mat->procedural != (int)Procedural::None ||
+                            !mat->base_map.empty() || !mat->metallic_map.empty() || !mat->roughness_map.empty() ||
+                            !mat->normal_map.empty() || !mat->emission_map.empty());
+    }
+    if (material_changed || T.refresh_streamed) {
+      T.mat = mat;
+      T.tex = &mat->textures();  // (resolved before the parallel stages: a cached reference)
+      T.uniform = opt_.uniform_shading && material_uniform(*mat, *T.tex);
+      if (T.uniform) T.surface = evaluate_material(*mat, *T.tex, SurfacePoint{});
+      T.live = false;
+      for (int k = 0; k < 5; k++) T.live = T.live || T.tex->live[k] != nullptr;
+      for (int axis = 0; axis < 4; axis++)
+        if (const Material::Resolved *at = T.tex->axis_tx[axis])
+          for (int k = 0; k < 5; k++) T.live = T.live || at->live[k] != nullptr;
+      /* Box / Generated mappings and procedurals read the pixel's footprint too (task 0164). */
+      T.footprint = T.live || mat->mapping != (int)MaterialMapping::UV || mat->procedural != 0 || mat->axis_mode != 0;
+    }
     for (int k = 0; k < 3; k++) {
       T.p[k] = rm.positions[tri[k]];
       T.n[k] = rm.normals[tri[k]];
@@ -1827,31 +1848,21 @@ void Renderer3D::shade_deferred() {
       T.wn[k] = nm.dir(T.n[k]);
     }
     T.geo_normal = normalize(nm.dir(cross(T.p[1] - T.p[0], T.p[2] - T.p[0])));
-    T.bounds = rm.bounds;
-    T.has_uv = !rm.uvs.empty();
-    if (T.has_uv)
+    T.has_uv = !T.uniform && !rm.uvs.empty();
+    if (T.has_uv) {
       for (int k = 0; k < 3; k++) T.uv[k] = rm.uvs[tri[k]];
-    T.has_tangent = !rm.tangents.empty();
+      if (opt_.affine_uv) {
+        T.aa = st.c[0] * a[0] + st.c[1] * a[1] + st.c[2] * a[2];
+        T.ab = st.c[0] * b[0] + st.c[1] * b[1] + st.c[2] * b[2];
+        T.ac = st.c[0];
+      }
+    }
+    if (!T.uniform) T.bounds = rm.bounds;
+    T.has_tangent = !T.uniform && !rm.tangents.empty();
     if (T.has_tangent) {
       for (int k = 0; k < 3; k++) T.wt[k] = nm.dir(rm.tangents[tri[k]].xyz());
       T.tangent_w = rm.tangents[tri[0]].w;
     }
-    int slot = rm.tri_material.empty() ? 0 : rm.tri_material[st.prim];
-    T.mat = default_material().get();
-    if (it.materials && !it.materials->empty()) {
-      const MaterialPtr &mp = (*it.materials)[(size_t)std::min(slot, (int)it.materials->size() - 1)];
-      if (mp) T.mat = mp.get();
-    }
-    T.tex = &T.mat->textures();  // (resolved before the parallel stages: a cached reference)
-    T.uniform = opt_.uniform_shading && material_uniform(*T.mat, *T.tex);
-    if (T.uniform) T.surface = evaluate_material(*T.mat, *T.tex, SurfacePoint{});
-    T.live = false;
-    for (int k = 0; k < 5; k++) T.live = T.live || T.tex->live[k] != nullptr;
-    for (int a = 0; a < 4; a++)
-      if (const Material::Resolved *at = T.tex->axis_tx[a])
-        for (int k = 0; k < 5; k++) T.live = T.live || at->live[k] != nullptr;
-    /* Task 0164: a Box or Generated mapping and the procedurals read the pixel's footprint too (their lod, the fade). */
-    T.footprint = T.live || T.mat->mapping != (int)MaterialMapping::UV || T.mat->procedural != 0 || T.mat->axis_mode != 0;
     T.has_lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= ((size_t)st.prim + 1) * 3;
     if (T.has_lm)
       for (int k = 0; k < 3; k++) T.lm_uv[k] = (*it.lightmap_uv)[(size_t)st.prim * 3 + k];
@@ -1869,23 +1880,29 @@ void Renderer3D::shade_deferred() {
     T.item = &it;
 #ifdef BL_RASTER_X86
     T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes) && !(env_.light_volumes && it.use_probes);  // (task 0419: a Light Volume lights it per pixel)
-    if (T.fast) {
-      SurfaceSample fs = T.surface;
-      if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)
-      T.fast_surface = fs;
-      Shade8Tri &e = T.s8;
-      e.ox = T.ox, e.oy = T.oy, e.na = T.na, e.nb = T.nb, e.nc = T.nc, e.sa = T.sa, e.sb = T.sb, e.sc = T.sc;
-      for (int k = 0; k < 3; k++) e.wp[k] = T.wp[k], e.wn[k] = T.wn[k];
-      e.geo = T.geo_normal;
-      e.f0 = fresnel_f0(fs);
-      e.diff = fs.albedo * ((1.0f - fs.metallic) / kPi);
-      const float a = std::max(fs.roughness * fs.roughness, 0.002f);
-      e.a2 = a * a;
-      e.shadows = it.receive_shadows;
-    }
+    T.fast_ready = false;
 #endif
     T.valid = true;
   };
+#ifdef BL_RASTER_X86
+  /* Dense meshes often have no run of eight pixels on a triangle. Prepare SIMD inputs only when a run uses them. */
+  auto setup_fast = [](TriSetup &T) {
+    const DrawItem &it = *T.item;
+    SurfaceSample &fs = T.fast_surface;
+    fs = T.surface;
+    if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);
+    Shade8Tri &e = T.s8;
+    e.ox = T.ox, e.oy = T.oy, e.na = T.na, e.nb = T.nb, e.nc = T.nc, e.sa = T.sa, e.sb = T.sb, e.sc = T.sc;
+    for (int k = 0; k < 3; k++) e.wp[k] = T.wp[k], e.wn[k] = T.wn[k];
+    e.geo = T.geo_normal;
+    e.f0 = fresnel_f0(fs);
+    e.diff = fs.albedo * ((1.0f - fs.metallic) / kPi);
+    const float a = std::max(fs.roughness * fs.roughness, 0.002f);
+    e.a2 = a * a;
+    e.shadows = it.receive_shadows;
+    T.fast_ready = true;
+  };
+#endif
   JobSystem &js = JobSystem::global();
   /* Voxel GI (task 0013, Thiedemann et al. 2011, section 5.1): receivers at 1 / ds of the resolution,
    * each gathering one of 16 interleaved ray sets; a blur over 4 x 4 receivers (that merges the sets)
@@ -1977,7 +1994,10 @@ void Renderer3D::shade_deferred() {
   /* Rows go out in pairs, so a 2 x 2 quad's shared probe sample is always taken by the thread that shades
    * both its rows, whatever the scheduling: the picture doesn't depend on it. */
   js.parallel_for((H + 1) / 2, 2, [&](int64_t p0, int64_t p1) {
+    TriSetup T;
     for (int64_t y = p0 * 2; y < std::min<int64_t>(H, p1 * 2); y++) {
+      // Refresh the first covered triangle on each row, including material maps that arrived mid-flush.
+      T.ref = 0;
       const uint32_t *vrow = rt_->vis.data() + (size_t)y * W;
       uint32_t *crow = rt_->color + (size_t)y * rt_->stride;
       /* Shaded colours are encoded for display a whole row at a time (SIMD). */
@@ -1988,7 +2008,6 @@ void Renderer3D::shade_deferred() {
       row_x.clear();
       size_t row_simd = 0;  // pixels lit 8 at a time (counted once per row)
       int run_break = 0;
-      TriSetup T;
       int probe_hint = -1;  // the brick the last probe sample in this row used
       /* Probe samples shared by 2 x 2 pixels on one triangle: kept per thread, valid for this flush only
        * (the stamp) and for the quad's own rows. */
@@ -2010,6 +2029,7 @@ void Renderer3D::shade_deferred() {
         if (fast_pass && T.fast && x >= run_break && x + 8 <= W) {
           const uint32_t *end = std::find_if(vrow + x, vrow + x + 8, [ref](uint32_t r) { return r != ref; });
           if (end == vrow + x + 8) {
+            if (!T.fast_ready) setup_fast(T);
             shade_run8(T.s8, T.fast_surface, x, y, eye, env, row_hdr, row_x);
             row_simd += 8;
             x += 7;
@@ -2037,7 +2057,7 @@ void Renderer3D::shade_deferred() {
         sp.position = T.wp[0] * B.x + T.wp[1] * B.y + T.wp[2] * B.z;
         sp.normal = normalize(T.wn[0] * B.x + T.wn[1] * B.y + T.wn[2] * B.z);
         sp.geo_normal = T.geo_normal;
-        if (T.has_uv && !T.uniform) {
+        if (T.has_uv) {
           auto uv_at = [&](Vec3 b) { return T.uv[0] * b.x + T.uv[1] * b.y + T.uv[2] * b.z; };
           if (opt_.affine_uv) {
             /* Linear across the screen, as the PS1 drew textures: they swim and bend on
@@ -2079,7 +2099,7 @@ void Renderer3D::shade_deferred() {
           sp.normal_dy = wn_at(ratio(N + T.nb, S + T.sb)) - sp.normal;
           if (!finite_bits(dot(sp.normal_dx, sp.normal_dx)) || !finite_bits(dot(sp.normal_dy, sp.normal_dy))) sp.normal_dx = sp.normal_dy = Vec3(0.0f);
         }
-        if (T.has_tangent && !T.uniform) {  // (a normal map's: a uniform material has none)
+        if (T.has_tangent) {
           sp.tangent = Vec4(normalize(T.wt[0] * B.x + T.wt[1] * B.y + T.wt[2] * B.z), T.tangent_w);
           sp.has_tangent = true;
         }
@@ -2732,6 +2752,18 @@ Mat4 shadow_view_proj(Vec3 light_dir, const AABB &bounds) {
   return Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f) * Mat4::look_at(c - d * r * 2.0f, c, up);
 }
 
+static RenderTarget &shadow_depth_target() {
+  static thread_local RenderTarget rt;
+  return rt;
+}
+
+size_t shadow_map_scratch_bytes() { return shadow_depth_target().depth.capacity() * sizeof(float); }
+
+void trim_shadow_map_scratch(size_t max_depth_values) {
+  auto &depth = shadow_depth_target().depth;
+  if (depth.capacity() > max_depth_values) std::vector<float>().swap(depth);
+}
+
 void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec3 light_dir, const AABB &bounds, int res,
                        const ShadowMap *base) {
   out.size = 0;
@@ -2743,7 +2775,7 @@ void render_shadow_map(ShadowMap &out, const std::vector<DrawItem> &casters, Vec
   Vec3 up = std::fabs(d.y) > 0.99f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
   Mat4 view = Mat4::look_at(c - d * r * 2.0f, c, up);
   Mat4 proj = Mat4::ortho(r, 1.0f, r * 0.5f, r * 3.5f);  // (shadow_view_proj below: the same, kept in step)
-  static thread_local RenderTarget rt;
+  RenderTarget &rt = shadow_depth_target();
   static thread_local Renderer3D r3d;
   rt.make_depth_only(res, res);
   RasterOptions opt;

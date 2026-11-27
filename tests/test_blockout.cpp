@@ -26842,6 +26842,94 @@ static void tests_round500_te() {
 }
 // r500te-end
 
+static void tests_round655_overlaps() {
+  test("architectural Blockout (655): moving a small face away from the origin preserves coincident and touching face checks", [] {
+    // Render triangles from exact railing seed 35, faces 398 and 399. Their projected intersection has zero area.
+    Mesh contact;
+    contact.positions = {{24.3143463f, 2.94819403f, -19.2837486f}, {25.7929478f, 2.94819403f, -18.7183666f},
+                         {26.3607693f, 2.94819403f, -18.5012455f}, {26.744873f, 2.94819403f, -18.277914f},
+                         {26.7743912f, 2.94819403f, -18.3551121f}};
+    contact.add_face({0, 1, 2});
+    contact.add_face({2, 3, 4});
+    CHECK(meshops::overlapping_faces(contact) == 0);
+
+    for (const float offset : {0.0f, 60.0f}) {
+      constexpr float side = 1.0f / 128.0f;
+      Mesh m;
+      m.positions = {{offset, 0, offset}, {offset + side, 0, offset}, {offset, 0, offset + side}, {offset + side, 0, offset + side}};
+      m.add_face({0, 1, 2});
+      m.add_face({3, 2, 1});  // The triangles share only their diagonal, which has no area.
+      CHECK(meshops::overlapping_faces(m) == 0);
+      m.add_face({0, 1, 2});  // The new face covers the first triangle's full area, side squared over two.
+      m.touch();
+      std::vector<std::pair<uint32_t, uint32_t>> pairs;
+      meshops::overlapping_faces(m, 0.0f, &pairs);
+      CHECK((pairs == std::vector<std::pair<uint32_t, uint32_t>>{{0, 2}}));
+    }
+  });
+
+  test("architectural Blockout (655): editing a translated outline railing rebuilds its closed mesh and Undo restores its geometry and face attributes", [] {
+    for (const int method : r498_methods()) {
+      Editor ed;
+      const R500Scene s = r500_make(ed, "railing", method, 0.08f);
+      CHECK(s.bo && s.piece && s.piece->get<BlockoutPiece>());
+      if (!s.bo || !s.piece || !s.piece->get<BlockoutPiece>()) continue;
+
+      // Outline railing from architectural sweep seed 35. As in the sweep, the outline controls the run.
+      BlockoutPiece &railing = *s.piece->get<BlockoutPiece>();
+      railing.length = 4.29022884f;
+      railing.rail_height = 0.99342591f;
+      railing.post_spacing = 0.64310253f;
+      railing.post_size = 0.06018487f;
+      railing.rail_size = 0.08265f;
+      railing.outline = {{0, 0}, {3.68377423f, 0}, {3.68377423f, 1.57163393f},
+                         {1.25383866f, 1.57163393f}, {1.25383866f, 3.28638697f}, {0, 3.28638697f}};
+      const Mat4 placement = Mat4::trs({24.87046051f, 2.76554394f, -15.97584534f}, Quat::euler({0, 339.07434082f, 0}), Vec3(1));
+      const Mat4 turn = Mat4::trs({1.00769043f, 0, -2.86101770f}, Quat::euler({0, 270, 0}), Vec3(1));
+      s.piece->set_world_matrix(placement * turn);
+      r495_built(ed);
+      const size_t setup_depth = ed.undo_depth_for_test();
+      ed.mark_changed_for_test("outline railing from seed 35");
+      ed.step_frame_headless();  // Save the completed fixture as its own Undo step before the rail height edit.
+      CHECK(ed.undo_depth_for_test() == setup_depth + 1);
+
+      const uint64_t blockout_id = s.bo->id, piece_id = s.piece->id;
+      const Mesh *before = r495_mesh(*s.bo);
+      CHECK(before && structurally_valid(*before) && closed_manifold(*before) && r476_volume(*before) > 0.0);
+      if (!before) continue;
+      // The seed's exact-path pair shares an edge and has zero clipped area.
+      if (method == 1) CHECK(r498_judge(*s.bo).empty());
+      const uint64_t before_hash = blockout_mesh_hash(*before);
+      const blockout::Faces before_faces = s.bo->get<Blockout>()->state.faces;
+      CHECK(before->has_uvs() && before_faces.piece.size() == before->face_count());
+
+      ed.select_for_test(piece_id, false);
+      const size_t depth = ed.undo_depth_for_test();
+      ed.command("blockout set railheight 1.25");
+      r495_built(ed);
+      const Mesh *after = r495_mesh(*s.bo);
+      CHECK(after && structurally_valid(*after) && closed_manifold(*after) && r476_volume(*after) > 0.0);
+      CHECK(after && blockout_mesh_hash(*after) != before_hash);
+      CHECK(ed.undo_depth_for_test() == depth + 1);
+      // A newel top stands a quarter rail width above Rail Height.
+      CHECK_NEAR(r500_top(*s.bo), 2.76554394f + 1.25f + 0.25f * 0.08265f, method == 1 ? 0.002f : 0.08f);
+
+      ed.command("undo");
+      r495_built(ed);
+      const GameObject *restored = ed.scene().find(blockout_id);
+      const Mesh *back = restored ? r495_mesh(*restored) : nullptr;
+      CHECK(back && blockout_mesh_hash(*back) == before_hash);
+      const GameObject *restored_piece = ed.scene().find(piece_id);
+      const BlockoutPiece *restored_railing = restored_piece ? restored_piece->get<BlockoutPiece>() : nullptr;
+      CHECK(restored_railing && restored_railing->rail_height == 0.99342591f);
+      if (!back) continue;
+      if (method == 1) CHECK(r498_judge(*restored).empty());
+      const blockout::Faces &after_undo = restored->get<Blockout>()->state.faces;
+      CHECK(after_undo.piece == before_faces.piece && after_undo.side == before_faces.side && after_undo.flat == before_faces.flat);
+    }
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -26895,4 +26983,5 @@ void run_blockout_tests() {
   tests_round515_te();
   tests_round503();
   tests_round547();
+  tests_round655_overlaps();
 }

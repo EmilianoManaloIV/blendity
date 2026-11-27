@@ -1949,6 +1949,9 @@ struct EnvironmentSettings {
    * Light drives it - off is the look before 5.3 (the sky's ambient alone). Sun Intensity scales it, as Blender's. */
   bool sun_lights_scene = true;
   float sun_intensity = 1.0f;
+  // Angles of the original default sky direction (0.35, 0.75, -0.55).
+  static constexpr float default_sun_elevation = 49.00195f, default_sun_rotation = 147.52881f;
+  float sun_elevation = default_sun_elevation, sun_rotation = default_sun_rotation;
   /* The stylized sky (task 0248, ADR 0084) on the Gradient world: a painted sun disc (its size in degrees, 0 off; toward the
    * first directional light) and a horizon band (its half-width as a share of the sky, 0 off). */
   float sun_disc = 0.0f, sun_disc_softness = 0.3f;
@@ -1962,7 +1965,7 @@ struct EnvironmentSettings {
   float fog_density = 0.02f;  // the exponential modes' (Unity's Density)
   float fog_start = 10.0f, fog_end = 60.0f;
   Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_color_far{0.75f, 0.8f, 0.9f};
-  void reflect(Reflector &r);
+  void reflect(Reflector &r, bool include_sun_angles = true);
 };
 
 /* Unity: Lighting window > Scene (Mixed Lighting, Lightmapping Settings). Baked lighting, task 0012. */
@@ -2246,7 +2249,8 @@ size_t forget_material_assets(const std::string &path);
  * missing when the scene opened (relink_material_assets) is read from the file too once it is there and foreign.
  * Returns how many came out different (their versions go up; `changed` gets them); a file that is gone, or that the
  * loader no longer takes, leaves its material as it is. Main thread, as material_asset. */
-size_t reload_foreign_materials(const std::string &under = std::string(), std::vector<MaterialPtr> *changed = nullptr, const std::set<std::string> *only = nullptr);
+size_t reload_foreign_materials(const std::string &under = std::string(), std::vector<MaterialPtr> *changed = nullptr, const std::set<std::string> *only = nullptr,
+                                std::vector<MaterialPtr> *reread = nullptr);
 /* Round 485: `under` (a file or a folder) is on disk again - a package imported after its folder was deleted in this
  * session: the marks that said "deleted" for it, for anything inside it and for a folder it lies in are taken off, so
  * material_asset loads its files again. Returns how many marks went. */
@@ -2267,6 +2271,8 @@ using ProceduralTexturePtr = std::shared_ptr<ProceduralTexture>;
 std::string save_texture_text(ProceduralTexture &t);
 bool load_texture_text(const std::string &text, ProceduralTexture &t);
 ProceduralTexturePtr texture_asset(const std::string &path);  // loads on first use; nullptr if missing
+// Resolve the browser's paths in order, including null entries for missing assets.
+std::vector<ProceduralTexturePtr> texture_assets_for_browser(const std::vector<std::string> &paths);
 ProceduralTexturePtr create_texture_asset(const ProceduralTexture &src, const std::string &path);  // writes the file
 size_t save_dirty_texture_assets();
 const std::vector<std::pair<std::string, ProceduralTexturePtr>> &loaded_texture_assets();

@@ -165,7 +165,7 @@ struct UnityGlossMean {
   uint64_t bytes = 0;
   std::array<float, 4> mean = {0.0f, 0.0f, 0.0f, 0.0f};
 };
-std::map<std::string, std::set<std::string>> &unity_gloss_wanted();
+std::map<std::string, std::map<std::string, float>> &unity_gloss_wanted();
 std::map<std::string, UnityGlossMean> &unity_gloss_session_means();
 const float *unity_gloss_session_mean(const std::string &guid, const std::string &path);
 /* The project's index, kept a few seconds (a material loads a texture's path through it; many load at once). */
@@ -184,6 +184,8 @@ std::string unity_shader_name(const UnityGuidIndex &index, const std::string &gu
  * own first look, and what is asked, with nothing else done, before a scene's stand-in copy would be written over a
  * file that has appeared at its path. */
 bool load_unity_material(const std::string &text, const std::string &path, Material &m);
+/* The source still reads its roughness from one of the measured maps. */
+bool measured_unity_roughness(const std::string &path, const std::map<std::string, float> &requests, float &provisional, float &measured);
 bool unity_material_text(const std::string &text);
 
 /* A model's nodes as objects (their hierarchy, transforms, meshes and materials) under one named `name` - a model

@@ -52,6 +52,12 @@ const Curated kCurated[] = {
     {"Bring Windows Back", "Windows", "Every window's tabs back into the main window.", "dock bringback"},
 };
 
+const Curated kViewportQuality[] = {
+    {"Low Viewport Quality", "Performance", "Set Viewport Resolution Scale to 67%.", "quality low"},
+    {"Medium Viewport Quality", "Performance", "Set Viewport Resolution Scale to 85%.", "quality medium"},
+    {"High Viewport Quality", "Performance", "Set Viewport Resolution Scale to 100%.", "quality high"},
+};
+
 std::string lower(std::string s) {
   for (char &c : s) c = (char)std::tolower((unsigned char)c);
   return s;
@@ -101,6 +107,8 @@ const std::vector<PaletteEntry> &Editor::palette_entries() {
     for (const PaletteEntry &e : palette_entries_) known = known || lower(e.command) == lower(a.command);
     if (!known) add({a.label, "Yours", "Your shortcut: " + a.command, a.command, a.id});
   }
+  /* Add the preset names after user actions so saved labels such as "quality low" still resolve in favorites and tools. */
+  for (const Curated &c : kViewportQuality) add({c.name, c.category, c.help, c.command, ""});
   return palette_entries_;
 }
 

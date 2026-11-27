@@ -103,7 +103,7 @@ namespace sys {
 uint64_t physical_memory_bytes();  // installed RAM (0 if unknown)
 uint64_t working_set_bytes();      // this process's resident memory now
 uint64_t peak_working_set_bytes(); // and at its highest so far
-int hardware_threads();            // logical processors
+int hardware_threads();            // logical processors available at startup
 /* Windows: the program's arguments from the wide command line, as UTF-8 (main()'s argv is in the ANSI code page, which
  * can't hold every file name). Elsewhere empty: argv is UTF-8 already. */
 std::vector<std::string> utf8_arguments();

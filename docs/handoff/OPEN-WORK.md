@@ -1,6 +1,7 @@
 # Open work
 
-Every follow-up that was named and not taken, as of 2026-11-18 (the tree of PR #472 plus Pass 28's write-up).
+The original inventory covers follow-ups named by 2026-11-18 (PR #472 plus Pass 28's write-up).
+Later updates link the task or evidence that changed an item's status.
 Each item gives what is wrong or missing, the evidence, the files, and what "done" would look like, so it can
 become a task spec (`docs/tasks/TEMPLATE.md`) with little more reading. Line numbers are those of this tree and
 will drift; the function names will not. Item 19 could have held up 1.0.0. Windows CI and release builds use MSVC 14.51.
@@ -29,6 +30,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   `nvidia-smi` sampled beside the run (`PITFALLS.md`, "The card's power state").
 
 ### 2. The see-through corners are compared on the CPU every frame (S-M)
+- **Comparison removed for unchanged lists in round 614.** On the RTX 4070 SUPER, eligible posing workloads fell from one CPU comparison per card frame to 0.00–0.15. A changing camera still uploads its new list. Controlled replays covered dragging and Rigging playback. Live Link rendered the same frames, but asynchronous mesh traffic varied between trials, so its whole-frame timing remains inconclusive. [Task 0596](../tasks/0596-transparent-corner-reuse.md)
 - **Evidence:** round 565's fragment, "Named, not fixed": 7 MB read twice, 0.5 to 1 ms a card frame - as long
   as the copy it replaced. The editor already knows when its sorted list is last frame's (round 471).
 - **Files:** `src/editor/gpu_views.cpp`, `src/render/gpu_raster.cpp`.
@@ -36,6 +38,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   is sent; the `posing` rows no worse.
 
 ### 3. A camera with filters lights its picture twice on the card (M)
+- **Closed in round 610.** On the RTX 4070 SUPER and RTX 3060 Ti, filtered cameras produced identical display and HDR values with one opaque lighting draw. The original two-draw path covers incompatible resources and mixed shadow modes. Matched Play trials on both cards reduced median and 95th-percentile frame times. [Task 0592](../tasks/0592-filtered-camera-lighting.md)
 - **Evidence:** round 565: the linear-light pass costs 2 to 3.6 ms in P8 in the Play row; one pass with two
   targets would halve it (the see-through and overlay draws share that pass).
 - **Files:** `src/render/gpu_raster.cpp` and the card's shaders.
@@ -49,6 +52,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   frame (and the ADR notes the exception) or it is reverted.
 
 ### 5. Splat import: the whole-file read, SPZ's inflate, serial validation (M)
+- **SPZ copy removed in round 615.** On a million-splat input the legacy gzip reader used 61.92 MiB less peak memory during decompression. Peak memory across the complete import stayed near 350 MiB. Round 619 subsequently reduced complete-import median peak from about 350 to 293 MiB at both two and four allowed CPUs. [Task 0601](../tasks/0601-spz-file-peak.md) The PLY file read and serial validation remain open. [Task 0597](../tasks/0597-splat-import-memory.md)
 - **Evidence:** round 567's fragment: a 1M-splat PLY imports in 273 ms of which `fs::read_file` is 184; an SPZ
   in 365 ms of which inflate and the copy `gunzip` makes of its output are 253; `pointcloud_validate` is serial,
   about 30 ms. The import already runs off the main thread and meets ADR 0105's frame budget.
@@ -65,14 +69,22 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 - **Files:** `src/render/gsplat_raster*`, `tests/test_splats_raster.cpp`.
 
 ### 7. Older named rows (L, from Pass 25's verification)
+- **Later measurements.** Round 648 measured a 100-object Unity package unpack at 608.8/537.2 ms (32/two workers) and first import of a separate 10,000-object scene at 597.8/659.9 ms. Round 650 rejected the single-control Noise Reduction candidate after comparing the floating-point output. Neither result closes the original performance target. [Import measurements](../perf/0630-survey.md) · [Noise Reduction decision](../tasks/0632-single-control-noise.md)
 - **Evidence:** `docs/perf/verify-511.md` and the PRs it names: Noise Reduction 18.3 ms, full-size camera
   filters 102 to 332 ms, Unity import 533 ms, two views or a drag at 50,000 objects, two-level card rows while
   dragging.
 - **Done:** each needs its own measurement round first; treat the document as the list, not as a plan.
 
+### Fresh-process Textures window still misses its 100 ms budget
+
+Task 0644 tested deferring path construction for unrelated entries in the Windows scan. The mixed-directory paired gains fell below both predeclared thresholds. The trial retained no product change. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
+
+Round 623 reduced the Windows first-open median for 2,000 procedural textures from 177.6 to 123.2 ms at default affinity and from 242.6 to 193.4 ms with two workers. The next frame took 3.7–3.8 ms. The 100 ms first-open target remains open. Profile the remaining startup work with the same nested-path, alias, search and selection controls. [Task 0599](../tasks/0599-cold-textures.md) and [task 0605](../tasks/0605-cold-texture-directory.md)
+
 ## Testability and flaky checks
 
 ### 8. `anim_tick` and playback read the real clock (M)
+- **Verified on the Pass 37 stack.** Task 0638 at `ae6c5456` routes preview playback through the editor clock. The focused comparison moved frame 10 to exactly 25 in 0.25 seconds. The Centre of Mass redraw test steps that clock explicitly and checks all 24 moving frames in both overlay states on Windows and Linux.
 - **Evidence:** round 568's fragment, "A testability gap": `Editor::anim_tick`
   (`src/editor/animation_window.cpp`) and the places that start playback set and read `anim_.play_clock` from
   `now_seconds()`, not the editor's clock, so `set_clock_for_test` cannot pin a playing clip. The Centre of Mass
@@ -91,6 +103,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   only added), or `--check` runs in the local chain and the failure names the verb. A self-test for the tool.
 
 ### 10. Preferences focus: two cases the re-reveal does not see (S-M)
+- **Closed in round 611.** Preferences keeps an edited field visible when rows move or the scroll offset is clamped. Scrolling with the wheel during recovery still moves the field out of view. Windows full, Windows dependency-free and Linux passed the focus, HCI and editor tests. Keeping dynamic status text at a fixed row height is a separate layout suggestion. [Task 0593](../tasks/0593-preferences-focus.md)
 - **Evidence:** round 573 (`docs/tasks/0555-preferences-budget-rows.md`, "Out, from the review"): a text or
   number field that Tab is *editing* goes through `Context::walk_stop` only (`src/editor/ui.cpp`) and is not
   watched, so rows changing above it can still push it out of view; rows that go away above the control on the
@@ -120,6 +133,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   unit checks sharded like the sanitizers, with the minutes measured.
 
 ### 13. Four card picture checks fail in the libraries build only (M)
+- **Acceptance verified on the Pass 37 base.** The source-equivalent Windows full-library `gpu` group passed 1,836 checks across 164 fixtures with the RTX 4070 SUPER drawing actual views. The old failures remain useful history. Repeat on other hardware before drawing a cross-device conclusion. [Round 658 verification](../perf/0640-input-sweep.md#older-open-work)
 - **Evidence:** Pass 24's notes: `tests/test_gpu.cpp` picture checks (then at lines 888, 2227, 4887) failed on
   `main` with Blender's libraries on the development machine's card, with and without the round under test.
   Round 551 (`docs/tasks/0531-card-cpu-picture-tolerances.md`) dealt with three card-vs-CPU picture tests; check
@@ -157,6 +171,7 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   release defaults, with precise floating-point mode, and with link-time code generation disabled. The full
   Windows unit suite failed in all three runs. The cause remains unresolved. [Task 0564 and CI results](../tasks/0564-msvc-1452.md)
 - **Unresolved.** The 14.52 full suite failed in each tested configuration. [PR 485](https://github.com/EmilianoManaloIV/blendity/pull/485)
+- **Pass 37 compiler trial.** Task 0642 (c4292781) found that the 14.52 unit run still exited 0xc0000409 after 416 passing cases. The bounded stress run passed. Its diagnostic changes were not adopted. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
 - **Acceptance remains open.** Keep Windows CI and release builds pinned to 14.51 until the original failures
   are explained and addressed and the full Windows unit suite and quick stress both pass on the intended 14.52 release build.
 
@@ -175,7 +190,8 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
   Sun Rotation on the Sky world".
 - **Done:** the two fields in the Sky world's Inspector, reachable from the console, with a Learn step.
 
-### 16. Leftovers from Pass 25 (S each; unverified)
+### 16. Leftovers from Pass 25
+- **Checked in task 0643.** The full-library README count matched the 31-group run. The native same-tick GUID rewrite and cross-project reuse fixtures passed, as did package reimport with a renamed file and removal of the obsolete GUID. Four loopback peers received seven sends over 120 paint dabs. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
 - **Evidence:** only the coordinating session's private notes of 2026-11-15 - nothing in the tree records them,
   so reproduce each before writing a spec: a Live Link painted-dab tick assert (`src/editor/livelink*`,
   `docs/LIVELINK.md`); a GUID list filled from a worker that is not pruned when a GUID is reused (the Unity
@@ -185,30 +201,31 @@ Sizes: **S** an hour or two, **M** a round, **L** a pass or a decision first.
 ### 17. Pass 24's open points (owner's decisions and M-L work)
 - **Evidence:** `docs/tasks/0460-*` to `0464-*`, Pass 24's write-up and rounds 484-488 in `CHANGELOG.md`: a re-read replacing a typed material
   value; the direction-dependent slow Scene view; the bake's remaining specks; the bake's CPU half on the card;
-  bakes over 2^23 texels depend on batch size; `tools/dev/chain.sh` copies into the shared checkout and is not
-  usable from a worktree (rounds since ran its steps by hand).
-- **Done:** each needs a spec; the `chain.sh` item is tooling and the most useful to a new agent - a chain that
-  runs in whatever tree it is called from.
+  bakes over 2^23 texels depend on batch size. The original `chain.sh` assumed the shared checkout.
+- **Reproduced in task 0643.** With a missing gloss mean, automatic background completion rewrote a locally edited Metallic value from 0.37 to 1.0. Task 0650 owns the correction. Explicit Reimport Unity Materials reads values from the Unity file. [Round 658 reconciliation](../perf/0640-input-sweep.md#older-open-work)
+- **Verification chain update:** the helper now accepts a selected dependency-free checkout through `BL_W` and
+  requires explicit scratch targets through `BL_MAIN` and `BL_WSL_TREE`. Use the receipt's actual command and
+  test results when checking the chain. [Migration inventory](CODEX.md) · [Helper](../../tools/dev/chain.sh)
+- **Remaining work:** write a spec for each unresolved product item before implementation.
 
 ### 18. `build.sh` gaps (S)
-- **Evidence:** `PITFALLS.md`: `build.sh` checks only `src/*/*.h` and `src/*/*/*.h` for newer headers (editing a
-  `tests/*.h` alone rebuilds nothing), compares mtimes only, and compiles with `nproc` jobs (no `JOBS`
-  override; on a memory-limited WSL that means `taskset`).
-- **Done:** test headers in the dependency check; a `JOBS` setting; both documented in `tools/README.md` via a
-  fragment.
+- **Updated:** `build.sh` now checks `tests/*.h` and `tests/fixtures/*.h` when deciding whether to rebuild test
+  objects. Its dependency checks still use modification times.
+- **Caller-provided jobs verified in Pass 37.** Task 0647, integrated at `e0bbb37b`, preserves an explicit positive `JOBS` value and passes it to `xargs -P`. An unset or empty value uses platform detection. Zero and malformed values stop before compilation. Nine shell-entry cases passed. The mtime-based dependency check and the WSL affinity limit still apply. [Build script](../../build.sh) · [WSL limits](MACHINE.md#wsl-limits)
 
 ## The owner's decisions and housekeeping
-These wait on the owner, not on a task. Do not act on them unasked.
+The owner decides the open items below. Standing authorization already covers hub cleanup of verified merged
+`task/*` branches through the guarded helper.
 - Item 4 above (round 565's fix under the 1.3x bar) and item 1's choice.
 - ADR 0146's amendments made during Pass 26 (rounds 520 and 521: vertex deform stays per frame and F12 poses
   at the snapshot on the main thread; the outline is the rest shape's hull skinned, up to 44 % of thickness off
   the old hull where bones blend) were published for the owner's reading.
 - Whether to keep `tools/dev/integrate.sh` (the integration PR trial, ADR 0132) or retire it: Passes 26 to 28
   used one top per stack instead.
-- The backlog of merged `task/*` branches on GitHub and the `diag/549-gcc15` branch: `AGENTS.md` asks for
-  merged branches to be deleted after each merge, but the agents' deletes were refused by the permission
-  system, so the owner deletes them or allows it.
-- Removing finished worktrees and scratch folders on the development machine (`MACHINE.md` lists the families;
-  one folder with a mangled name, `C:\blcmp565$tag`, was left because its delete was blocked).
+- Only the hub may exercise the standing cleanup approval. The helper requires verification of each merged
+  `task/*` branch. Other refs, including `diag/549-gcc15`, remain owner decisions. [Guarded cleanup approval](../tasks/0570-project-parity.md#owner-decision-on-merged-branch-cleanup)
+- The owner authorized task 0594 to retire verified stale worktrees and branches. It removed 31 worktrees,
+  59 local branches and 97 remote branches. The task records the retained exceptions and the limits of that
+  cleanup. Refer new ambiguous paths or refs to the hub. [Cleanup outcome](../tasks/0594-verified-cleanup.md)
 - A larger WSL memory limit (`.wslconfig`) was never asked for; it would lift the one-build rule.
 - Releases after 1.0.0: version numbers, tags and what goes in them.

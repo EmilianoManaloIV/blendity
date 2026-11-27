@@ -1,9 +1,9 @@
 # 0570 — Carry Blendity's complete project workflow into Codex (round 588)
 
-- **Status** — reviewed
+- **Status** — done
 - **Requirements** — Owner's handoff, existing project engineering standards and CLAUDE.md
 - **Decisions** — Existing Git and role boundaries, ADR 0123 and ADR 0133
-- **PR** — Targets main and carries #480, #479, #478 and #477
+- **PR** — [#481](https://github.com/EmilianoManaloIV/blendity/pull/481), recorded merge `62854e5b`. Targeted `main` and carried #480, #479, #478 and #477.
 
 ## Goal
 
