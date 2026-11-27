@@ -8187,28 +8187,53 @@ static void tests_round418() {
     CHECK(!named);
   });
   test("sweep rows (round 418): a screenshot's PNG is written on a worker the tray lists, and lands as a file; without workers it lands in the frame", [] {
+    constexpr int width = 640, height = 400;
+    const std::string root = test_run_dir(test_dir(), test_run_stamp(), std::random_device{}() % 100000u);
+    const bool fresh = !fs::exists(root);
+    CHECK(fresh);
+    if (!fresh) return;
+    const char *project_env = std::getenv("BLENDITY_PROJECT");
+    const std::string previous_project = project_env ? project_env : "";
+    const std::string previous_asset_root = asset_root();
     for (bool async : {true, false}) {
+      const std::string project = fs::normalize(fs::join(root, async ? "async" : "sync"));
+      set_env("BLENDITY_PROJECT", project);
       Editor ed;
-      ed.init_headless(640, 400);
+      ed.init_headless(width, height);
+      if (previous_project.empty()) clear_env("BLENDITY_PROJECT");
+      else set_env("BLENDITY_PROJECT", previous_project);
+      const std::string dir = fs::join(project, "Screenshots");
+      CHECK(ed.screenshots_dir_for_test() == dir);
+      if (ed.screenshots_dir_for_test() != dir) continue;
+      const auto pngs = [&] { return fs::find_files(dir, ".png", 0); };
       ed.set_async_jobs_for_test(async);
       ed.step_frame_headless();
-      ed.run_action_for_test("render.screenshot");
-      bool listed = false;
-      std::string label;
-      for (int i = 0; i < 40; i++) {
-        ed.step_frame_headless();
-        for (const Editor::JobView &j : ed.jobs_for_test())
-          if (j.label == "Saving screenshot") listed = true;
-        if (!ed.file_jobs_running() && i > 2) break;
+      CHECK(ed.run_action_for_test("render.screenshot"));
+      ed.step_frame_headless();
+      CHECK(pngs().empty() && !ed.file_jobs_running());
+      /* The action defers capture by two frames so the menu has closed. Check the tray at capture, before the next poll. */
+      ed.step_frame_headless();
+      const auto jobs = ed.jobs_for_test();
+      const bool listed = std::any_of(jobs.begin(), jobs.end(), [](const Editor::JobView &job) { return job.label == "Saving screenshot"; });
+      CHECK(listed == async);
+      if (async) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (ed.file_jobs_running() && std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          ed.step_frame_headless();
+        }
       }
-      std::vector<std::string> pngs;
-      for (const DirEntry &de : fs::list(ed.screenshots_dir_for_test()))
-        if (!de.is_dir && fs::extension(de.name) == ".png") pngs.push_back(de.name);
-      std::printf("    %s: %zu png(s), the tray listed the job: %s\n", async ? "with workers" : "without workers", pngs.size(), listed ? "yes" : "no");
-      CHECK(!pngs.empty());
-      CHECK(async ? listed : !listed);
-      for (const std::string &n : pngs) fs::remove_file(fs::join(ed.screenshots_dir_for_test(), n));
+      /* Without workers this is still the capture frame. In either mode require this project's own readable file. */
+      CHECK(!ed.file_jobs_running());
+      const auto landed = pngs();
+      std::printf("    %s: %zu png(s), the tray listed the job: %s\n", async ? "with workers" : "without workers", landed.size(), listed ? "yes" : "no");
+      CHECK(landed.size() == 1);
+      if (landed.size() != 1) continue;
+      Bitmap shot;
+      std::string error;
+      CHECK(load_image(fs::join(dir, landed[0]), shot, error) && shot.width == width && shot.height == height && !shot.is_float);
     }
+    set_asset_root(previous_asset_root);
   });
   test("sweep rows (round 418): 10,000 cold render meshes built on every core before the gather are the ones a serial gather builds, and the frame that lands them is one frame", [] {
     Editor ed;

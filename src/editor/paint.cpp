@@ -1722,17 +1722,15 @@ void Editor::export_textures_command(const std::vector<std::string> &t) {
     Log::warn("export textures --assign: %s has no material to point at the files", g->name.c_str());
     return;
   }
-  /* The engine's maps one a channel (`separate`) beside the packing's files: the material reads roughness and metallic
-   * from their own images, as it did from the surface's channels, and emission only when the stack writes it. */
-  std::vector<std::string> sep;
-  if (!export_texture_set(*pt, "separate", resolve_asset_path(dir), sep, &why)) {
+  /* The material needs one image per channel. Reuse the files when the export already used the separate packing. */
+  if (packing != "separate" && !export_texture_set(*pt, "separate", resolve_asset_path(dir), files, &why)) {
     Log::warn("export textures --assign: %s", why.c_str());
     return;
   }
   const std::vector<std::string> maps = texture_packing_maps("separate");
   auto file_of = [&](const char *map) {
-    for (size_t k = 0; k < maps.size() && k < sep.size(); k++)
-      if (maps[k] == map) return fs::join(dir, fs::filename(sep[k]));
+    for (size_t k = 0; k < maps.size() && k < files.size(); k++)
+      if (maps[k] == map) return fs::join(dir, fs::filename(files[k]));
     return std::string();
   };
   Material &m = *mr->materials[0];
