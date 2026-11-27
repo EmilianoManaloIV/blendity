@@ -22,7 +22,7 @@ class JobSystem {
  public:
   enum class Backend { Builtin, TBB };
 
-  /* threads == 0 -> hardware_concurrency - 1 workers (+ the calling thread). */
+  /* Zero selects the available logical CPUs, including the calling thread. */
   explicit JobSystem(int threads = 0);
   ~JobSystem();
   JobSystem(const JobSystem &) = delete;
@@ -98,5 +98,8 @@ class JobSystem {
   std::mutex background_mutex_;
   std::shared_ptr<JobSystem> background_pool();
 };
+
+/* Runs this thread's loops inline when it already has an independent item of parallel work. */
+void run_job_loops_serial(const std::function<void()> &fn);
 
 }  // namespace bl

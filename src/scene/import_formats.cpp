@@ -850,7 +850,8 @@ bool import_stl_file(const std::string &path, ImportResult &out) {
 
 bool import_ply_file(const std::string &path, ImportResult &out) {
   std::string data;
-  if (!fs::read_file(path, data)) {
+  if (const auto imported = try_import_binary_ply_point_cloud(path, data, out)) return *imported;
+  if (data.empty() && !fs::read_file(path, data)) {
     out.error = "cannot read " + path;
     return false;
   }

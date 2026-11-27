@@ -16,6 +16,7 @@
 #include "../scene/unity_package.h"
 #include "../scene/visemes.h"
 #include "../scene/scene.h"
+#include "../texture/procedural_texture.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +25,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -834,9 +836,11 @@ uint64_t texture_stamp(const Texture *t) {
 struct TexSent {
   int key = 0;
   TextureRef ref;
+  std::string procedural_asset;
   uint64_t stamp = 0;
   double last = -1e30;  // (when it was last sent: at most 4 a second while it keeps changing)
   bool live = false;    // (named by a material now: only those are looked at and sent - review 377)
+  bool recheck = false;  // a late snapshot can see pixels the other clients have yet to receive
 };
 
 /* A texture's first level copied as it is (at most kMaxTextureSide a side, every n-th texel past it) for the worker,
@@ -844,13 +848,28 @@ struct TexSent {
 struct TexJob {
   int key = 0;
   std::string name;
-  bool non_color = false, force = false;  // (force: a new client - sent whatever its hash)
+  bool non_color = false;
+  bool seed_hash = false;  // (there were no other clients when this snapshot was queued)
   int w = 0, h = 0;
   std::vector<uint32_t> px8;  // (R | G<<8 | B<<16 | A<<24) - or, for a float image:
   std::vector<Vec4> pxf;      // (linear)
   std::vector<int> clients;
   bool broadcast = false;
 };
+
+enum class TextureDelivery { Skip, ExplicitClients, Broadcast };
+
+constexpr TextureDelivery texture_delivery(bool broadcast, bool has_explicit_clients, std::optional<uint64_t> common_hash, uint64_t hash) {
+  if (broadcast && (!common_hash || *common_hash != hash)) return TextureDelivery::Broadcast;
+  return has_explicit_clients ? TextureDelivery::ExplicitClients : TextureDelivery::Skip;
+}
+
+// An unchanged broadcast can merge with a snapshot while the worker is busy. Only the newcomer still needs the PNG.
+static_assert(texture_delivery(true, true, uint64_t{7}, 7) == TextureDelivery::ExplicitClients);
+static_assert(texture_delivery(true, false, uint64_t{7}, 7) == TextureDelivery::Skip);
+static_assert(texture_delivery(true, true, uint64_t{7}, 8) == TextureDelivery::Broadcast);
+static_assert(texture_delivery(true, true, std::nullopt, 7) == TextureDelivery::Broadcast);
+static_assert(texture_delivery(false, true, uint64_t{7}, 8) == TextureDelivery::ExplicitClients);
 
 /* The PNG's pixels (0xAARRGGBB) on the worker: 8-bit as they are, a float image's colour made sRGB unless the slot is
  * non-colour data (review 377: an EXR colour map went linear, too dark), clamped, a NaN black. */
@@ -897,17 +916,22 @@ struct Link::Impl {
 
   /* Round 377: the textures by slot, and their worker (PNG encoding off the main thread; the newest job per texture). */
   std::unordered_map<std::string, TexSent> textures;
+  struct PaintBurst {
+    double until = 0.0;
+    int maps = 0;
+  };
+  std::unordered_map<std::string, PaintBurst> paint_bursts;
   int next_texture = 1;
   std::thread tex_worker;
   std::mutex tm;
   std::condition_variable tcv;
   std::deque<int> tex_order;
   std::unordered_map<int, TexJob> tex_pending;
-  std::unordered_map<int, uint64_t> tex_hash_sent;  // (by key: the pixels last broadcast - the worker's)
+  std::unordered_map<int, uint64_t> tex_hash_sent;  // by key: pixels known common to all clients, maintained by the worker
   bool tex_quit = false;
   int tex_busy = 0;
   int texture_key(const TextureRef &t);
-  void queue_texture(TexSent &ts, const std::vector<int> &to, bool all, bool force, double now);
+  void queue_texture(TexSent &ts, const std::vector<int> &to, bool all, double now, bool seed_hash = false);
   void compare_textures(double now);
   void tex_loop();
 
@@ -1037,23 +1061,29 @@ void Link::Impl::start_worker() {
 /* A texture slot's key: the same path in the same colour space is one texture, whatever material uses it. */
 int Link::Impl::texture_key(const TextureRef &t) {
   TexSent &ts = textures[t.path + (t.non_color ? "|data" : "|color")];
-  if (!ts.key) ts.key = next_texture++, ts.ref = t;
+  if (!ts.key) {
+    ts.key = next_texture++, ts.ref = t;
+    int output;
+    split_texture_ref(t.path, ts.procedural_asset, output);
+  }
   ts.live = true;
   return ts.key;
 }
 
 /* Its texels copied for the worker (to everyone, or to `to` only when a client is new). */
-void Link::Impl::queue_texture(TexSent &ts, const std::vector<int> &to, bool all, bool force, double now) {
+void Link::Impl::queue_texture(TexSent &ts, const std::vector<int> &to, bool all, double now, bool seed_hash) {
   TexturePtr tex = resolve_texture_ref(ts.ref);
   if (!tex || tex->levels.empty() || tex->levels[0].w <= 0) return;
   const Texture::Level &l = tex->levels[0];
   const int step = std::max(1, (std::max(l.w, l.h) + kMaxTextureSide - 1) / kMaxTextureSide);
   TexJob job;
-  job.key = ts.key, job.name = texture_ref_label(ts.ref), job.non_color = ts.ref.non_color, job.force = force;
+  job.key = ts.key, job.name = texture_ref_label(ts.ref), job.non_color = ts.ref.non_color;
+  job.seed_hash = seed_hash;
   job.w = (l.w + step - 1) / step, job.h = (l.h + step - 1) / step, job.clients = to, job.broadcast = all;
   if (!l.px8.empty()) copy_texels(l.px8, l.w, step, job.w, job.h, job.px8);
   else copy_texels(l.pxf, l.w, step, job.w, job.h, job.pxf);
   if (all) ts.last = now;
+  ts.recheck = !all && !seed_hash;
   {
     std::lock_guard<std::mutex> lk(tm);
     auto it = tex_pending.find(job.key);
@@ -1061,7 +1091,8 @@ void Link::Impl::queue_texture(TexSent &ts, const std::vector<int> &to, bool all
     else {
       for (int c : it->second.clients)
         if (std::find(job.clients.begin(), job.clients.end(), c) == job.clients.end()) job.clients.push_back(c);
-      job.broadcast = job.broadcast || it->second.broadcast, job.force = job.force || it->second.force;
+      job.broadcast = job.broadcast || it->second.broadcast;
+      job.seed_hash = job.seed_hash || it->second.seed_hash;
     }
     tex_pending[job.key] = std::move(job);
   }
@@ -1076,17 +1107,36 @@ void Link::Impl::compare_textures(double now) {
   for (auto &[key, ms] : materials)
     if (MaterialPtr m = ms.ptr.lock()) m->reflect(rc);
   for (const TextureRef &r : rc.refs) texture_key(r);
+  for (auto it = paint_bursts.begin(); it != paint_bursts.end();) {
+    if (now >= it->second.until) it = paint_bursts.erase(it);
+    else it->second.maps = 0, ++it;
+  }
+  // A stroke can change several outputs of one surface. Share its live send budget across those outputs so each
+  // can still update during a long burst. Once painting pauses, each map can send its final state at its normal rate.
+  if (!paint_bursts.empty()) {
+    for (const auto &[name, ts] : textures) {
+      if (!ts.live || ts.procedural_asset.empty()) continue;
+      auto burst = paint_bursts.find(ts.procedural_asset);
+      if (burst != paint_bursts.end()) burst->second.maps++;
+    }
+  }
   for (auto &[name, ts] : textures) {
-    if (!ts.live || now - ts.last < kTextureMinGap) continue;
+    if (!ts.live) continue;
+    double gap = kTextureMinGap;
+    if (!paint_bursts.empty() && !ts.procedural_asset.empty()) {
+      const auto burst = paint_bursts.find(ts.procedural_asset);
+      if (burst != paint_bursts.end()) gap *= burst->second.maps;
+    }
+    if (now - ts.last < gap) continue;
     const uint64_t stamp = texture_stamp(resolve_texture_ref(ts.ref).get());
-    if (stamp == ts.stamp) continue;
+    if (stamp == ts.stamp && !ts.recheck) continue;
     ts.stamp = stamp;
-    queue_texture(ts, {}, true, false, now);
+    queue_texture(ts, {}, true, now);
   }
 }
 
-/* The worker: the PNG's pixels made, hashed, a broadcast whose pixels are the same as the last one's dropped; the PNG
- * encoded and sent with its key, name, size and hash. */
+/* The worker hashes the PNG pixels, then sends unchanged maps only to explicit recipients. A changed broadcast
+ * includes both ready and explicit clients. */
 void Link::Impl::tex_loop() {
   for (;;) {
     TexJob job;
@@ -1105,20 +1155,24 @@ void Link::Impl::tex_loop() {
     const std::vector<uint32_t> px = png_pixels(job);
     uint64_t h = kFnvOffset ^ ((uint64_t)job.w << 32 | (uint32_t)job.h);
     for (uint32_t p : px) h = (h ^ p) * kFnvPrime;
-    bool same = false;
+    TextureDelivery delivery;
     {
       std::lock_guard<std::mutex> lk(tm);
-      same = job.broadcast && !job.force && tex_hash_sent[job.key] == h;
-      if (job.broadcast) tex_hash_sent[job.key] = h;
+      const auto previous = tex_hash_sent.find(job.key);
+      const std::optional<uint64_t> common = previous == tex_hash_sent.end() ? std::nullopt : std::optional<uint64_t>{previous->second};
+      delivery = texture_delivery(job.broadcast, !job.clients.empty(), common, h);
+      if (delivery == TextureDelivery::Broadcast || job.seed_hash) tex_hash_sent[job.key] = h;
+      // If a late client saw different pixels, even a return to the previous broadcast must go out again.
+      else if (previous != tex_hash_sent.end() && previous->second != h) tex_hash_sent.erase(previous);
     }
-    if (!same) {
+    if (delivery != TextureDelivery::Skip) {
       const std::string png = encode_png(px.data(), job.w, job.h, job.w, true);
       JsonWriter w;
       w.obj().key("t").str("texture").key("key").integer(job.key).key("name").str(job.name).key("width").integer(job.w).key("height").integer(job.h);
       w.key("non_color").boolean(job.non_color).key("hash").str(strprintf("%016llx", (unsigned long long)h)).end();
-      server.send_to(job.clients, job.broadcast, w.out, png, ckey((uint64_t)job.key, kTexture));
+      server.send_to(job.clients, delivery == TextureDelivery::Broadcast, w.out, png, ckey((uint64_t)job.key, kTexture));
     }
-    (same ? tex_same : tex_sent)++;
+    (delivery == TextureDelivery::Skip ? tex_same : tex_sent)++;
     std::lock_guard<std::mutex> lk(tm);
     tex_busy--;
     tcv.notify_all();
@@ -1525,7 +1579,7 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
   for (auto &[name, ts] : textures) {  // (round 377: every texture its materials name, to the new clients; encoded on the worker)
     if (!ts.live) continue;
     if (!others) ts.stamp = texture_stamp(resolve_texture_ref(ts.ref).get());  // (with others there, compare() still owes them a change - review 377)
-    queue_texture(ts, fresh, false, true, last_compare);
+    queue_texture(ts, fresh, false, last_compare, !others);
   }
   for (int c : fresh) server.ready(c);
   stats.syncs++;
@@ -1966,6 +2020,7 @@ bool Link::start(int port, std::string *error) {
   d_->materials.clear();
   d_->material_key.clear();
   d_->textures.clear(), d_->tex_hash_sent.clear(), d_->next_texture = 1;  // (round 377: a new session's own)
+  d_->paint_bursts.clear();
   d_->start_worker();
   return true;
 }
@@ -2004,6 +2059,10 @@ const Stats &Link::stats() const {
 }
 net::Server::Stats Link::net_stats() const { return d_->server.stats(); }
 void Link::set_interval_for_test(double seconds) { d_->interval = seconds; }
+
+void Link::note_surface_paint(const std::string &asset, double now_s) {
+  if (!asset.empty() && d_->server.client_count() != 0) d_->paint_bursts[asset].until = now_s + kTextureMinGap;
+}
 
 void Link::wait_meshes_for_test() {
   {

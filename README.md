@@ -36,12 +36,24 @@ in **[docs/INSTALL.md](docs/INSTALL.md)**. Every version is on the
 - **Model** with Blender's Edit Mode tools (extrude, inset, bevel, loop cut, knife), a modifier stack, and
   **sculpt** with brushes, DynaMesh and Dyntopo.
 - **Unwrap and texture**: a UV Editor, Principled and toon materials, layered procedural textures, painting on the
-  model, texture baking.
+  model, face-corner paint that survives mesh editing, and texture baking.
+  Textures cards follow paint Undo and Redo (round 639).
 - **Light and render**: a realtime rasterizer and a path tracer on the CPU or a Vulkan graphics card, baked
   lightmaps and probes, Gaussian splats (PLY, SPZ, glTF).
+  Vulkan device creation supports the advertised portability subset (round 616).
+  On Vulkan, mesh storage can be reused without disrupting baked lighting on other objects.
+  The built-in CPU ray tracer uses less memory when preparing large splat clouds (round 629).
+  The Lighting window shows the active update mode first and reveals the full bake counts on hover.
+  Selecting Low releases oversized shadow planes in CPU viewports (round 631).
+  Find and apply Low, Medium or High Viewport Quality from the command palette.
 - **Rig and animate**: bones, IK, automatic weights, a dopesheet and curves, a Sequencer, walk cycles, spring bones.
 - **Work with other tools**: import and export OBJ, FBX, glTF, STL, PLY and USD; Unity packages and scenes, VRM and
   MikuMikuDance characters; **Live Link** to Blender, Unity, Godot and Unreal.
+  - **Steam Workshop**: [import installed characters and maps](docs/guides/workshop.md) from loose files or VPKs.
+  Pose classic SFM characters with their bones and materials.
+  Import classic BSP maps with terrain, brush models and placed props.
+  Half-Life: Alyx and CS2 characters retain supported skins, materials and textures.
+  Their compiled maps bring in world geometry and placed props.
 
 The full list, stage by stage, is in **[docs/FEATURES.md](docs/FEATURES.md)**.
 
@@ -51,16 +63,17 @@ The full list, stage by stage, is in **[docs/FEATURES.md](docs/FEATURES.md)**.
 2. Press **F1** for the **Learn** tab, or pick a stage from the **Layout** dropdown (top right).
 3. **Alt+drag** orbits, the **wheel** zooms, **W / E / R** move, rotate and scale, **Tab** enters Edit Mode,
    **Ctrl+P** plays, and **Ctrl+K** finds any command by name.
+   4. In Preferences, press **Tab** or **Shift+Tab** to move between controls. The field you are editing stays in view when settings change the layout.
 
 ## Learn more
 
 - **[The manual](docs/MANUAL.md)** - the work stage by stage, with examples.
 - **The Learn tab** (F1) - interactive lessons with Try-it buttons.
-- **The books** (PDF, attached to every release): [User Guide](docs/Blendity-User-Guide.pdf) and
-  [Architecture and Engineering](docs/Blendity-Architecture.pdf), each ending with the full reference list.
+- **The books** (PDF, attached to every release): [User Guide](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-User-Guide.pdf) and
+  [Architecture and Engineering](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-Architecture.pdf), each ending with the full reference list.
 - **For developers:** [ARCHITECTURE.md](docs/ARCHITECTURE.md), [decisions/](docs/decisions/) (ADRs),
   [PERFORMANCE.md](docs/PERFORMANCE.md), [USABILITY.md](docs/USABILITY.md), [requirements.md](docs/requirements.md)
-  and [CLAUDE.md](CLAUDE.md) (engineering standards).
+  and [AGENTS.md](AGENTS.md) (engineering standards and handoff).
 - **Known limits and what changed** in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## Build from source
@@ -78,7 +91,7 @@ Blender's prebuilt libraries (faster rendering, denoising, video export), CMake 
 **[docs/BUILDING.md](docs/BUILDING.md)**.
 
 <!-- The unit-check count: the pass write-up updates this one line (tools/dev/changelog.py fold --checks). -->
-Each build is tested: `blendity_tests` (106864 unit checks in 3801 tests with Blender's libraries), on Windows, Linux and
+Each build is tested: `blendity_tests` (142033 unit checks in 3951 tests with Blender's libraries), on Windows, Linux and
 macOS by GitHub Actions.
 
 ## License
@@ -88,5 +101,5 @@ because they include libraries under other compatible licences; the details are 
 [licenses/README.md](licenses/README.md) and the people and projects Blendity follows are named in
 [CREDITS.md](CREDITS.md). Your scenes, meshes, textures and renders are yours.
 
-Blendity is written with Anthropic's Claude through Claude Code, under a human's direction and review; the program
+Anthropic's Claude Code helped build Blendity through 1.0.0. Development continues with OpenAI Codex under the owner's direction and review. The program
 itself runs no AI except an optional, local download. See [docs/AI_DISCLOSURE.md](docs/AI_DISCLOSURE.md).

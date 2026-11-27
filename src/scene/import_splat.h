@@ -8,6 +8,7 @@
 #include "pointcloud.h"
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,5 +61,7 @@ void splat_sh_band_matrix(int band, const float m[3][3], double *out);
 bool import_spz_file(const std::string &path, ImportResult &out);
 /* A PLY whose geometry is points only (ply_is_point_cloud), its bytes already read. */
 bool import_ply_point_cloud(const std::string &path, const std::string &data, ImportResult &out);
+/* Handles large fixed-width binary clouds. On fallback, empty data means the caller must read the file. */
+std::optional<bool> try_import_binary_ply_point_cloud(const std::string &path, std::string &data, ImportResult &out);
 
 }  // namespace bl

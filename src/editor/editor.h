@@ -2091,6 +2091,11 @@ class Editor {
     outline_view_.on = false;
     return items;
   }
+  struct DrawListStats { uint64_t generation; size_t size, capacity; };
+  DrawListStats draw_list_stats_for_test(int variant, bool tangents) const {
+    const auto &items = items_cache_[variant][tangents].items;
+    return {keeps_.items_gen[variant][tangents], items.size(), items.capacity()};
+  }
   /* Round 522: the Game view's gather as a card view makes it - the flatten view on (render_deferred turns it on for every Game
    * view frame), from `eye` looking at `target` - without a card. The LOD and outline-distance views stay off. */
   std::vector<DrawItem> collect_game_items_card_for_test(Vec3 eye, Vec3 target) {
@@ -2605,7 +2610,7 @@ class Editor {
   const std::vector<DrawItem> &solid_items_ref(const Scene &s, bool game, uint64_t *gen);
   /* Round 436: the gather itself; `view_dep` set when an item depends on this view's eye (an outline's width, an LOD
    * Group's level, a camera-shaped mesh), so the kept list is keyed by the eye too. */
-  std::vector<DrawItem> collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod);
+  void collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod, std::vector<DrawItem> &items);
   uint64_t items_key(bool game, bool want_tangents);
   uint64_t items_view_key() const;
   /* Round 436 (ADR 0115): a per-frame walk that only reacts to edits (procedural shapes, colliders' Fit to Mesh, a
@@ -5790,6 +5795,7 @@ class Editor {
   void paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, const Mat4 &W, Vec2 centre, float radius, float k_max, bool all);
   std::vector<Vec3> paint_mirrors(Vec3 hit_local) const;
   void paint_end_stroke();
+  void paint_surface_changed(ProceduralTexture &pt);
   void paint_abort_stroke();
   static void paint_tile_write(PaintImages &im, const PaintDelta::Tile &t, bool before);
   void apply_paint_delta(UndoState s, std::vector<UndoState> &into, const char *verb, bool undo);
@@ -7346,6 +7352,7 @@ class Editor {
     std::vector<SeeRel> see;
     std::vector<std::pair<std::weak_ptr<const Texture>, int>> deps;  // (for the whole keep made from a frame of copies)
     std::vector<gpu::SeeCorner> see_frame;  // the last frame's sorted corners, taken back after the render
+    uint64_t see_frame_generation = 0;  // gpu_calls_ when these sorted corners were packed
     bool see_frame_ok = false;
   };
   InstanceRows instance_rows_[gpu::Raster::kSlots];

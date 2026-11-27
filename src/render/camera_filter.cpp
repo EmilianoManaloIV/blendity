@@ -8,6 +8,7 @@
 #include "display.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 namespace bl {
@@ -1002,8 +1003,10 @@ void apply_bloom(RenderTarget &rt, const BloomParams &p) {
    * through the bright pass with Unity's soft knee. `current` marks pixels whose colour is still
    * exactly what the HDR value encodes: the composite may re-encode only those. An earlier pass
    * (posterize, retro dither, depth of field) that changed a pixel keeps its result. */
+  std::atomic<bool> has_bright{false};
   JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
     std::vector<uint32_t> enc((size_t)W);
+    bool chunk_has_bright = false;
     for (int64_t y = y0; y < y1; y++) {
       const uint32_t *row = rt.color + (size_t)y * rt.stride;
       if (have_hdr) {
@@ -1032,9 +1035,13 @@ void apply_bloom(RenderTarget &rt, const BloomParams &p) {
         c = c * std::max(0.0f, k);
         for (int j = 0; j < 3; j++) c[j] = std::min(c[j], cap);
         bright.px[i] = c;
+        chunk_has_bright = chunk_has_bright || c.x != 0.0f || c.y != 0.0f || c.z != 0.0f;
       }
     }
+    if (chunk_has_bright) has_bright.store(true, std::memory_order_relaxed);
   });
+  /* A black bright plane stays black through the pyramid and the composite adds nothing. */
+  if (!has_bright.load(std::memory_order_relaxed)) return;
   /* 2. The pyramid starts at a fixed reference size, 540 rows (the frame's aspect, at most 4:1
    * either way), so the glow covers the same part of the frame at any resolution: a 320 x 240
    * console render, the small Camera Preview and a 4K F12 render agree. Area-averaged when

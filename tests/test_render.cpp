@@ -13706,6 +13706,244 @@ static void tests_round597() {
   });
 }
 
+static size_t round631_shadow_bytes(const Editor &ed) {
+  for (const auto &account : ed.memory_accounts())
+    if (std::strcmp(account.name, "shadow maps") == 0) return account.bytes;
+  CHECK(false);
+  return 0;
+}
+
+static std::vector<uint32_t> round631_scene_picture(const Editor &ed, const Recti &view) {
+  /* The Scene view draws transient overlays after saving the rendered picture. */
+  const Image *img = ed.scene_layer_image_for_test();
+  const bool ready = img && view.w > 0 && view.h > 0 && img->width == view.w && img->height == view.h &&
+                     img->pixels.size() == (size_t)view.w * view.h;
+  CHECK(ready);
+  return ready ? img->pixels : std::vector<uint32_t>{};
+}
+
+static void tests_round631() {
+  test("Low quality releases the High CPU shadow plane and rebuilds the same High picture on return", [] {
+    Editor ed;
+    ed.init_headless(960, 640);
+    ed.viewport_device_for_test(1);
+    ed.set_render_cache_verify(false);
+    ed.command("quality low");  // drop any oversized scratch a preceding test left on this thread
+    ed.command("quality high");
+    ed.command("shading shaded");
+    ed.command("camera 25 20 7 0 0.5 0");
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+
+    const size_t low_plane = 1024u * 1024u * sizeof(float);
+    CHECK(ed.shadow_map_size_for_test() == 2048 && round631_shadow_bytes(ed) == 4 * low_plane);
+    const Recti view = ed.scene_view_rect();
+    const auto high = round631_scene_picture(ed, view);
+    CHECK(!high.empty());
+
+    ed.command("quality low");
+    CHECK(round631_shadow_bytes(ed) == 0);
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 1024 && round631_shadow_bytes(ed) == low_plane);
+    const auto low_shadows = ed.frame_profile_totals().shadow_renders;
+    r34_steps(ed, 2);
+    CHECK(ed.frame_profile_totals().shadow_renders == low_shadows);
+
+    ed.command("position 0.08 0.5 0");
+    r34_steps(ed, 1);
+    CHECK(ed.shadow_layer_renders_for_test() == 1 && round631_shadow_bytes(ed) == 3 * low_plane);
+    ed.command("position 0 0.5 0");
+    r34_steps(ed, 1);
+    CHECK(ed.shadow_layer_renders_for_test() == 1);
+
+    ed.command("quality high");
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 2048);
+    CHECK(round631_scene_picture(ed, view) == high);
+  });
+
+  test("Low quality keeps compatible CPU shadows in the split Scene and Game views through repeated quality changes", [] {
+    Editor ed;
+    ed.init_headless(1100, 720);
+    ed.viewport_device_for_test(1);
+    ed.set_render_cache_verify(false);
+    ed.command("quality low");
+    ed.command("quality high");
+    ed.command("layout 2 by 3");
+    ed.command("shading shaded");
+    ed.command("camera 25 20 7 0 0.5 0");
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 2048);
+
+    ed.command("set Render.ShadowResolution 1024");
+    r34_steps(ed, 1);
+    /* Replace the completed High plane and give its storage to a compatible map. */
+    ed.command("position 0.07 0.5 0");
+    r34_steps(ed, 1);
+    ed.command("position 0.08 0.5 0");
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 1024);
+    CHECK(ed.shadow_layer_renders_for_test() == 1);
+    const Recti scene_view = ed.scene_view_rect();
+    const Recti game_view = ed.game_rect_for_test();
+    const auto pictures = [&] {
+      const Recti game = ed.game_rect_for_test();
+      CHECK(game.w == game_view.w && game.h == game_view.h);
+      return std::make_pair(round631_scene_picture(ed, scene_view), r34_crop(ed, game));
+    };
+    const auto high = pictures();
+    CHECK(high.first.size() > 10000 && high.second.size() > 10000);
+    const size_t high_bytes = round631_shadow_bytes(ed);
+    const auto before = r34_totals(ed);
+    ed.command("quality low");
+    r34_steps(ed, 2);
+    const size_t low_plane = 1024u * 1024u * sizeof(float);
+    CHECK(ed.shadow_map_size_for_test() == 1024 && round631_shadow_bytes(ed) == 4 * low_plane);
+    CHECK(high_bytes >= round631_shadow_bytes(ed) + 3 * low_plane);
+    CHECK((r34_totals(ed) - before).shadows == 0);
+    const auto low = pictures();
+    CHECK(low.first.size() == high.first.size() && low.second.size() == high.second.size());
+
+    ed.command("quality high");
+    r34_steps(ed, 2);
+    CHECK(pictures() == high);
+    ed.command("quality low");
+    r34_steps(ed, 2);
+    CHECK(pictures() == low);
+    CHECK((r34_totals(ed) - before).shadows == 0);
+    ed.command("position 0.12 0.5 0");
+    r34_steps(ed, 1);
+    CHECK((r34_totals(ed) - before).shadows == 1);
+    CHECK(ed.shadow_layer_renders_for_test() == 1);
+    const auto moved = pictures();
+    CHECK(moved.first != low.first && moved.second != low.second);
+  });
+
+  test("Low quality keeps F12 shadows at full resolution while viewport shadows are released", [] {
+    Editor ed;
+    ed.init_headless(960, 640);
+    ed.viewport_device_for_test(1);
+    ed.command("quality high");
+    ed.command("shading shaded");
+    ed.scene().render.engine = 0;
+    ed.scene().render.width = 192;
+    ed.scene().render.height = 108;
+    r34_steps(ed, 2);
+    CHECK(ed.shadow_map_size_for_test() == 2048);
+
+    ed.command("render");
+    const auto high = ed.render_image_for_test().pixels;
+    CHECK(ed.render_shadow_size_for_test() == 2048 && high.size() == 192u * 108u);
+    ed.set_async_jobs_for_test(true);
+    auto finish_render = [&] {
+      CHECK(p37_until(ed, 5000, [&] { return !ed.rendering_for_test(); }) >= 0);
+      CHECK(ed.render_shadow_size_for_test() == 2048);
+      CHECK(ed.render_image_for_test().pixels == high);
+    };
+    ed.command("render");
+    CHECK(ed.rendering_for_test());
+    ed.command("quality low");
+    finish_render();
+
+    ed.command("render");
+    CHECK(ed.rendering_for_test());
+    finish_render();
+  });
+}
+
+static void tests_round647() {
+  test("bloom: a last-row highlight glows between unchanged dark frames without touching alpha or picking", [] {
+    constexpr int W = 23, H = 35;
+    const Recti view{2, 1, W, H};
+    Image img;
+    img.resize(W + 5, H + 3);
+    std::fill(img.pixels.begin(), img.pixels.end(), 0x28ABCDEFu);
+    RenderTarget rt;
+    rt.attach(img, view);
+    rt.want_hdr = true;
+    rt.hdr_exposure = 0.375f;
+    rt.vis.resize((size_t)W * H);
+    rt.hdr.assign((size_t)W * H, Vec3(0.125f, 0.25f, 0.5f));
+    rt.hdr.front().x = -1.0f;  // the sky falls back to display colour
+    rt.hdr.back().z = 1.0f;    // exactly on the hard threshold
+
+    auto encode = [&](int x, int y) {
+      const size_t i = (size_t)y * W + x;
+      uint32_t color = 0x010203u;
+      if (rt.hdr[i].x >= 0.0f)
+        display::encode_span(&rt.hdr[i].x, &color, 1, rt.hdr_view_transform, rt.hdr_exposure);
+      const uint32_t alpha = (uint32_t)(i % 256) << 24;
+      rt.color[(size_t)y * rt.stride + x] = alpha | (color & 0x00FFFFFFu);
+    };
+    for (int y = 0; y < H; y++) {
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        rt.depth[i] = (float)i / (W * H);
+        rt.ids[i] = (uint32_t)i + 1;
+        rt.vis[i] = (uint32_t)i / 3 + 1;
+        encode(x, y);
+      }
+    }
+    // Keep one pixel as altered by an earlier filter in the stack.
+    rt.color[rt.stride + 1] ^= 0x000041u;
+
+    const auto dark_pixels = img.pixels;
+    const auto depth = rt.depth;
+    const auto ids = rt.ids;
+    const auto vis = rt.vis;
+    auto apply_and_check_planes = [&](const BloomParams &params) {
+      const auto hdr = rt.hdr;
+      apply_bloom(rt, params);
+      CHECK(rt.depth == depth && rt.ids == ids && rt.vis == vis);
+      CHECK(rt.hdr.size() == hdr.size() && std::memcmp(rt.hdr.data(), hdr.data(), hdr.size() * sizeof(Vec3)) == 0);
+      CHECK(rt.want_hdr && rt.hdr_view_transform == ViewTransform::Standard && rt.hdr_exposure == 0.375f);
+      CHECK(rt.id_at(W - 1, H - 1) == ids.back());
+    };
+
+    BloomParams params;
+    params.soft_knee = 0.0f;
+    params.intensity = 2.0f;
+    apply_and_check_planes(params);
+    CHECK(img.pixels == dark_pixels);
+
+    rt.hdr.back().z = 16.0f;
+    encode(W - 1, H - 1);
+    const auto before_glow = img.pixels;
+    const size_t neighbor = (size_t)(view.y + H - 1) * img.width + view.x + W - 2;
+    apply_and_check_planes(params);
+    CHECK((img.pixels[neighbor] & 255u) > (before_glow[neighbor] & 255u));
+    const auto glow = img.pixels;
+    bool alpha_unchanged = true, outside_unchanged = true;
+    for (int y = 0; y < img.height; y++) {
+      for (int x = 0; x < img.width; x++) {
+        const size_t i = (size_t)y * img.width + x;
+        alpha_unchanged &= ((glow[i] ^ before_glow[i]) & 0xFF000000u) == 0;
+        if (!view.contains(x, y))
+          outside_unchanged &= glow[i] == before_glow[i];
+      }
+    }
+    CHECK(alpha_unchanged && outside_unchanged);
+
+    // Change only the clamp: even a surviving source highlight now contributes no glow.
+    std::copy(before_glow.begin(), before_glow.end(), img.pixels.begin());
+    BloomParams clamped = params;
+    clamped.clamp = 0.0f;
+    apply_and_check_planes(clamped);
+    CHECK(img.pixels == before_glow);
+
+    rt.hdr.back().z = 1.0f;
+    std::copy(dark_pixels.begin(), dark_pixels.end(), img.pixels.begin());
+    apply_and_check_planes(params);
+    CHECK(img.pixels == dark_pixels);
+
+    rt.hdr.back().z = 16.0f;
+    encode(W - 1, H - 1);
+    apply_and_check_planes(params);
+    CHECK(img.pixels == glow);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13766,4 +14004,6 @@ void run_render_tests() {
   tests_round556();
   tests_round572();
   tests_round597();
+  tests_round631();
+  tests_round647();
 }

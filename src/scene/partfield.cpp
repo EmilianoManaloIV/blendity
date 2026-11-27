@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <thread>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -74,7 +73,7 @@ class OrtModel : public Model {
     if (!api_) return error = "ONNX Runtime's API " + std::to_string(ORT_API_VERSION) + " isn't there", false;
     OrtSessionOptions *so = nullptr;
     if (!ok(api_->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "blendity-partfield", &env_), error) || !ok(api_->CreateSessionOptions(&so), error)) return false;
-    ok(api_->SetIntraOpNumThreads(so, std::max(1, (int)std::thread::hardware_concurrency() / 2)), error);
+    ok(api_->SetIntraOpNumThreads(so, std::max(1, sys::hardware_threads() / 2)), error);
     const std::string model = fs::join(install_dir(), kModelFile);
 #ifdef _WIN32
     const int n = MultiByteToWideChar(CP_UTF8, 0, model.c_str(), -1, nullptr, 0);

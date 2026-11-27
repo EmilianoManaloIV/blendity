@@ -2,6 +2,700 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-27 (round 651): Dense UV Reset redraw
+
+**Asked:** Improve interaction with complex UV layouts, including the redraw after resetting thousands of overlapping faces.
+
+**Changed (task 0633, ADR 0056)**
+- The UV editor skips repeated Reset quads after confirming that another identical draw leaves the visible pixels unchanged.
+
+**Checked:** Compared ordinary, overlapping, selected, mixed-winding, stretched and offscreen layouts. Measurements and pixel comparisons are in the round report.
+
+## 2026-11-27 (round 650): Measuring single-control Noise Reduction
+
+**Asked:** Determine whether skipping the unused Noise Reduction channel speeds up editing while preserving floating-point output and cache behavior.
+
+**Checked (task 0632, ADR 0056):** Two prototypes improved Linux 4K single-control apply. The revised prototype saved 246 / 208 ms for Luminance and 52 / 421 ms for Color with 32 / two workers. Three paired runs per setting also exercised real slider drags and warm previews. A direct Windows release comparison found 668 changed channel words for Luminance and 182 with both controls enabled on a finite HDR image. Both prototypes were rejected. The existing filter is retained.
+
+## 2026-11-26 (round 649): Redrawing images on the Reference Board
+
+**Asked:** Investigate the delay after duplicating hundreds of visible image placements.
+
+**Changed (task 0631, ADR 0089)**
+- The board looks up a canonical file path for a full-resolution picture only when the export has supplied overrides. Drawing the board uses its existing picture cache.
+
+**Checked:** In five paired full-library Windows runs per size, duplicating 512 visible placements to 1,024 reduced the median next frame from 66.7 to 5.4 ms. Duplicating two to four took 0.3 ms, down from 0.6 ms. All ten pairs matched in the board pixels, ordered saved items and selection counts. The Windows board group passed 96 checks, including full-size export and updates to linked paper.
+
+## 2026-11-26 (round 648): Whole-program complex tool survey
+
+**Asked:** Identify where complex scenes slow down across editor tools and account for each named action and coverage gap.
+
+**Added (task 0630, ADR 0056)**
+- A searchable register of 5,871 source entries with per-action evidence and gaps. The survey measures selected-object edits, board redraw, imports and exports, and reconciles the six specialist rounds.
+
+**Checked:** All 40 creation cases, 14 mesh-format round trips, 49 persisted field changes and 50 window/configuration checks passed. The follow-up checked 75 Edit tools, 86 modes, 19 brushes and nine modifiers. Five failed checks remain individually documented.
+
+## 2026-11-26 (round 647): Measure complex rendering and skip empty camera bloom
+
+**Asked:** Exercise rendering tools on complex scenes, measure user-visible cost and memory, and improve demonstrated bottlenecks while preserving the picture.
+
+**Changed (task 0629):**
+- Added a Windows benchmark that waits for completed camera renders, verifies saved output, and compares ordinary and restricted CPU affinity on a generated world with 600 parts and 70 lights.
+- CPU camera Bloom checks whether any positive bright-pass sample survived thresholding and clamping. A completely black input can skip the blur pyramid and composite. A single surviving channel keeps the original path.
+
+**Checked:** Six paired 960 × 540 F12 trials on a 600-part world at four logical CPUs reduced median worker time from 381.5 to 329.5 ms and editor completion time from 390.65 to 335.60 ms. All 36 PNGs and their decoded RGBA pixels matched, including the visible-glow control. Checked CPU and GPU viewport/render paths, native ray-traced shadows, Gaussian splats, 21 individual camera effects, MoonRay and image/sequence outputs. The report in `docs/perf/0629-rendering.md` gives the controls, coverage gaps and verification evidence.
+
+## 2026-11-26 (round 646): Measure articulated animation and rigging workloads
+
+**Asked:** Measure animation and rigging tools on a humanoid and a branching creature, with a simpler control and a constrained CPU run.
+
+**Changed (task 0628, ADR 0028)**
+- Transfer Weights skips assembling the inpainting system when every target vertex already has a trusted match. On the measured 10,242-vertex humanoid and 15,874-vertex quadruped shells, complete transfer fell from 15.3 to 4.3 ms and from 23.8 to 7.2 ms at ordinary CPU affinity. Every transferred weight matched the baseline.
+- A scratch editor workload for marker Auto-Rig, skin weights, IK, pose editing, keyed clips, sampled deformation, playback and humanoid retargeting.
+- The runner retains stage and frame timings, native scenes and clips, and evaluated mesh samples for independent comparison.
+
+**Checked:** See the [round report](docs/perf/0628-animation.md) for package identities, measured results and remaining coverage gaps.
+
+## 2026-11-26 (round 645): Faster texture export and assignment
+
+**Asked:** Measure complex material, texture, paint and bake tools and preserve their outputs.
+
+**Changed (task 0627, ADRs 0056 and 0082)**
+- Exporting the separate texture set with Assign now evaluates and writes the seven maps once. The material uses the paths returned by that export.
+- The PNG writer recognizes identical consecutive scanlines and uses the same filter and residual bytes as its full filter search.
+
+- The screenshot regression test observes the asynchronous tray job and waits for it to finish with a bounded watchdog. Its synchronous branch still requires the file on the capture frame.
+
+**Checked:** Three paired Windows release runs per size and worker setting. At 2048² the duplicate-export fix saved 2.14 s with 32 workers and 2.54 s with two. The PNG change additionally saved 195 / 178 ms on plain export. All seven PNGs matched. The seeded image control with unique rows showed small mixed timing differences and byte-identical output. The final screenshot fixture passed three isolated runs and all 4,021 editor checks per platform on Windows and Linux. The tools and remaining gaps are in [the performance report](docs/perf/0627-complex-texturing.md).
+
+## 2026-11-26 (round 644): Cylinder and Sphere UV Projection
+
+**Asked:** Measure the UV toolset on large selected meshes and improve measured bottlenecks while preserving mapping results.
+
+**Changed (task 0626):** Cylinder and Sphere Projection calculate the angular span while writing each face. This removes the temporary U-coordinate buffer allocated for every selected face. The new UV benchmark covers 19 production actions on connected and fragmented meshes.
+
+**Checked:** Two reversed-order Linux timing blocks on each CPU profile gave matching UV and seam signatures. On 36,480 selected faces the two projections eliminated 36,480 allocations and 583,680 requested bytes. The independent projection oracle compared 144 cases byte for byte. The editor selection sweep checked all 24,576 exported corners for each of twenty actions. See [the UV measurements](docs/perf/0626-uv.md).
+
+## 2026-11-26 (round 643): Checked Sculpt pointer workloads
+
+**Asked:** Measure sustained Sculpt input on dense geometry and verify the edit and its undo.
+
+**Added (task 0625, ADRs 0056, 0074 and 0078)**
+- A dense Sculpt pointer workload checks each brush and stroke type, with normal and single-CPU measurement runs and matching geometry and attribute checks.
+- The Sculpt action inventory records covered fixtures, controls, and the remaining measurement gaps in `docs/perf/0625-sculpt.md`.
+
+**Checked:** Across three paired CPU runs, 62 stroke outputs matched, including every brush and all five stroke methods. The 99k/500k-face stress sweep reported zero structural problems. At 500k faces all ten geometry brushes exceeded the 16.7 ms median target. The Sculpt groups passed 553 assertions on Windows and 533 on Linux.
+
+## 2026-11-26 (round 642): Mesh and object editing under complex workloads
+
+**Asked:** Find slow editing actions in dense meshes and populated scenes, and reproduce gains against the same work.
+
+**Changed (task 0624)**
+- Slice batches cuts on ordinary meshes. UV seams, face order, colors, wires and Undo retain the tested editing behavior.
+- Push/Pull skips edge hash-table entries outside the projected bounds of the selected region.
+
+**Added**
+- A headless production-command workload for dense face selection, Poke Faces, Adjust Last Operation, Slice, Push/Pull, Duplicate, Join and Undo.
+- A matched trial driver that checks geometry, topology and selection, with separate command and follow-up frame timings.
+
+**Checked:** On a 50,176-face sphere, median Slice dispatch fell from 905.9 to 14.5 ms and Push/Pull from 154.9 to 124.2 ms on 32 logical CPUs. All twelve ordinary and restricted-affinity pairs preserved the exported geometry and selections. Push/Pull remained above 100 ms. Windows and Linux each passed 36,653 modeling/editor assertions. Geometry stress counts matched baseline, including 26,608 Push/Pull operations with zero problems and the three existing curved-mesh problems. See the [performance report](docs/perf/0624-mesh-editing.md).
+
+## 2026-11-26 (round 641): Linux CI installs missing packages from Ubuntu
+
+**Asked:** Repair the failing Linux check on PR #504.
+
+**Changed (task 0623)**
+- The two Linux build jobs and three test jobs check their installed packages first. When a dependency is missing, they use the signed Ubuntu archive and verify the resulting package state.
+
+**Checked:** Bash syntax, package setup simulations and the five workflow package lists.
+
+## 2026-11-26 (round 640): Measure four low-end Linux VM profiles
+
+**Asked:** Exercise the editor under several low-end device budgets, including a Pi-class SBC.
+
+**Added (task 0622):**
+- Four native Linux CPU and RAM profiles with scratch-only editor checks, hosted ARM64 automation and a repeatable x86-64 VM procedure.
+
+**Checked:** On final joined revision `6ed52dc0`, four profiles reopened the edited scene and rendered it through the CPU viewport and F12 camera. The hosted ARM profiles recorded 3.36–5.09 ms steady orbit means across six samples. Two joined WSL profiles recorded 3.72–3.79 ms. See the [VM report](docs/perf/0622-low-end-vm.md) for caps, image checks and memory peaks.
+
+## 2026-11-26 (round 639): Refresh Textures cards after paint Undo and Redo
+
+**Asked:** Show the original texture after undoing the first paint stroke on a surface.
+
+**Fixed (task 0621, ADR 0081)**
+- Textures cards follow the restored paint pixels after Undo and Redo. Each stroke remains a tile-based history step.
+- The Paint layer's stroke stamp now reaches the thumbnail hash and the saved texture. The baseline already restored the saved albedo after Undo, while the card stayed painted.
+- A new stroke on a Paint layer saved at the maximum stamp wraps to zero. Undo and Redo restore the stamp for each saved pixel state.
+- Reopening Textures after a hidden Undo and replacement stroke refreshes the painted card and selected preview even when the replacement reuses the undone stamp.
+- Undo and Redo refresh a full preview that still contains live dab pixels from before the tile restore.
+- Live Link shares a painted surface's texture send budget across its maps during a burst. Each map can update during painting and sends its final state after the burst. New clients receive a full snapshot.
+- A Live Link client that joins during a paint burst gets the restored map if the latest stroke is undone before the next broadcast.
+- A queued snapshot with unchanged pixels goes only to clients that requested it, even when an update for all clients is queued for the same map.
+
+**Checked:** Windows and Linux each passed 150 focused Paint checks. Tests cover a hidden replacement stroke, immediate Undo, the maximum saved stamp, and an unchanged neighboring texture. The unchanged four-client Live Link test passed three times on each platform with seven sends per run. The final Linux receiver check verified full-size normal updates during height-only painting and identical final PNG pixels for all five maps on existing and late peers.
+
+## 2026-11-26 (round 638): Pass 35 performance and interaction survey
+
+**Asked:** Measure a fresh cross-program sample on the published baseline, exercise editor workflows and account for low-end and optional platform coverage.
+
+**Added (task 0620):** A [survey of Pass 35](docs/perf/0620-pass35-survey.md) records the workload registry, CPU and graphics paths, unmeasured families and pass decisions.
+
+**Checked:** The baseline Windows library build completed 29 quick stress runs under exclusive timing, with 1,095 CSV records and zero taint. The HCI sweep exercised 2,168 screens at 12 configurations. The editor saved and reopened a seven-object scene and exported the selected cube to GLB. A second exclusive measurement verified six selected-mesh actions after the original starter fixture failed to select its target in 352 attempts.
+
+## 2026-11-26 (round 637): Keep CPU libraries available with a partial Vulkan bundle
+
+**Asked:** Preserve optional CPU acceleration when the build bundle is missing Vulkan development files.
+
+**Fixed (task 0619, ADR 0001)**
+
+- The Windows batch, Unix shell and CMake build entry points enable Vulkan when the public Vulkan and shaderc headers and the platform's shaderc link library are present. A missing file leaves the CPU libraries available.
+
+**Checked:** 28/28 Windows and Linux plans passed. The baseline failed all 12 partial-bundle cases and passed all 16 controls. GCC 15.2 reproduced the missing shaderc header failure in the original Linux build. The corrected Linux build compiled the device code in each configuration. Its partial-bundle probe reported no GPU backend, and the complete-bundle archive linked and returned its SPIR-V version.
+
+## 2026-11-26 (round 636): CPU live procedural close-ups
+
+**Asked:** Reduce the deferred raster cost of close-up live materials while preserving every rendered pixel.
+
+**Changed (task 0618)**
+
+- Prepare the enabled layer order when a live texture snapshot has no remapper. The normal samples use the existing height and mask subset in the same order.
+- Cover full samples and both normal sampling paths with an identity Tile comparison on ordinary and nested, masked stacks, including seams and invalid UVs.
+
+**Checked:** All 32 matched Windows CPU launches returned identical pixels per mode. All five live-frame pairs improved on both two physical cores and normal affinity. Windows with Blender libraries passed 3,509 asset, 3,871 editor and 40,476 render checks. Joined dependency-free Linux passed 3,471 asset, 3,984 editor and 40,479 render checks. Quick procedural-texture stress passed 343 fuzz cases on each of three joined configurations. Independent review approved the candidate.
+
+## 2026-11-26 (round 635): Find viewport quality in the command palette
+
+**Asked** — Assess common editor workflows and make it easier to lower viewport quality while editing.
+
+**Changed (task 0617)** — Search the command palette for Low, Medium or High Viewport Quality to apply the existing editor presets. Existing user shortcuts and Quick Favorites for raw quality commands still use their saved names. The quality tiers lesson shows the search route.
+
+**Checked** — At 1024 by 640, Unity and Blender keyboard searches applied all three tiers and preserved render settings and undo history. The saved-shortcut and Quick Favorite fixture failed six checks on the earlier implementation and passed all 16 after correction. Windows with libraries, Windows dependency-free and Linux dependency-free each passed all 95 focused checks. Their HCI/editor groups passed 2,208/3,900, 2,205/3,889 and 2,203/3,865 checks respectively. The five HCI audits passed. Geometry stress was outside this UI change.
+
+## 2026-11-26 (round 634): Measure cold texture file reads on two cores
+
+**Asked:** Determine whether avoiding size seeks for ordinary texture files improves the first complete Textures frame.
+
+**Checked (task 0616)**
+
+- On 2,000 small textures, four of five matched pairs favored the 4 KiB reader. Its median whole-frame gain of 4.8 ms fell below the 6.8 ms difference observed between baseline runs.
+- With half the textures padded to 64 KiB, the prototype was slower in four of five pairs. First-frame pixels and all 2,000 loaded paths matched. The round records the measurements and rejects the prototype.
+
+## 2026-11-26 (round 633): Bounded reads for large binary point-cloud PLY files
+
+**Asked:** Reduce peak memory when importing a large binary point cloud from disk.
+
+**Changed (task 0615, ADR 0147)**
+
+- Read fixed-width binary point-cloud PLY records from disk in batches. Check the vertex range against the file length before allocating the decoded cloud.
+- Reuse the PLY decoder for disk batches and borrowed input. Small files, ASCII and mesh PLY files use the existing byte importer.
+
+**Checked:** Generated test cases cover both byte orders, mixed-width and padded records, skipped elements, batch boundaries, degree-4 SH warnings, malformed sizes, dispatch and the editor import command. The three affected groups passed 7,909 checks on dependency-free Windows, 7,991 on Windows with Blender libraries and 7,914 on Linux. Quick splat stress reported zero problems across 2,100 damaged files.
+
+## 2026-11-26 (round 632): Shorten Recalculate Normals on large closed meshes
+
+**Asked:** Reduce the wait for Edit Mode Recalculate Normals on a large mesh.
+
+**Changed (task 0614)**
+- Determine whether each component is closed during the winding traversal. For a closed component whose signed volume determines its orientation, skip the farthest-face search.
+
+**Checked:** Windows modeling and editor groups passed 34,892 and 3,914 checks with Blender libraries and 32,569 and 3,888 dependency-free. Linux passed 32,569 and 3,866. The 2.10M-face reference and candidate produced identical positions, face offsets, corner indices, UVs, custom normals and face materials. The focused tests cover open and non-manifold surfaces, negligible and nonfinite volume, corner data and Shift+N followed by Undo with either keymap.
+
+## 2026-11-26 (round 631): Low quality releases oversized CPU shadow planes
+
+**Asked:** Make memory available to the editor after switching a shaded CPU viewport to Low quality.
+
+**Fixed (task 0613, ADR 0026)**
+
+- Switching to Low releases obsolete completed shadows, static caster layers and the rasterizer's spare depth plane.
+- Compatible shadow maps keep their depth data and cache keys. The shadow memory account includes the spare depth plane.
+
+**Checked:** On the 1280 × 720 software viewport, matched single and split views fell from 20 MiB to 4 MiB of retained CPU shadow storage at settled Low. The first caster edit fell from 28 MiB to 12 MiB. Scene, Game and shadow-depth hashes matched, as did all six F12 images. Windows passed 45 focused, 40,585 render and 3,908 editor checks. Linux passed 40,479 render and 3,860 editor checks. Both editor stress runs completed 1,500 frames with zero stale pictures or missed changes.
+
+## 2026-11-26 (round 630): Reduce Textures preview latency
+
+**Asked:** Open and scroll the Textures window with less delay on low-core machines.
+
+**Changed (task 0612)**
+- Evaluate visible procedural thumbnail misses in one job, keeping Image and Paint stacks one at a time to bound full-size decode memory.
+- Reuse Edge Wear's wrapped or clamped sample indices and copy clipped preview rows directly when the picture fits pixel for pixel.
+
+**Checked:** Five matched Windows runs with 2,000 assets improved the two-core first-scroll median from 56.6 to 53.0 ms and warm reopen from 3.6 to 1.7 ms. Two-core cold open was inconclusive. With 32 logical CPUs, cold open improved from 119.7 to 89.2 ms and first scroll from 41.3 to 9.8 ms. Desktop working set after first scroll grew 4.6 MB. Matched panel pixels and full-size exports agree with the integration baseline.
+
+## 2026-11-26 (round 629): Lower peak memory for CPU splat rendering
+
+**Asked:** Reduce the memory required to prepare a large Gaussian splat cloud on machines with limited memory and CPU capacity.
+
+**Changed (task 0611)**
+Built-in CPU preparation retains the filled record array when every splat is visible and sizes the retained arrays to the number of visible records for mixed clouds. The built-in ray accelerator reorders records and their source indices in place.
+
+**Measured:** With one million visible splats, the built-in accelerator's median process peak fell from 363.90 to 321.31 MiB across five matched pairs on two physical cores. Median build time fell from 590.92 to 503.81 ms. Dense Embree peak memory stayed close to 414 MiB. The retained implementation preserves Embree preparation. Its near-dense query timing tracked identical-baseline variation in a separate nine-pair control.
+
+**Checked:** Windows full-library splat tracing covered the built-in and Embree paths. Dependency-free Linux covered built-in tracing. All measured cloud counts and query digests matched the baseline. Windows quick splat stress reported zero problems across 2,100 damaged inputs.
+
+## 2026-11-20 (round 628): Restore the full template for open task records
+
+**Changed (task 0610)**
+
+- Restored the six metadata fields and eight sections in tasks 0592–0599. The records identify their open PRs and checked heads, and retain the original acceptance criteria, measurements, references and limitations.
+- Linked the correction to the handoff reconciliation in task 0609.
+
+## 2026-11-20 (round 627): Reconcile the handoff with published history
+
+**Asked** — Audit the transition from Claude Code to Codex and correct inconsistent project records.
+
+**Changed** — Link the four merged migration and closeout tasks to their actual PRs and merge revisions. Record the compact handoff verification results, index every numbered architecture decision and refresh onboarding and cleanup guidance with the applicable commands and approvals.
+
+**Checked** — Compared the four merge records with GitHub and published main. Verified the decision index, cross-links, change scope and changelog fragment. Task 0609 records the historical discrepancies and shared workflow follow-ups.
+
+## 2026-11-20 (round 626): Propagate local verification failures
+
+**Fixed (task 0608, ADR 0134)**
+
+- Local verification returns failure when a build, test group, full suite, WSL invocation, audit or selected optional stage fails. The chain names the failed stage and keeps its logs.
+- Windows batch invocation handles checkout paths with spaces. The usage example supplies all three scratch checkout paths and the Windows library bundle.
+- Each Windows build verifies its requested library mode. The WSL build runs on the ten cores specified in the machine handoff.
+
+**Checked:** Synthetic Git Bash verification with fake Windows build, test and WSL commands.
+
+## 2026-11-20 (round 625): Preserve integration PR evidence on refresh
+
+**Asked:** Bring integration pull requests into line with the project PR template and preserve the owner's notes and reviewers' evidence.
+
+**Fixed (task 0607, ADR 0132)**
+- New integration PRs use the five template sections. Refreshes update the carried PRs, stack heads and omission reasons in a marked summary while preserving surrounding content and attribution.
+- Existing unmarked descriptions retain their manual content on migration. The script stops before pushing or editing if it cannot read the existing body or finds ambiguous summary markers. It re-reads the body immediately before editing and leaves any newer description intact if the comparison fails.
+
+**Checked:** `bash tools/dev/stack_selftest.sh` passed 112 checks each on Windows (Git Bash) and Linux (WSL) against a local origin and fake `gh`. The task record is `docs/tasks/0607-integration-pr-template.md`.
+
+## 2026-11-20 (round 624): Apply Blendity’s documentation templates in every subsystem
+
+**Asked:** Have the Hub and every subsystem use the repository’s provided templates.
+
+**Changed (task 0606)**
+- Documented the task, ADR, changelog fragment and PR formats, with checks for applicable pass, handoff and subsystem records.
+- Added template checks for authors, testers, reviewers and the Hub, and showed how to supply a completed body when opening a PR.
+- Clarified the existing task lifecycle and Codex and Claude role references.
+
+**Checked:** Documentation-only round. See task 0606 for the template and fragment checks.
+
+## 2026-11-20 (round 623): Avoid per-file attribute queries in the Textures browser
+
+**Asked:** Shorten the first usable frame when opening an existing library of 2,000 procedural textures.
+
+**Changed (task 0605)**
+- Use attributes returned by Windows directory enumeration to classify ordinary texture files. Preserve canonical path resolution for reparse entries and use the filesystem scan when the native search cannot open a directory.
+
+**Checked:** Three interleaved production pairs per worker setting improved the median first open from 177.6 to 123.2 ms at default parallelism and from 242.6 to 193.4 ms at two workers. Both remain above the 100 ms target. The Windows reference passed all 17 focused checks. Windows libraries passed 3,204 assets and 3,868 editor checks. Linux dependency-free passed 3,166 assets and 3,860 editor checks on the combined tree.
+
+## 2026-11-20 (round 622): Reuse draw-list storage during large-scene movement
+
+**Asked:** Reduce interaction latency while moving one object among 50,000.
+
+**Changed (task 0604, ADR 0115)**
+
+The collector refills each invalidated view list in place. Cache verification can still build a separate comparison list, and shrinking the scene releases excess storage.
+
+**Checked:** The first two matched runs reduced the 50k drag median by 8.7–11.2 percent and reduced the 95th percentile in both orderings. Simultaneous reserved draw-list storage at the measured point fell from 44,241,840 to 22,120,920 bytes. Across 72 matched work/output pairs, the 50k mover median fell from 244.10 to 220.75 ms and p95 from 285.48 to 245.18 ms. Two-view p95 was nearly flat (108.29 to 108.39 ms). The 10k mover improved at pooled p95, but p95 rose slightly within each launch order. Task 0604 records the per-order results and baseline controls.
+
+## 2026-11-20 (round 621): Less work for a one-segment bevel
+
+**Asked:** Reduce the time and memory of the all-edge bevel on the 50k-face sphere.
+
+**Changed (task 0603)**
+
+- A straight bevel builds each strip directly from its oriented endpoints. A rounded bevel still builds and reuses the profile arcs and inserts their interior vertices where adjacent faces need them.
+- The 50k-face sphere's all-edge modifier evaluation fell from 574.0 to 439.6 ms median on the Windows release build and from 537.9 to 452.3 ms on one logical CPU. The candidate was faster in all eight pairs at both affinities. Median peak working set fell from 184.6 to 166.9 MiB and from 181.9 to 163.5 MiB. All runs produced 200,192 vertices, 200,194 faces and 800,768 corners.
+
+**Checked:** Windows modeling and editor passed 34,570 and 3,848 checks. Linux passed 32,247 and 3,819 checks. On baseline and candidate, Windows `curved` stress returned 6 problems and 67 results with new overlaps in 5,032 operations, and Linux returned 3 problems and 68 results with new overlaps in 5,036 operations. Both platforms ran 236 projected draws with zero problems. Windows recorded zero new overlaps and Linux recorded one on each build. The 32 direct and Edit Mode receipts matched within each platform.
+
+## 2026-11-20 (round 620): Smaller baked-corner buffers on low-memory GPUs
+
+**Asked:** Reduce the first-use memory cost of baked corners on integrated and low-memory GPUs and preserve existing corners under reuse.
+
+**Changed (task 0602, ADR 0109)**
+- Use a 1 MiB minimum when the corner buffer first outgrows 4 KiB on integrated GPUs and GPUs reporting up to 4 GiB of device-local memory. Keep this policy through 4 MiB of baked data, then use the standard growth targets to avoid repeatedly copying large spans. Try the exact required size before falling back to the CPU.
+- Preserve live corner blocks during free-range splits and retain their data and bases when the buffer grows or an allocation fails.
+
+**Checked:** Native Vulkan grew the four-cube scene's 4 KiB buffer to 1 MiB under an emulated integrated profile, down from 64 MiB. The first compact candidate reached 121.4 ms on a large-scene growth frame and was rejected. With adaptive growth the same scene used one growth allocation and reached 6.24 ms against 5.91 ms on its paired baseline. Display, depth and ID data matched in all 24 adaptive pairs. The scratch probe reproduced the baseline overlap and exercised growth, coalescing, tail reuse and exact-size retry. Independent focused checks passed 68 assertions on Windows Vulkan and 22 portable assertions each on Windows and Linux. The joined `gpu` group passed 1,836 checks on Windows and 187 on Linux. The Linux `editor` group passed 3,860 checks. Windows quick editor stress drew 131 Vulkan views with zero CPU fallbacks. Its 1,500 fuzzed frames produced zero crashes, stale pictures or missed changes.
+
+## 2026-11-20 (round 619): Lower peak memory for legacy SPZ file imports
+
+**Asked:** Reduce the peak memory of opening a legacy SPZ file while preserving decoded attributes and errors.
+
+**Changed (task 0601)**
+The disk importer releases the compressed file bytes once gzip unpacking finishes, before it allocates decoded
+attributes. Disk imports and the borrowed SPZ reader share gzip validation, timing and decoding. Version 4
+continues through the Zstandard reader where the library is available.
+
+**Measured:** Full import of 1,000,000 SPZ v3 splats at SH degree 3 in five matched fresh-process pairs
+per CPU count against `66feaeb3`. Median paired peak RSS fell by 58.05 MiB on four CPUs and 57.90 MiB
+on two CPUs in dependency-free x86-64 WSL 2. Median elapsed time moved from 473.42 to 417.94 ms on
+four CPUs and from 468.15 to 461.83 ms on two CPUs. All six array counts and digests matched across
+20 imports. See `docs/tasks/0601-spz-file-peak.md` for the ranges and evidence.
+
+**Checked:** Dependency-free WSL passed 517 splats and 3,819 editor checks. Quick splats stress reported
+zero problems in 2,100 damaged inputs. Independent unit tests compare all six decoded arrays and pin the
+borrowed reader's input lifetime and refusal messages. The full-library Windows build passed all 530 splat checks, including Zstandard v4 success and malformed input. Independent review approved integration.
+
+## 2026-11-20 (round 618): Engine performance audit and shared verification
+
+**Asked:** Identify measurable costs in modeling, interactive frames, memory and hardware scaling, with particular attention to constrained configurations.
+
+**Changed (task 0600)**
+
+The audit links each selected workload to a numbered subsystem task and a production-level correctness and performance check.
+
+**Checked:** The pass reconciled 63 historical workload reports against the current 67-section stress registry, then selected fresh comparisons for large-scene drags, single-segment bevel, end-to-end SPZ peak memory, Vulkan baked-corner allocation and first access to a texture library. Task 0600 records ownership, acceptance criteria and the distinction between measurements on actual adapters and controlled small-memory or low-core configurations.
+
+The combined tree passed all 15 affected group runs on Windows with and without Blender libraries and on dependency-free Linux. The matched sweep covered 56 full-size selectors and all 67 registered stress sections. The 50k-object move improved from 218.1 to 197.7 ms median and from 240.5 to 221.5 ms p95. The bevel of the 50k-face sphere improved from 505.21 to 406.59 ms. The audit retains the original small-scene GPU slowdown, isolated camera-frame spikes and the results of same-executable controls alongside the gains. [Task 0600](docs/tasks/0600-engine-performance-audit.md)
+
+## 2026-11-20 (round 617): Fresh-process Textures browser
+
+**Changed (task 0599)**
+
+- The Textures browser reads and decodes uncached procedural assets in parallel while retaining the existing path, cache and selection semantics.
+- In three matched Windows CPU runs per build with 2,000 existing synthetic textures, median first open fell from 334.5 to 169.0 ms at default parallelism and from 351.0 to 244.7 ms with a parallelism ceiling of two. The following frame and same-process reopen took 3.5–3.9 ms. All first opens remain above the 100 ms budget.
+
+- The combined Windows libraries build passed all 68 checks in the focused regression for row order, shared asset identity, repaired files, and unsaved edits.
+
+## 2026-11-20 (round 616): Enable the Vulkan portability subset when advertised
+
+**Fixed (task 0598)**
+
+- The compute, path tracing and raster backends now enable the mandatory portability subset on Vulkan devices that advertise it. Raster keeps it enabled when retrying device creation without ray queries.
+- Pipeline support still depends on the driver's reported features and limits.
+
+**Checked:** 144 independent synthetic creation profiles passed, including the raster retry. Four extension-selection checks and 39 native Windows Vulkan checks passed across compute, path tracing and raster. Physical MoltenVK and Raspberry Pi runs are outside this round.
+
+## 2026-11-20 (round 615): Lower gzip inflate peak for SPZ imports
+
+**Asked:** Reduce temporary memory when importing gzip SPZ splats and measure both inflation and the full import.
+
+**Changed (task 0597)**
+- SPZ v1–v3 decodes directly from the validated inflate output. Unity packages keep the gzip string API.
+- The byte and string APIs share the bounded inflate and trailer length check. Tests cover binary data, empty
+  output, exact limits, forged lengths and preservation of earlier output on failure.
+
+**Measured:** Five matched fresh processes per revision and stage, using 1,000,000 SPZ v3 splats at SH degree 3.
+On the x86-64 WSL 2 machine with GCC 15.2, median gzip inflate peak RSS fell from 187.1 to 125.1 MiB and
+median inflate time fell from 266 to 205 ms. Full-import peak stayed near 350.4 MiB. Median full-import time
+was 470 ms before and 431 ms after, with overlapping ranges. See `docs/tasks/0597-splat-import-memory.md`.
+
+**Checked:** The splats, assets and editor groups passed 7,404 checks on Windows with Blender's libraries
+and 7,343 on dependency-free WSL. Quick splats stress reported zero problems in 2,100 damaged inputs on each
+platform. Independent SPZ v1–v3 imports matched the baseline byte for byte across all six cloud attributes.
+
+## 2026-11-20 (round 614): Reuse uploaded transparent corners
+
+**Changed (task 0596)**
+
+- A Vulkan view that reuses its sorted transparent corners can keep the uploaded buffer without comparing the arrays on the CPU. A view can still compare corners with its cached staging bytes when the generation is unknown or changes.
+- The `posing` stress report counts byte comparisons and generation hits per card frame alongside the existing upload and reuse counts.
+- On the RTX 4070 SUPER, 34 eligible posing rows dropped from 1.00 comparison per card frame to 0.00–0.15. Interleaved measurements of six eligible rows and a camera-orbit control stayed within the recorded median and p95 margins. Windows Vulkan and dependency-free Linux GPU and editor checks passed.
+
+## 2026-11-19 (round 613): Size automatic CPU work to Linux processor affinity
+
+**Asked:** Improve performance on machines and sessions with fewer processor resources.
+
+**Changed (task 0595):** Linux uses the main thread's inherited CPU mask when sizing the built-in worker pool, texture readers, UV workers and optional inference sessions. Preferences reports the same available count. Built-in background jobs use the background caller when their budget leaves one lane.
+
+**Checked:** On the previous Linux build a process restricted to one or two CPUs created 32 threads in the scheduling test. The regression launches fresh processes with a single CPU, a noncontiguous pair and the full allowed mask, and checks foreground and background scheduling and exact results.
+
+## 2026-11-19 (round 612): Retire verified merged development work
+
+**Asked:** Reclaim disk space and remove stale task branches while retaining unmerged work, verification evidence and the owner's active editor.
+
+**Changed (task 0594):** Retired 31 development worktrees, 59 local branches and 97 verified merged remote task branches.
+
+**Checked:** The final inventory accounted for every removed checkout and branch. The removed files occupied 57.47 GiB. The existing project's merge and branch deletion checks preserved 47 remote and two local candidates. [Task 0594](docs/tasks/0594-verified-cleanup.md) records the accounting and retained exceptions.
+
+## 2026-11-19 (round 611): Keep the active Preferences field visible
+
+When Preferences status rows appear or disappear, the scroll area brings the field being edited back into view. Text and number fields retain their current input, caret and selection. A wheel scroll still lets the user look elsewhere while editing.
+
+Three regression cases passed 22 assertions on Windows with and without Blender's libraries and on dependency-free Linux. The HCI and editor groups passed on each build.
+
+## 2026-11-19 (round 610): Filtered camera lighting
+
+**Changed (task 0592)**
+
+- Supported Vulkan devices now produce display colour and linear light for bloom or exposure grading in one lighting draw. Devices and scenes that require separate passes retain that path.
+- In the filtered avatar-world Play scene, median frame time fell from 24.82 to 22.78 ms on an RTX 4070 SUPER and from 16.20 to 15.38 ms on an RTX 3060 Ti. Both cards produced identical display, HDR, depth and ID buffers in the parity checks. Task 0592 records the repeat run, comparison method and portability checks.
+
+## 2026-11-19 (round 609): Hosted Windows builds provision MSVC 14.51
+
+**Asked:** Keep Windows CI and installer builds on MSVC 14.51 as the hosted runner image changes.
+
+**Changed (task 0591, ADR 0156)**
+- Select the newest usable x64 14.51 patch in the Visual Studio instance the build selects. Add the versioned
+  component through Visual Studio Installer when the runner lacks it.
+- Activate the exact selected patch in the build shell and verify the compiler, linker and toolset version before
+  compilation. Log the runner image, revision, installer outcome and active tool paths.
+
+**Checked:** Windows fixtures cover preinstalled and missing toolsets, repeat setup, installer failures and exact
+activation for each build variant. See task 0591 for hosted verification.
+
+## 2026-11-19 (round 608): Incremental local Windows builds
+
+**Asked:** Shorten the Hub's local editor refresh by reusing verified MSVC objects between published revisions.
+
+**Added (task 0590, ADR 0155)**
+- `BLENDITY_INCREMENTAL=1` opts the Windows release editor and unit tests into a separate scratch cache. It uses the clean build's resolved source lists, library selection and compiler flags, including LTCG.
+- The worker checks transitive include contents and search candidates, relinks each requested target as needed and validates the staged runtime. It publishes one complete package at a time and keeps earlier packages available while their executables are in use.
+
+**Checked**: Clean and incremental camera renders matched at both tested scene geometries, and all 101 runtime, license and shader files matched by SHA-256. Eight independent native build scenarios passed. On the owner machine, the clean editor took 234.4 s, an empty incremental cache took 303.4 s, an unchanged request took 19.4 s, and a documentation-only request took 18.3 s. The Hub now uses the incremental path for routine local editor refreshes. Task 0590 records timings, conditions and full-suite results.
+
+## 2026-11-19 (round 607): Parallel verification and evidence collection
+
+**Changed (task 0589)**
+
+- Route dependency handoffs directly, exercise one integrated path early, and run full verification
+  on a recorded combined revision. Give each independent role a fresh brief.
+- Add a Python helper for compact native test and GitHub Actions evidence.
+
+## 2026-11-19 (round 606): Workshop fixtures, rig controls and compatibility guide
+
+**Asked:** Verify classic Source Filmmaker, Half-Life: Alyx and Counter-Strike 2 character and map imports through posing, rendering and reopening with the source detached.
+
+**Changed (task 0588, ADR 0154)**
+
+- Auto IK recognizes Scout's side-specific hips and the exact arm and leg naming patterns in Alyx and CS2. An alarm prop armature keeps its existing joints without gaining humanoid controls.
+- Added original loose and packed Workshop layouts and checks for weighted movement, marker rigs, editable project materials and cold reopen. Added the Workshop guide and updated both book chapters.
+
+**Checked:** Focused Windows and hosted Linux fixture runs each passed 772 initial checks and 224 in a separate process with source and cache detached, including the alarm-armature regression. Independent Linux and Windows generation produced identical bytes for all 15 fixture files. Rebuilt both manuals and inspected Workshop sections on user guide PDF page 42 and architecture PDF page 28. All three real character-and-map scenes matched their detached-source renders. The downloaded CS2 map contributed 61 mesh objects and the combined scene resolved base textures on all 75 material slots. Both platforms also passed 905 checks across five editor processes for same-name assets, two reimports and byte-for-byte retention of edited and untouched project PNGs. The task records material coverage and outstanding checks.
+
+## 2026-11-19 (round 605): Import compiled Source 2 maps
+
+**Asked:** Bring compiled Alyx and CS2 world geometry and its placed props into Blendity.
+
+**Added (task 0587, ADR 0154)**
+- Follow the map's world and world-node references to load standalone meshes, placed props and aggregate draws. Keep repeated meshes shared. Convert the placements and geometry to metres in Blendity's axes.
+- Apply whole-model material overrides to the affected placements. Import notes name unsupported material skins and per-draw overrides and the resources that use them.
+- Keep placement tints in reusable materials and snapshot aggregate LOD 0. Report the compiled paths of omitted baked lightmaps and the path and version of an unsupported map resource.
+- Show a magenta placeholder at a missing prop's placement and report its compiled resource path.
+
+**Checked:** Eight map cases passed 550 checks on a fresh Windows release build. They cover material assignments and pixels, tint, repeated rotated props, aggregate LOD and draw selection, missing and unsupported dependencies, and stable source IDs across cache moves, placement reordering and changed pixels. With meshoptimizer enabled, the real Alyx map *Bad Kitty* imported all 84 placements and 111,182 faces. The installed CS2 graphics settings map imported all 70 placements and 147,105 faces, with 206 texture paths from the mounted game archives.
+
+## 2026-11-19 (round 604): Compiled Source 2 characters and materials
+
+**Asked:** Import Half-Life: Alyx and Counter-Strike 2 Workshop characters for posing and rendering in Blendity.
+
+**Added (task 0586, ADR 0154)**
+- Compiled Source 2 model and mesh resources through the mounted content resolver, with Source bone names, bind transforms, remapped vertex weights, UVs and face material slots.
+- Compiled Source 2 materials with editable base color, normal, roughness, metalness, emission and cutout settings. Texture paths resolve through mounts and use the native import asset workflow.
+- Path-specific diagnostics for missing resources, unsupported versions, texture encodings and shader features. Meshoptimizer and Zstandard streams use Blender's existing libraries.
+- Full-width visibility masks preserve each model's authored mesh groups, including maps with unsigned 64-bit masks.
+- Material and texture identities follow their compiled virtual paths and conversion roles through reimport.
+- The material reader extracts authored metalness channels, keeps R8 red-only, and names unsupported anisotropic gloss. Embedded images and aggregate resource and geometry allocations are validated before staging.
+
+**Checked:** 436 focused Windows checks, real CS2 SAS and SWAT characters, two Alyx add-on humanoids, the Alyx ApertureVR cutout prop, a CS2 Workshop prop with 64-bit mesh masks, and two genuine VTEX resources with embedded images. Task 0586 records measured bind drift, texture checks and reimport identity coverage. Pass 0588 tracks joined editor verification.
+
+## 2026-11-19 (round 603): Import classic Source maps
+
+**Asked:** Bring a compiled classic Source map into Blendity with its terrain, materials and placed props.
+
+**Added (task 0585, ADR 0154)**
+- Import world surfaces, displaced terrain and brush models from classic VBSP. Brush entities and static props keep their placement. Repeated static props share their model mesh.
+- Keep compiled brush surfaces with retraced edges and use the BSP's indexed triangles where provided.
+- Brush entities retain their placements with mixed-case property names or shortened origin and angle vectors.
+- Resolve materials and props against the BSP pakfile and the mounted content roots. A missing prop keeps its placement as a magenta marker and reports its path.
+- Map surfaces and static props carry their source material and texture identities into the project import so reimport can find existing edited assets.
+
+**Checked:** The Windows map tests passed 1,846 checks, including repeated import of same-named props, materials and textures from different virtual directories. Offline reopen retained all 47 placements from the SFM Warehouse item and all 40 displacement grids from Valve's Lockdown map. A generated map retained the expected packed texture over a conflicting mounted file. Task 0585 records the fixtures and commands.
+
+## 2026-11-19 (round 602): Import classic Source characters and materials
+
+**Asked** Bring installed Source Filmmaker characters into a Blendity project for posing and rendering.
+
+**Added (task 0584, ADR 0154)**
+
+- Classic MDL v48/v49 with VVD v4 and VTX v7 companions. The default bodygroups, skin family and base LOD become a native mesh, with authored normals, UVs, joint hierarchy, bind matrices and weights. A missing companion names its virtual path.
+- Recognized ValveBiped and TF-style humanoids keep their bone names. Their arm and leg bones point toward the next joint for native Auto IK. Static props import as meshes.
+- Native editable materials keep base colour, diffuse texture, normal map, and alpha test or blend settings from supported VMTs. Missing and unsupported resources are named in the import report.
+- An edited material keeps its project file when a missing VMT appears in a later search directory. Same-name textures from different virtual paths remain distinct across reimport.
+
+**Checked** The focused Windows group passed 528 checks in 17 cases, including two editor reimports with a saved material edit. A separate compiled SFM Scout probe passed 64 checks covering material assignments, converted texture pixels and weighted deformation of both arms and legs.
+
+**Checked** The focused Linux suite passed 204 checks, including a native asymmetric cutout render, weighted posing, ValveBiped Auto IK and marker Auto-Rig. The SFM Scout demo imported 7,814 faces, 78 joints, four material slots and four converted textures. Neutral bind displacement stayed under `0.6 µm`. EyeRefract used native fallback materials and reported its unsupported maps.
+
+## 2026-11-19 (round 601): Choose installed Source Engine content
+
+**Asked:** Choose among models and maps in a local Steam Workshop item. Resolve their dependencies from the item and other content roots.
+
+**Added (task 0583, ADR 0154)**
+- File > Import > Source Engine Assets lists model and map paths from an installed folder, loose file, or VPK. The list shows the provider for the selected entry.
+- VPKs inside a Workshop archive are listed with their own provider. An inner map can use its outer package’s resources, and a skipped child produces a warning without hiding healthy siblings.
+- The resolver searches the map's embedded ZIP first, then the item and any additional roots in order. Add a root after a missing dependency is reported and retry the chosen entry.
+- Source conversion stages project assets before publication. Cancel or a publication failure discards fresh files, and explicit reimport reuses edited assets by their virtual identity even when same-named resources change order. Workshop item IDs distinguish otherwise identical entries and other providers need corroborating entry bytes for relocation. Legacy assets remain eligible for migration when they return after an intervening import. The Learn tab walks through choosing an item and its dependencies.
+
+**Checked:** Independent Windows tests passed 899 checks in 18 cases, including failed or canceled preparation, offline native scene reload, reordered same-name assets, distinct Steam items, provider relocation and returning legacy assets. The GCC resolver read the nested map and outer material from CS2 Workshop item 3070193546, matching independent CRCs. The [joined verification record](docs/tasks/0588-workshop-verification.md) includes the hosted Linux fixture groups and Windows editor stress.
+
+The legacy packed-material test checks that split and embedded images share a per-model directory under the selected import cache. The Linux full-suite run exposed its former assumption that a scratch home always selected the cache location.
+
+## 2026-11-19 (round 600): Steam Workshop import architecture
+
+**Changed (task 0582, ADR 0154)**
+
+- Recorded the approved design to import downloaded Workshop content into project-owned assets and the separate acceptance criteria for classic SFM, Half-Life: Alyx and CS2.
+- Assigned humanoid manual posing, marker Auto-Rig and Auto IK checks to the character and verification rounds.
+
+**Checked:** The pass specification, ADR and six task specifications resolve their relative links.
+
+## 2026-11-19 (round 599): Compact handoffs for Codex workers
+
+**Changed (task 0581)**
+
+- Give each role a fresh brief and tie verification results to the candidate it checked.
+- Track each task's cursor and candidate to surface new results, failures and changes that need verification.
+
+**Checked:** The scratch fixture exercised 13 observations and suppressed four duplicate reports. The Codex
+configuration and changelog fragment checks passed.
+
+## 2026-11-19 (round 598): Make the release manuals easier to read and find
+
+- Asked: correct the five findings from the 1.0.0 documentation audit and document how assigned work reaches final owner review.
+- Changed: the Architecture module map wraps the Blender shader path and the User Guide names the double-chevron overflow button. The README points to the released manuals and the architecture guide distinguishes the PR citation check from release regeneration. The standing workflow records the owner assignment before implementation and routes owner-reserved decisions through the hub. Explicit project-wide workflow changes carry forward to future sessions within the scope set by the owner. The hub updates affected briefs and tooling, and each role cites its evidence.
+- Checked: the Windows build and release workflows both request MSVC 14.51. Both current-book URLs resolved to their 1.0.0 attachments. The committed citation check passed with 182 references. After joining the Workshop changes, the parser accepted the Steamworks lesson citation with Valve attribution. Release regeneration checked 185 references and both books compiled with LuaLaTeX and Biber. On physical page 14 of Architecture the complete path fits its column. On physical page 11 of the User Guide the button name renders and extracts as text.
+
+## 2026-11-19 (round 597): Measure distant toon detail before editor notifications
+
+**Fixed (task 0579):** The hatched plane, face-shadow sphere and box-mapped cube now use the cached Scene view
+for both captures in the near and far comparisons. A warning toast could previously change the sampled colors
+and extend the object mask.
+
+**Checked:** The regression compares the composited and cached captures with a visible toast at both distances
+and checks that the measured energy responds to a rendered checker. Sanitizer shard 4 passed all 49,030 checks. The toast added 10,586 pixels to each composited mask,
+while the cached colors and coverage stayed identical. Both Windows configurations passed render and editor.
+
+## 2026-11-19 (round 596): Target-aware Linux build and Raspberry Pi 5 performance assessment
+
+**Asked:** Find a practical route to interactive editing on an 8 GB Raspberry Pi 5.
+
+**Changed (task 0578):** The shell build consults the compiler target before selecting Blender's optional library bundle and Jolt's x86 flags. Linux ARM64 defaults to dependency-free and accepts an explicitly supplied native library directory. A compiler-target change invalidates cached objects. CMake uses the configured Linux target processor and pointer size, and disregards the obsolete automatically cached x64 path on ARM.
+
+**Checked:** Shell fixture verifies ARM64 with an x64 bundle nearby, an explicit ARM64 path, native x64 discovery and forced dependency-free x64. Five CMake configure-only cases verified the generated compile and link arguments, including a stale x64 cache path on ARM. The assessment records linked desktop baselines, renderer requirements and a scratch-only Pi acceptance procedure. Hosted Ubuntu ARM64 produced an AArch64 release editor, rendered a 720p CPU screenshot and passed all 4,101 editor/input checks. A quiet Windows x64 CPU sample at 720p completed the editing journey in 322.6 ms with 99.3 MiB observed peak working set. Its longest marked frame was texture assignment at 32.5 ms. Physical Pi measurements remain pending.
+
+## 2026-11-19 (round 595): Instance uploads during a drag
+
+**Measured (task 0577).** Writing only changed Vulkan instance rows reduced writes from 150,000 to one per frame while dragging one of 50,000 cubes. The Shaded drag median fell from 221.7 to 214.5 ms (3.25%), below the required 5% improvement. The candidate was withdrawn. Task 0577 records the matched controls, frame tails and GPU parity checks.
+
+## 2026-11-19 (round 594): Faster first open of the Textures window
+
+**Asked:** Bring the first open with 2,000 procedural textures within the 100 ms frame budget.
+
+**Changed (task 0576)**
+
+- Walk the Assets tree without collecting file sizes or modification times. Resolve each directory once for ordinary texture files, and use the existing path conversion for links and other special entries.
+- Keep the sorted paths and the texture library's existing loading, filtering and selection behavior.
+
+**Checked:** The same 90 Windows behavior checks passed before and after. Windows release assets/editor groups passed with libraries (3,118/3,872 checks) and dependency-free (3,075/3,846). Linux passed 3,085 assets and 3,846 editor checks, including file links, directory links and an unreadable file. The same focused Linux checks passed on the baseline. All six full benchmark runs completed.
+
+## 2026-11-19 (round 593): Independent task chats report directly to the hub
+
+**Changed (task 0575)**
+
+- Made direct task chats the default for independent work in every approved plan. Workstream leads coordinate dependent tasks when needed. The parent hub oversees review, machine scheduling, stack publication and ongoing health.
+
+## 2026-11-19 (round 592): Read Lighting status in a narrow pane
+
+The Lighting window shows Manual or Automatic at the start of the update status. Hovering over the row reveals the full explanation and the current preview stage while the row shows live preview progress. Hovering over the Contribute GI summary shows the contributing object count, lightmap count and size, and baked object count.
+
+Verified the painted labels and full hover text at 1024×640 and 1366×768. The full twelve-configuration HCI sweep matched its existing baseline.
+
+## 2026-11-19 (round 591): Use the active keymap in HCI checklist steps
+
+The checklist now identifies the actions for framing, Edit Mode, mesh selection, Extrude, Loop Cut and Set Key. An artist using the default Unity preset can extrude a face with Ctrl+E. Preferences > Keymap lets artists find or assign these actions on another preset or after customizing shortcuts.
+
+Task 0573 updated seven procedures. All 141 checklist IDs, expected outcomes and time targets were preserved, and the Markdown and interactive HTML were checked against the source JSON.
+
+## 2026-11-19 (round 590): HCI sweep and checklist review
+
+**Asked:** Rerun the current HCI suite and identify reproducible interface and checklist faults.
+
+**Checked (task 0572)**
+
+- The Windows libraries test build through PR #480 produced 2,156 screens across 12 configurations. The 7 elided labels and 3 vector handles matched the established baseline. The focused dim-text and keyboard focus ring checks passed.
+- The checklist evidence map accounts for all 141 rows across eight workstreams. Static label, consistency, KLM, console and checklist checks passed.
+- Recorded the incorrect default Extrude shortcut in checklist item D2 and two truncated Lighting status rows in the 1024×640 tablet-scale pane. Follow-up tasks 0573 and 0574 cover those findings.
+
+## 2026-11-19 (round 589): Measuring the first Edit Mode frame on a 500k-face sphere
+
+**Asked (task 0571)** — Bring the median cold Edit Mode entry below 100 ms while keeping the flat cage, shading, attributes and picking available on the first frame.
+
+**Measured** — With Blender libraries on Windows, the smooth sphere produced 2,004,992 flat render vertices and 3,004,416 indices. Packing the vertices took 25.113 ms median in the instrumented app. Copying the single-material index list took 1.491 ms, grouping multiple materials took 8.825 ms and card submission took 14.908 ms. A candidate used existing workers to fill disjoint ranges of the upload buffer.
+
+**Outcome** — The three matched full-selector observations were 141.5, 101.4 and 100.6 ms for the baseline and 107.2, 96.4 and 99.6 ms for the candidate. The median fell 1.8 ms, from 101.4 to 99.6 ms, within the 40.9 and 10.8 ms ranges of the two builds. The first-frame app medians were 105.7 and 103.6 ms. The candidate was rejected.
+
+**Checked** — Modeling, Render, GPU and Editor groups passed on both Windows configurations and dependency-free Linux. Four-thread quick stress completed all 48 sections on Windows in 670.1 seconds and on hosted Linux in 628.4 seconds. The Linux run peaked at 14.45 GiB resident. [Linux stress receipt](https://github.com/EmilianoManaloIV/blendity/actions/runs/44609521187/job/135862079065)
+
+## 2026-11-18 (round 588): Blendity's project workflow in Codex
+
+**Asked:** Carry the project-owned Claude workflow into a clean Codex checkout.
+
+**Changed (task 0570)**
+
+- Linked the Codex roles, project Git rules, owner approval gates and cold-start instructions from the engineering handoff.
+- Mapped ten project deny entries and recorded the responsibilities of the existing workflow and machine helpers.
+- Aligned task, review and attribution guidance for future work and added lightweight configuration checks to CI.
+- Added the owner-approved hub cleanup for verified merged task branches with checks for the exact remote and head.
+
+## 2026-11-18 (round 587): Project Codex worker roles
+
+**Asked:** Give the Blendity hub three reusable workers for implementation, independent testing and independent review.
+
+**Added (task 0569)**
+
+- Project Codex definitions for `implementer`, `test-engineer` and `code-reviewer` with role-specific models and reasoning effort.
+- Handoff instructions for named selection and explicit dispatch through the hub.
+
+## 2026-11-18 (round 586): Reusing verified work across parallel rounds
+
+**Asked:** Reduce repeated builds and timed measurements across parallel workers.
+
+**Changed (task 0568)** The handoff method describes how the coordinator tracks candidates and shared resources,
+when a worker can reuse a verified executable or measurement, and how to resume an interrupted timed batch.
+AGENTS.md links directly to the procedure.
+
+**Checked:** Walked through the release command inventory, a colour regression added after compilation, and
+full-size versus quick stress reports. Checked the procedure against the existing approval, review,
+verification and publication rules.
+
+## 2026-11-18 (round 585): Full-size performance measurements after 1.0.0
+
+**Asked:** Measure the default and extended benchmarks on the release-sized workloads, identify reproducible bottlenecks and document the results.
+
+**Measured (task 0567, ADR 0105)**
+
+All 67 registered stress sections completed. The 63 survey jobs returned reports across 69 attempts. The full operations sweep covered 1,056 operation and scene combinations. Listing GPUs on the starter scene and switching the worldlike scene to a two-by-three layout were the only observations over 50 ms. Three runs reproduced the misses for Edit Mode entry on the 500k sphere, moving one object in a 50,000-cube scene, and opening Textures with 2,000 entries.
+
+## 2026-11-18 (round 584): Carry face-corner paint through mesh edits
+
+**Asked:** Keep face-corner colours when editing, applying modifiers, joining or separating painted meshes.
+
+**Changed (task 0566, ADR 0152)**
+- Mesh edits carry each surviving face corner and interpolate linear RGBA within the contributing face. Artists can keep different colours and alpha on either side of the same vertex.
+- Join matches layers by name and domain, uses white for a missing side, and assigns distinct names when domains conflict. Separate keeps each piece's painted faces and layer selections.
+
+**Checked:** All 25 groups passed in three configurations. Including the final modeling-group rerun, Windows passed 134,275 checks with Blender libraries and 125,174 dependency-free. Linux passed 125,199 dependency-free. Focused checks included all twelve outer and cutter walls of a Boolean difference, clamped remesh gradients, a three-way Join with occupied names, editor Apply All and Undo. Against the release baseline both Windows configurations kept zero problems in 26,620 Push/Pull operations and all 394 existing overlapping results. All 11,540 odd-mesh operations passed, including 26 new painted operations. All 5,032 curved operations retained the six existing problems and overlap counts of 67 with libraries and 66 without.
+
+## 2026-11-18 (round 583): Stable console examples in the operations sweep
+
+**Asked:** Keep an unrelated unit test that uses a shorter command from changing the measured inventory (open work 9).
+
+**Changed (task 0565, ADR 0105)**
+- The generator now maintains an explicit invocation or skip reason for every registered verb. All 203 runnable commands and 32 skips match the 1.0.0 table. Adding or removing a verb reports its name until the inventory matches. A changed example shows the affected row in the check output.
+- The local chain runs the generator's self-test, prints the check output and stops on failure.
+
+**Checked:** The generator's three regression tests and read-only check pass on Windows and Linux. The generated include matches the 1.0.0 blob. A missing verb in a scratch registry makes the chain's sweep step name the verb and exit 1.
+
+The editor group passed 3,872 checks on Windows with Blender's libraries and 3,846 each on dependency-free Windows and Linux. In an exclusive quick stress window, all 203 runnable commands matched the release on each of two scenes, with the same 32 skips. Of 704 operations, one took over 50 ms and none took over 100 ms.
+
+## 2026-11-19 (round 582): Windows compatibility status for MSVC 14.52
+
+**Asked:** Check whether MSVC 14.52 meets the Windows CI and release requirements in handoff item 19.
+
+**Checked (task 0564):** The candidate compiled and passed quick stress with release defaults, with precise floating-point mode, and with link-time code generation disabled. The full Windows unit suite failed in each configuration. The cause remains unresolved, so Windows CI and release builds retain the strict MSVC 14.51 pin.
+
 ## 2026-11-18 (round 579): The Windows builds name their compiler; CI and the release build with 14.51 or not at all
 
 **Asked:** the release blocker of the day (the hub): CI's dependency-free Windows test program crashed once on #472's tree.
