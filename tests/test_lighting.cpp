@@ -12366,6 +12366,10 @@ static void tests_round542() {
     ed.commit_change("sun");
     LightingEnv le = ed.make_lighting_for_test();
     CHECK(r542_directional_count(le) == 1 && le.lights.size() == 1);
+    const Vec3 lamp_direction = le.environment->sun_dir;
+    ed.scene().environment.sun_elevation = 12.0f;
+    ed.scene().environment.sun_rotation = 300.0f;
+    CHECK(length(ed.make_lighting_for_test().environment->sun_dir - lamp_direction) < 1e-6f);
     /* Disabled, it is no sun: the sky's comes back (still one). */
     l->enabled = false;
     ed.commit_change("sun off");

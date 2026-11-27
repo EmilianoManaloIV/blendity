@@ -28,6 +28,10 @@ Vec3 sky_sun_transmittance(float elevation, float turbidity);
  * (sky.cpp's scale), times Sun Intensity. */
 std::optional<RenderLight> sky_sun_light(const EnvironmentSettings &es, Vec3 to_sun);
 
+/* Direction toward the World sun when no enabled Directional Light drives it. */
+Vec3 sky_world_sun(const EnvironmentSettings &es);
+uint64_t sky_world_orientation_key(const EnvironmentSettings &es);
+
 /* What sky_sun_light reads of the settings besides the direction, for the views' cache keys (0 when it adds nothing). */
 uint64_t sky_sun_key(const EnvironmentSettings &es);
 

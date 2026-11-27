@@ -64,6 +64,24 @@ std::optional<RenderLight> sky_sun_light(const EnvironmentSettings &es, Vec3 to_
   return rl;
 }
 
+Vec3 sky_world_sun(const EnvironmentSettings &es) {
+  if (es.mode != 1 || !finite_bits(es.sun_elevation) || !finite_bits(es.sun_rotation) ||
+      (es.sun_elevation == es.default_sun_elevation && es.sun_rotation == es.default_sun_rotation))
+    return {0.35f, 0.75f, -0.55f};
+  const float elevation = clampf(es.sun_elevation, -90.0f, 90.0f) * kDeg2Rad;
+  const float rotation = std::fmod(es.sun_rotation, 360.0f) * kDeg2Rad;
+  const float horizontal = std::cos(elevation);
+  return {horizontal * std::sin(rotation), std::sin(elevation), horizontal * std::cos(rotation)};
+}
+
+uint64_t sky_world_orientation_key(const EnvironmentSettings &es) {
+  if (es.mode != 1) return 0;
+  uint32_t elevation, rotation;
+  std::memcpy(&elevation, &es.sun_elevation, sizeof(elevation));
+  std::memcpy(&rotation, &es.sun_rotation, sizeof(rotation));
+  return ((uint64_t)elevation << 32) | rotation;
+}
+
 uint64_t sky_sun_key(const EnvironmentSettings &es) {
   if (es.mode != 1 || !es.sun_lights_scene) return 0;
   uint32_t a, b;

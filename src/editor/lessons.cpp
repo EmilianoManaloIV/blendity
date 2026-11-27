@@ -1424,6 +1424,7 @@ The physical sky has a sun, and since round 542 it lights the scene when no Dire
 ! cmd:select Directional Light; delete; world sky; shading shaded | The physical sky alone: delete the Directional Light (Ctrl+Z brings it back) and the sky's sun lights the scene
 ! cmd:set World.SunLightsScene false | Sun Lights Scene off: the look before Blender 5.3, the sky's ambient alone
 ! cmd:set World.SunLightsScene true; set World.SunIntensity 2 | The sky's sun back, twice as strong
+! cmd:set World.SunElevation 15; set World.SunRotation 90 | Place the sun 15 degrees above the positive X horizon. An enabled Directional Light takes precedence over both angles.
 )"},
     {"Editing: Develop a Render", "Exposure, white balance, curves and crops without touching the file", R"(
 # Developing a picture

@@ -1949,6 +1949,9 @@ struct EnvironmentSettings {
    * Light drives it - off is the look before 5.3 (the sky's ambient alone). Sun Intensity scales it, as Blender's. */
   bool sun_lights_scene = true;
   float sun_intensity = 1.0f;
+  // Angles of the original default sky direction (0.35, 0.75, -0.55).
+  static constexpr float default_sun_elevation = 49.00195f, default_sun_rotation = 147.52881f;
+  float sun_elevation = default_sun_elevation, sun_rotation = default_sun_rotation;
   /* The stylized sky (task 0248, ADR 0084) on the Gradient world: a painted sun disc (its size in degrees, 0 off; toward the
    * first directional light) and a horizon band (its half-width as a share of the sky, 0 off). */
   float sun_disc = 0.0f, sun_disc_softness = 0.3f;

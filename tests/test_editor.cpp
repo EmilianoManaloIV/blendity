@@ -15628,6 +15628,8 @@ static void tests_round542() {
     /* Each change made straight on the settings, no undo step: only the keep's key can see it. */
     const std::pair<const char *, std::function<void()>> edits[] = {
         {"Sun Lights Scene off", [&] { es.sun_lights_scene = false; }},
+        {"Sky elevation with ambient alone", [&] { es.sun_elevation = 15.0f; }},
+        {"Sky rotation with ambient alone", [&] { es.sun_rotation = 90.0f; }},
         {"Sun Lights Scene on", [&] { es.sun_lights_scene = true; }},
         {"Sun Intensity 3", [&] { es.sun_intensity = 3.0f; }},
         {"Turbidity 8", [&] { es.turbidity = 8.0f; }},
@@ -15666,8 +15668,8 @@ static void tests_round542() {
         p = end == std::string::npos ? body.size() : end;
       }
     }
-    CHECK(tries.size() == 3);
-    if (tries.size() != 3) return;
+    CHECK(tries.size() == 4);
+    if (tries.size() != 4) return;
     Editor ed;
     ed.init_headless(800, 600);
     auto strip = [](std::string s) {
@@ -15699,6 +15701,18 @@ static void tests_round542() {
     run(tries[2]);
     CHECK(ed.scene().environment.sun_lights_scene && ed.scene().environment.sun_intensity == 2.0f);
     CHECK(suns(&i2) == 1 && std::fabs(i2 - 2.0f * i1) < 1e-4f * i1);
+    run(tries[3]);
+    const auto env = ed.make_lighting_for_test();
+    const Vec3 expected{std::cos(15.0f * kDeg2Rad), std::sin(15.0f * kDeg2Rad), 0.0f};
+    CHECK(env.environment && length(env.environment->sun_dir - expected) < 1e-5f);
+    for (const auto &l : env.lights)
+      if (l.type == RenderLight::Directional) CHECK(length(l.direction + expected) < 1e-5f);
+    const std::string path = fs::join(test_dir(), "sky-orientation.scene");
+    CHECK(save_scene(ed.scene(), path));
+    Scene reopened;
+    std::string err;
+    CHECK(load_scene(path, reopened, err));
+    CHECK(reopened.environment.sun_elevation == 15.0f && reopened.environment.sun_rotation == 90.0f);
     std::printf("    the sky's sun: intensity %.3f, at Sun Intensity 2: %.3f\n", i1, i2);
   });
 }
