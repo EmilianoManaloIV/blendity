@@ -1,0 +1,69 @@
+name: Native unit call stacks
+on:
+  push:
+    branches: [diagnostics/0642-unit-stack]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  ordinary-unit:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: current
+            revision: d7503d4e62b45dfa42e2c250691817c582e0694d
+            prefix: 416
+          - variant: original
+            revision: 36dd42af969a24530195d77de2238883191cdc6a
+            prefix: 644
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: symbols-${{ matrix.variant }}
+          path: dist/windows
+          run-id: 46008140480
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Collect function names from the regular unit suite
+        shell: pwsh
+        timeout-minutes: 35
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$false
+          foreach ($v in Import-Csv dist/windows/identities.csv) {
+            $p=Join-Path 'dist/windows' (Split-Path $v.Path -Leaf)
+            if ((Get-FileHash $p).Hash -ne $v.Hash) { throw "Artifact mismatch for $p" }
+          }
+          if ((Get-Content dist/windows/source.txt).Trim() -ne '${{ matrix.revision }}') { throw 'Unexpected program revision' }
+          foreach ($n in 'PROJECT','TRASH','PREFS_DIR','TEST_DIR','CACHE_DIR') {
+            $p=Join-Path $env:RUNNER_TEMP "blendity-0642/$n"
+            New-Item -ItemType Directory -Force $p | Out-Null
+            [Environment]::SetEnvironmentVariable("BLENDITY_$n",$p,'Process')
+          }
+          $exe=(Resolve-Path dist/windows/blendity_tests.exe).Path
+          $scratch=Join-Path $env:RUNNER_TEMP 'ordinary-unit.log'
+          $cdb=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
+          if (Test-Path $cdb) {
+            $env:_NT_SYMBOL_PATH=(Resolve-Path dist/windows).Path
+            & $cdb -c 'g;k 24;q' $exe *> $scratch
+          } elseif (Get-Command lldb -ErrorAction SilentlyContinue) {
+            & lldb --batch --one-line run --one-line-on-crash 'thread backtrace' -- $exe *> $scratch
+          } else { throw 'Neither preinstalled Windows debugger is available' }
+          $lines=Get-Content $scratch
+          $passed=@($lines | Select-String '^\[ ok \]')
+          $frames=@(foreach ($line in $lines) {
+            if ($line -match 'blendity_tests[!`](?<name>.+?)(?:\+0x[0-9a-f]+| at | \[|$)') { $Matches.name.Trim() }
+          })
+          [pscustomobject]@{source='${{ matrix.revision }}';passed=$passed.Count;last=($passed | Select-Object -Last 1).Line;functions=$frames} |
+            ConvertTo-Json -Depth 4 | Set-Content ordinary-unit.json
+          if ($passed.Count -ne ${{ matrix.prefix }} -or !$frames.Count) { throw 'Call stack missing or workload stopped at another boundary' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ordinary-${{ matrix.variant }}-unit-stack
+          path: ordinary-unit.json
+          retention-days: 3
