@@ -288,6 +288,8 @@ def exercise(app, work, field, lamp_override=False):
                                 if "perf drag at: press " in line]
     if field.render:
         result["render_pixels"], result["changed_pixels"] = compare_images(case / "undo.png", case / "reopened.png")
+        if field.context in ("hdri", "hdri-placed") and field.name in ("HDRI", "Rotation"):
+            result["render_passed"] = result["changed_pixels"] > 0
     if field.name in ANGLE_DEFAULTS:
         result["start_reference_difference"] = compare_images(case / "undo.png", case / "reference-start.png")[1]
         result["edit_reference_difference"] = compare_images(case / "reopened.png", case / "reference-edit.png")[1]
@@ -390,6 +392,8 @@ def main():
     parser.add_argument("--latency", action="store_true", help="Repeat the three latency candidates in the 600-part world")
     parser.add_argument("--field", action="append", help="Exact inventory key; repeat to select a subset")
     args = parser.parse_args()
+    args.app = args.app.resolve(strict=True)
+    args.work = args.work.resolve()
     with args.app.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != PACKAGE_SHA256:
             raise ValueError("The executable differs from the verified d79d27a7 package")
@@ -419,7 +423,8 @@ def main():
         for row in rows:
             writer.writerow((row["key"], row["lamp_override"], row["state_passed"], row.get("values", {}).get("edited"),
                              row.get("changed_pixels"), row.get("directory")))
-    if not all(row["state_passed"] and row.get("angle_render_passed", True) for row in rows):
+    if not all(row["state_passed"] and row.get("angle_render_passed", True) and row.get("render_passed", True)
+               for row in rows):
         raise SystemExit(1)
 
 
