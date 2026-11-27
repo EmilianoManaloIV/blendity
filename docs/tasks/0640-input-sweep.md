@@ -46,3 +46,7 @@ The per-action register, a link from the historical 0630 survey to the current r
 ## Outcome
 
 The register grew by 34 explicit source keys. The round brought 757 keys to checked status and recorded 25 additional dispatch-only results. The final Windows run passed 243 gesture trials. The corrected Linux Inspector, material, binding and contextual checks also passed. The [round report](../perf/0640-input-sweep.md) gives counts, residual fixtures, external dependencies and prior-failure dispositions. The Hub receives the independently checked local commit for integration.
+
+## Combined-source verification
+
+The Hub assigned a documentation and inventory follow-up on the frozen product at `d79d27a7e09eeaa6cdde1a33906cbdfd5beaeaf9`. Regenerate in an isolated worktree, compare every existing key and evidence cell, check changed command locations and new declarations against source, and account for the 3,542 prior gaps plus any new routes by family. Independently verify the staged tree and hand the local follow-up commit to the Hub.
