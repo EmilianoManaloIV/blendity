@@ -116,10 +116,11 @@ void Editor::land_unity_gloss() {
   ScopedTimer landing;
   std::map<std::string, std::string> lines;  // (a package folder: its new lines)
   std::map<std::string, std::map<std::string, float>> asked;  // .mat path to GUID and original roughness
-  size_t measured = 0;
+  size_t measured = 0, left = 0;
   for (const GlossJob::Item &it : job->items) {
     if (it.materials.empty()) continue;  // a full reimport superseded all requests for this measurement
     if (!it.ok) {
+      ++left;
       gloss_failed_.insert(it.guid);  // (unreadable, or not reached before Cancel: not sent again on its own)
       continue;
     }
@@ -137,7 +138,6 @@ void Editor::land_unity_gloss() {
     if (!fs::write_file(fs::join(dir, ".unity-stats"), text + added)) Log::warn("Unity materials: %s could not be written - their gloss is measured again next time", fs::join(dir, ".unity-stats").c_str());
   }
   const size_t changed = asked.empty() ? 0 : apply_measured_unity_gloss(asked);
-  const size_t left = job->items.size() - measured;
   const std::string rest = !left ? std::string()
                            : job->cancel.load() ? strprintf(" (cancelled with %zu left: Assets > Reimport Unity Materials measures them)", left)
                                                 : strprintf(" (%zu could not be read)", left);

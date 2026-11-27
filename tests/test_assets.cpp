@@ -15110,6 +15110,11 @@ static void tests_round485() {
     ed.land_unity_gloss_for_test(late);
     CHECK(a->roughness == 0.0f && std::fabs(a->metallic - 0.2f) < 0.005f);
     CHECK(b->metallic == 0.29f && std::fabs(b->roughness - 0.819608f) < 0.005f);
+    late->items[0].materials.clear();  // A full reimport superseded every requester before this landing.
+    const size_t mark = r484a::log_mark();
+    ed.land_unity_gloss_for_test(late);
+    const std::string report = r484a::log_since(mark);
+    CHECK(report.find("0 texture(s) measured") != std::string::npos && report.find("could not be read") == std::string::npos);
     r484a::cleanup();
   });
 
