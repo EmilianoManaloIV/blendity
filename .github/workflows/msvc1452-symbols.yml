@@ -37,6 +37,8 @@ jobs:
           set "CL=/Z7"
           set "LINK=/DEBUG /OPT:REF /OPT:ICF"
           call build.bat release all || exit /b 1
+          set "CL="
+          set "LINK="
           for %%p in (blendity_tests blendity_stress) do (
             if not exist "dist\windows\%%p.pdb" exit /b 1
             dumpbin /headers "dist\windows\%%p.exe" > "dist\windows\%%p-pe.txt" || exit /b 1
@@ -84,12 +86,33 @@ jobs:
             New-Item -ItemType Directory -Force $p | Out-Null
             [Environment]::SetEnvironmentVariable("BLENDITY_$n",$p,'Process')
           }
+          $start=Get-Date
           if ('${{ matrix.suite }}' -eq 'unit') { & ./dist/windows/blendity_tests.exe *> native.log }
           else { & ./dist/windows/blendity_stress.exe --quick --out stress/results/ci *> native.log }
           $rc=$LASTEXITCODE
           "$rc" | Set-Content exit.txt
           Get-Content native.log -Tail 25
-          if ($rc) { exit 1 }
+          if ($rc) {
+            $events = Get-WinEvent -FilterHashtable @{LogName="Application"; ID=1000; StartTime=$start} -ErrorAction SilentlyContinue
+            $program = if ('${{ matrix.suite }}' -eq 'unit') { "blendity_tests.exe" } else { "blendity_stress.exe" }
+            foreach ($event in $events) {
+              $xml = [xml]$event.ToXml()
+              $data = @{}
+              foreach ($field in $xml.Event.EventData.Data) { $data[$field.Name] = $field.InnerText }
+              if ($data.AppName -ne $program) { continue }
+              [pscustomobject]@{Application=$data.AppName;Module=$data.ModuleName;Code=$data.ExceptionCode;Offset=$data.FaultingOffset} |
+                ConvertTo-Json | Set-Content app-event.json
+              if ($data.ModuleName -eq $program -and $data.FaultingOffset -match "^(?:0x)?[0-9a-f]+$") {
+                $tool = Get-Command llvm-symbolizer.exe -ErrorAction SilentlyContinue
+                if ($tool) {
+                  $off = $data.FaultingOffset -replace "^0x",""
+                  & $tool.Source --relative-address "--obj=dist/windows/$program" "0x$off" > event-function.txt
+                }
+              }
+              break
+            }
+            exit 1
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -97,5 +120,7 @@ jobs:
           path: |
             native.log
             exit.txt
+            app-event.json
+            event-function.txt
             stress/results/ci
           retention-days: 3
