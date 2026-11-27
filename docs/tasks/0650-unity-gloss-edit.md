@@ -1,6 +1,6 @@
 # 0650: Keep local material edits when Unity gloss measurement finishes
 
-- **Status:** approved for implementation
+- **Status:** in review
 - **Authorization:** Owner-authorized Pass 37 repair of a reproduced report, assigned by the Hub as round 668 on d7503d4e.
 - **Requirements:** R-04, Q-06.
 - **Decisions:** ADR 0157 refines automatic completion under ADR 0131.
@@ -33,3 +33,5 @@ A numbered ADR, its index, the existing Learn wording about reimport if necessar
 
 ## Outcome
 Task 0643 reproduced the loss at a3d6cc8c (product-identical to d7503d4e). One frame after saving Metallic 0.37 on gloss_in_metal_alpha, automatic measurement read back Metallic 1.0. The explicit reimport control also read back 1.0. See [paired readbacks](D:/Blendity-agent-scratch/pass37/0643/material-edit.log).
+
+The implementation records the original requesting roughness so that a source scale change during measurement preserves an intervening edit and still updates untouched materials. Explicit reimport refreshes divergent history even when its changed-live count is zero. The independent source review approved product commit `7fafb39b`. Independent Windows verification against that commit is pending. See the [source review](C:/blab/pass37-hub/0650-review.md) and [native verification](C:/blab/pass37-hub/0650-test.md).
