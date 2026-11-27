@@ -1,7 +1,7 @@
 name: MSVC 14.52 release diagnostics
 on:
   push:
-    branches: [diagnostics/0642-msvc1452]
+    branches: [diagnostics/0642-msvc1452-bounded]
 permissions:
   contents: read
 jobs:

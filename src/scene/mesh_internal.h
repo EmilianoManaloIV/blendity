@@ -24,8 +24,11 @@ struct CornerSample {
   Vec3 weight = {1, 0, 0};
   Vec4 read(const ColorAttribute &layer) const {
     if (a == UINT32_MAX) return {1, 1, 1, 1};
-    if (b == UINT32_MAX) return layer.rgba[a];
-    return layer.rgba[a] * weight.x + layer.rgba[b] * weight.y + layer.rgba[c] * weight.z;
+    const Vec4 first = layer.rgba.at(a);
+    if (b == UINT32_MAX) return first;
+    const Vec4 second = layer.rgba.at(b);
+    const Vec4 third = layer.rgba.at(c);
+    return first * weight.x + second * weight.y + third * weight.z;
   }
 };
 CornerSample sample_face_corner(const Mesh &mesh, size_t face, uint32_t vertex, Vec3 point, const std::vector<uint32_t> &triangles);

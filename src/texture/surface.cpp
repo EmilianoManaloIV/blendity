@@ -18,22 +18,24 @@ namespace bl {
 /* The maps                                                               */
 /* ===================================================================== */
 
-float SurfaceMaps::sample(const std::vector<float> &pl, float u, float v) const {
-  if (w <= 0 || h <= 0 || pl.size() < (size_t)w * h) return 0.5f;
+template <class T>
+static T sample_surface_plane(const std::vector<T> &pl, int w, int h, float u, float v) {
+  if (w <= 0 || h <= 0 || pl.size() < (size_t)w * h) return T(0.5f);
   const float fx = std::min(std::max(u, 0.0f), 1.0f) * w - 0.5f, fy = std::min(std::max(v, 0.0f), 1.0f) * h - 0.5f;
   const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
   const float tx = fx - x0, ty = fy - y0;
-  auto at = [&](int x, int y) { return pl[(size_t)std::min(std::max(y, 0), h - 1) * w + std::min(std::max(x, 0), w - 1)]; };
-  return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+  const int left = std::clamp(x0, 0, w - 1), right = std::clamp(x0 + 1, 0, w - 1);
+  const size_t top = (size_t)std::clamp(y0, 0, h - 1) * w, bottom = (size_t)std::clamp(y0 + 1, 0, h - 1) * w;
+  return (pl[top + left] * (1 - tx) + pl[top + right] * tx) * (1 - ty) +
+         (pl[bottom + left] * (1 - tx) + pl[bottom + right] * tx) * ty;
+}
+
+float SurfaceMaps::sample(const std::vector<float> &pl, float u, float v) const {
+  return sample_surface_plane(pl, w, h, u, v);
 }
 
 Vec3 SurfaceMaps::sample3(const std::vector<Vec3> &pl, float u, float v) const {
-  if (w <= 0 || h <= 0 || pl.size() < (size_t)w * h) return Vec3(0.5f);
-  const float fx = std::min(std::max(u, 0.0f), 1.0f) * w - 0.5f, fy = std::min(std::max(v, 0.0f), 1.0f) * h - 0.5f;
-  const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
-  const float tx = fx - x0, ty = fy - y0;
-  auto at = [&](int x, int y) { return pl[(size_t)std::min(std::max(y, 0), h - 1) * w + std::min(std::max(x, 0), w - 1)]; };
-  return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+  return sample_surface_plane(pl, w, h, u, v);
 }
 
 namespace {
