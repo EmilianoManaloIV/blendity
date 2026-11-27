@@ -5,7 +5,7 @@
 - **Requirements:** World lighting, rendering parity and editor accessibility.
 - **Decisions:** preserve task 0522 and existing directional-light precedence.
 - **Implementation:** project implementer.
-- **PR:** Hub integration pending.
+- **PR:** Included in the local Pass 37 integration at `19df3b49`. Hub publication and owner merge are pending.
 
 ## Goal
 Set the physical Sky world's sun direction from scene settings and the console and learn it in the editor.
@@ -31,4 +31,6 @@ Below-horizon elevation, wrapped azimuth, old settings with missing fields, a di
 Round 666 changelog fragment and Learn lesson.
 
 ## Outcome
-The initial review found that the new reflected fields changed saved lightmap keys for earlier scenes. The correction includes the fields in the persisted key only when the physical Sky uses valid custom angles without an overriding lamp. The regression opens Gradient and Sky scenes and lightmaps produced by the full-library Windows baseline at a3d6cc8c (same product and test sources as d7503d4e), verifies their saved keys, and exercises active and overridden angles. The baseline fixtures are under tests/fixtures/sky_sun_bakes. See the [generation receipt](C:/blab/pass37-hub/timing-queue/0648-functional-legacy-bake.result.json). Native candidate tests, final independent review and integration are pending.
+The initial review found that the new reflected fields changed saved lightmap keys for earlier scenes. The correction includes the fields in the persisted key only when the physical Sky uses valid custom angles without an overriding lamp. The regression opens Gradient and Sky scenes and lightmaps produced by the full-library Windows baseline at a3d6cc8c (same product and test sources as d7503d4e), verifies their saved keys, and exercises active and overridden angles. The baseline fixtures are under tests/fixtures/sky_sun_bakes. [Generation receipt](C:/blab/pass37-hub/timing-queue/0648-functional-legacy-bake.result.json)
+
+All 51 focused Sky checks passed on the combined full-library Windows release at `2b9178d4`, and the independent reviewer approved corrected tip `f864abea`. Coverage includes both legacy bake reopens, active Sky invalidation, directional lamp precedence, warmed render parity, angle wrapping, below-horizon lighting and save/reopen after editing through Learn and the console. The Inspector check covered field registration through reflection. [Native verification](C:/blab/pass37-hub/0648-test.md) · [Review](C:/blab/pass37-hub/0648-review.md)
