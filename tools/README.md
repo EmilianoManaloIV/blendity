@@ -34,3 +34,10 @@ reports beside `stress/results/latest.md`. `tools\clean.bat` removes them.
 ## Round 555: a slice of a test group
 
 - `BLENDITY_TEST_RANGE=lo-hi` and `BLENDITY_TEST_ALSO=text` (round 555): a run of `blendity_tests` takes only the tests numbered lo to hi, in their order, plus those whose name contains text - to find which earlier test leaves state behind for a later one (bisect lo-hi).
+
+## Complex mesh editing
+Use `python tools/bench_mesh_editing.py --baseline PATH --out SCRATCH` to run the dense-face and
+many-object editing workloads. Add `--candidate PATH` for paired trials. See
+[the fixtures and verification](../docs/perf/0624-mesh-editing.md).
+
+- `python tools/bench_animation_rigs.py --exe <editor> --out <fresh scratch directory>` measures the editor's animation and rigging actions on generated control, humanoid and creature fixtures. See [task 0628's measurements](../docs/perf/0628-animation.md).

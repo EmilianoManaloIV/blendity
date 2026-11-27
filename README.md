@@ -91,7 +91,7 @@ Blender's prebuilt libraries (faster rendering, denoising, video export), CMake 
 **[docs/BUILDING.md](docs/BUILDING.md)**.
 
 <!-- The unit-check count: the pass write-up updates this one line (tools/dev/changelog.py fold --checks). -->
-Each build is tested: `blendity_tests` (141819 unit checks in 3942 tests with Blender's libraries), on Windows, Linux and
+Each build is tested: `blendity_tests` (142033 unit checks in 3951 tests with Blender's libraries), on Windows, Linux and
 macOS by GitHub Actions.
 
 ## License
