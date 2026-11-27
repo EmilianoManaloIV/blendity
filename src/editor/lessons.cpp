@@ -1403,7 +1403,7 @@ Everything not covered by a light comes from the environment: Blender's World, U
 | Flat colour | Color | World colour | Environment Lighting: Color
 # Image-based lighting
 An HDRI stores real light levels, far above 1.0. Diffuse lighting needs the HDRI blurred over a hemisphere. Blendity projects it onto 9 spherical harmonics, which capture that blur in 27 numbers. Shiny reflections use pre-blurred mip levels chosen by roughness.
-In the Lighting window, choose Environment > Source > HDRI. The image picker also offers UV Grid and Color Grid. These generated images travel with the scene. Adjust Rotation to see how their orientation changes the background and reflections.
+In the Lighting window, choose Environment > Source > HDRI. The image picker also offers UV Grid and Color Grid. These generated images travel with the scene. You can also pick an output from a project procedural texture. Editing that texture updates the World, including when a surface finishes evaluating. Adjust Rotation to see how their orientation changes the background and reflections.
 # Tone mapping
 Scene light is unbounded but a screen shows 0 to 1. A view transform compresses highlights instead of clipping them: Standard clips, Filmic (Blender's former default) rolls off softly, ACES is the film-industry curve Unity also offers in post-processing. Exposure scales light before that, in stops (each +1 doubles brightness).
 > [FoCG] 20 Tone Reproduction (20.2 Dynamic Range, 20.9 Sigmoids)

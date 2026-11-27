@@ -962,6 +962,14 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   mix(&es.rotation, 4);
   mix(es.hdri.path.data(), es.hdri.path.size());
   if (es.mode == 1) mix(&sun, sizeof(sun));
+  std::string asset;
+  int output = 0;
+  const bool procedural = es.mode == 2 && split_texture_ref(es.hdri.path, asset, output);
+  if (procedural) {
+    // An edit and a surface worker publishing its result both invalidate resolved material textures.
+    const size_t generation = material_textures_generation();
+    mix(&generation, sizeof(generation));
+  }
   env_.sky = es.sky;
   env_.equator = es.equator;
   env_.ground = es.ground;
@@ -982,6 +990,13 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   if (es.mode == 1) {
     env_.map = generate_sky_texture(sun, es.turbidity, es.ground_albedo, 512);
     env_.rotation = 0.0f;  // the sky is baked in world space
+  }
+  else if (procedural) {
+    if (ProceduralTexturePtr texture = texture_asset(asset)) {
+      if (texture->surface) procedural_texture_set_async(texture->asset_path, true);
+      env_.map = procedural_texture_output(*texture, output);
+    }
+    if (!env_.map) Log::warn("World HDRI: cannot resolve %s", es.hdri.path.c_str());
   }
   else if (es.mode == 2 && !es.hdri.empty()) {
     std::string err;

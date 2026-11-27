@@ -12606,6 +12606,63 @@ static void tests_round672() {
   });
 }
 
+static void tests_round673() {
+  test("The World follows the selected procedural output through edits and Undo", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ProceduralTexture bricks;
+    apply_texture_preset(bricks, "Bricks");
+    bricks.width = bricks.height = 64;
+    const std::string path = "Assets/Textures/WorldBricks673.ptex";
+    auto asset = create_texture_asset(bricks, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    auto map = [&] { return ed.make_lighting_for_test().environment->map; };
+    const TexturePtr initial = map();
+    CHECK(initial && initial == resolve_texture_ref({path + "#albedo", false}));
+    ed.step_frame_headless();
+    const uint64_t before = asset->hash();
+    ed.command("settex WorldBricks673 L0Rows 12");
+    const TexturePtr edited = map();
+    CHECK(edited && edited != initial && edited == resolve_texture_ref({path + "#albedo", false}));
+    ed.command("undo");
+    CHECK(asset->hash() == before);
+    CHECK(map() == resolve_texture_ref({path + "#albedo", false}));
+    ed.command("world hdri " + path + "#height");
+    CHECK(map() == resolve_texture_ref({path + "#height", true}) && map() != edited);
+  });
+
+  test("A World surface follows the published worker image at the same reference", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ProceduralTexture surface;
+    apply_texture_preset(surface, "Bricks");
+    surface.width = surface.height = 64;
+    surface.surface = true;
+    const std::string path = "Assets/Textures/WorldSurface673.ptex";
+    auto asset = create_texture_asset(surface, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    auto map = [&] { return ed.make_lighting_for_test().environment->map; };
+    auto settle = [&] {
+      const uint64_t hash = procedural_texture_cache_hash(*asset);
+      const double deadline = now_seconds() + 8;
+      while (!procedural_texture_cached(path, hash) && now_seconds() < deadline) ed.step_frame_headless();
+      return procedural_texture_cached(path, hash);
+    };
+    CHECK(map() != nullptr);
+    CHECK(settle());
+    const TexturePtr initial = map();
+    CHECK(initial && initial == resolve_texture_ref({path + "#albedo", false}));
+    ed.command("settex WorldSurface673 L0Rows 12");
+    CHECK(map() == initial);
+    CHECK(settle());
+    CHECK(map() && map() != initial && map() == resolve_texture_ref({path + "#albedo", false}));
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -12656,4 +12713,5 @@ void run_lighting_tests() {
   tests_round545b2();
   tests_round549();
   tests_round672();
+  tests_round673();
 }
