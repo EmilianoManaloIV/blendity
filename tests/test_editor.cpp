@@ -11595,16 +11595,9 @@ static void tests_round468() {
     CHECK(length(ed.scene_eye() - eye0) < 1e-3f);
   });
 
-  /* Round 568: this test counted the view's renders over 24 frames paced 17 ms apart and asked for at least half as many
-   * with the Centre of Mass shown as hidden. A clip plays by the real clock, and the perf clip moves for its first 30
-   * frames of 60 (half a second in every second): how many of the 24 frames fell in the moving half was the machine's
-   * speed, in both runs separately - 11 hidden / 5 shown in a sanitizer shard, 20 / 12 and 10 / 17 here under load,
-   * with the view drawing every frame the avatar moved in all of them. Now the clip is slowed to a frame a second, so its
-   * rising half (frames 0 to 15: every bone turning one way) lasts 15 s, and exactly 24 frames are stepped: each one
-   * whose playhead moved on inside that half - all 24 unless the 26 steps together take over 15 s - must draw the view, hidden
-   * and shown. That is stricter than the old ratio (every moving frame, not half of them) and no longer a measurement.
-   * The editor's own clock is pinned (the toasts, the measured rate); the clip's is the real one and cannot be, so each
-   * frame is given 5 ms for the playhead to move: a floor a slow machine only raises. */
+  /* Round 568 checked that every moving frame draws the Scene view with Centre of Mass hidden and shown.
+   * Preview now follows the editor clock. Step it explicitly so all 24 frames stay inside the clip's rising half
+   * regardless of host speed and both cases see the same playhead sequence. */
   test("a clip playing with Centre of Mass shown (round 468): the Scene view still draws the moving avatar - every stepped frame the clip moved it in, as with it hidden (the stress row 'Centre of Mass shown: the clip playing' read NO VIEW)", [] {
     const int kFrames = 24;
     int moved[2] = {0, 0}, drawn[2] = {0, 0};
@@ -11624,21 +11617,25 @@ static void tests_round468() {
       if (!clip) return;
       clip->frame_rate = 1.0f;  // (the perf clip's keys: 0, 15, 30 - the rising half is 15 s long now)
       const float rising_end = 15.0f;
-      ed.set_clock_for_test(100.0);
+      double clock = 100.0;
+      ed.set_clock_for_test(clock);
       ed.command("anim play");
+      const auto step = [&] {
+        clock += 0.01;
+        ed.set_clock_for_test(clock);
+        ed.step_frame_headless();
+      };
       /* Two frames first, as before: the pose a frame draws may be the one the frame before applied, so a frame counts
        * as "moved" when the playhead rose over both of the last two steps. */
       float before = ed.anim_frame_for_test(), last = before;
       for (int i = 0; i < 2; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        ed.step_frame_headless();
+        step();
         before = last, last = ed.anim_frame_for_test();
       }
       const PoseCounts c0 = ed.pose_counts_total_for_test();
       for (int i = 0; i < kFrames; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         const uint64_t r0 = ed.frame_profile_totals().view_renders;
-        ed.step_frame_headless();
+        step();
         const uint64_t r = ed.frame_profile_totals().view_renders - r0;
         const float now = ed.anim_frame_for_test();
         const bool moving = before < last && last < now && now <= rising_end;
@@ -11652,7 +11649,7 @@ static void tests_round468() {
       ed.command("anim stop");
       std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
     }
-    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] > 0 && drawn[shown] == moved[shown]);
+    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] == kFrames && drawn[shown] == moved[shown]);
   });
 
   test("perf drag key with nothing under it (round 468): an origin off the Scene view (behind the camera, far to the side) is refused and the key never left pressed; with no active object likewise", [r468t_clean, r468t_click_selects, r468t_settle] {

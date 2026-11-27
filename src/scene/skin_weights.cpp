@@ -95,8 +95,8 @@ void stiffness_row(Row &o, uint32_t i, Row &out) {
     out.push_back({j, -w});
     diag += w;
   }
-  out.push_back({i, diag});
-  std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  const auto at = std::lower_bound(out.begin(), out.end(), i, [](const auto &a, uint32_t v) { return a.first < v; });
+  out.emplace(at, i, diag);
 }
 
 /* A sparse row summed through a dense scatter array (one per thread, reused row after row). */
@@ -365,11 +365,14 @@ bool solve_eigen(const Problem &p, const std::vector<double> &B, std::vector<dou
   if (ldlt.info() != Eigen::Success || cancelled(o)) return false;
   set_progress(o, 0.7f);
   Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> Bm(B.data(), (Eigen::Index)nu, (Eigen::Index)na);
-  const Eigen::MatrixXd Xm = ldlt.solve(Eigen::MatrixXd(Bm));
-  if (ldlt.info() != Eigen::Success || !Xm.allFinite()) return false;
-  for (size_t r = 0; r < nu; r++)
-    for (size_t a = 0; a < na; a++) X[r * na + a] = Xm((Eigen::Index)r, (Eigen::Index)a);
-  return true;
+  Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> Xm(X.data(), (Eigen::Index)nu, (Eigen::Index)na);
+  // Each block reads the same factorization and writes its own columns.
+  JobSystem::global().parallel_for((int64_t)na, 4, [&](int64_t b, int64_t e) {
+    const Eigen::Index first = (Eigen::Index)b, count = (Eigen::Index)(e - b);
+    const Eigen::MatrixXd solved = ldlt.solve(Eigen::MatrixXd(Bm.middleCols(first, count)));
+    Xm.middleCols(first, count) = solved;
+  });
+  return ldlt.info() == Eigen::Success && Xm.allFinite();
 }
 #endif
 
@@ -464,7 +467,9 @@ void cotangent_laplacian(const Mesh &m, std::vector<Row> &rows, std::vector<doub
     if (a > 0.0) total += a, counted++;
   const double floor = counted ? total / (double)counted * 1e-8 : 1e-8;  // vertices on no area: a tiny, finite mass
   for (double &a : mass) a = std::max(a, floor);
-  for (size_t i = 0; i < n; i++) stiffness_row(off[i], (uint32_t)i, rows[i]);
+  JobSystem::global().parallel_for((int64_t)n, 512, [&](int64_t b, int64_t e) {
+    for (int64_t i = b; i < e; i++) stiffness_row(off[(size_t)i], (uint32_t)i, rows[(size_t)i]);
+  });
 }
 
 void envelope_weights(Vec3 p, const std::vector<BoneSegment> &bones, std::vector<float> &out) {
