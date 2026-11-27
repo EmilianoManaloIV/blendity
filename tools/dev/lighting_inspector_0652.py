@@ -183,7 +183,18 @@ FIELDS = [
 
 def read_block(path, owner, object_name=None):
     start = {"EnvironmentSettings": "world", "LightingSettings": "lighting", "Light": "component Light 1"}[owner]
-    text = path.read_text(encoding="utf-8")
+    # Larger saved scenes embed length-prefixed binary meshes between their text records.
+    raw = path.read_bytes()
+    parts = []
+    cursor = 0
+    binary_mesh = re.compile(rb'^mesh [^\n]+ bin (\d+)\r?\n', re.MULTILINE)
+    while header := binary_mesh.search(raw, cursor):
+        parts.append(raw[cursor:header.end()])
+        cursor = header.end() + int(header[1])
+        if cursor > len(raw):
+            raise ValueError(f"Truncated binary mesh in {path}")
+    parts.append(raw[cursor:])
+    text = b"".join(parts).decode("utf-8").replace("\r\n", "\n")
     if object_name is not None:
         match = re.search(r'^object [^\n]*' + re.escape(f'"{object_name}"') + r' [^\n]+\n([\s\S]*?)(?=^object |\Z)',
                           text, re.MULTILINE)
