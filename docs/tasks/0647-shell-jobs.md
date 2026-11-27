@@ -1,6 +1,6 @@
 # 0647: Honor shell build parallelism requested by the caller
 
-- **Status:** approved for implementation
+- **Status:** in review
 - **Authorization:** Owner-assigned Pass 37 Hub follow-up, round 665 on d7503d4e.
 - **Requirements:** Portable and repeatable builds.
 - **Decisions:** none needed.
@@ -31,4 +31,4 @@ Portable bash, no assumptions about GNU xargs on macOS. Preserve current WSL aff
 Round 665 fragment and usage comment.
 
 ## Outcome
-The isolated build entry-point fixture passed explicit, default and invalid cases. Git Bash syntax also passed. Independent verification and Hub integration are pending.
+Git Bash syntax and nine cases through the build entry point passed. With nproc returning seven, unset and empty JOBS dispatched seven; explicit one and two reached xargs. Zero, all-zero digits, negative, text and whitespace values failed before dispatch. The independent examiner repeated the fixture and approved implementation commit 6fa0ed02. See the [independent receipt](C:/blab/pass37-hub/0647-review.md) and [fixture](D:/Blendity-agent-scratch/pass37/0643/test-jobs.sh). Hub integration remains pending.
