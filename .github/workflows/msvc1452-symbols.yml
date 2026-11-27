@@ -1,0 +1,101 @@
+name: MSVC release symbol provenance
+on:
+  push:
+    branches: [diagnostics/0642-msvc1452-symbols]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: current
+            revision: d7503d4e62b45dfa42e2c250691817c582e0694d
+          - variant: original
+            revision: 36dd42af969a24530195d77de2238883191cdc6a
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: driver
+      - uses: actions/checkout@v4
+        with:
+          path: source
+          ref: ${{ matrix.revision }}
+      - name: Prepare strictly selected hosted 14.52 compiler
+        shell: pwsh
+        run: ./driver/tools/dev/hosted_msvc.ps1 -Mode Prepare
+      - name: Stock release with symbols, preserving release compiler and linker optimization
+        working-directory: source
+        shell: cmd
+        env:
+          BLENDITY_FETCH_OPTIX: "1"
+        run: |
+          call "%BLENDITY_HOSTED_VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=%BLENDITY_VCVARS_VER% || exit /b 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File ..\driver\tools\dev\hosted_msvc.ps1 -Mode Verify || exit /b 1
+          set "CL=/Z7"
+          set "LINK=/DEBUG /OPT:REF /OPT:ICF"
+          call build.bat release all || exit /b 1
+          for %%p in (blendity_tests blendity_stress) do (
+            if not exist "dist\windows\%%p.pdb" exit /b 1
+            dumpbin /headers "dist\windows\%%p.exe" > "dist\windows\%%p-pe.txt" || exit /b 1
+            dumpbin /pdbpath:verbose "dist\windows\%%p.exe" > "dist\windows\%%p-pdb.txt" || exit /b 1
+          )
+      - name: Capture compiler source and binary identities
+        shell: pwsh
+        working-directory: source
+        run: |
+          git rev-parse HEAD | Set-Content dist/windows/source.txt
+          Get-ChildItem dist/windows/*.exe,dist/windows/*.pdb | Get-FileHash | Export-Csv dist/windows/identities.csv -NoTypeInformation
+      - uses: actions/upload-artifact@v4
+        with:
+          name: symbols-${{ matrix.variant }}
+          path: source/dist/windows
+          retention-days: 3
+  workloads:
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [current, original]
+        suite: [unit, stress]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.variant == 'current' && 'd7503d4e62b45dfa42e2c250691817c582e0694d' || '36dd42af969a24530195d77de2238883191cdc6a' }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: symbols-${{ matrix.variant }}
+          path: dist/windows
+      - name: Run unchanged CI workload on the recorded package
+        shell: pwsh
+        timeout-minutes: 35
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$false
+          foreach ($v in Import-Csv dist/windows/identities.csv) {
+            $p = Join-Path 'dist/windows' (Split-Path $v.Path -Leaf)
+            if ((Get-FileHash $p).Hash -ne $v.Hash) { throw "Artifact mismatch for $p" }
+          }
+          foreach ($n in 'PROJECT','TRASH','PREFS_DIR','TEST_DIR','CACHE_DIR') {
+            $p = Join-Path $env:RUNNER_TEMP "blendity-0642/$n"
+            New-Item -ItemType Directory -Force $p | Out-Null
+            [Environment]::SetEnvironmentVariable("BLENDITY_$n",$p,'Process')
+          }
+          if ('${{ matrix.suite }}' -eq 'unit') { & ./dist/windows/blendity_tests.exe *> native.log }
+          else { & ./dist/windows/blendity_stress.exe --quick --out stress/results/ci *> native.log }
+          $rc=$LASTEXITCODE
+          "$rc" | Set-Content exit.txt
+          Get-Content native.log -Tail 25
+          if ($rc) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ matrix.variant }}-${{ matrix.suite }}
+          path: |
+            native.log
+            exit.txt
+            stress/results/ci
+          retention-days: 3
