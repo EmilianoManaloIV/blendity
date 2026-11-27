@@ -7,8 +7,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$component = 'Microsoft.VisualStudio.Component.VC.14.51.x86.x64'
-$patchPattern = '^14\.51\.\d+$'
+$component = 'Microsoft.VisualStudio.Component.VC.14.52.x86.x64'
+$patchPattern = '^14\.52\.\d+$'
 $toolBin = 'bin\Hostx64\x64'
 $toolNames = @('cl', 'link')
 
@@ -87,9 +87,9 @@ function Prepare-Toolset {
     if ($usable.Count -eq 0) {
         Install-Toolset $installerDirectory $instance
         $usable = @(Get-ToolsetInventory $instance 'After setup')
-        if ($usable.Count -eq 0) { throw 'Installer reported success but no usable MSVC 14.51 x64 toolset was found.' }
+        if ($usable.Count -eq 0) { throw 'Installer reported success but no usable MSVC 14.52 x64 toolset was found.' }
     } else {
-        Write-Host '[hosted-msvc] MSVC 14.51 already present. Skipping the installer.'
+        Write-Host '[hosted-msvc] MSVC 14.52 already present. Skipping the installer.'
     }
 
     $selected = $usable | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1

@@ -1,0 +1,72 @@
+name: MSVC 14.52 release diagnostics
+on:
+  push:
+    branches: [diagnostics/0642-msvc1452]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare and identify hosted x64 toolset
+        shell: pwsh
+        run: |
+          Write-Host "Runner image $env:ImageOS $env:ImageVersion; source $env:GITHUB_SHA"
+          ./tools/dev/hosted_msvc.ps1 -Mode Prepare
+      - name: Build stock release with strict compiler and linker verification
+        shell: cmd
+        env:
+          BLENDITY_FETCH_OPTIX: "1"
+        run: call tools\dev\hosted_msvc.cmd release all
+      - name: Record executable identities
+        shell: pwsh
+        run: Get-ChildItem dist/windows/*.exe | Get-FileHash | Export-Csv dist/windows/executables.csv -NoTypeInformation
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msvc1452-release
+          path: dist/windows
+          retention-days: 5
+  workload:
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [unit, stress]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: msvc1452-release
+          path: dist/windows
+      - name: Run original workload and record native exit
+        shell: pwsh
+        timeout-minutes: 35
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $folder = Join-Path $env:RUNNER_TEMP 'blendity-0642'
+          foreach ($name in 'PROJECT','TRASH','TEST_DIR','PREFS_DIR','CACHE_DIR') {
+            $path = Join-Path $folder $name
+            New-Item -ItemType Directory -Force $path | Out-Null
+            [Environment]::SetEnvironmentVariable("BLENDITY_$name", $path, 'Process')
+          }
+          if ('${{ matrix.target }}' -eq 'unit') {
+            & ./dist/windows/blendity_tests.exe *> workload.log
+          } else {
+            & ./dist/windows/blendity_stress.exe --quick --out stress/results/ci *> workload.log
+          }
+          $rc = $LASTEXITCODE
+          "$rc" | Set-Content exit.txt
+          Get-Content workload.log -Tail 25
+          if ($rc -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: msvc1452-${{ matrix.target }}-logs
+          path: |
+            workload.log
+            exit.txt
+            stress/results/ci
+          retention-days: 5
