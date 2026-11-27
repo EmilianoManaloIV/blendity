@@ -5,7 +5,7 @@
 - **Requirements:** R-02, R-08, Q-01, Q-06
 - **Decisions:** ADR 0056 (measurements), ADR 0123 (fragments), ADR 0134 (verification)
 - **Implementation:** Project implementer, independent test engineer, independent code reviewer.
-- **PR:** Hub integration pending.
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Identify editing actions that become slow on dense geometry or in populated scenes and reduce costs where matched trials verify a gain.

@@ -5,7 +5,7 @@
 - **Requirements:** R-04, Q-06.
 - **Decisions:** ADR 0056 (performance evidence), 0123 (fragments), 0134 (verification).
 - **Implementation:** Independent implementer, test engineer and reviewer.
-- **PR:** Pending Hub integration.
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Identify where editing large textures and materials costs time, and retain improvements that preserve the result.

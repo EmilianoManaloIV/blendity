@@ -5,7 +5,7 @@
 - **Requirements:** Q-03, Q-04, Q-05
 - **Decisions:** ADR 0089 (existing board and export model)
 - **Implementation:** assigned board worker
-- **PR:** pending Hub integration
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Keep image duplication responsive on boards with hundreds of visible placements. Task 0630 measured 80.1 ms median for the first redraw after duplicating 512 placements, versus 0.7 ms for two.

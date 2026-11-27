@@ -5,7 +5,7 @@
 - **Requirements:** Q-03, Q-04, Q-06, B-06
 - **Decisions:** ADR 0056, 0123, 0134
 - **Implementation:** project implementer (inventory), lead (cross-program evidence and reconciliation)
-- **PR:** local handoff to Hub
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Give the owner a searchable account of each exposed tool and action, its complex workload and observed outcome, or the specific gap that still prevents a conclusion.

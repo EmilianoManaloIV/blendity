@@ -5,7 +5,7 @@
 - **Requirements:** R-13, Q-07
 - **Decisions:** ADRs 0025, 0029, 0031, 0056, 0127, 0146
 - **Implementation:** project implementer
-- **PR:** Hub integration pending.
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Measure editor animation and rigging workflows on an articulated humanoid and a branching non-humanoid. Preserve sampled motion and identify costs that grow with the workload.

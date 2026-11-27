@@ -5,7 +5,7 @@
 - **Requirements:** Q-06
 - **Decisions:** ADRs 0056, 0074, 0078 and 0134
 - **Implementation:** project implementer
-- **PR:** Hub publication after local review
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Establish how the production sculpt tools behave on complex geometry during sustained input. Use paired output-checked measurements to decide which performance changes merit inclusion.

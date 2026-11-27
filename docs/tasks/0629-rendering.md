@@ -5,7 +5,7 @@
 - **Requirements:** R-05, R-10, Q-03, Q-04, C-04
 - **Decisions:** ADR 0056, 0123, 0134
 - **Implementation:** Project implementer, independent test engineer and reviewer
-- **PR:** Pending Hub integration
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. First published head `d2b47b445d835f84b783ce2833ea621efb0fd7a4`.
 
 ## Goal
 Measure what users pay to display and export complex scenes across the available rendering paths and identify evidence-backed opportunities to reduce that cost while preserving pixels.
