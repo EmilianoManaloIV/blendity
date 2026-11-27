@@ -17238,6 +17238,41 @@ static void tests_round639_paint_undo() {
   });
 }
 
+static void tests_round653_flip_rotate() {
+  test("Flip / Rotate (round 653): quarter turns preserve every RGBA word on and across tile edges", [] {
+    for (const auto &[width, height] : {std::pair<int, int>{1, 33}, {33, 1}, {16, 17}, {17, 16}, {33, 47}}) {
+      edit::Image input;
+      input.resize(width, height);
+      constexpr uint32_t words[] = {0x7fc01234u, 0x7fa05678u, 0x7f800000u, 0xff800000u, 0x80000000u, 1u, 0x7f7fffffu};
+      for (size_t i = 0; i < input.px.size(); ++i) {
+        const uint32_t word = i % 19 < std::size(words) ? words[i % 19] : 0x3f000000u | ((uint32_t)i * 2654435761u & 0x00ffffffu);
+        std::memcpy(&input.px[i], &word, sizeof(word));
+      }
+      edit::FilterKeep keep;
+      for (int quarter : {1, 3}) {
+        for (int flips = 0; flips < 4; ++flips) {
+          const bool horizontal = (flips & 1) != 0, vertical = (flips & 2) != 0;
+          edit::Adjustment adjustment = edit::make_adjustment("Flip / Rotate");
+          adjustment.set("Flip Horizontal", horizontal ? 1.0f : 0.0f);
+          adjustment.set("Flip Vertical", vertical ? 1.0f : 0.0f);
+          adjustment.set("Quarter Turns", (float)quarter);
+          edit::Image actual, expected;
+          expected.resize(height, width);
+          for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+              const int sx = horizontal ? width - 1 - x : x, sy = vertical ? height - 1 - y : y;
+              const int dx = quarter == 1 ? height - 1 - sy : sy, dy = quarter == 1 ? sx : width - 1 - sx;
+              std::memcpy(expected.at(dx, dy), input.at(x, y), 4 * sizeof(float));
+            }
+          }
+          edit::apply(adjustment, input, actual, 1.0f, &keep);
+          CHECK(r508te::same_bits(actual, expected));
+        }
+      }
+    }
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -17357,5 +17392,6 @@ void run_editor_tests() {
   tests_round556();
   tests_round622_editor();
   tests_round639_paint_undo();
+  tests_round653_flip_rotate();
   coverage_tests();
 }

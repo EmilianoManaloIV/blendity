@@ -593,11 +593,37 @@ void crop(const Adjustment &a, const Image &in, Image &out) {
 
 void flip_rotate_row(const Image &in, Image &out, int y, int turns, bool fh, bool fv);
 
+/* A quarter turn transposes the pixels. Keep a tile's source and destination rows close together in cache. */
+void flip_rotate_quarter(const Image &in, Image &out, bool reverse_source_x, bool reverse_source_y) {
+  constexpr int tile = 16;
+  JobSystem::global().parallel_for((out.h - 1) / tile + 1, 1, [&](int64_t b0, int64_t b1) {
+    for (int64_t block = b0; block < b1; block++) {
+      const int y0 = (int)block * tile, y1 = y0 + std::min(tile, out.h - y0);
+      for (int x0 = 0; x0 < out.w;) {
+        const int x1 = x0 + std::min(tile, out.w - x0);
+        for (int y = y0; y < y1; y++) {
+          const int sx = reverse_source_x ? in.w - 1 - y : y;
+          float *dst = out.at(x0, y);
+          for (int x = x0; x < x1; x++, dst += 4) {
+            const int sy = reverse_source_y ? in.h - 1 - x : x;
+            std::copy_n(in.at(sx, sy), 4, dst);
+          }
+        }
+        x0 = x1;
+      }
+    }
+  });
+}
+
 void flip_rotate(const Adjustment &a, const Image &in, Image &out) {
   const bool fh = a.v[0] >= 0.5f, fv = a.v[1] >= 0.5f;
   const int turns = ((int)std::lround(a.v[2]) % 4 + 4) % 4;
   const bool swap = turns % 2 == 1;
   out.resize(swap ? in.h : in.w, swap ? in.w : in.h);
+  if (swap && &in != &out) {
+    flip_rotate_quarter(in, out, (turns == 3) != fh, (turns == 1) != fv);
+    return;
+  }
   JobSystem::global().parallel_for(out.h, 16, [&](int64_t r0, int64_t r1) {
     for (int64_t r = r0; r < r1; r++) flip_rotate_row(in, out, (int)r, turns, fh, fv);
   });
