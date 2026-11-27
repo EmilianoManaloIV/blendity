@@ -109,3 +109,14 @@ The Hub's local independent audits and queue receipts are under `C:/blab/pass37-
 | Live Link processing and delivery | `link/tick1/report/latest.md`, `link/pairs2`, `link/final1-*`, Hub `0638-link-pairs-audit.json` and `0638-link-smoke-final-audit.json` |
 | Test packages and group output | `build-final/full-candidate`, `build-testeditor`, `wsl-verify`, `independent-groups` |
 | Accepted timing windows | Hub queue results for `0638-skin-profile1`, `0638-dense-pairs1`, `0638-linktick1`, `0638-linkpairs2` and `0638-skin-pairs-final1`; each child exited 0 with zero recorded taint |
+
+## Playback on the combined Pass 37 build
+
+The Windows full-library build at `d79d27a7` repeated the CPU playback test with the same camera, layout, world, worker setting and 30-frame sequence as the original rig benchmark. The table gives the median of three run means for each dense scene, in milliseconds per frame.
+
+| Rig | Original frame | Combined frame | Original Scene view | Combined Scene view |
+| --- | ---: | ---: | ---: | ---: |
+| Humanoid | 35.30 | 33.11 | 32.72 | 30.67 |
+| Quadruped | 35.22 | 33.36 | 32.69 | 30.99 |
+
+All 12 runs finished, and all six paired motion checks passed. The exclusive window recorded zero interference. The Scene view still accounts for most of each frame. These timings include all integrated changes. The local evidence is `D:/Blendity-agent-scratch/pass37/combined/d79d27a7e09eeaa6cdde1a33906cbdfd5beaeaf9/dense-rig-replay/matched-playback.json`.
