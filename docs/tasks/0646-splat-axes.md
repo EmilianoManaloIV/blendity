@@ -1,19 +1,42 @@
-# 0646 Constrained splat axis conversion
+# 0646: Constrained splat axis conversion
 
-- **Status** Findings ready for owner review. The candidate was rejected after native testing.
-- **Authorization** Pass 37 Hub assignment, reserved task 0646, round 664.
-- **Base** The frozen task 0641 diagnostic at 33228827.
-- **Requirements** Q-06 import responsiveness, ADR 0147 and ADR 0056.
+- **Status:** in review. The candidate was rejected after native testing.
+- **Authorization:** Pass 37 Hub assignment, reserved task 0646, round 664.
+- **Requirements:** Q-06 import responsiveness.
+- **Decisions:** ADR 0147 and ADR 0056.
+- **Implementation:** Constrained-import worker with independent testing and review.
+- **PR:** Pending Pass 37 publication.
 
-## Goal and scope
+## Goal
+
+Reduce import time for large degree-3 splat files on constrained CPUs while preserving the imported cloud exactly.
+
+## Scope
 
 The native ARM baseline measured degree-3 axis conversion at 83 ms with two background lanes and 167 ms with one. Compare fixed-size spherical-harmonic band loops with the existing same-order calculation. Keep existing rotation, source-coordinate mapping, invalid-data handling, report counts, imported values and serial validation semantics. This task owns the CPU importer only.
 
-## Acceptance
+## Likely files
+
+- `src/scene/import_splat.cpp` for the experimental conversion, based on the frozen task 0641 diagnostic at `33228827`.
+- `docs/tasks/0646-splat-axes.md` and `changelog.d/664-splat-axes.md` for the findings.
+
+## Acceptance criteria
 
 Record the local x86 baseline before interpreting the candidate. Verify byte equality on full cloud output, including signed zeros, invalid coefficients, arbitrary rotations and extreme inputs under the release build. Use matched native importer builds, the same checked million-record input, constrained resources and an exclusive timing window. Compare stage and total medians, variance and process memory. Retain the change only with a repeatable gain and matching output, and document the measured device coverage. Test and review independently. The Hub owns remote publication.
 
-## Results and decision
+## Tests and checks to run
+
+Compare original and candidate cloud bytes at two and four CPUs, then measure paired imports on native ext4. Proceed to ARM candidate confirmation only after a repeatable x86 timing gain.
+
+## Risks and edge cases
+
+Coefficient promotion or reordered operations can alter NaN payloads or signed zeros. File-read variation can mask conversion costs, so compare the conversion stage as well as the complete import.
+
+## Documentation to update
+
+Record parity, timings, platform coverage and the decision in this task and the round 664 changelog fragment.
+
+## Outcome
 
 The [constrained import measurements](../perf/0641-constrained-imports.md) identified axis conversion as the largest CPU stage for the degree-3 PLY on native WSL ext4 and hosted ARM. The candidate specialized the three spherical-harmonic band loops for lengths 3, 5 and 7, promoting input channels to double once per band. The first version changed a NaN payload from 0xffc00000 to 0xffc05678 on x86. The revision routed nonfinite inputs through the original calculation.
 
