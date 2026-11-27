@@ -143,6 +143,21 @@ void Editor::uv_op(const std::string &op) {
   else Log::info("UV %s done in %.1f ms", op.c_str(), t.ms());
 }
 
+/* Identical Reset quads redraw the same two triangles and four edges. Include the
+ * ordered edge styles: their antialiased pixels blend between consecutive fills. */
+static int reset_quad_edges(const Mesh &m, uint32_t b, const std::vector<uint8_t> &selected) {
+  static const Vec2 unit[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  for (int i = 0; i < 4; ++i)
+    if (m.uvs[b + i].x != unit[i].x || m.uvs[b + i].y != unit[i].y) return -1;
+  int styles = 0;
+  for (int i = 0; i < 4; ++i) {
+    const uint32_t a = b + i, z = b + ((i + 1) % 4);
+    const int style = m.is_seam(m.corner_verts[a], m.corner_verts[z]) ? 2 : (selected[a] && selected[z] ? 1 : 0);
+    styles |= style << (2 * i);
+  }
+  return styles;
+}
+
 void Editor::draw_uv_editor(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
@@ -295,6 +310,14 @@ void Editor::draw_uv_editor(const Recti &r) {
     }
   std::vector<float> stretch;
   if (uv_stretch_) stretch = uvops::face_area_stretch(m);
+  const bool check_reset_runs = m.face_count() >= 64 && !u.canvas.has_xform();
+  int previous_edges = -1;
+  uint32_t previous_fill = 0;
+  size_t repeats = 0;
+  bool settled = false;
+  // The two-pixel seam stroke and its antialiasing extend beyond the UV square.
+  const Recti footprint = Recti{sq.x - 4, sq.y - 4, sq.w + 8, sq.h + 8}.intersect(u.canvas.clip());
+  std::vector<uint32_t> before;
   for (size_t f = 0; f < m.face_count(); f++) {
     if (!shown(f)) continue;
     uint32_t b = m.face_offsets[f], n = m.face_size(f);
@@ -307,12 +330,39 @@ void Editor::draw_uv_editor(const Recti &r) {
       fill = Color::from(c, 0.55f);
     }
     else if (edit_mode_ && f < face_sel_.size() && face_sel_[f]) fill = Color::hex(0xFF8C1A, 45);
+    const int edges = check_reset_runs && n == 4 ? reset_quad_edges(m, b, uv_sel_) : -1;
+    if (edges < 0 || edges != previous_edges || fill != previous_fill) {
+      previous_edges = edges;
+      previous_fill = fill;
+      repeats = 0;
+      settled = false;
+    }
+    if (settled) continue;
+    // Test a full draw including its edge fringe. Once it changes no pixels,
+    // repeating the same sequence on the same buffer cannot change it either.
+    const bool check = edges >= 0 && !footprint.empty() && ++repeats % 64 == 0;
+    const Image &target = *u.canvas.target();
+    if (check) {
+      before.resize((size_t)footprint.w * footprint.h);
+      for (int y = 0; y < footprint.h; ++y) {
+        const size_t offset = (size_t)(footprint.y + y) * target.width + footprint.x;
+        std::copy_n(target.pixels.data() + offset, footprint.w, before.data() + (size_t)y * footprint.w);
+      }
+    }
     for (uint32_t i = 1; i + 1 < n; i++) u.canvas.fill_triangle(pts[0], pts[i], pts[i + 1], fill);
     for (uint32_t i = 0; i < n; i++) {
       uint32_t j = (i + 1) % n;
       bool seam = m.is_seam(m.corner_verts[b + i], m.corner_verts[b + j]);
       bool sel = uv_sel_[b + i] && uv_sel_[b + j];
       u.canvas.line(pts[i].x, pts[i].y, pts[j].x, pts[j].y, seam ? Color::hex(0xFF3030) : (sel ? Color::hex(0xFFA733) : Color::hex(0xD0D0D0, 200)), seam ? 2.0f : 1.0f);
+    }
+    if (check) {
+      settled = true;
+      for (int y = 0; y < footprint.h && settled; ++y) {
+        const auto *saved = before.data() + (size_t)y * footprint.w;
+        const size_t offset = (size_t)(footprint.y + y) * target.width + footprint.x;
+        settled = std::equal(saved, saved + footprint.w, target.pixels.data() + offset);
+      }
     }
   }
   /* Unselected UV vertices only when they will not swamp the layout. */
