@@ -184,6 +184,8 @@ std::string unity_shader_name(const UnityGuidIndex &index, const std::string &gu
  * own first look, and what is asked, with nothing else done, before a scene's stand-in copy would be written over a
  * file that has appeared at its path. */
 bool load_unity_material(const std::string &text, const std::string &path, Material &m);
+/* The source still reads its roughness from one of the measured maps. */
+bool measured_unity_roughness(const std::string &path, const std::set<std::string> &guids, float &provisional, float &measured);
 bool unity_material_text(const std::string &text);
 
 /* A model's nodes as objects (their hierarchy, transforms, meshes and materials) under one named `name` - a model

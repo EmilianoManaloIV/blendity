@@ -204,6 +204,7 @@ void read_gloss(const Props &p, const YamlNode &body, const std::string &family,
     if (info.gloss_pending) alpha = 1.0f;
   }
   const double scale = urp ? slider : prop(p, "_GlossMapScale", 1.0);
+  info.provisional_roughness = (float)std::clamp(1.0 - scale, 0.0, 1.0);
   m.roughness = (float)std::clamp(1.0 - std::clamp((double)alpha, 0.0, 1.0) * scale, 0.0, 1.0);
 }
 

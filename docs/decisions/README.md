@@ -164,6 +164,7 @@ Open each record for its status, amendments and superseding decisions. The numbe
 | [0154](0154-steam-workshop-import.md) | Import installed Steam Workshop assets into native projects |
 | [0155](0155-local-incremental-builds.md) | Reuse verified MSVC objects for local editor builds |
 | [0156](0156-hosted-msvc-provisioning.md) | Provision MSVC 14.51 on hosted Windows build runners |
+| [0157](0157-unity-gloss-edit.md) | A measured Unity roughness merges into each material state |
 
 ## Template
 

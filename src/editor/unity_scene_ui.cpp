@@ -314,11 +314,10 @@ const float *unity_gloss_session_mean(const std::string &guid, const std::string
 
 bool unity_material_text(const std::string &text) { return text.find("--- !u!21 ") != std::string::npos; }
 
-bool load_unity_material(const std::string &text, const std::string &path, Material &m) {
+static bool read_unity_material(const std::string &text, const std::string &path, Material &m, UnityMaterialInfo &info) {
   if (!unity_material_text(text)) return false;  // (a Material document: anything else isn't one - no index walked for it)
   const std::string assets = resolve_asset_path("Assets");
   const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets, fs::parent(assets));
-  UnityMaterialInfo info;
   const bool ok = unity_material(text, [&](const std::string &guid) {
         const auto it = index->find(guid);
         return it == index->end() ? std::string() : make_asset_relative(it->second.path);
@@ -347,6 +346,22 @@ bool load_unity_material(const std::string &text, const std::string &path, Mater
   for (const std::string &n : info.notes) Log::info("Unity material %s: %s", path.c_str(), n.c_str());
   if (!info.known) Log::warn("Unity material %s: its shader (%s) isn't one Blendity reads - its main texture and colour came in", path.c_str(), info.shader.c_str());
   return true;
+}
+
+bool load_unity_material(const std::string &text, const std::string &path, Material &m) {
+  UnityMaterialInfo info;
+  return read_unity_material(text, path, m, info);
+}
+
+bool measured_unity_roughness(const std::string &path, const std::set<std::string> &guids, float &provisional, float &measured) {
+  std::string text;
+  Material fresh;
+  UnityMaterialInfo info;
+  if (!fs::read_file(resolve_asset_path(path), text) || !read_unity_material(text, path, fresh, info) ||
+      info.gloss_pending || !guids.count(info.gloss_texture)) return false;
+  provisional = info.provisional_roughness;
+  measured = fresh.roughness;
+  return provisional != measured;
 }
 
 namespace {
