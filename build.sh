@@ -2,7 +2,7 @@
 # Blendity - Linux / macOS build without CMake.
 # Needs only a C++17 compiler (g++ 9+ or clang 10+) and, on Linux, the X11 headers
 # (Debian/Ubuntu: sudo apt install g++ libx11-dev).
-# Usage: ./build.sh [release|debug] [app|stress|tests|all]
+# Usage: [JOBS=positive-count] ./build.sh [release|debug] [app|stress|tests|all]
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -12,7 +12,11 @@ OS="$(uname -s)"
 # CI sets CXX="ccache g++" and CC="ccache gcc" (round 492, ADR 0133): a compiler cache kept between runs. Any
 # wrapper works the same way; nothing here needs one.
 CXX="${CXX:-c++}"
-JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+JOBS="${JOBS:-$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+if ! [[ "$JOBS" =~ ^[0-9]+$ && "$JOBS" =~ [1-9] ]]; then
+  echo "[blendity] JOBS must be a positive integer (received '$JOBS')." >&2
+  exit 2
+fi
 
 # The build's identity (task 0079): VERSION's number, and CI's release tag (BLENDITY_BUILD) or "dev".
 IDFLAGS="-DBL_VERSION_NUMBER=$(tr -d ' \r\n' < VERSION) -DBL_BUILD=${BLENDITY_BUILD:-dev}"
