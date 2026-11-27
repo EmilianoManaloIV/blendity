@@ -503,6 +503,21 @@ bool inpaint(const Mesh &m, const std::vector<uint8_t> &known_in, std::vector<st
     return false;
   }
   set_progress(o, 0.02f);
+  InpaintReport rep;
+  const auto finish = [&]() {
+    rep.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    set_progress(o, 1.0f);
+    if (report) *report = rep;
+    return !cancelled(o);
+  };
+  // Every vertex keeps its weights when all are trusted, so there is no topology to solve over.
+  if (std::find(known_in.begin(), known_in.end(), uint8_t{0}) == known_in.end()) {
+    rep.known = n;
+    for (const auto &w : weights)
+      if (std::any_of(w.begin(), w.end(), [](float weight) { return weight > 1e-12f; })) rep.groups++;
+    if (cancelled(o)) return false;
+    return finish();
+  }
   std::vector<Row> K;
   std::vector<double> mass;
   cotangent_laplacian(m, K, mass);
@@ -513,7 +528,6 @@ bool inpaint(const Mesh &m, const std::vector<uint8_t> &known_in, std::vector<st
   const std::vector<uint8_t> reach = reached(K, known_in);
   std::vector<uint8_t> known(n);
   for (size_t v = 0; v < n; v++) known[v] = known_in[v] || !reach[v];
-  InpaintReport rep;
   Problem p;
   p.index.assign(n, -1);
   for (uint32_t v = 0; v < n; v++) {
@@ -554,10 +568,7 @@ bool inpaint(const Mesh &m, const std::vector<uint8_t> &known_in, std::vector<st
       if (normalize) renormalize(p, X, weights);
     }
   }
-  rep.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  set_progress(o, 1.0f);
-  if (report) *report = rep;
-  return !cancelled(o);
+  return finish();
 }
 
 }  // namespace skinweights

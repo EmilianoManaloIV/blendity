@@ -1835,12 +1835,15 @@ float sweep_limit(const Mesh &m, const Region &r, Vec3 dir, float tol) {
     const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
     for (uint32_t i = 0; i < n; i++) {
       const uint32_t a = fv[i], b = fv[(i + 1) % n];
-      if (!done.insert(Mesh::edge_key(a, b)).second) continue;
       const Vec3 da = m.positions[a] - o, db = m.positions[b] - o;
       const Vec2 pa{dot(da, u), dot(da, w)}, pb{dot(db, u), dot(db, w)};
       if (std::max(pa.x, pb.x) < lo.x - tol || std::min(pa.x, pb.x) > hi.x + tol || std::max(pa.y, pb.y) < lo.y - tol ||
-          std::min(pa.y, pb.y) > hi.y + tol)
+          std::min(pa.y, pb.y) > hi.y + tol) {
+        // With NaN endpoints min/max may reject only one orientation of the edge.
+        if (nan_bits(pa.x) || nan_bits(pa.y) || nan_bits(pb.x) || nan_bits(pb.y)) done.insert(Mesh::edge_key(a, b));
         continue;
+      }
+      if (!done.insert(Mesh::edge_key(a, b)).second) continue;
       const float ha = dot(da, dir), hb = dot(db, dir);
       if (in_way(pa, pb)) take(ha);
       if (in_way(pb, pa)) take(hb);

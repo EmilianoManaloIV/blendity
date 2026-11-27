@@ -655,14 +655,18 @@ static void project_round(Mesh &m, const Mask *mask, bool sphere) {
   for (size_t f = 0; f < m.face_count(); f++) {
     if (!in_mask(mask, f)) continue;
     uint32_t b = m.face_offsets[f], n = m.face_size(f);
-    std::vector<float> us(n);
+    float lo = 0.0f, hi = 0.0f;
     for (uint32_t i = 0; i < n; i++) {
       Vec3 d = m.positions[m.corner_verts[b + i]] - c;
-      us[i] = 0.5f + std::atan2(d.z, d.x) / (2 * kPi);
+      const float u = 0.5f + std::atan2(d.z, d.x) / (2 * kPi);
+      if (i == 0) lo = hi = u;
+      else {
+        lo = std::min(lo, u);
+        hi = std::max(hi, u);
+      }
       float v = sphere ? 0.5f + std::asin(clampf(d.y / std::max(1e-6f, length(d)), -1, 1)) / kPi : (d.y / h + 0.5f);
-      m.uvs[b + i] = {us[i], v};
+      m.uvs[b + i] = {u, v};
     }
-    float lo = *std::min_element(us.begin(), us.end()), hi = *std::max_element(us.begin(), us.end());
     if (hi - lo > 0.5f)
       for (uint32_t i = 0; i < n; i++)
         if (m.uvs[b + i].x < 0.5f) m.uvs[b + i].x += 1.0f;

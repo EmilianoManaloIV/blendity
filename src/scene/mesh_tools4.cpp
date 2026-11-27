@@ -19,38 +19,146 @@
 
 namespace bl::meshops {
 
+namespace {
+
+struct SliceEdge {
+  uint32_t a, b;
+  float t;
+};
+
+void split_slice_marks(std::vector<uint64_t> &marks, const EdgeSplits &splits) {
+  const size_t count = marks.size();
+  for (size_t i = 0; i < count; i++) {
+    const uint64_t key = marks[i];
+    const auto it = splits.find(key);
+    if (it == splits.end()) continue;
+    // Old scene files may contain duplicate marks. split_edge replaces one.
+    while (i + 1 < count && marks[i + 1] == key) i++;
+    const uint32_t v = it->second.front().second;  // one cut per edge
+    marks[i] = Mesh::edge_key((uint32_t)(key >> 32), v);
+    marks.push_back(Mesh::edge_key(v, (uint32_t)key));
+  }
+  if (marks.size() != count) std::sort(marks.begin(), marks.end());
+}
+
+void split_slice_edges(Mesh &m, const std::vector<SliceEdge> &edges, bool batch) {
+  if (!batch) {
+    for (const SliceEdge &e : edges) split_edge(m, e.a, e.b, e.t);
+    return;
+  }
+  EdgeSplits splits;
+  splits.reserve(edges.size());
+  for (const SliceEdge &e : edges) {
+    if (e.t <= 1e-5f || e.t >= 1.0f - 1e-5f) continue;  // split_edge snaps close cuts to endpoints
+    const uint32_t v = m.add_vert(lerp(m.positions[e.a], m.positions[e.b], e.t));
+    splits[Mesh::edge_key(e.a, e.b)].push_back({e.t, v});  // edge_cache orders endpoints by index
+  }
+  apply_edge_splits(m, splits);
+  split_slice_marks(m.seams, splits);
+  split_slice_marks(m.sharp_edges, splits);
+
+}
+
+struct SliceFace {
+  uint32_t on[2]{};
+  size_t count = 0;
+  bool crosses = false;
+};
+
+SliceFace slice_face_points(const Mesh &m, size_t f, Vec3 p, Vec3 n, float eps) {
+  SliceFace result;
+  bool above = false, below = false;
+  for (uint32_t c = 0; c < m.face_size(f); c++) {
+    const float s = dot(m.positions[m.face_verts(f)[c]] - p, n);
+    if (s > eps) above = true;
+    else if (s < -eps) below = true;
+    else {
+      if (result.count < 2) result.on[result.count] = c;
+      result.count++;
+    }
+  }
+  result.crosses = above && below && result.count >= 2;
+  return result;
+}
+
+size_t split_slice_faces_sequential(Mesh &m, Vec3 p, Vec3 n, float eps) {
+  size_t cuts = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const SliceFace cut = slice_face_points(m, f, p, n, eps);
+    if (cut.crosses && split_face(m, f, m.face_verts(f)[cut.on[0]], m.face_verts(f)[cut.on[1]])) cuts++;
+  }
+  return cuts;
+}
+
+size_t split_slice_faces(Mesh &m, Vec3 p, Vec3 n, float eps, bool batch) {
+  struct Cut {
+    size_t face;
+    uint32_t a, b;  // face-local corners, in order
+  };
+  if (!batch) return split_slice_faces_sequential(m, p, n, eps);
+  std::vector<Cut> cuts;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const SliceFace cut = slice_face_points(m, f, p, n, eps);
+    if (!cut.crosses) continue;
+    /* A complex polygon can be split again as the existing loop visits its second half. */
+    if (cut.count > 2) return split_slice_faces_sequential(m, p, n, eps);
+    const uint32_t a = cut.on[0], b = cut.on[1], size = m.face_size(f);
+    if (b - a == 1 || b - a == size - 1 || m.face_verts(f)[a] == m.face_verts(f)[b]) continue;
+    cuts.push_back({f, a, b});
+  }
+  if (cuts.empty()) return 0;
+  FaceBuilder fb(m);
+  auto cut = cuts.begin();
+  std::vector<uint32_t> verts;
+  std::vector<Vec2> uv;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t base = m.face_offsets[f], size = m.face_size(f);
+    const uint32_t *corners = m.face_verts(f);
+    const int material = m.material_of(f);
+    const bool smooth = m.smooth_of(f);
+    if (cut == cuts.end() || cut->face != f) {
+      fb.add(corners, size, fb.has_uv ? &m.uvs[base] : nullptr, material, smooth, f);
+      continue;
+    }
+    auto emit_half = [&](uint32_t from, uint32_t to) {
+      verts.clear();
+      uv.clear();
+      for (uint32_t c = from;; c = (c + 1) % size) {
+        verts.push_back(corners[c]);
+        if (fb.has_uv) uv.push_back(m.uvs[base + c]);
+        if (c == to) break;
+      }
+      fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, material, smooth, f);
+    };
+    emit_half(cut->a, cut->b);
+    emit_half(cut->b, cut->a);
+    ++cut;
+  }
+  fb.commit(m);
+  return cuts.size();
+}
+
+}  // namespace
+
 size_t slice(Mesh &m, Vec3 p, Vec3 n, int clear) {
   const float ln = length(n);
   if (ln < 1e-12f || !std::isfinite(ln) || !std::isfinite(p.x + p.y + p.z)) return 0;
   n = n / ln;
   const float eps = 1e-5f * std::max(1.0f, length(m.bounds().extent()));
-  auto side = [&](uint32_t v) { return dot(m.positions[v] - p, n); };
+  /* Painted corners sample the intermediate polygons. Preserve that order, and
+   * the original handling of partial UV and face-group arrays. Legacy meshes can
+   * contain duplicate wires, each of which gets its own split. */
+  const bool batch = m.loose_edges.empty() && m.color_attributes.empty() && (m.uvs.empty() || m.has_uvs()) &&
+                     (m.face_group.empty() || m.face_group.size() == m.face_count());
   /* 1. A vertex wherever an edge crosses the plane. */
-  std::vector<std::pair<uint32_t, uint32_t>> crossing;
-  for (auto &e : m.edge_cache()) {
-    const float a = side(e.first), b = side(e.second);
-    if ((a > eps && b < -eps) || (a < -eps && b > eps)) crossing.push_back(e);
+  std::vector<SliceEdge> crossing;
+  for (const auto &e : m.edge_cache()) {
+    const float a = dot(m.positions[e.first] - p, n), b = dot(m.positions[e.second] - p, n);
+    if ((a > eps && b < -eps) || (a < -eps && b > eps)) crossing.push_back({e.first, e.second, a / (a - b)});
   }
-  for (auto &e : crossing) {
-    const float a = side(e.first), b = side(e.second);
-    split_edge(m, e.first, e.second, a / (a - b));
-  }
-  /* 2. Every face with corners on the plane on both sides: cut between them. */
-  size_t cuts = 0;
-  for (size_t f = 0; f < m.face_count(); f++) {
-    const uint32_t nc = m.face_size(f);
-    bool above = false, below = false;
-    std::vector<uint32_t> on;
-    for (uint32_t k = 0; k < nc; k++) {
-      const uint32_t v = m.face_verts(f)[k];
-      const float s = side(v);
-      if (s > eps) above = true;
-      else if (s < -eps) below = true;
-      else on.push_back(v);
-    }
-    if (!above || !below || on.size() < 2) continue;
-    if (split_face(m, f, on[0], on[1])) cuts++;  // the halves are appended or kept; later faces still get visited
-  }
+  split_slice_edges(m, crossing, batch);
+  /* 2. Every face with corners on the plane and on both sides: cut between them. */
+  const size_t cuts = split_slice_faces(m, p, n, eps, batch);
   /* 3. Optionally clear one side (Blender's Clear Inner / Clear Outer). */
   if (clear) {
     std::vector<uint8_t> drop(m.face_count(), 0);

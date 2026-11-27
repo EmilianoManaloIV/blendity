@@ -2,6 +2,104 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-27 (round 651): Dense UV Reset redraw
+
+**Asked:** Improve interaction with complex UV layouts, including the redraw after resetting thousands of overlapping faces.
+
+**Changed (task 0633, ADR 0056)**
+- The UV editor skips repeated Reset quads after confirming that another identical draw leaves the visible pixels unchanged.
+
+**Checked:** Compared ordinary, overlapping, selected, mixed-winding, stretched and offscreen layouts. Measurements and pixel comparisons are in the round report.
+
+## 2026-11-27 (round 650): Measuring single-control Noise Reduction
+
+**Asked:** Determine whether skipping the unused Noise Reduction channel speeds up editing while preserving floating-point output and cache behavior.
+
+**Checked (task 0632, ADR 0056):** Two prototypes improved Linux 4K single-control apply. The revised prototype saved 246 / 208 ms for Luminance and 52 / 421 ms for Color with 32 / two workers. Three paired runs per setting also exercised real slider drags and warm previews. A direct Windows release comparison found 668 changed channel words for Luminance and 182 with both controls enabled on a finite HDR image. Both prototypes were rejected. The existing filter is retained.
+
+## 2026-11-26 (round 649): Redrawing images on the Reference Board
+
+**Asked:** Investigate the delay after duplicating hundreds of visible image placements.
+
+**Changed (task 0631, ADR 0089)**
+- The board looks up a canonical file path for a full-resolution picture only when the export has supplied overrides. Drawing the board uses its existing picture cache.
+
+**Checked:** In five paired full-library Windows runs per size, duplicating 512 visible placements to 1,024 reduced the median next frame from 66.7 to 5.4 ms. Duplicating two to four took 0.3 ms, down from 0.6 ms. All ten pairs matched in the board pixels, ordered saved items and selection counts. The Windows board group passed 96 checks, including full-size export and updates to linked paper.
+
+## 2026-11-26 (round 648): Whole-program complex tool survey
+
+**Asked:** Identify where complex scenes slow down across editor tools and account for each named action and coverage gap.
+
+**Added (task 0630, ADR 0056)**
+- A searchable register of 5,871 source entries with per-action evidence and gaps. The survey measures selected-object edits, board redraw, imports and exports, and reconciles the six specialist rounds.
+
+**Checked:** All 40 creation cases, 14 mesh-format round trips, 49 persisted field changes and 50 window/configuration checks passed. The follow-up checked 75 Edit tools, 86 modes, 19 brushes and nine modifiers. Five failed checks remain individually documented.
+
+## 2026-11-26 (round 647): Measure complex rendering and skip empty camera bloom
+
+**Asked:** Exercise rendering tools on complex scenes, measure user-visible cost and memory, and improve demonstrated bottlenecks while preserving the picture.
+
+**Changed (task 0629):**
+- Added a Windows benchmark that waits for completed camera renders, verifies saved output, and compares ordinary and restricted CPU affinity on a generated world with 600 parts and 70 lights.
+- CPU camera Bloom checks whether any positive bright-pass sample survived thresholding and clamping. A completely black input can skip the blur pyramid and composite. A single surviving channel keeps the original path.
+
+**Checked:** Six paired 960 × 540 F12 trials on a 600-part world at four logical CPUs reduced median worker time from 381.5 to 329.5 ms and editor completion time from 390.65 to 335.60 ms. All 36 PNGs and their decoded RGBA pixels matched, including the visible-glow control. Checked CPU and GPU viewport/render paths, native ray-traced shadows, Gaussian splats, 21 individual camera effects, MoonRay and image/sequence outputs. The report in `docs/perf/0629-rendering.md` gives the controls, coverage gaps and verification evidence.
+
+## 2026-11-26 (round 646): Measure articulated animation and rigging workloads
+
+**Asked:** Measure animation and rigging tools on a humanoid and a branching creature, with a simpler control and a constrained CPU run.
+
+**Changed (task 0628, ADR 0028)**
+- Transfer Weights skips assembling the inpainting system when every target vertex already has a trusted match. On the measured 10,242-vertex humanoid and 15,874-vertex quadruped shells, complete transfer fell from 15.3 to 4.3 ms and from 23.8 to 7.2 ms at ordinary CPU affinity. Every transferred weight matched the baseline.
+- A scratch editor workload for marker Auto-Rig, skin weights, IK, pose editing, keyed clips, sampled deformation, playback and humanoid retargeting.
+- The runner retains stage and frame timings, native scenes and clips, and evaluated mesh samples for independent comparison.
+
+**Checked:** See the [round report](docs/perf/0628-animation.md) for package identities, measured results and remaining coverage gaps.
+
+## 2026-11-26 (round 645): Faster texture export and assignment
+
+**Asked:** Measure complex material, texture, paint and bake tools and preserve their outputs.
+
+**Changed (task 0627, ADRs 0056 and 0082)**
+- Exporting the separate texture set with Assign now evaluates and writes the seven maps once. The material uses the paths returned by that export.
+- The PNG writer recognizes identical consecutive scanlines and uses the same filter and residual bytes as its full filter search.
+
+- The screenshot regression test observes the asynchronous tray job and waits for it to finish with a bounded watchdog. Its synchronous branch still requires the file on the capture frame.
+
+**Checked:** Three paired Windows release runs per size and worker setting. At 2048² the duplicate-export fix saved 2.14 s with 32 workers and 2.54 s with two. The PNG change additionally saved 195 / 178 ms on plain export. All seven PNGs matched. The seeded image control with unique rows showed small mixed timing differences and byte-identical output. The final screenshot fixture passed three isolated runs and all 4,021 editor checks per platform on Windows and Linux. The tools and remaining gaps are in [the performance report](docs/perf/0627-complex-texturing.md).
+
+## 2026-11-26 (round 644): Cylinder and Sphere UV Projection
+
+**Asked:** Measure the UV toolset on large selected meshes and improve measured bottlenecks while preserving mapping results.
+
+**Changed (task 0626):** Cylinder and Sphere Projection calculate the angular span while writing each face. This removes the temporary U-coordinate buffer allocated for every selected face. The new UV benchmark covers 19 production actions on connected and fragmented meshes.
+
+**Checked:** Two reversed-order Linux timing blocks on each CPU profile gave matching UV and seam signatures. On 36,480 selected faces the two projections eliminated 36,480 allocations and 583,680 requested bytes. The independent projection oracle compared 144 cases byte for byte. The editor selection sweep checked all 24,576 exported corners for each of twenty actions. See [the UV measurements](docs/perf/0626-uv.md).
+
+## 2026-11-26 (round 643): Checked Sculpt pointer workloads
+
+**Asked:** Measure sustained Sculpt input on dense geometry and verify the edit and its undo.
+
+**Added (task 0625, ADRs 0056, 0074 and 0078)**
+- A dense Sculpt pointer workload checks each brush and stroke type, with normal and single-CPU measurement runs and matching geometry and attribute checks.
+- The Sculpt action inventory records covered fixtures, controls, and the remaining measurement gaps in `docs/perf/0625-sculpt.md`.
+
+**Checked:** Across three paired CPU runs, 62 stroke outputs matched, including every brush and all five stroke methods. The 99k/500k-face stress sweep reported zero structural problems. At 500k faces all ten geometry brushes exceeded the 16.7 ms median target. The Sculpt groups passed 553 assertions on Windows and 533 on Linux.
+
+## 2026-11-26 (round 642): Mesh and object editing under complex workloads
+
+**Asked:** Find slow editing actions in dense meshes and populated scenes, and reproduce gains against the same work.
+
+**Changed (task 0624)**
+- Slice batches cuts on ordinary meshes. UV seams, face order, colors, wires and Undo retain the tested editing behavior.
+- Push/Pull skips edge hash-table entries outside the projected bounds of the selected region.
+
+**Added**
+- A headless production-command workload for dense face selection, Poke Faces, Adjust Last Operation, Slice, Push/Pull, Duplicate, Join and Undo.
+- A matched trial driver that checks geometry, topology and selection, with separate command and follow-up frame timings.
+
+**Checked:** On a 50,176-face sphere, median Slice dispatch fell from 905.9 to 14.5 ms and Push/Pull from 154.9 to 124.2 ms on 32 logical CPUs. All twelve ordinary and restricted-affinity pairs preserved the exported geometry and selections. Push/Pull remained above 100 ms. Windows and Linux each passed 36,653 modeling/editor assertions. Geometry stress counts matched baseline, including 26,608 Push/Pull operations with zero problems and the three existing curved-mesh problems. See the [performance report](docs/perf/0624-mesh-editing.md).
+
 ## 2026-11-26 (round 641): Linux CI installs missing packages from Ubuntu
 
 **Asked:** Repair the failing Linux check on PR #504.

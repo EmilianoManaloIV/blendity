@@ -13852,6 +13852,98 @@ static void tests_round631() {
   });
 }
 
+static void tests_round647() {
+  test("bloom: a last-row highlight glows between unchanged dark frames without touching alpha or picking", [] {
+    constexpr int W = 23, H = 35;
+    const Recti view{2, 1, W, H};
+    Image img;
+    img.resize(W + 5, H + 3);
+    std::fill(img.pixels.begin(), img.pixels.end(), 0x28ABCDEFu);
+    RenderTarget rt;
+    rt.attach(img, view);
+    rt.want_hdr = true;
+    rt.hdr_exposure = 0.375f;
+    rt.vis.resize((size_t)W * H);
+    rt.hdr.assign((size_t)W * H, Vec3(0.125f, 0.25f, 0.5f));
+    rt.hdr.front().x = -1.0f;  // the sky falls back to display colour
+    rt.hdr.back().z = 1.0f;    // exactly on the hard threshold
+
+    auto encode = [&](int x, int y) {
+      const size_t i = (size_t)y * W + x;
+      uint32_t color = 0x010203u;
+      if (rt.hdr[i].x >= 0.0f)
+        display::encode_span(&rt.hdr[i].x, &color, 1, rt.hdr_view_transform, rt.hdr_exposure);
+      const uint32_t alpha = (uint32_t)(i % 256) << 24;
+      rt.color[(size_t)y * rt.stride + x] = alpha | (color & 0x00FFFFFFu);
+    };
+    for (int y = 0; y < H; y++) {
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        rt.depth[i] = (float)i / (W * H);
+        rt.ids[i] = (uint32_t)i + 1;
+        rt.vis[i] = (uint32_t)i / 3 + 1;
+        encode(x, y);
+      }
+    }
+    // Keep one pixel as altered by an earlier filter in the stack.
+    rt.color[rt.stride + 1] ^= 0x000041u;
+
+    const auto dark_pixels = img.pixels;
+    const auto depth = rt.depth;
+    const auto ids = rt.ids;
+    const auto vis = rt.vis;
+    auto apply_and_check_planes = [&](const BloomParams &params) {
+      const auto hdr = rt.hdr;
+      apply_bloom(rt, params);
+      CHECK(rt.depth == depth && rt.ids == ids && rt.vis == vis);
+      CHECK(rt.hdr.size() == hdr.size() && std::memcmp(rt.hdr.data(), hdr.data(), hdr.size() * sizeof(Vec3)) == 0);
+      CHECK(rt.want_hdr && rt.hdr_view_transform == ViewTransform::Standard && rt.hdr_exposure == 0.375f);
+      CHECK(rt.id_at(W - 1, H - 1) == ids.back());
+    };
+
+    BloomParams params;
+    params.soft_knee = 0.0f;
+    params.intensity = 2.0f;
+    apply_and_check_planes(params);
+    CHECK(img.pixels == dark_pixels);
+
+    rt.hdr.back().z = 16.0f;
+    encode(W - 1, H - 1);
+    const auto before_glow = img.pixels;
+    const size_t neighbor = (size_t)(view.y + H - 1) * img.width + view.x + W - 2;
+    apply_and_check_planes(params);
+    CHECK((img.pixels[neighbor] & 255u) > (before_glow[neighbor] & 255u));
+    const auto glow = img.pixels;
+    bool alpha_unchanged = true, outside_unchanged = true;
+    for (int y = 0; y < img.height; y++) {
+      for (int x = 0; x < img.width; x++) {
+        const size_t i = (size_t)y * img.width + x;
+        alpha_unchanged &= ((glow[i] ^ before_glow[i]) & 0xFF000000u) == 0;
+        if (!view.contains(x, y))
+          outside_unchanged &= glow[i] == before_glow[i];
+      }
+    }
+    CHECK(alpha_unchanged && outside_unchanged);
+
+    // Change only the clamp: even a surviving source highlight now contributes no glow.
+    std::copy(before_glow.begin(), before_glow.end(), img.pixels.begin());
+    BloomParams clamped = params;
+    clamped.clamp = 0.0f;
+    apply_and_check_planes(clamped);
+    CHECK(img.pixels == before_glow);
+
+    rt.hdr.back().z = 1.0f;
+    std::copy(dark_pixels.begin(), dark_pixels.end(), img.pixels.begin());
+    apply_and_check_planes(params);
+    CHECK(img.pixels == dark_pixels);
+
+    rt.hdr.back().z = 16.0f;
+    encode(W - 1, H - 1);
+    apply_and_check_planes(params);
+    CHECK(img.pixels == glow);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -13913,4 +14005,5 @@ void run_render_tests() {
   tests_round572();
   tests_round597();
   tests_round631();
+  tests_round647();
 }

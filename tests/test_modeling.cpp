@@ -2063,6 +2063,197 @@ static void modeling_round10_tests() {
   });
 }
 
+/* Round 642 (task 0624): preserve Slice's geometry and index order on both paths. */
+static size_t r642_sequential_slice(Mesh &m, Vec3 p, Vec3 n, int clear = 0) {
+  // The original Slice, using the individual mesh operators as a reference on small fixtures.
+  n = normalize(n);
+  const float eps = 1e-5f * std::max(1.0f, length(m.bounds().extent()));
+  auto side = [&](uint32_t v) { return dot(m.positions[v] - p, n); };
+  const auto edges = m.edge_cache();
+  size_t changes = 0;
+  for (const auto &[a, b] : edges) {
+    const float da = side(a), db = side(b);
+    if ((da > eps && db < -eps) || (da < -eps && db > eps)) {
+      meshops::split_edge(m, a, b, da / (da - db));
+      changes++;
+    }
+  }
+  for (size_t f = 0; f < m.face_count(); f++) {
+    bool above = false, below = false;
+    std::vector<uint32_t> on;
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const uint32_t v = m.face_verts(f)[k];
+      const float d = side(v);
+      if (d > eps) above = true;
+      else if (d < -eps) below = true;
+      else on.push_back(v);
+    }
+    if (above && below && on.size() >= 2 && meshops::split_face(m, f, on[0], on[1])) changes++;
+  }
+  if (clear) {
+    std::vector<uint8_t> drop(m.face_count());
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const float d = dot(m.face_center(f) - p, n);
+      drop[f] = clear == 1 ? d > eps : d < -eps;
+    }
+    meshops::delete_faces(m, drop);
+  }
+  return changes;
+}
+
+static bool r642_slice_same(const Mesh &a, const Mesh &b) {
+  auto same = [](const auto &u, const auto &v) {
+    return u.size() == v.size() && (u.empty() || std::memcmp(u.data(), v.data(), u.size() * sizeof(u[0])) == 0);
+  };
+  return same(a.positions, b.positions) && a.face_offsets == b.face_offsets && a.corner_verts == b.corner_verts &&
+         same(a.uvs, b.uvs) && a.face_material == b.face_material && a.face_smooth == b.face_smooth &&
+         a.face_group == b.face_group && a.seams == b.seams && a.sharp_edges == b.sharp_edges && a.loose_edges == b.loose_edges;
+}
+
+static Mesh r642_marked_slice_mesh() {
+  Mesh m;
+  for (Vec3 p : {Vec3(-1, 0, 0), Vec3(3, 0, 0), Vec3(-1, 2, 0), Vec3(3, 2, 0), Vec3(-1, 0, 2), Vec3(3, 0, 2),
+                 Vec3(0, -2, 1), Vec3(0, 4, 0), Vec3(0, 5, 0), Vec3(0, 4, 1)})
+    m.add_vert(p);
+  m.add_face({0, 1, 3, 2});
+  m.add_face({1, 0, 4, 5});
+  m.add_face({0, 1, 6});  // a third face at the shared edge, ending on the plane
+  m.add_face({7, 8, 9});  // a separate face lying in the plane
+  for (size_t f = 0; f < m.face_count(); f++) {
+    for (uint32_t c = 0; c < m.face_size(f); c++) {
+      const Vec3 p = m.positions[m.face_verts(f)[c]];
+      m.uvs.push_back({2 * p.x + 8 * float(f), p.y + 2 * p.z + 4 * float(f)});
+    }
+  }
+  m.face_material = {2, 5, 7, 11};
+  m.face_smooth = {1, 0, 1, 0};
+  m.face_group = {4, -2, 3, 2};
+  m.set_seam(0, 1, true);
+  m.set_seam(2, 3, true);
+  m.set_seam(7, 8, true);
+  m.set_sharp(0, 1, true);
+  m.set_sharp(4, 5, true);
+  return m;
+}
+
+static void tests_round642_slice() {
+  test("Slice: shared crossings keep ordered faces, per-corner UVs, materials and edge marks", [] {
+    const Mesh before = r642_marked_slice_mesh();
+    for (int clear : {0, 1, 2}) {
+      Mesh actual = before, reference = before;
+      CHECK(r642_sequential_slice(reference, {0, 0, 0}, {1, 0, 0}, clear) == 6);
+      CHECK(meshops::slice(actual, {0, 0, 0}, {1, 0, 0}, clear) == 6);
+      CHECK(r642_slice_same(actual, reference));
+      if (clear) {
+        CHECK(actual.face_count() == 4);
+        continue;
+      }
+      CHECK(actual.vert_count() == 13);
+      CHECK(actual.face_offsets == (std::vector<uint32_t>{0, 4, 8, 12, 16, 19, 22, 25}));
+      CHECK(actual.corner_verts == (std::vector<uint32_t>{10, 1, 3, 11, 11, 2, 0, 10, 10, 0, 4, 12, 12, 5, 1, 10, 10, 1, 6, 6, 0, 10, 7, 8, 9}));
+      CHECK(actual.face_material == (std::vector<int32_t>{2, 2, 5, 5, 7, 7, 11}));
+      CHECK(actual.face_smooth == (std::vector<uint8_t>{1, 1, 0, 0, 1, 1, 0}));
+      CHECK(actual.is_seam(0, 10) && actual.is_seam(10, 1) && !actual.is_seam(0, 1));
+      CHECK(actual.is_sharp(0, 10) && actual.is_sharp(10, 1) && !actual.is_sharp(0, 1));
+      CHECK(actual.is_seam(7, 8));
+      if (actual.has_uvs() && actual.corner_verts.size() == 25) {
+        CHECK_NEAR(actual.uvs[0].x, 0.0f, 1e-6f);
+        CHECK_NEAR(actual.uvs[8].x, 8.0f, 1e-6f);  // the same crossing on the other UV island
+      }
+      CHECK(actual.has_uvs());
+    }
+  });
+  test("Slice: concave faces, painted corners and legacy wire edges retain their cut geometry", [] {
+    Mesh concave;
+    for (Vec3 p : {Vec3(-2, 0, 0), Vec3(2, 0, 0), Vec3(2, 1, 0), Vec3(-1, 1, 0), Vec3(-1, 2, 0), Vec3(2, 2, 0),
+                   Vec3(2, 3, 0), Vec3(-2, 3, 0)})
+      concave.add_vert(p);
+    concave.add_face({0, 1, 2, 3, 4, 5, 6, 7});  // four intersections with x = 0
+    Mesh reference = concave;
+    const size_t changes = r642_sequential_slice(reference, {0, 0, 0}, {1, 0, 0});
+    CHECK(changes > 4);
+    CHECK(meshops::slice(concave, {0, 0, 0}, {1, 0, 0}) == changes);
+    CHECK(r642_slice_same(concave, reference));
+
+    Mesh painted = r642_marked_slice_mesh();
+    auto color = painted.make_color("Paint", ColorAttribute::Domain::Corner, {0, 0, 0, 1});
+    for (size_t c = 0; c < color.rgba.size(); c++) color.rgba[c].x = float(c % 7) / 7.0f;
+    painted.color_attributes.push_back(std::move(color));
+    reference = painted;
+    CHECK(meshops::slice(painted, {0, 0, 0}, {1, 0, 0}) == r642_sequential_slice(reference, {0, 0, 0}, {1, 0, 0}));
+    CHECK(r642_slice_same(painted, reference));
+    CHECK(painted.color_attributes.size() == 1 && reference.color_attributes.size() == 1);
+    if (painted.color_attributes.size() == 1 && reference.color_attributes.size() == 1) {
+      const auto &got = painted.color_attributes.front();
+      const auto &want = reference.color_attributes.front();
+      CHECK(painted.color_fits(got) && got.corners == want.corners);
+      CHECK(got.rgba.size() == want.rgba.size() && std::memcmp(got.rgba.data(), want.rgba.data(), got.rgba.size() * sizeof(Vec4)) == 0);
+    }
+
+    Mesh wire;
+    wire.add_vert({-1, 0, 0});
+    wire.add_vert({3, 0, 0});
+    wire.add_loose_edge(0, 1);
+    wire.set_sharp(0, 1, true);
+    Mesh single = wire;
+    CHECK(meshops::slice(single, {0, 0, 0}, {1, 0, 0}) == 1);
+    CHECK(single.vert_count() == 3 && single.face_count() == 0);
+    CHECK(single.loose_edges == (std::vector<uint64_t>{Mesh::edge_key(0, 2), Mesh::edge_key(1, 2)}));
+    CHECK(single.sharp_edges == single.loose_edges);
+    // Older files can carry the same wire twice. Each occurrence has its own split vertex.
+    wire.loose_edges = {Mesh::edge_key(0, 1), Mesh::edge_key(0, 1)};
+    CHECK(meshops::slice(wire, {0, 0, 0}, {1, 0, 0}) == 2);
+    CHECK(wire.vert_count() == 4);
+    CHECK(wire.loose_edges == (std::vector<uint64_t>{Mesh::edge_key(0, 2), Mesh::edge_key(0, 3), Mesh::edge_key(1, 2), Mesh::edge_key(1, 3)}));
+  });
+  test("Slice: a cut through the selected sphere face clears selection and Undo restores it", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    GameObject *sphere = ed.scene().create("Slice sphere");
+    const auto before = primitives::uv_sphere(1.0f, 48, 32);
+    sphere->add<MeshFilter>()->mesh = before;
+    sphere->add<MeshRenderer>();
+    const uint64_t id = sphere->id;
+    ed.commit_change("Add slice sphere");
+    ed.step_frame_headless();
+    ed.select_object(id);
+    ed.command("edit face");
+    ed.command("fsel 100");
+    CHECK(ed.in_edit_mode() && ed.edit_face_selected(100));
+    Mesh expected = *before;
+    Vec3 center(0.0f);
+    std::vector<uint8_t> verts(before->vert_count(), 0);
+    for (uint32_t k = 0; k < before->face_size(100); k++) verts[before->face_verts(100)[k]] = 1;
+    for (size_t v = 0; v < verts.size(); v++)
+      if (verts[v]) center += before->positions[v];
+    center = center / float(before->face_size(100));
+    CHECK(r642_sequential_slice(expected, center, {0, 1, 0}) > 0);
+    ed.command("editop slice");
+    const auto result = sphere->get<MeshFilter>()->mesh;
+    CHECK(r642_slice_same(*result, expected));
+    CHECK(closed_manifold(*result));
+    auto selection_is = [&](bool restored) {
+      const auto &m = *ed.scene().find(id)->get<MeshFilter>()->mesh;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (ed.edit_face_selected(f) != (restored && f == 100)) return false;
+      for (size_t v = 0; v < m.vert_count(); v++)
+        if (ed.edit_vert_selected(v) != (restored && verts[v])) return false;
+      return ed.in_edit_mode();
+    };
+    CHECK(selection_is(false));
+    ed.command("undo");
+    sphere = ed.scene().find(id);
+    CHECK(sphere && r642_slice_same(*sphere->get<MeshFilter>()->mesh, *before));
+    if (!sphere) return;
+    CHECK(selection_is(true));
+    ed.command("redo");
+    sphere = ed.scene().find(id);
+    CHECK(sphere && r642_slice_same(*sphere->get<MeshFilter>()->mesh, expected));
+    if (sphere) CHECK(selection_is(false));
+  });
+}
+
 static void modeling_round11_tests() {
   const float cube_sign = signed_volume(*primitives::cube()) > 0 ? 1.0f : -1.0f;
   auto vol = [&](const Mesh &m) { return signed_volume(m) * cube_sign; };
@@ -12987,6 +13178,7 @@ void run_modeling_tests() {
   uv_tests();
   modeling_round9_tests();
   modeling_round10_tests();
+  tests_round642_slice();
   modeling_round11_tests();
   modeling_round12_tests();
   modeling_round13_tests();

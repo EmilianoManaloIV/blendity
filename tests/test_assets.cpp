@@ -16576,6 +16576,166 @@ static void tests_round630() {
   });
 }
 
+static void tests_round645() {
+  test("PNG rows (round 645): repeated, zero and alpha-only rows keep their filters and pixels with a padded stride", [] {
+    constexpr int width = 3, height = 12, stride = 5;
+    constexpr uint32_t pixels[height][stride] = {
+        {0, 0, 0, 1, 2},
+        {0, 0, 0, 3, 4},
+        {0x12000000, 0x34104020, 0x56113122, 5, 6},
+        {0x12000000, 0x34104020, 0x56113122, 7, 8},
+        {0xFE000000, 0x80104020, 0x01113122, 9, 10},
+        {0xF4FF1234, 0x450400F1, 0x22FF0086, 11, 12},
+        {0x12000000, 0x34104020, 0x56113122, 13, 14},
+        {0xF4FF1234, 0x450400F1, 0x22FF0086, 15, 16},
+        {0xF4FF1234, 0x450400F1, 0x22FF0086, 17, 18},
+        {0, 0, 0, 19, 20},
+        {0, 0, 0, 21, 22},
+        {0xFF000000, 0x80000000, 0x01000000, 23, 24},
+    };
+    /* One legacy filter byte and its exact residuals per row. Compare after inflate so this also checks the
+     * library build, whose compressed bytes can differ from the built-in deflater's. */
+    constexpr uint8_t rgb[height][1 + width * 3] = {
+        {}, {}, {1, 0, 0, 0, 16, 64, 32, 1, 241, 2}, {2}, {2},
+        {0, 255, 18, 52, 4, 0, 241, 255, 0, 134}, {1, 0, 0, 0, 16, 64, 32, 1, 241, 2},
+        {0, 255, 18, 52, 4, 0, 241, 255, 0, 134}, {2}, {}, {}, {},
+    };
+    constexpr uint8_t rgba[height][1 + width * 4] = {
+        {}, {}, {1, 0, 0, 0, 18, 16, 64, 32, 34, 1, 241, 2, 34}, {2},
+        {2, 0, 0, 0, 236, 0, 0, 0, 76, 0, 0, 0, 171},
+        {0, 255, 18, 52, 244, 4, 0, 241, 69, 255, 0, 134, 34}, {1, 0, 0, 0, 18, 16, 64, 32, 34, 1, 241, 2, 34},
+        {0, 255, 18, 52, 244, 4, 0, 241, 69, 255, 0, 134, 34}, {2}, {}, {}, {3, 0, 0, 0, 255, 0, 0, 0, 1, 0, 0, 0, 193},
+    };
+    std::vector<uint32_t> input;
+    for (const auto &row : pixels) input.insert(input.end(), row, row + stride);
+    for (bool alpha : {false, true}) {
+      const std::string png = encode_png(input.data(), width, height, stride, alpha);
+      std::string idat;
+      for (size_t at = 8; at + 12 <= png.size();) {
+        const auto *p = reinterpret_cast<const uint8_t *>(png.data() + at);
+        const uint32_t len = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+        CHECK(len <= png.size() - at - 12);
+        if (len > png.size() - at - 12) break;
+        if (png.compare(at + 4, 4, "IDAT") == 0) idat.append(png, at + 8, len);
+        at += 12 + len;
+      }
+      std::vector<uint8_t> scanlines;
+      const size_t row_size = alpha ? sizeof(rgba[0]) : sizeof(rgb[0]);
+      const bool inflated = !idat.empty() && zlib_inflate(reinterpret_cast<const uint8_t *>(idat.data()), idat.size(), scanlines);
+      CHECK(inflated && scanlines.size() == height * row_size);
+      if (scanlines.size() == height * row_size) {
+        for (int y = 0; y < height; y++) {
+          const uint8_t *legacy = alpha ? rgba[y] : rgb[y];
+          const bool equal = std::equal(legacy, legacy + row_size, scanlines.data() + y * row_size);
+          if (!equal) std::printf("    %s row %d: legacy filter %u, got %u\n", alpha ? "RGBA" : "RGB", y,
+                                  (unsigned)legacy[0], (unsigned)scanlines[y * row_size]);
+          CHECK(equal);
+        }
+      }
+      Bitmap decoded;
+      std::string error;
+      CHECK(decode_image(png, decoded, error));
+      CHECK(decoded.width == width && decoded.height == height && !decoded.is_float);
+      std::vector<uint8_t> expected;
+      for (const auto &row : pixels) {
+        for (int x = 0; x < width; x++) {
+          const uint32_t px = row[x];
+          expected.insert(expected.end(), {(uint8_t)(px >> 16), (uint8_t)(px >> 8), (uint8_t)px,
+                                           alpha ? (uint8_t)(px >> 24) : (uint8_t)255});
+        }
+      }
+      CHECK(decoded.rgba8 == expected);
+    }
+  });
+
+  test("separate texture export (round 645): Assign preserves all seven PNGs and the material links survive Undo, Redo and reopening", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("select Cube");
+    ed.command("surface new Export645");
+    const auto surface = ed.texture_selected_for_test();
+    CHECK(surface && surface->surface);
+    if (!surface || !surface->surface) return;
+    const std::string name = surface->name;
+    ed.command("surface set Width 64");
+    ed.command("surface set Height 128");
+    ed.command("surface set L0 Roughness 0.25");
+    ed.command("surface set L0 Metallic 0.75");
+    ed.command("surface set L0 Emission 0.8,0.2,0.1");
+    ed.command("surface set L0 Writes Emission 1");
+    ed.command("surface add Gradient");
+    ed.command("surface set L1 Writes Roughness 0");
+    ed.step_frame_headless();
+    CHECK(surface->width == 64 && surface->height == 128 && surface->layers.size() == 2);
+
+    const std::string dir = "Exports/" + name;
+    const auto material = [&]() -> const Material * {
+      const GameObject *cube = ed.scene().find_by_name("Cube");
+      const MeshRenderer *mr = cube ? cube->get<MeshRenderer>() : nullptr;
+      return mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
+    };
+    const std::string live = surface->asset_path + "#albedo";
+    const auto check_live = [&] {
+      const Material *m = material();
+      CHECK(m && m->base_map.path == live);
+    };
+    const auto check_assigned = [&] {
+      const Material *m = material();
+      CHECK(m);
+      if (!m) return;
+      const std::string prefix = dir + "/assigned/" + name + "_";
+      CHECK(m->base_map.path == prefix + "Albedo.png" && !m->base_map.non_color);
+      CHECK(m->normal_map.path == prefix + "Normal.png" && m->normal_map.non_color);
+      CHECK(m->roughness_map.path == prefix + "Roughness.png" && m->roughness_map.non_color && m->roughness == 1.0f);
+      CHECK(m->metallic_map.path == prefix + "Metallic.png" && m->metallic_map.non_color && m->metallic == 1.0f);
+      CHECK(m->emission_map.path == prefix + "Emission.png" && !m->emission_map.non_color);
+    };
+    check_live();
+    const size_t before = ed.undo_steps_for_test();
+    ed.command("export textures separate " + dir + "/control");
+    ed.step_frame_headless();
+    check_live();
+    CHECK(ed.undo_steps_for_test() == before);
+    const std::string blocker = dir + "/blocked";
+    CHECK(fs::write_file(ed.resolve_asset_path_for_test(blocker), "A file where a directory would be"));
+    ed.command("export textures separate " + blocker + " --assign");
+    ed.step_frame_headless();
+    check_live();
+    CHECK(ed.undo_steps_for_test() == before);
+
+    ed.command("export textures Separate " + dir + "/assigned --assign");
+    ed.step_frame_headless();
+    check_assigned();
+    CHECK(ed.undo_steps_for_test() == before + 1);
+    for (const char *map : {"Albedo", "Normal", "Roughness", "Metallic", "Height", "Emission", "AO"}) {
+      const std::string file = name + "_" + map + ".png";
+      Bitmap control, assigned;
+      std::string error;
+      const bool same = load_image(ed.resolve_asset_path_for_test(dir + "/control/" + file), control, error) &&
+                        load_image(ed.resolve_asset_path_for_test(dir + "/assigned/" + file), assigned, error) &&
+                        control.width == 64 && control.height == 128 && assigned.width == 64 && assigned.height == 128 &&
+                        assigned.rgba8 == control.rgba8;
+      std::printf("    %s: %s\n", map, same ? "all pixels match" : "missing, wrong size or differs");
+      CHECK(same);
+      if (!same || assigned.rgba8.empty()) continue;
+      const std::string channel = map;
+      if (channel == "Roughness") CHECK(assigned.rgba8[0] == 64);
+      if (channel == "Metallic") CHECK(assigned.rgba8[0] == 191);
+      if (channel == "Emission") CHECK(assigned.rgba8[0] > assigned.rgba8[1] && assigned.rgba8[1] > assigned.rgba8[2]);
+    }
+
+    ed.command("undo");
+    check_live();
+    ed.command("redo");
+    check_assigned();
+    const std::string scene = "Assets/Scenes/" + name + ".scene";
+    ed.command("save " + scene);
+    ed.command("newscene");
+    ed.command("open " + scene);
+    check_assigned();
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -16732,4 +16892,5 @@ void run_assets_tests() {
     CHECK(edited.live->normal(u, v) == Vec3(0.0f, 0.0f, 1.0f));
     check_published();
   });
+  tests_round645();
 }

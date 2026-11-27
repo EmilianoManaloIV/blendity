@@ -1,4 +1,6 @@
 # Performance, limits and efficiencies
+## UV projection and island costs (round 644)
+Cylinder and Sphere Projection removed 36,480 allocations on a selection of 36,480 quads. [The UV survey](perf/0626-uv.md) reports traversal, unwrap, packing and editing costs on connected and fragmented meshes.
 ## Post-1.0.0 full-size Windows survey (round 585)
 
 The Windows libraries build at `4dbfc99` ran on the 32-thread Ryzen 9 5900XT with an RTX 4070 SUPER. In the full operations sweep, listing GPUs on the starter scene took 187.3 ms in the command and 0.8 ms in the next frame. Switching the worldlike scene to a two-by-three layout took 57.5 ms in the next frame. The other 1,054 observations were within 50 ms.
@@ -4661,3 +4663,44 @@ At `68dafe59`, CPU orbit averaged 7.12 ms with the desktop defaults and 27.79 ms
 ## Low-end Linux VM profiles (round 640)
 
 The [four-profile report](perf/0622-low-end-vm.md) records native Linux CPU editor measurements under enforced CPU and RAM budgets and the limits of the device comparisons.
+
+## Round 642: mesh and object editing
+The [complex editing benchmark](perf/0624-mesh-editing.md) separates command latency from the
+follow-up frame and verifies the operation's geometry, selection and undo.
+
+## Round 643: Sculpt pointer workloads
+
+See [the Sculpt action inventory and checked pointer benchmark](perf/0625-sculpt.md) for the normal and single-CPU runs.
+
+## Round 645: export and assign a separate texture set
+
+On a 2048² four-layer surface, eliminating the duplicate set write saved 2.14 s with 32 workers and 2.54 s with two. A separate comparison measured an additional 195 / 178 ms saving on plain export from recognizing repeated PNG rows. All seven files matched between each pair. See [the workloads, controls and inventory](perf/0627-complex-texturing.md).
+
+## Round 646: Articulated animation and rigging
+
+The [animation and rigging workload report](perf/0628-animation.md) records control, humanoid and quadruped measurements, deformation checks and coverage limits.
+
+## Round 647: Complex viewport, path tracing, splats and camera output
+
+See the [round 647 measurements](perf/0629-rendering.md) for the workloads, controls, backend participation and output checks.
+
+## Round 648: whole-program complex tool survey
+
+The [Pass 36 survey](perf/0630-survey.md) and its [per-action register](perf/0630-inventory.tsv) link source names to workload checks, measurements and open gaps.
+
+## Round 649: Reference Board image duplication
+
+An 800×600 CPU viewport displayed a grid of 8×8 placements referencing one image. Five alternating baseline/candidate pairs per size measured the first frame after duplicating the selected items. The board now skips per-placement file canonicalization when its full-resolution export override table is empty.
+
+| Placements before → after | Previous median frame | New median frame |
+|---|---:|---:|
+| 2 → 4 | 0.6 ms | 0.3 ms |
+| 512 → 1,024 | 66.7 ms | 5.4 ms |
+
+## Round 650: single-control Noise Reduction
+
+On a 4096² image, skipping an inactive channel reduced Linux cold apply time for Luminance and Color. The Windows release candidate changed raw floating-point output, including with both controls enabled. The existing kernel remains in place. See [gesture, cache and output comparisons](perf/0632-single-control-noise.md).
+
+## Round 651: dense UV Reset redraw
+
+The [UV redraw measurements](perf/0633-uv-redraw.md) compare command-to-frame time and pane pixels across nine layouts, including a 4K offscreen control.

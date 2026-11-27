@@ -15708,6 +15708,119 @@ static void tests_round569() {
   });
 }
 
+/* ===================================================================== */
+/* Round 646 (task 0628): skin weight transfer with no holes to fill      */
+/* ===================================================================== */
+
+static void tests_round646() {
+  test("round 646: Transfer Weights copies every group from the surface and keeps the target's custom groups", [] {
+    Mesh source;
+    source.add_vert({0, 0, 0});
+    source.add_vert({8, 0, 0});
+    source.add_vert({0, 8, 0});
+    source.add_face({0, 1, 2});
+    source.vertex_groups = {{"Low", {1.0f, 0.0f, 0.0f}}, {kInpaintMask, {1.0f, 1.0f, 1.0f}},
+                            {"High", {0.0f, 0.5f, 1.0f}}, {"Side", {0.0f, 0.5f, 0.0f}}, {"Zero", {0.0f, 0.0f, 0.0f}}};
+    Mesh target;
+    target.add_vert({2, 1, 0.0625f});
+    target.add_vert({4, 2, 0.0625f});
+    target.add_vert({1, 4, 0.0625f});
+    // Start the face at a different corner so the transfer finds surface points instead of reusing vertex indices.
+    target.add_face({1, 2, 0});
+    target.vertex_groups = {{"Custom", {0.125f, 0.25f, 0.75f}}, {"High", {1.0f, 1.0f, 1.0f}}, {kInpaintMask, {0.5f, 0.0f, 0.25f}}};
+    const std::vector<VertexGroup> original = target.vertex_groups;
+    // Each target's projection lies inside the triangle. Its barycentric weights are 1 - (x+y)/8, x/8 and y/8.
+    const std::vector<VertexGroup> expected = {{"Custom", original[0].weights}, {"High", {0.25f, 0.5f, 0.5625f}},
+                                               {kInpaintMask, original[2].weights}, {"Low", {0.625f, 0.25f, 0.375f}},
+                                               {"Side", {0.125f, 0.25f, 0.0625f}}, {"Zero", {0.0f, 0.0f, 0.0f}}};
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{true};
+    InpaintOptions opts;
+    opts.progress = &progress;
+    opts.cancel = &cancel;
+    InpaintReport report;
+    report.known = 17;
+    std::string err;
+    CHECK(!transfer_skin_weights(source, target, opts, &report, &err));
+    CHECK(progress.load() == 0.02f && report.known == 17 && err.empty());
+    CHECK(target.vertex_groups.size() == original.size());
+    for (size_t g = 0; g < std::min(target.vertex_groups.size(), original.size()); g++) {
+      CHECK(target.vertex_groups[g].name == original[g].name);
+      CHECK(target.vertex_groups[g].weights == original[g].weights);
+    }
+
+    cancel.store(false);
+    CHECK(transfer_skin_weights(source, target, opts, &report, &err));
+    CHECK(err.empty() && progress.load() == 1.0f);
+    CHECK(report.known == 3 && report.inpainted == 0 && report.fallback == 0 && report.groups == 3);
+    CHECK(std::string(report.solver).empty() && report.converged && report.ms >= 0.0);
+    CHECK(target.vertex_groups.size() == expected.size());
+    for (size_t g = 0; g < std::min(target.vertex_groups.size(), expected.size()); g++) {
+      const VertexGroup &got = target.vertex_groups[g];
+      CHECK(got.name == expected[g].name);
+      CHECK(got.weights == expected[g].weights);
+    }
+
+    if (target.find_group(kInpaintMask) < 0) return;
+    target.vertex_groups[(size_t)target.find_group(kInpaintMask)].weights = {1.0f, 1.0f, 1.0f};
+    progress.store(0.0f);
+    CHECK(!transfer_skin_weights(source, target, opts, &report, &err));
+    CHECK(err.find("no vertex lies near the source") != std::string::npos && progress.load() == 0.0f);
+    CHECK(report.known == 3 && r81_weight(target, "High", 2) == 0.5625f);
+  });
+
+  test("round 646: inpainting preserves trusted weights at float precision and counts only groups above the cutoff", [] {
+    Mesh mesh;
+    mesh.add_vert({0, 0, 0});
+    mesh.add_vert({1, 0, 0});
+    mesh.add_vert({0.5f, 1, 0});
+    mesh.add_vert({2, 2, 2});  // A loose vertex can also be trusted.
+    mesh.add_face({0, 1, 2});
+    const float cutoff = 1e-12f;
+    const std::vector<std::vector<float>> before = {{0.18750001f, 0.33333334f, 0.0f, 0.375f}, {-0.25f, 1.125f, 0.0f, 0.125f},
+                                                    {cutoff, std::nextafter(cutoff, 0.0f), 0.0f, 0.0f},
+                                                    {0.0f, std::nextafter(cutoff, 1.0f), 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f},
+                                                    {-0.25f, -0.5f, -0.125f, -0.75f}};
+    std::vector<std::vector<float>> weights = before;
+    const std::vector<uint8_t> known = {1, 2, 255, 128};
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false};
+    InpaintOptions opts;
+    opts.progress = &progress;
+    opts.cancel = &cancel;
+    opts.smooth = 2;
+    InpaintReport report;
+    std::string err;
+    CHECK(skinweights::inpaint(mesh, known, weights, true, opts, &report, &err));
+    CHECK(err.empty() && progress.load() == 1.0f);
+    CHECK(report.known == 4 && report.inpainted == 0 && report.fallback == 0 && report.groups == 3);
+    CHECK(std::string(report.solver).empty() && report.converged && report.ms >= 0.0);
+    CHECK(weights == before);
+
+    CHECK(skinweights::inpaint(mesh, {1, 0, 1, 0}, weights, false, opts, &report, &err));
+    CHECK(err.empty() && progress.load() == 1.0f);
+    CHECK(report.known == 2 && report.inpainted == 1 && report.fallback == 1 && report.groups == 2);
+    CHECK(*report.solver && report.converged && report.ms >= 0.0);
+    for (size_t g = 0; g < before.size(); g++) {
+      CHECK(weights[g][0] == before[g][0] && weights[g][2] == before[g][2] && weights[g][3] == before[g][3]);
+    }
+    CHECK(weights[0][1] > 0.0f && weights[0][1] < before[0][0]);
+
+    weights = before;
+    progress.store(0.0f);
+    CHECK(skinweights::inpaint(mesh, {0, 0, 0, 0}, weights, true, opts, &report, &err));
+    CHECK(err.empty() && progress.load() == 1.0f);
+    CHECK(report.known == 0 && report.inpainted == 0 && report.fallback == 4 && report.groups == 3);
+    CHECK(std::string(report.solver).empty() && report.converged && weights == before);
+
+    cancel.store(true);
+    progress.store(0.0f);
+    report.known = 17;
+    CHECK(!skinweights::inpaint(mesh, known, weights, true, opts, &report, &err));
+    CHECK(err.empty() && progress.load() == 0.02f && report.known == 17 && weights == before);
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -15759,4 +15872,5 @@ void run_animation_tests() {
   tests_round521();
   tests_round522();
   tests_round569();
+  tests_round646();
 }
