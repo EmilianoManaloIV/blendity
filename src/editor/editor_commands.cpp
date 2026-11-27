@@ -18,6 +18,7 @@
 #include "../research/research.h"
 #include "../scene/pointcloud_object.h"  // (round 530: `pointcloud`)
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -198,6 +199,8 @@ struct SetFieldReflector : Reflector {
   std::string target;              // pass 2: the field to set
   bool done = false;
   bool all = true;  // every field, or only the ones shown (matset: a toon field reaches toon materials only)
+  bool check_view_transform = false;
+  bool view_transform_unavailable = false;
   bool all_fields() const override { return all; }
   bool hit(const char *n) {
     if (target.empty()) {
@@ -235,12 +238,29 @@ struct SetFieldReflector : Reflector {
   void color(const char *n, Vec3 &v) override { field(n, v); }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
     if (!hit(n)) return;
+    const std::string choice = field_key(value);
     for (int k = 0; k < count; k++)
-      if (field_key(opts[k]).rfind(field_key(value), 0) == 0 && !field_key(value).empty()) {
+      if (!choice.empty() && field_key(opts[k]).rfind(choice, 0) == 0) {
         v = k;
         return;
       }
-    if (!value.empty() && std::isdigit((unsigned char)value[0])) v = std::max(0, std::min(count - 1, std::atoi(value.c_str())));
+    if (!check_view_transform || std::strcmp(n, "View Transform") != 0) {
+      if (!value.empty() && std::isdigit((unsigned char)value[0]))
+        v = std::max(0, std::min(count - 1, std::atoi(value.c_str())));
+      return;
+    }
+    unsigned index = 0;
+    const char *const begin = value.data();
+    const char *end = begin + value.size();
+    while (end != begin && std::isspace((unsigned char)end[-1])) --end;
+    const auto parsed = std::from_chars(begin, end, index);
+    if (parsed.ptr == end && parsed.ec == std::errc()) {
+      v = (int)std::min(index, (unsigned)(count - 1));
+    } else if (parsed.ptr == end && parsed.ec == std::errc::result_out_of_range) {
+      v = count - 1;
+    } else {
+      view_transform_unavailable = true;
+    }
   }
   void text(const char *n, std::string &v) override {
     if (hit(n)) v = value;
@@ -297,6 +317,7 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
       }
   if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
   reflect(sr);
+  if (sr.view_transform_unavailable) return false;
   if (sr.done) edit_epoch::bump();  // (round 435, ADR 0115: a field set by name is an edit the views must see)
   if (sr.bad) Log::warn("set %s: '%s' isn't a number (a number, or +=1, *=2 from its own value)", sr.target.c_str(), sr.value.c_str());
   return sr.done && !sr.bad;
@@ -921,7 +942,15 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
   sr.value = value;
   auto apply = [&](const std::function<void(Reflector &)> &reflect) { return set_field_on(sr, reflect); };
   int n = 0;
-  if (owner == "render") n += apply([&](Reflector &r) { scene_->render.reflect(r); });
+  if (owner == "render") {
+    sr.check_view_transform = true;
+    n += apply([&](Reflector &r) { scene_->render.reflect(r); });
+    if (sr.view_transform_unavailable) {
+      Log::warn("Render View Transform '%s' is unavailable. Render settings list the available views. "
+                "OpenColorIO views require a loaded configuration.", value.c_str());
+      return false;
+    }
+  }
   else if (owner == "world") n += apply([&](Reflector &r) { scene_->environment.reflect(r); });
   else if (owner == "lighting") n += apply([&](Reflector &r) { scene_->lighting.reflect(r); });
   else

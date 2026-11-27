@@ -7,6 +7,7 @@
 #include "../src/core/view_perf.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
+#include "../src/render/colormanagement.h"
 #include "../src/scene/budget.h"
 #include "../src/scene/unity_package.h"
 #include "../src/texture/smart_material.h"
@@ -17270,6 +17271,63 @@ static void tests_round653_flip_rotate() {
   });
 }
 
+static void tests_round657_view_transform() {
+  test("round 657: the console explains an unavailable Render view transform and keeps the current setting", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.clear_scene_dirty_for_test();
+    ed.command("set Render.ViewTransform ACES (built-in)");
+    CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::ACES));
+    CHECK(ed.scene_dirty_for_test());
+
+    const auto reject = [&](const std::string &requested) {
+      const int transform = ed.scene().render.view_transform;
+      const bool dirty = ed.scene_dirty_for_test();
+      const size_t undo_steps = ed.undo_steps_for_test();
+      const size_t before = r468_log_mark();
+      ed.command("set Render.ViewTransform " + requested);
+      std::vector<LogEntry> entries;
+      Log::fetch(before, entries);
+      CHECK(std::any_of(entries.begin(), entries.end(), [&](const LogEntry &entry) {
+        return entry.level == LogLevel::Warning && entry.text.find("View Transform") != std::string::npos &&
+               entry.text.find(requested) != std::string::npos && entry.text.find("unavailable") != std::string::npos;
+      }));
+      CHECK(ed.scene().render.view_transform == transform);
+      CHECK(ed.scene_dirty_for_test() == dirty);
+      CHECK(ed.undo_steps_for_test() == undo_steps);
+    };
+
+    reject("Missing Test Transform");
+    ed.clear_scene_dirty_for_test();
+    reject("Missing Test Transform");
+    reject("35mm Film");
+    reject("999999999999999999999999 Film");
+
+    const int agx = colormanagement::view_index("AgX");
+    if (agx < 0) {
+      reject("AgX");
+    } else {
+      ed.command("set Render.ViewTransform AgX");
+      const auto expected = static_cast<ViewTransform>(static_cast<int>(ViewTransform::OcioView) + agx);
+      CHECK(ed.scene().render.view_transform == view_transform_setting(expected));
+      CHECK(ed.scene_dirty_for_test());
+    }
+
+    ed.clear_scene_dirty_for_test();
+    ed.command("set Render.ViewTransform 0 \t ");
+    CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::Standard));
+    CHECK(ed.scene_dirty_for_test());
+
+    for (const char *index : {"999", "999999999999999999999999"}) {
+      ed.command("set Render.ViewTransform 0");
+      ed.clear_scene_dirty_for_test();
+      ed.command(std::string("set Render.ViewTransform ") + index);
+      CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::AcesFull));
+      CHECK(ed.scene_dirty_for_test());
+    }
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -17390,5 +17448,6 @@ void run_editor_tests() {
   tests_round622_editor();
   tests_round639_paint_undo();
   tests_round653_flip_rotate();
+  tests_round657_view_transform();
   coverage_tests();
 }
