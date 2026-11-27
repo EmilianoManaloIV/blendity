@@ -67,6 +67,7 @@ class Link {
   /* Once a frame, on the main thread: new clients get the whole scene, every client what changed since the last
    * comparison (at most every 1/60 s). Nothing at all happens while no client is connected. */
   void tick(Scene &scene, bool playing, double now_s);
+  void note_surface_paint(const std::string &asset, double now_s);
 
   /* Round 398: the scene's Light Volume bakes (Blendity's, by object id) and their generation - a new number when they
    * change; a volume with Bake in Blendity on sends its bake when the generation moves. Not owned. */

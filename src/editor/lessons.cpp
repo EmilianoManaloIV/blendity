@@ -1130,11 +1130,12 @@ Round 411 wrote down a promise - no frame over 50 ms while a job runs, no single
 ! cmd:perf status | This frame's parts and the jobs running
 ? How many of the suite's responsiveness rows broke the budget before Pass 16, and how many after? | 21 of 38 before, 4 after: Edit Mode entry at 500k faces on the CPU, the OBJ and USDA imports' landing frames and one Generate Lighting frame.
 # Quality tiers: a small machine
-Blendity's views are drawn by the CPU, so their cost follows the cores and the pixels. Preferences > Performance > Quality tier picks a set of limits for the editor's views (never for F12 renders): Low draws the Scene and Game views' 3D at 67 % and scales it up (lines, gizmos and text stay sharp, and clicks still pick exactly), with a 1024 shadow map, lighter Realtime GI and 60 fps; Medium is 85 %; High has no limits. A first run on a machine with 8 threads or fewer, or about 8 GB, starts on Low. CPU Threads sets how many threads Blendity works on, which also lets a big machine feel like a small one.
+On the CPU, drawing the views costs more as the pixel count rises. Preferences > Performance > Quality tier sets limits for the editor's views. Low sets Viewport Resolution Scale to 67 %, with a 1024 shadow map, lighter Realtime GI and a 60 fps cap. Medium sets the scale to 85 % and High to 100 %. The software rasterizer can draw the 3D picture smaller and scale it up while lines, gizmos and text stay sharp and clicks still pick exactly. F12 renders use the scene's settings. A first run on a machine with 8 threads or fewer, or about 8 GB, starts on Low. CPU Threads sets how many threads Blendity works on, which also lets a big machine feel like a small one.
 | Tier | Views | Shadow map | Realtime GI | Frame cap
 | Low | 67 % | 1024 | 4 rays | 60
 | Medium | 85 % | 2048 | 8 rays | 120
 | High | 100 % | the scene's | the scene's | 144
+To switch while editing, open the command palette and search for "low viewport quality", "medium viewport quality" or "high viewport quality". Press Enter to apply the selected tier.
 Two more tricks keep a small machine smooth. Cached shadows: while one object is dragged, the objects that stay still keep a shadow map of their own and only the moving one is drawn over a copy of it. The sky last: the background is drawn after the surfaces, only where none landed.
 ! cmd:quality low | Switch to the Low tier (watch the views soften slightly)
 ! cmd:quality high | Back to High

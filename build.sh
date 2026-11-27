@@ -98,8 +98,13 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -n "$LIBDIR" ] && [ -d "$LIBDIR/tbb/inclu
   elif [ -n "$FFL" ]; then
     LIBLINK="$LIBLINK -ldl -lm"
   fi
-  # GPU rendering: Vulkan headers (the loader comes with the GPU driver, opened at run time) and shaderc.
-  [ -d "$LIBDIR/vulkan/include" ] && addlib shaderc BL_WITH_VULKAN "shaderc/include vulkan/include" "shaderc/lib/libshaderc_combined.a"
+  # GPU rendering needs both public headers and the shaderc archive. The Vulkan loader comes with the driver.
+  SHADERC_A="shaderc/lib/libshaderc_combined.a"
+  if [ -f "$LIBDIR/vulkan/include/vulkan/vulkan.h" ] &&
+     [ -f "$LIBDIR/shaderc/include/shaderc/shaderc.h" ] &&
+     [ -f "$LIBDIR/$SHADERC_A" ]; then
+    addlib shaderc BL_WITH_VULKAN "shaderc/include vulkan/include" "$SHADERC_A"
+  fi
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
   LIBLINK="$LIBLINK $LIBDIR/tbb/lib/libtbb.$SOEXT"
   # Round 419 (ADR 0112): the allocator - BLENDITY_ALLOCATOR=system (the default on Linux and macOS: oneTBB's

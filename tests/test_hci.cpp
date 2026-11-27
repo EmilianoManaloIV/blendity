@@ -1551,6 +1551,15 @@ void run_hci_tests() {
       ed.step_frame_headless({e});
       ed.step_frame_headless();
     }
+    static void type(Editor &ed, const std::string &value) {
+      std::vector<platform::Event> text;
+      for (const char c : value) {
+        platform::Event e = ev(ET::Text, 5, 5);
+        e.codepoint = c;
+        text.push_back(e);
+      }
+      ed.step_frame_headless(text);
+    }
     static void settle(Editor &ed, int n = 3) {
       for (int i = 0; i < n; i++) ed.step_frame_headless();
     }
@@ -4242,4 +4251,156 @@ void run_hci_tests() {
   tests_round559_layout();
   tests_round570_adjust_key();
   tests_round573();
+
+  test("hci: viewport quality is searchable by keyboard in Unity and Blender, and leaves render settings and undo intact (round 635)", [] {
+    struct Preset {
+      const char *name;
+      int palette_key;
+      int mods;
+    };
+    struct Quality {
+      const char *query;
+      Editor::QualityTier tier;
+      float scale;
+    };
+    const Quality low{"low viewport", Editor::TierLow, 0.67f};
+    const Quality medium{"medium quality", Editor::TierMedium, 0.85f};
+    const Quality high{"high viewport", Editor::TierHigh, 1.0f};
+
+    for (const Preset &preset : {Preset{"Unity", platform::KEY_K, platform::MOD_CTRL}, Preset{"Blender", platform::KEY_F3, 0}}) {
+      Editor ed;
+      ed.init_headless(1024, 640);
+      ed.command(std::string("keymap ") + preset.name);
+      CHECK(ed.keymap_preset_name() == preset.name);
+      ed.command("viewscale 73");
+      ed.scene().render.width = 832;
+      ed.scene().render.percent = 90;
+      ed.scene().render.samples = 31;
+      ed.scene().render.shadow_resolution = 1536;
+      ed.mark_changed_for_test("Set render options");
+      Kb::settle(ed);
+      auto render_settings = [&] { return reflect_to_json([&](Reflector &r) { ed.scene().render.reflect(r); }); };
+      const std::string before_render = render_settings();
+      const size_t before_edit = ed.undo_depth_for_test();
+      const size_t before_objects = ed.scene().object_count();
+      ed.command("create Sphere");
+      Kb::settle(ed);
+      const size_t after_edit = ed.undo_depth_for_test();
+      CHECK(after_edit == before_edit + 1);
+      CHECK(ed.scene().object_count() == before_objects + 1);
+      // Creation selects the new sphere. The default scene already has a sphere named Sphere.
+      const GameObject *created = ed.active_object_for_test();
+      CHECK(created != nullptr);
+      if (!created) continue;
+      const uint64_t created_id = created->id;
+
+      auto search = [&](const char *query) {
+        Kb::key(ed, preset.palette_key, preset.mods);
+        CHECK(ed.ui_for_test().any_popup_open());
+        Kb::type(ed, query);
+      };
+      for (const Quality &quality : {low, medium, high}) {
+        const int prior_tier = ed.quality_tier();
+        search(quality.query);
+        CHECK(ed.quality_tier() == prior_tier);
+        Kb::key(ed, platform::KEY_ENTER);
+        const bool closed = !ed.ui_for_test().any_popup_open();
+        std::printf("    %s '%s': tier %d, viewport scale %.0f%%, palette %s\n", preset.name, quality.query, ed.quality_tier(),
+                    ed.view_scale() * 100.0f, closed ? "closed" : "open");
+        CHECK(closed);
+        CHECK(ed.quality_tier() == quality.tier);
+        CHECK(std::fabs(ed.view_scale() - quality.scale) < 1e-6f);
+        CHECK(render_settings() == before_render);
+        CHECK(ed.undo_depth_for_test() == after_edit);
+        if (!closed) Kb::key(ed, platform::KEY_ESCAPE);
+      }
+
+      search(low.query);
+      Kb::key(ed, platform::KEY_ESCAPE);
+      CHECK(!ed.ui_for_test().any_popup_open());
+      CHECK(ed.quality_tier() == high.tier);
+      CHECK(std::fabs(ed.view_scale() - high.scale) < 1e-6f);
+      CHECK(render_settings() == before_render);
+      CHECK(ed.undo_depth_for_test() == after_edit);
+      CHECK(ed.scene().find(created_id) != nullptr);
+
+      Kb::key(ed, platform::KEY_Z, platform::MOD_CTRL);
+      CHECK(ed.scene().find(created_id) == nullptr);
+      CHECK(ed.scene().object_count() == before_objects);
+      CHECK(ed.undo_depth_for_test() == before_edit);
+      CHECK(render_settings() == before_render);
+      CHECK(ed.quality_tier() == high.tier);
+    }
+  });
+
+  test("hci: Learn teaches how to find and apply the three viewport quality presets (round 635)", [] {
+    for (int i = 0; i < lesson_count(); i++) {
+      const Lesson &entry = lesson(i);
+      if (std::string(entry.title) != "Performance and Stress Testing") continue;
+      const std::string body = entry.body;
+      CHECK(body.find("command palette") != std::string::npos);
+      CHECK(body.find("low viewport quality") != std::string::npos);
+      CHECK(body.find("medium viewport quality") != std::string::npos);
+      CHECK(body.find("high viewport quality") != std::string::npos);
+      CHECK(body.find("Press Enter") != std::string::npos);
+      return;
+    }
+    CHECK(false && "Performance and Stress Testing lesson missing");
+  });
+
+  test("hci: a saved quality shortcut and Quick Favorite still work alongside the viewport preset names (round 635)", [] {
+    using ET = platform::EventType;
+    const std::string prefs = fs::join(test_dir(), "r635-quality-prefs.txt");
+    // The old editor saved the console command as the user action's label and the favorite's name.
+    const bool saved = fs::write_file(prefs, "workspace=Default\nkeymap_preset=Unity\nquality_tier=2\n"
+                                            "useraction=user.1|quality low|quality low\n"
+                                            "keymap=user.1=Ctrl+Alt+L\nfavorites=Default|quality low\n");
+    CHECK(saved);
+    if (!saved) return;
+    Editor ed;
+    ed.init_headless(1024, 640);
+    ed.prefs_for_test(prefs);
+    ed.load_prefs_for_test();
+    ed.record_buttons_for_test(true);
+    Kb::settle(ed);
+    CHECK(ed.quality_tier() == Editor::TierHigh);
+
+    Kb::key(ed, platform::KEY_Q, platform::MOD_SHIFT);
+    const Recti row = Kb::button_named(ed, "menu:quality low");
+    CHECK(!row.empty());
+    CHECK(ed.menu_shortcut_for_test("quality low") == "Ctrl+Alt+L");
+    if (!row.empty()) {
+      for (const ET event : {ET::MouseMove, ET::MouseDown, ET::MouseUp})
+        ed.step_frame_headless({ev(event, row.x + row.w / 2, row.y + row.h / 2)});
+    }
+    CHECK(ed.quality_tier() == Editor::TierLow);
+    CHECK_NEAR(ed.view_scale(), 0.67f, 1e-6f);
+    CHECK(!ed.ui_for_test().any_popup_open());
+    if (ed.ui_for_test().any_popup_open()) Kb::key(ed, platform::KEY_ESCAPE);
+
+    ed.command("quality high");
+    Kb::key(ed, platform::KEY_L, platform::MOD_CTRL | platform::MOD_ALT);
+    CHECK(ed.quality_tier() == Editor::TierLow);
+
+    const auto by_command = ed.palette_names_for_test("quality low");
+    const auto by_label = ed.palette_names_for_test("low viewport");
+    CHECK(!by_command.empty() && by_command.front() == "quality low");
+    CHECK(!by_label.empty() && by_label.front() == "Low Viewport Quality");
+    for (const char *query : {"quality low", "low viewport"}) {
+      ed.command("quality high");
+      Kb::key(ed, platform::KEY_K, platform::MOD_CTRL);
+      Kb::type(ed, query);
+      Kb::key(ed, platform::KEY_ENTER);
+      CHECK(ed.quality_tier() == Editor::TierLow);
+      CHECK(!ed.ui_for_test().any_popup_open());
+      if (ed.ui_for_test().any_popup_open()) Kb::key(ed, platform::KEY_ESCAPE);
+    }
+
+    ed.command("shortcut Ctrl+Alt+M Medium Viewport Quality");
+    Kb::key(ed, platform::KEY_M, platform::MOD_CTRL | platform::MOD_ALT);
+    CHECK(ed.quality_tier() == Editor::TierMedium);
+    Kb::key(ed, platform::KEY_L, platform::MOD_CTRL | platform::MOD_ALT);
+    CHECK(ed.quality_tier() == Editor::TierLow);
+    std::remove(prefs.c_str());
+  });
 }

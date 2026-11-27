@@ -4561,3 +4561,103 @@ In the 60-frame Shaded `scene_views` drag, checking which Vulkan instance rows h
 ## Raspberry Pi 5 editing assessment (round 596)
 
 See [the Pi 5 assessment](perf/0578-pi5-baseline.md) and [the physical-board acceptance procedure](perf/0578-pi5-acceptance.md) for the 720p editing workload, frame and memory budgets, and Vulkan requirements.
+
+## Round 610: filtered camera lighting in Play
+
+A Vulkan filtered camera can evaluate opaque lighting once for both display colour and linear light. In three within-process trials of the baked `avatarworld` Play scene, this reduced median editor frame time by 5.1–8.2%. Each trial interleaved 160 frames per path. Median frames on the RTX 4070 SUPER changed from 24.82 to 22.78 ms and from 24.59 to 22.69 ms on repeat. On the RTX 3060 Ti they changed from 16.20 to 15.38 ms. The 95th-percentile frame time also improved on both cards. Four separate whole-program runs recorded substantial GPU power-state variation and gave no consistent speedup. See the individual runs, controls and image-parity results in [task 0592](tasks/0592-filtered-camera-lighting.md).
+
+## CPU scheduling under inherited Linux affinity (round 613)
+
+On a 32-CPU x86-64 host the built-in scheduler test process peaked at 32 threads when restricted to either one CPU or a noncontiguous pair. With affinity-aware sizing the corresponding peaks were one and two. Both builds peaked at 32 when unrestricted. Each observation repeated three times. A native four-vCPU ARM64 build also respected one-, two- and four-CPU masks, rendered a 720p CPU image and passed 4,102 editor/input checks. [Task and test evidence](tasks/0595-cpu-affinity.md)
+
+## Round 614: reuse uploaded transparent corners
+
+When a Vulkan view reuses its sorted transparent corners, it can keep the device buffer by comparing generations. In four matched RTX 4070 SUPER posing runs, eligible rows reduced corner writer time from 0.31–0.63 ms per card frame to under 0.005–0.08 ms. End-to-end results varied across rows. The interleaved follow-up stayed within the predeclared median and p95 margins. A fixed-clock replay matched the Rigging clip's full workload and both clips' raster work in every pair. Asynchronous Live Link mesh and deform sends varied, limiting that row's whole-frame comparison. [Task 0596](tasks/0596-transparent-corner-reuse.md) records the timings, shader and power-state checks, and workload counts.
+
+## Round 615: gzip SPZ inflate memory
+
+Median of five paired fresh-process samples on x86-64 WSL 2 with four job threads and GCC 15.2. The synthetic
+SPZ v3 file contains 1,000,000 splats at SH degree 3 and expands from 60,773,370 to 65,000,016 bytes.
+
+| Stage | Peak RSS before | Peak RSS after | Time before | Time after |
+| --- | ---: | ---: | ---: | ---: |
+| Gzip inflate, compressed input preloaded | 187.06 MiB | 125.14 MiB | 266.02 ms | 205.04 ms |
+| Complete SPZ file import | 350.43 MiB | 350.40 MiB | 469.68 ms | 430.81 ms |
+
+The full import still holds the decompressed data while building the cloud. Full-import times overlapped
+across runs. The task spec records the ranges and measurement method.
+
+## Round 617. Existing Textures library in a fresh process
+
+At 1600 × 900 with CPU viewport rendering, the median first open of an existing 2,000-texture library fell from 334.5 to 169.0 ms at default parallelism and from 351.0 to 244.7 ms with a parallelism ceiling of two. Three matched fresh processes per build at each limit used the same nested fixture. The OS file cache was uncontrolled and potentially warm. Following frames and same-process reopens took 3.5–3.9 ms. First open still exceeded the 100 ms budget. Independent checks verified the visible names and count, case-insensitive search, stable selection, and thumbnail pixels. [Task 0599](tasks/0599-cold-textures.md)
+
+## Round 619: Legacy SPZ full-import memory
+
+Five paired fresh processes per CPU count on dependency-free x86-64 WSL 2 with GCC 15.2 at `-O2`.
+Both revisions imported the same 60.77 MB synthetic SPZ v3 file with one million SH degree 3 splats.
+
+| Permitted CPUs | Baseline peak RSS | Candidate peak RSS | Baseline elapsed | Candidate elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| 4 | 350.46 MiB | 292.56 MiB | 473.42 ms | 417.94 ms |
+| 2 | 350.38 MiB | 292.51 MiB | 468.15 ms | 461.83 ms |
+
+Values are medians. The candidate releases the compressed input before allocating decoded attributes.
+All six output arrays had matching element counts and digests in every run. The task spec records the
+paired differences and elapsed ranges.
+
+## Round 620: Baked-corner arena growth
+
+On an RTX 4070 SUPER with an emulated integrated profile, a 48-triangle scene reserved 1 MiB at first growth, down from 64 MiB. The 640,012-triangle scene used one growth allocation and copied 1,152 bytes in each version. Its upload-frame p95 was 5.84 ms before and 6.14 ms after. Progressive growth to 60,012 triangles used four allocations and copied 6,724,608 bytes. Its upload-frame p95 was 17.17 ms, up from 4.82 ms. All 24 before-and-after pairs matched display, depth and IDs. The native discrete policy kept its growth sizes.
+
+## Round 621: Single-segment bevel of a 50k-face sphere
+
+Applying the Bevel modifier to every edge of the sphere took 439.6 ms median on the Windows release build, down from 574.0 ms. With one logical CPU the median fell from 537.9 to 452.3 ms. Peak working set fell by roughly 18 MiB in each configuration. The candidate was faster in all 16 paired measurements. The topology and mesh attributes matched the reference, including after adjusting the operation with F9 and using Undo. [Task 0603](tasks/0603-single-segment-bevel.md)
+
+## Round 622: Moving one object in a 50k-object scene
+
+On the Windows RTX 4070 SUPER, matched shaded drags fell from 244.10 to 220.75 ms median and from 285.48 to 245.18 ms p95. The collector reserved 22,120,920 bytes for the draw list immediately after a warm miss, down from 44,241,840 bytes. The 50k two-view control changed from 108.29 to 108.39 ms p95. At 10k objects, the pooled drag p95 fell slightly while both individual launch orders showed a small increase. [Task 0604](tasks/0604-moving-scene-collection.md)
+
+## Round 623: Windows Textures directory discovery
+
+The median first usable frame with a complete 2,000-texture library took 123.2 ms at default parallelism (177.6 ms before) and 193.4 ms with two workers (242.6 ms before). The round removes 2,000 extra Windows attribute queries during discovery. Both settings remain above the 100 ms target. The median next frame took 3.7 and 3.8 ms respectively. The fresh-process CPU viewport runs used an uncontrolled OS file cache. [Task 0605](tasks/0605-cold-texture-directory.md)
+
+## Round 629: First CPU splat acceleration build
+
+Five fresh process pairs per shape and backend prepared one million splats on x86-64 WSL using GCC 15.2 and two distinct cores of a Ryzen 9 5900XT. Peak figures are median process RSS through the first build, including the input cloud.
+
+| Visible splats | CPU backend | Baseline peak | Candidate peak |
+| ---: | --- | ---: | ---: |
+| 1,000,000 | Built-in | 363.90 MiB | 321.31 MiB |
+| 984,375 | Built-in | 362.22 MiB | 340.29 MiB |
+| 1,000,000 | Embree | 413.96 MiB | 413.93 MiB |
+| 984,375 | Embree | 410.85 MiB | 410.82 MiB |
+
+The largest reduction came from applying the built-in hierarchy's leaf permutation without a second full array. With only 15,625 visible splats, process peak changed negligibly on either backend. The benchmark exercised CPU builds and ray queries; physical Raspberry Pi measurements remain open.
+
+## Round 630: Textures preview latency on two cores
+
+In five matched Windows runs on two distinct cores, first scroll into unseen textures improved from 56.6 to 53.0 ms and warm reopen from 3.6 to 1.7 ms for a 2,000-asset library. A cold open's median fell from 193.5 to 189.0 ms, with two slower pairs. At desktop concurrency, cold open improved from 119.7 to 89.2 ms and first scroll from 41.3 to 9.8 ms. The measured working set after first scroll increased 0.1 MB on two cores and 4.6 MB at desktop concurrency. Panel pixels and full-size export PNGs matched the integration baseline. [Task 0612](tasks/0612-texture-preview.md)
+
+## Round 631: CPU shadow memory after lowering the quality tier
+
+In a generated sun-lit scene at 1280 × 720, the baseline retained 20 MiB of CPU shadow depth after switching from High to Low. The candidate retained 4 MiB at the same checkpoint in single and split views. The first caster edit used 12 MiB versus 28 MiB. A Low launch kept the same cache build counts. Returning immediately to High rebuilt one completed map. Across six paired runs on two physical desktop cores, settled process working set fell 15.57–16.35 MiB. The immediate return to High took 3.68–7.99 ms longer. The 16-edit median changed by at most 0.19 ms, and lifetime peak memory showed no consistent change. The active depths and both view images matched. See [task 0613](tasks/0613-low-tier-shadow-cache.md) for the measurements and controls.
+
+## Round 632: Recalculate Normals
+
+On the Ryzen 9 5900XT with one logical processor on each of two physical cores and two workers, Recalculate Normals on the 2.10M-face solidified mesh took 436.1 ms before and 290.2 ms after (medians). The three pairs saved 132.3, 145.9 and 153.3 ms against 2.5 ms between identical baseline runs. At full affinity with 32 workers the arm medians were 450.7 and 309.9 ms. All three pairs also improved on the 33.5k and 527.4k controls at both affinities. The largest row remains above the 100 ms modeling target. The stress timer covers the mesh operation invoked by Edit Mode. [Fixtures, controls and complete measurements](tasks/0614-recalculate-normals.md)
+
+## Round 633: Importing binary point-cloud PLY files from disk
+
+On a generated 236.5 MiB, million-point degree-3 PLY, bounded disk reads reduced the dependency-free Windows import peak from 470.6 to 242.0 MiB on two physical cores and from 470.7 to 242.1 MiB on four. Through the headless editor import and a subsequent frame, peak working set fell from 491.8 to 322.9 MiB and from 492.0 to 322.6 MiB, respectively. Median editor elapsed times changed from 751 to 708 ms and from 621 to 572 ms. Task 0615 records the five-pair ranges, the wide-record case, small-file timings and the warm file-cache method.
+
+## Round 636: CPU live procedural close-ups
+
+The live evaluator prepares the layer order for stacks without a remapper once per snapshot, including the shorter order for height samples. For the 1080p Bricks close-up, the median paired live-frame saving was 6.73% on two physical cores and 8.03% at normal Windows affinity. Median live/image ratios fell to 2.63× and 2.58×. Both remain over the 2× target. Task 0618 records the exact frame, memory and baseline-only controls.
+
+## Pass 35: representative editor and stress measurements
+
+At `68dafe59`, CPU orbit averaged 7.12 ms with the desktop defaults and 27.79 ms with a two-thread job-system cap. Moving an object averaged 15.57 and 58.38 ms. Unpacking a generated 100-object Unity package synchronously and drawing the following headless frame took 494.1 ms. The complete [Pass 35 survey](perf/0620-pass35-survey.md) gives fixture sizes, CPU and card paths, first-use costs and exclusions.
+
+## Low-end Linux VM profiles (round 640)
+
+The [four-profile report](perf/0622-low-end-vm.md) records native Linux CPU editor measurements under enforced CPU and RAM budgets and the limits of the device comparisons.
