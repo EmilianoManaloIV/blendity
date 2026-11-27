@@ -1416,9 +1416,12 @@ size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<
       }
       poly = out;
     }
-    float a2 = 0;
-    for (size_t i = 0; i < poly.size(); i++) a2 += poly[i].x * poly[(i + 1) % poly.size()].y - poly[(i + 1) % poly.size()].x * poly[i].y;
-    return 0.5f * std::fabs(a2);
+    double twice_area = 0.0;
+    for (size_t i = 1; i + 1 < poly.size(); i++) {
+      const Vec2 a = poly[i] - poly[0], b = poly[i + 1] - poly[0];
+      twice_area += (double)a.x * b.y - (double)a.y * b.x;
+    }
+    return 0.5 * std::fabs(twice_area);
   };
   /* Round 503: only triangles whose boxes overlap along x are compared (a sweep over the boxes sorted by their low x, as zfight_pairs does), not every pair: a mesh of
    * a few hundred thousand triangles took minutes. The pair (i < j) is tested as it was. */
@@ -1438,7 +1441,8 @@ size_t overlapping_faces(const Mesh &m, float plane_dist, std::vector<std::pair<
     if (!coplanar) return;
     const Vec3 u = normalize(std::fabs(n[i].y) < 0.9f ? cross(Vec3(0, 1, 0), n[i]) : cross(Vec3(1, 0, 0), n[i])), v = cross(n[i], u);
     auto flat = [&](size_t t, int k) {
-      const Vec3 p = rm.positions[rm.indices[t * 3 + k]];
+      // Absolute projections lose small overlap areas as the faces move away from the origin.
+      const Vec3 p = rm.positions[rm.indices[t * 3 + k]] - a0;
       return Vec2(dot(p, u), dot(p, v));
     };
     Vec2 ti[3] = {flat(i, 0), flat(i, 1), flat(i, 2)};
