@@ -8,6 +8,9 @@ The visible controls passed for all 66 previously unexercised inventory keys und
 | --- | ---: | ---: | ---: |
 | Sky Sun Elevation | 49.00195° | 61.00195° | 57,600 |
 | Sky Sun Rotation | 147.52881° | 172.52881° | 36,265 |
+| Sun Disc | 8° | 18° | 1,692 |
+| Sun Disc Softness | 0.3 | 0.7 | 291 |
+| Sun Disc Color | 1, 0.95, 0.8 | white | 385 |
 | Ground Albedo | 0.3 | 0.7 | 57,600 |
 | Sun Lights Scene | enabled | disabled | 21,300 |
 | Spot Angle | 30° | 60° | 800 |
@@ -15,6 +18,8 @@ The visible controls passed for all 66 previously unexercised inventory keys und
 | Horizon Band Color | 0.95, 0.75, 0.6 | white | 9,162 |
 
 For both Sky angles the changed and original images exactly matched their respective console references. With a directional lamp active, both gestures still changed the saved angles and Undo restored them. The resulting renders differed by zero pixels. The independent audit checked 56 raw trials in the first batch. [Field snapshots and render comparisons](D:/Blendity-agent-scratch/pass38/0652/matrix1/results.json) · [Independent audit](D:/Blendity-agent-scratch/pass38/0652-independent/matrix1-audit.json)
+
+The Sun Disc trials aimed a camera at the gradient sun. Each change remained visible after reopening, and Undo restored the starting value. [Disc camera and renders](D:/Blendity-agent-scratch/pass38/0652/sundisc1/results.json)
 
 The first HDRI trial selected the visible **UV Grid (generated)** option. The scene retained `generated:UV Grid` across reopen. F12 reported a read failure for that name, and the two renders differed by zero pixels. Selecting a real asymmetric disk image changed all 57,600 pixels. Rotating that image by 45° changed 51,233. Task 0654 owns the generated-grid repair. [Generated versus disk audit](D:/Blendity-agent-scratch/pass38/0652-independent/hdri-audit.json) · [Disk controls](D:/Blendity-agent-scratch/pass38/0652/hdrifile1/results.json)
 
