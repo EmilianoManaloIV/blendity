@@ -18,7 +18,7 @@ One entry per round of requests, newest first: what was asked, what changed, and
 **Added (task 0630, ADR 0056)**
 - A searchable register of 5,871 source entries with per-action evidence and gaps. The survey measures selected-object edits, board redraw, imports and exports, and reconciles the six specialist rounds.
 
-**Checked:** All 40 creation cases, 14 mesh-format round trips, 49 persisted field changes and 50 window/configuration checks passed. The survey records failed checks alongside verified outcomes.
+**Checked:** All 40 creation cases, 14 mesh-format round trips, 49 persisted field changes and 50 window/configuration checks passed. The follow-up checked 75 Edit tools, 86 modes, 19 brushes and nine modifiers. Five failed checks remain individually documented.
 
 ## 2026-11-26 (round 647): Measure complex rendering and skip empty camera bloom
 
