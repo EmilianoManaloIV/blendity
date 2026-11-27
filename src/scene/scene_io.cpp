@@ -2038,7 +2038,8 @@ size_t forget_material_assets(const std::string &path_in) {
   return n;
 }
 
-size_t reload_foreign_materials(const std::string &under_in, std::vector<MaterialPtr> *changed_out, const std::set<std::string> *only) {
+size_t reload_foreign_materials(const std::string &under_in, std::vector<MaterialPtr> *changed_out, const std::set<std::string> *only,
+                                std::vector<MaterialPtr> *reread) {
   const std::string under = asset_key(under_in);
   if (!foreign_loader()) return 0;
   size_t changed = 0;
@@ -2057,6 +2058,7 @@ size_t reload_foreign_materials(const std::string &under_in, std::vector<Materia
     fresh.name = fs::stem(kv.first);
     if (!foreign_loader()(text, kv.first, fresh)) continue;
     fresh.name = fs::stem(kv.first), fresh.asset_path = kv.first, fresh.foreign = true;
+    if (reread) reread->push_back(e.m);  // historical copies can differ even when the library asset matches the file
     if (!stand_in && save_material_text(fresh) == save_material_text(*e.m)) continue;  // (read as before: nothing to tell its users)
     const uint64_t version = std::max(e.m->version, fresh.version) + 1;
     *e.m = fresh;

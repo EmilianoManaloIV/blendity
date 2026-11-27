@@ -2249,7 +2249,8 @@ size_t forget_material_assets(const std::string &path);
  * missing when the scene opened (relink_material_assets) is read from the file too once it is there and foreign.
  * Returns how many came out different (their versions go up; `changed` gets them); a file that is gone, or that the
  * loader no longer takes, leaves its material as it is. Main thread, as material_asset. */
-size_t reload_foreign_materials(const std::string &under = std::string(), std::vector<MaterialPtr> *changed = nullptr, const std::set<std::string> *only = nullptr);
+size_t reload_foreign_materials(const std::string &under = std::string(), std::vector<MaterialPtr> *changed = nullptr, const std::set<std::string> *only = nullptr,
+                                std::vector<MaterialPtr> *reread = nullptr);
 /* Round 485: `under` (a file or a folder) is on disk again - a package imported after its folder was deleted in this
  * session: the marks that said "deleted" for it, for anything inside it and for a folder it lies in are taken off, so
  * material_asset loads its files again. Returns how many marks went. */

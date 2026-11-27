@@ -11,6 +11,7 @@
 #include "../core/core.h"
 
 #include <chrono>
+#include <iterator>
 #include <thread>
 #include <unordered_map>
 
@@ -52,20 +53,32 @@ void Editor::visit_material_states(const std::function<void(Material &)> &visit)
 }
 
 size_t Editor::reread_unity_materials(const std::string &under) {
-  std::vector<MaterialPtr> changed;
-  reload_foreign_materials(under, &changed);
-  if (changed.empty()) return 0;
+  // The full read registers its own requests. Older requests for these paths
+  // must not apply to materials that an explicit import has since replaced.
+  auto &wanted = unity_gloss_wanted();
+  auto pending = std::move(wanted);
+  wanted.clear();
+  std::vector<MaterialPtr> reread;
+  const size_t changed = reload_foreign_materials(under, nullptr, nullptr, &reread);
   std::unordered_map<std::string, const Material *> fresh;
-  for (const MaterialPtr &m : changed) fresh[m->asset_path] = m.get();
+  for (const MaterialPtr &m : reread) fresh[m->asset_path] = m.get();
+  for (const auto &[guid, materials] : pending)
+    for (const auto &[path, provisional] : materials)
+      if (!fresh.count(path)) wanted[guid].emplace(path, provisional);
+  if (fresh.empty()) return 0;
+  if (gloss_job_)
+    for (auto &item : gloss_job_->items)
+      for (auto it = item.materials.begin(); it != item.materials.end();)
+        it = fresh.count(it->first) ? item.materials.erase(it) : std::next(it);
   visit_material_states([&](Material &m) {
     const auto it = fresh.find(m.asset_path);
     if (it != fresh.end() && &m != it->second) m = *it->second;
   });
   ui_.redraw = true;
-  return changed.size();
+  return changed;
 }
 
-size_t Editor::apply_measured_unity_gloss(const std::map<std::string, std::set<std::string>> &requests) {
+size_t Editor::apply_measured_unity_gloss(const std::map<std::string, std::map<std::string, float>> &requests) {
   struct Update { float provisional, measured; };
   std::unordered_map<std::string, Update> updates;
   std::set<Material *> visited;
@@ -102,9 +115,10 @@ void Editor::land_unity_gloss() {
   const std::shared_ptr<GlossJob> job = std::move(gloss_job_);
   ScopedTimer landing;
   std::map<std::string, std::string> lines;  // (a package folder: its new lines)
-  std::map<std::string, std::set<std::string>> asked;  // .mat path to measured texture GUIDs
+  std::map<std::string, std::map<std::string, float>> asked;  // .mat path to GUID and original roughness
   size_t measured = 0;
   for (const GlossJob::Item &it : job->items) {
+    if (it.materials.empty()) continue;  // a full reimport superseded all requests for this measurement
     if (!it.ok) {
       gloss_failed_.insert(it.guid);  // (unreadable, or not reached before Cancel: not sent again on its own)
       continue;
@@ -113,7 +127,7 @@ void Editor::land_unity_gloss() {
     /* Kept for the session whatever becomes of the table (a folder that can't be written): a texture measured once is
      * not sent to the worker again while its file stays the one that was measured. */
     unity_gloss_session_means()[it.guid] = UnityGlossMean{it.path, it.bytes, {it.mean[0], it.mean[1], it.mean[2], it.mean[3]}};
-    for (const std::string &path : it.materials) asked[path].insert(it.guid);
+    for (const auto &[path, provisional] : it.materials) asked[path][it.guid] = provisional;
     if (!it.table.empty()) lines[it.table] += unity_stats_line(it.guid, it.bytes, it.width, it.height, it.mean);
   }
   for (const auto &[dir, added] : lines) {
@@ -148,17 +162,17 @@ void Editor::stop_unity_gloss() {
 void Editor::poll_unity_gloss() {
   if (pkg_job_) return;
   if (gloss_job_ && gloss_job_->done.load()) land_unity_gloss();
-  std::map<std::string, std::set<std::string>> &wanted = unity_gloss_wanted();
+  auto &wanted = unity_gloss_wanted();
   if (gloss_job_ || wanted.empty()) return;
   const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets_dir_, project_root_);
   auto job = std::make_shared<GlossJob>();
-  std::map<std::string, std::set<std::string>> known;
+  std::map<std::string, std::map<std::string, float>> known;
   std::set<std::string> known_guids;  // (materials whose map has a mean by now - measured since they asked: read again at once)
   for (const auto &[guid, materials] : wanted) {
     const auto it = index->find(guid);
     if (it == index->end() || gloss_failed_.count(guid)) continue;
     if (it->second.has_mean || unity_gloss_session_mean(guid, it->second.path)) {
-      for (const std::string &path : materials) known[path].insert(guid);
+      for (const auto &[path, provisional] : materials) known[path][guid] = provisional;
       known_guids.insert(guid);
       continue;
     }

@@ -26,7 +26,6 @@ struct UnityMaterialInfo {
    * without it, and the caller can have the texture measured and read the material again. */
   std::string gloss_texture;
   bool gloss_pending = false;
-  float provisional_roughness = 0.0f;  // roughness with the missing texture mean, for automatic completion
 };
 
 /* The shader family from its name (its file's) and the material's properties. */

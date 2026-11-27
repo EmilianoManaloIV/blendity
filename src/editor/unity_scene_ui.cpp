@@ -296,8 +296,8 @@ void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::v
   if (!missing.empty()) notes.push_back("not baked yet from the scene's lightmap settings: " + missing);
 }
 
-std::map<std::string, std::set<std::string>> &unity_gloss_wanted() {
-  static std::map<std::string, std::set<std::string>> wanted;
+std::map<std::string, std::map<std::string, float>> &unity_gloss_wanted() {
+  static std::map<std::string, std::map<std::string, float>> wanted;
   return wanted;
 }
 
@@ -341,7 +341,7 @@ static bool read_unity_material(const std::string &text, const std::string &path
    * Assets copied in): the gloss job measures it off the frame and reads this material again - this one, by its path,
    * not every Unity material of the project. */
   const auto gloss = info.gloss_pending ? index->find(info.gloss_texture) : index->end();
-  if (gloss != index->end() && image_extension_supported(fs::extension(gloss->second.path))) unity_gloss_wanted()[info.gloss_texture].insert(path);
+  if (gloss != index->end() && image_extension_supported(fs::extension(gloss->second.path))) unity_gloss_wanted()[info.gloss_texture][path] = m.roughness;
   m.import_outline = info.outline_width, m.import_outline_color = info.outline_color;
   for (const std::string &n : info.notes) Log::info("Unity material %s: %s", path.c_str(), n.c_str());
   if (!info.known) Log::warn("Unity material %s: its shader (%s) isn't one Blendity reads - its main texture and colour came in", path.c_str(), info.shader.c_str());
@@ -353,13 +353,14 @@ bool load_unity_material(const std::string &text, const std::string &path, Mater
   return read_unity_material(text, path, m, info);
 }
 
-bool measured_unity_roughness(const std::string &path, const std::set<std::string> &guids, float &provisional, float &measured) {
+bool measured_unity_roughness(const std::string &path, const std::map<std::string, float> &requests, float &provisional, float &measured) {
   std::string text;
   Material fresh;
   UnityMaterialInfo info;
-  if (!fs::read_file(resolve_asset_path(path), text) || !read_unity_material(text, path, fresh, info) ||
-      info.gloss_pending || !guids.count(info.gloss_texture)) return false;
-  provisional = info.provisional_roughness;
+  if (!fs::read_file(resolve_asset_path(path), text) || !read_unity_material(text, path, fresh, info) || info.gloss_pending) return false;
+  const auto request = requests.find(info.gloss_texture);
+  if (request == requests.end()) return false;
+  provisional = request->second;  // The value shown when this material asked, even if its source scale has since changed.
   measured = fresh.roughness;
   return provisional != measured;
 }

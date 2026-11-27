@@ -14978,7 +14978,7 @@ static void tests_round485() {
     if (texture == index->end()) return;
     auto job = std::make_shared<Editor::GlossJob>();
     Editor::GlossJob::Item item;
-    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = {asset, scaled};
+    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = unity_gloss_wanted().at(guid);
     job->items.push_back(item);
     job->run();  // The worker finished; the main thread has yet to land the measurement.
     CHECK(job->items[0].ok);
@@ -15018,6 +15018,61 @@ static void tests_round485() {
     r484a::cleanup();
   });
 
+  test("A same-GUID source scale change during Unity gloss measurement preserves edited roughness and updates untouched requesters", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string asset = r484a::mat_path("gloss_in_metal_alpha"), scaled = r484a::mat_path("gloss_scaled");
+    std::string original, updated;
+    CHECK(fs::read_file(resolve_asset_path(asset), original) && fs::read_file(resolve_asset_path(scaled), updated));
+    CHECK(fs::write_file(resolve_asset_path(scaled), original));
+    const MaterialPtr touched = material_asset(asset), untouched = material_asset(scaled);
+    CHECK(touched && untouched && touched->roughness == 0.0f && untouched->roughness == 0.0f);
+    if (!touched || !untouched) return;
+    const auto guid = r485a::map_guid(1);
+    auto index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
+    const auto texture = index->find(guid);
+    CHECK(texture != index->end());
+    if (texture == index->end()) return;
+    auto job = std::make_shared<Editor::GlossJob>();
+    Editor::GlossJob::Item item;
+    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = unity_gloss_wanted().at(guid);
+    job->items.push_back(item);
+    job->run();
+    CHECK(job->items[0].ok);
+    r484a::forget_gloss();
+    touched->roughness = 0.5f, touched->touch();
+    CHECK(fs::write_file(resolve_asset_path(asset), updated) && fs::write_file(resolve_asset_path(scaled), updated));
+    ed.land_unity_gloss_for_test(job);
+    CHECK(touched->roughness == 0.5f);  // matches the new fallback, but the original request showed zero
+    CHECK(std::fabs(untouched->roughness - 0.819608f) < 0.005f);
+    r484a::cleanup();
+  });
+
+  test("Explicit Unity material reimport clears an edited Redo copy when the current material already matches its file", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha");
+    ed.command("select Cube");
+    ed.command("assignmat " + path);
+    r485a::steps(ed, 2);
+    ed.command("matset Metallic 0.37");
+    r485a::steps(ed, 2);
+    ed.command("undo");
+    const auto m = r485a::worn_by(ed, "Cube");
+    CHECK(m && m->metallic == 1.0f);
+    if (!m) return;
+    const size_t mark = r484a::log_mark();
+    ed.command("unity rematerials");
+    CHECK(r484a::log_since(mark).find(", 0 changed") != std::string::npos);
+    ed.command("redo");
+    CHECK(r485a::worn_by(ed, "Cube") == m && m->metallic == 1.0f);
+    r484a::cleanup();
+  });
+
   test("An available Unity gloss mean and a late worker preserve edits after multiple materials are reimported", [] {
     Editor ed;
     ed.init_headless(800, 600);
@@ -15034,7 +15089,7 @@ static void tests_round485() {
     if (texture == index->end()) return;
     auto late = std::make_shared<Editor::GlossJob>();
     Editor::GlossJob::Item item;
-    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = {asset, scaled};
+    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = unity_gloss_wanted().at(guid);
     late->items.push_back(item);
     late->run();
     const auto &sample = late->items[0];
@@ -15078,7 +15133,7 @@ static void tests_round485() {
       CHECK(it != index->end());
       if (it == index->end()) return;
       Editor::GlossJob::Item item;
-      item.guid = want.first, item.path = it->second.path, item.table = it->second.table, item.materials = {want.second};
+      item.guid = want.first, item.path = it->second.path, item.table = it->second.table, item.materials = unity_gloss_wanted().at(want.first);
       job->items.push_back(item);
     }
     Editor::GlossJob::Item &first = job->items[0];
@@ -15135,7 +15190,7 @@ static void tests_round485() {
     if (it == index->end()) return;
     auto job = std::make_shared<Editor::GlossJob>();
     Editor::GlossJob::Item item;
-    item.guid = mask, item.path = it->second.path, item.table = it->second.table, item.materials = {path};
+    item.guid = mask, item.path = it->second.path, item.table = it->second.table, item.materials = {{path, before->roughness}};
     job->items.push_back(item);
     job->run();
     ed.land_unity_gloss_for_test(job);
