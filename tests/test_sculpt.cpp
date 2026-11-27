@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Task 0236 (ADR 0074): Sculpt Mode - the brushes touch only what is under them; a stroke's undo is a delta.
 #include "test_common.h"
+#include "fixtures/perf_sculpt_0625.h"
 
 #include "../src/scene/mesh.h"
 #include "../src/scene/subdiv_chain.h"
@@ -4150,6 +4151,13 @@ static void tests_round562_te() {
   });
 }
 
+static void tests_round643() {
+  test("sculpt (round 643): dense Draw and Mask pointer strokes preserve face and corner data and undo exactly", [] {
+    CHECK(perf_sculpt_0625::pointer_case({"draw", "draw", "freehand"}, 8, 1, false));
+    CHECK(perf_sculpt_0625::pointer_case({"mask", "mask", "freehand"}, 8, 1, false));
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -4166,4 +4174,5 @@ void run_sculpt_tests() {
   tests_round540_te();
   tests_round562();
   tests_round562_te();
+  tests_round643();
 }
