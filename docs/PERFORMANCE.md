@@ -4704,3 +4704,29 @@ On a 4096² image, skipping an inactive channel reduced Linux cold apply time fo
 ## Round 651: dense UV Reset redraw
 
 The [UV redraw measurements](perf/0633-uv-redraw.md) compare command-to-frame time and pane pixels across nine layouts, including a 4K offscreen control.
+
+## Round 652: dense Sculpt viewport shading
+
+On a 500k-face rough sphere and two logical CPUs, deferred shading fell from 25.02 to 21.18 ms during standard Draw. Complete move frames improved by 5.95% for standard and 4.64% for broad Draw across five alternating pairs. Normal-affinity gains were smaller. [Gesture, control and parity measurements](perf/0634-dense-sculpt.md).
+
+## Round 653: 4K image quarter turns
+
+A 16 × 16 tiled copy saved a median paired 27.34 ms at two workers and 4.95 ms at 32 workers when applying a 4096-square quarter turn to a preallocated destination on Linux. The allocation-inclusive saving was 77.28 ms at two workers and inconclusive at 32. The Windows release output matched the original in every raw pixel comparison. [Round 653 results](perf/0635-image-adjustments.md)
+
+Round 657 measures Scene and Game drag frames, configured AgX, MoonRay process memory and finished editor bakes. [Measurements and reproduction](perf/0639-rendering.md)
+
+## Round 658: Tool input coverage
+
+[Input results and outstanding controls](perf/0640-input-sweep.md) records the real gestures, their controls and the older backlog dispositions. The [per-action register](perf/0630-inventory.tsv) links each supported conclusion to its evidence.
+
+## Constrained splat and Unity imports (round 659)
+
+The [import profile report](perf/0641-constrained-imports.md) records stage timings and memory peaks for a streamed PLY and a Unity scene under native Linux VM limits.
+
+## Round 662: Cold Textures startup in a mixed project
+
+An early filename filter saved a median 0.3 ms at default concurrency and 1.7 ms with two workers in a fresh Windows process on a project with 144 textures and 6,912 additional unrelated files. The experiment fell below its thresholds and was removed. [Round 662 results](perf/0644-textures-startup.md)
+
+## Splat axis-conversion experiment (round 664)
+
+On the two-CPU WSL ext4 profile, specializing three spherical-harmonic band loops moved median axis conversion from 122.71 to 123.29 ms and total PLY import from 285.28 to 288.75 ms. The [experiment record](tasks/0646-splat-axes.md) documents byte parity, matched pairs and the rejection.
