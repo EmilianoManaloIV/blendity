@@ -1965,7 +1965,7 @@ struct EnvironmentSettings {
   float fog_density = 0.02f;  // the exponential modes' (Unity's Density)
   float fog_start = 10.0f, fog_end = 60.0f;
   Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_color_far{0.75f, 0.8f, 0.9f};
-  void reflect(Reflector &r);
+  void reflect(Reflector &r, bool include_sun_angles = true);
 };
 
 /* Unity: Lighting window > Scene (Mixed Lighting, Lightmapping Settings). Baked lighting, task 0012. */

@@ -12328,6 +12328,37 @@ static void tests_round542() {
     const LightingEnv again = ed.make_lighting_for_test();
     CHECK(again.lights.size() == 1 && again.lights[0].intensity == on.lights[0].intensity);
   });
+  test("An older baked Gradient or Sky scene reopens current; only a change to the active sky sun invalidates its bake", [] {
+    for (const std::string mode : {"gradient", "sky"}) {
+      const std::string dir = fs::join(test_dir(), "legacy-sun-" + mode);
+      std::error_code ec;
+      std::filesystem::copy(fs::join("tests/fixtures/sky_sun_bakes", mode), dir,
+                            std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+      CHECK(!ec);
+      if (ec) continue;
+      Editor ed;
+      ed.init_headless(400, 300);
+      ed.command("open " + fs::join(dir, "Legacy.scene"));
+      CHECK(ed.scene().environment.mode == (mode == "sky" ? 1 : 0));
+      CHECK(!ed.lighting_data_for_test().empty());
+      CHECK(!ed.lighting_out_of_date_for_test());
+      const uint64_t baked = ed.lighting_data_for_test().scene_key;
+      CHECK(ed.lightmap_scene_key_for_test() == baked);
+      ed.command("set World.SunRotation 90");
+      if (mode == "gradient") {
+        // Store dormant Sky settings, as would switching worlds after an edit.
+        ed.scene().environment.sun_rotation = 90.0f;
+        CHECK(ed.lightmap_scene_key_for_test() == baked);
+      } else {
+        CHECK(ed.lightmap_scene_key_for_test() != baked && ed.lighting_out_of_date_for_test());
+        GameObject *sun = ed.scene().create("Sun");
+        sun->add<Light>()->type = 0;
+        const uint64_t overridden = ed.lightmap_scene_key_for_test();
+        ed.scene().environment.sun_rotation = 120.0f;
+        CHECK(ed.lightmap_scene_key_for_test() == overridden);
+      }
+    }
+  });
   test("Sky world: the switch toggled between two calls changes the light list at once, with no scene edit in between", [] {
     Editor ed;
     r542_world(ed, 1);

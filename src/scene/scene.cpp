@@ -492,7 +492,7 @@ void ProbeVolume::reflect(Reflector &r) {
   if (!global || r.all_fields()) r.field("Size", size);
 }
 
-void EnvironmentSettings::reflect(Reflector &r) {
+void EnvironmentSettings::reflect(Reflector &r, bool include_sun_angles) {
   static const char *modes[] = {"Gradient (Unity default)", "Sky (Hosek-Wilkie)", "HDRI", "Color"};
   r.enumeration("Source", mode, modes, 4);
   r.help("Background and ambient light. Blender: World > Surface. Unity: Lighting > Environment.");
@@ -533,10 +533,12 @@ void EnvironmentSettings::reflect(Reflector &r) {
   if (all || mode == 1) {
     r.field("Turbidity", turbidity, 0.02f, 1.0f, 10.0f);
     r.help("Haze in the atmosphere (Hosek-Wilkie model).");
-    r.field("Sun Elevation", sun_elevation, 0.1f, -90.0f, 90.0f);
-    r.help("Degrees above the horizon. An enabled Directional Light sets the sun direction when present.");
-    r.field("Sun Rotation", sun_rotation, 0.1f, 0.0f, 360.0f);
-    r.help("Degrees around the horizon, from positive Z toward positive X.");
+    if (include_sun_angles) {
+      r.field("Sun Elevation", sun_elevation, 0.1f, -90.0f, 90.0f);
+      r.help("Degrees above the horizon. An enabled Directional Light sets the sun direction when present.");
+      r.field("Sun Rotation", sun_rotation, 0.1f, 0.0f, 360.0f);
+      r.help("Degrees around the horizon, from positive Z toward positive X.");
+    }
     r.field("Ground Albedo", ground_albedo, 0.01f, 0.0f, 1.0f);
     r.field("Sun Lights Scene", sun_lights_scene);
     r.help("The sky's sun lights the scene when no Directional Light drives it (Blender 5.3's EEVEE). Off: the look before\n"

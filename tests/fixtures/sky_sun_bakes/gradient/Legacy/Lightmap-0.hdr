@@ -1,0 +1,6 @@
+#?RADIANCE
+FORMAT=32-bit_rle_rgbe
+EXPOSURE=1.0
+
+-Y 16 +X 16
+l{‘€l{‘€l{€l{€l{€k{€kz€kz€kz€kz€kz€kz€kz€kz€kz€kz€l{‘€l{‘€l{€l{€l{€k{€kz€kz€kz€kz€kz€kz€kz€kz€kz€kz€l{‘€l{‘€l{‘€l{€l{€kz€kz€kz€kz€kz€kz€kz€kz€kz€kz€kz€l{‘€l{‘€l{€l{‘€k{€k{€kz€k{€kz€kz€kz€k{€kz€kz€kz€kz€l{‘€l{€l{‘€l{€kz€kz€kz€kz€kz€kz€kz€kz€l{€k{€l{€k{€l{‘€l{‘€l{‘€l{‘€l{‘€l{€k{€l{€l{€l{€kz€l{€l{€l{€l{€l{€l{€l{€l{‘€l{€l{‘€k{€kz€l{€l{€l{€k{€k{€l{€l{€l{€l{€l{€l{€l{€l{€l{€l{€kz€l{€l{€l{€kz€kz€k{€l{€l{€l{€l{€l{€l{€k{€l{€kz€kz€k{€l{€kz€kz€kz€l{€l{€l{€l{€l{€l{€k{€l{€l{‘€l{€l{€l{€l{‘€l{‘€l{€k{€l{‘€l{‘€l{€l{€l{€k{€l{€kz€l{€k{€l{€l{€l{‘€l{€l{€l{€l{‘€l{‘€l{‘€l{€k{€k{€k{€l{€l{€l{€kz€l{€l{€l{€l{€l{€l{€l{€l{€l{€k{€k{€k{€kz€kz€kz€kz€k{€l{€k{€l{€l{€l{€l{€l{€l{€kz€kz€kz€kz€kz€kz€kz€kz€k{€l{€l{€l{€l{€l{€l{€l{€kz€kz€kz€kz€kz€kz€kz€kz€k{€l{€l{€l{€l{€l{€l{€l{€kz€kz€kz€kz€kz€kz€kz€kz€k{€l{€l{€l{€l{€l{€l{€l{€

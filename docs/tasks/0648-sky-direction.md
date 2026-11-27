@@ -1,6 +1,6 @@
 # 0648: Set the Sky world's sun elevation and rotation
 
-- **Status:** approved for implementation
+- **Status:** in review
 - **Authorization:** Owner-assigned Pass 37 Hub follow-up, round 666 on d7503d4e.
 - **Requirements:** World lighting, rendering parity and editor accessibility.
 - **Decisions:** preserve task 0522 and existing directional-light precedence.
@@ -31,4 +31,4 @@ Below-horizon elevation, wrapped azimuth, old settings with missing fields, a di
 Round 666 changelog fragment and Learn lesson.
 
 ## Outcome
-Pending.
+The initial review found that the new reflected fields changed saved lightmap keys for earlier scenes. The correction includes the fields in the persisted key only when the physical Sky uses valid custom angles without an overriding lamp. The regression opens Gradient and Sky scenes and lightmaps produced by the full-library Windows baseline at a3d6cc8c (same product and test sources as d7503d4e), verifies their saved keys, and exercises active and overridden angles. The baseline fixtures are under tests/fixtures/sky_sun_bakes. See the [generation receipt](C:/blab/pass37-hub/timing-queue/0648-functional-legacy-bake.result.json). Native candidate tests, final independent review and integration are pending.
