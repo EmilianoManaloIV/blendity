@@ -1,6 +1,6 @@
 # 0628: Complex animation and rigging workloads
 
-- **Status:** locally verified, pending Hub integration
+- **Status:** in review
 - **Authorization:** Owner's Pass 36 assignment, round 646, base 90136ffc.
 - **Requirements:** R-13, Q-07
 - **Decisions:** ADRs 0025, 0029, 0031, 0056, 0127, 0146

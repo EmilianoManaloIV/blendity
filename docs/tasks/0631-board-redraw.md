@@ -1,6 +1,6 @@
 # 0631: Reference Board redraw after duplicating images
 
-- **Status:** ready for independent review
+- **Status:** in review
 - **Authorization:** owner-assigned Pass 36 follow-up through the Hub, round 649
 - **Requirements:** Q-03, Q-04, Q-05
 - **Decisions:** ADR 0089 (existing board and export model)
