@@ -5,7 +5,7 @@
 - **Requirements:** R-04, Q-06.
 - **Decisions:** ADR 0056 (measurement), 0123 (fragments), 0134 (verification).
 - **Implementation:** Project implementer, independent test engineer and code reviewer.
-- **PR:** Local follow-up for Hub disposition.
+- **PR:** [#505](https://github.com/EmilianoManaloIV/blendity/pull/505) against main. Reviewed findings entered the stack at `05398b6c`.
 
 ## Goal
 Reduce wasted work when a user applies Noise Reduction with just Luminance or Color enabled. Preserve the image and the behavior of subsequent adjustments.
@@ -32,4 +32,4 @@ HDR/exceptional float arithmetic times zero, inactive cache reads, stale same-si
 Round 650 fragment and a short performance report with raw results, controls, timing boundaries and verdict.
 
 ## Outcome
-Two prototypes accelerated cold single-control apply on Linux. Both failed exact Windows release output comparisons. The revised prototype changed 668 Luminance-only and 182 both-enabled raw channel words on a finite 31 × 19 HDR gradient. The isolated both-enabled timing control also exceeded its baseline-noise cutoff. Both prototypes and candidate-only tests were removed; final product and tests match ce56f8e9. See [workloads, controls and results](../perf/0632-single-control-noise.md), [independent tests](C:/blab/pass36-hub/0627-noise-test.md) and [independent review](C:/blab/pass36-hub/0632-review.md). No publication requested.
+Two prototypes accelerated cold single-control apply on Linux. Both failed exact Windows release output comparisons. The revised prototype changed 668 Luminance-only and 182 both-enabled raw channel words on a finite 31 × 19 HDR gradient. The isolated both-enabled timing control also exceeded its baseline-noise cutoff. Both prototypes and candidate-only tests were removed; final product and tests match ce56f8e9. See [workloads, controls and results](../perf/0632-single-control-noise.md), [independent tests](C:/blab/pass36-hub/0627-noise-test.md) and [independent review](C:/blab/pass36-hub/0632-review.md). The Hub included the findings in the cumulative performance PR.
