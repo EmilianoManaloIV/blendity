@@ -1056,9 +1056,12 @@ void Editor::draw_board_image(const BoardItem &it) {
   const Recti box{(int)std::floor(x0), (int)std::floor(y0), (int)std::ceil(x1 - x0) + 1, (int)std::ceil(y1 - y0) + 1};
   const bool paper = it.kind == BoardItem::Paper;  // (task 0305: a paper's drawing)
   std::shared_ptr<BoardPicture> pic;
-  const auto own = board_export_pics_.find(fs::normalize(resolve_asset_path(it.path)));  // (an export's full-size pictures: review 326)
-  if (own != board_export_pics_.end()) pic = own->second;
-  else pic = paper ? board_paper_picture(it.path) : board_picture(it.path);
+  // Only exports have full-size overrides. Resolving a canonical path probes the filesystem.
+  if (!board_export_pics_.empty()) {
+    const auto own = board_export_pics_.find(fs::normalize(resolve_asset_path(it.path)));
+    if (own != board_export_pics_.end()) pic = own->second;
+  }
+  if (!pic) pic = paper ? board_paper_picture(it.path) : board_picture(it.path);
   if (!pic || !pic->error.empty() || pic->levels.empty() || it.w <= 0.0f) {
     if (it.w > 0.0f) cv.fill_polygon(c, 4, 0xFF404044);
     const char *why = paper ? "Missing paper: " : pic && !pic->error.empty() ? "Missing or unreadable: " : "Loading ";
