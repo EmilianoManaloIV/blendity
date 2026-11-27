@@ -39,3 +39,9 @@ Round 648 fragment and survey with linked evidence and inventory.
 
 ## Outcome
 The source register contains 5,871 entries across 23 surfaces. Windows and WSL source checks passed. The independent tester verified native scene round trips, property persistence, UI states, screenshot controls and board redraws. The survey carries the specialist results, rejected candidates and route-specific gaps. The Hub owns integration and publication.
+
+## Follow-up to the frozen register
+
+The owner assigned a second pass over the 75 Edit tool entries, 86 modes, 19 brushes and nine modifiers without route-specific evidence in commit `13504470`. Use the existing binaries and checked scratch scenes. Record actual interactions separately from changes to geometry, pixels, selection or persisted state. Reconcile each of the seven failed checks against its original oracle and newer evidence. The follow-up reports remaining counts and precise preconditions. It changes the register and supporting survey, with no editor product edits.
+
+The follow-up verified all 189 targeted entries. Edge Split and Flatten passed on their required inputs. Four Blockout geometry flags and the dense visible UV Reset timeout remain. The whole register now has 92 measured, 758 checked end-state, 742 dispatch, five failed and 4,274 unexercised entries.

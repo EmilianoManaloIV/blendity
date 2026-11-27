@@ -4,34 +4,34 @@ The reference revision is 90136ffc072f5b9b1c8be2be4ab2e2413b97fdd4. Read the reg
 
 ## What the register verifies
 
-Of 5,871 exposed entries, 92 have measured workloads, 567 have a checked effect without an attributed timing, 742 reached dispatch only, and seven have a failed outcome check. The remaining 4,463 entries carry a named gap. Counts describe source entries, so a console spelling and a toolbar control for the same operation count separately. A gap can mean an untested gesture on an available control, an external installation outside the pass, or a retired entry. Physical headset and pen input, live external-engine interoperability and individual Inspector gestures still have gaps. The TSV identifies the route and evidence for each entry.
+Of 5,871 exposed entries, 92 have measured workloads, 758 have a checked effect without an attributed timing, 742 reached dispatch only, and 5 have a failed outcome check. The remaining 4,274 entries carry a named gap. Counts describe source entries, so a console spelling and a toolbar control for the same operation count separately. A gap can mean an untested gesture on an available control, an external installation outside the pass, or a retired entry. Physical headset and pen input, live external-engine interoperability and individual Inspector gestures still have gaps. The TSV identifies the route and evidence for each entry.
 
 | Surface | Measured | Checked effect | Dispatch only | Failed check | Unexercised | Total |
 |---|---:|---:|---:|---:|---:|---:|
 | adjustment | 17 | 0 | 0 | 0 | 0 | 17 |
 | asset-format | 6 | 19 | 0 | 0 | 16 | 41 |
-| brush | 11 | 3 | 0 | 0 | 19 | 33 |
+| brush | 11 | 22 | 0 | 0 | 0 | 33 |
 | cli | 0 | 0 | 0 | 0 | 21 | 21 |
 | command | 3 | 33 | 164 | 0 | 36 | 236 |
 | component | 0 | 6 | 1 | 0 | 42 | 49 |
 | create | 0 | 40 | 0 | 0 | 0 | 40 |
-| edit-tool | 0 | 0 | 0 | 0 | 75 | 75 |
+| edit-tool | 0 | 75 | 0 | 0 | 0 | 75 |
 | field | 0 | 49 | 0 | 0 | 1233 | 1282 |
 | filter | 0 | 21 | 0 | 0 | 2 | 23 |
 | keymap | 0 | 13 | 4 | 0 | 123 | 140 |
 | layout | 0 | 19 | 0 | 0 | 0 | 19 |
 | menu | 0 | 21 | 0 | 0 | 519 | 540 |
-| mode | 0 | 26 | 0 | 4 | 86 | 116 |
-| modifier | 9 | 4 | 0 | 0 | 9 | 22 |
+| mode | 0 | 112 | 0 | 4 | 0 | 116 |
+| modifier | 9 | 13 | 0 | 0 | 0 | 22 |
 | palette | 0 | 3 | 0 | 0 | 228 | 231 |
 | panel | 0 | 23 | 3 | 1 | 783 | 810 |
 | retired | 0 | 0 | 0 | 0 | 1 | 1 |
-| subcommand | 46 | 260 | 562 | 2 | 1027 | 1897 |
+| subcommand | 46 | 262 | 562 | 0 | 1027 | 1897 |
 | texture-layer | 0 | 0 | 8 | 0 | 41 | 49 |
 | toolbar | 0 | 0 | 0 | 0 | 23 | 23 |
 | wheel | 0 | 2 | 0 | 0 | 179 | 181 |
 | window | 0 | 25 | 0 | 0 | 0 | 25 |
-| All surfaces | 92 | 567 | 742 | 7 | 4463 | 5871 |
+| All surfaces | 92 | 758 | 742 | 5 | 4274 | 5871 |
 
 ## Evidence and reproduction
 
@@ -168,3 +168,34 @@ The texture lane also traced the screenshot deadline. In 20 Linux controls every
 The six specialist results refer to local commits 0624 `f53eda7c`, 0625 `de2d0890`, 0626 `988b4d08`, 0627 `97919fa5`, 0628 `e918533a` and 0629 `22728cfe`. Each producer supplied its reviewed disposition. The 0627 test-only screenshot correction waits for completion and checks the captured output. Round 648 introduces no product code.
 
 The tester independently decoded all 14 saved mesh-format round trips, verified 49 property changes and 50 UI state exports, recalculated the 12 Board redraw observations and inspected the synchronous/asynchronous screenshot pairs. The source inventory and joined TSV regenerate on Windows and WSL. The image adjustment register includes the 17 named full-image operations from `src/image/adjustments.cpp` with their 4,096² full-image, add-step and slider timings. The 0627 lane report preserves its broader 257-row catalogue, including prior results and additional parameter combinations. Scratch receipts are `0630/tester-core-final.md`, `0630/tester-final.md` and `0630-receipt.md`.
+
+## Follow-up on previously unexercised tools
+
+The follow-up started from commit `13504470` and its 189 unexercised entries in four tool families. It used the existing full Windows package and checked Linux and Windows fixture logs. Each TSV row identifies its input route. These functional runs supply no new timing claims.
+
+| Family | Previously unexercised | What the evidence establishes |
+|---|---:|---|
+| Edit tools | 75 | All 75 have a checked result through the named tool callback, shortcut, or headless UI. A real Modeling Tools click activated Knife, two Scene clicks cut a face, and the 145-face output matched an independently activated control. Other rows describe their own route, selection witness, geometry, attribute, or undo checks. |
+| Modes | 86 | Named Sketch blends were saved on stroked layers. This checks blend selection and persistence. Vertex Paint blend modes have separate formula and untouched-pixel checks. The Blockout rows identify persistent choices and the geometry or class-material checks available for each. |
+| Brushes | 19 | All 19 have checked paper, pixel, weight, selection or stroke outcomes. The Sketch presets each identify the fixture used. For example, the Airbrush paper fixture checked the stroke count and a sampled pixel. Six attempted Scene preset selections still used Pen, so those attempts provide no preset-specific mark evidence. |
+| Modifiers | 9 | The native component appeared after attach and disappeared after undo for all nine on the 134-object fixture. Each row also links a distinct functional result, including deformed geometry, cage binding, skin pose, shading normals or Boolean volume. |
+
+All 189 targeted entries now have a checked outcome on the stated route. Zero of the original 75 Edit tools, 86 modes, 19 brushes and nine modifiers remain unexercised. The full register still has 4,274 unexercised entries across all surfaces. The four retained Blockout failures were already exercised and were outside the 189. Physical pressure sensitivity on a real pen, native desktop clicks for most Edit tool buttons, and per-setting rendered output for the Sketch blend modes remain distinct gaps. All follow-up actions were feasible on the available host or through an existing tested fixture.
+
+The six Weight Paint falloffs changed the same 173 of 6,561 vertices in matched one-dab controls. The largest difference between the saved weights and the independently reconstructed curves was 6.062×10⁻⁸. With the Blockout parent explicitly selected, all nine class-material slots changed from empty to the Probe material and retained it after reopening. See `0630/follow-brush-falloff-audit.json`, `0630/follow-brush-receipt.md` and `0630/follow-material-79bh6dd4/rows.json`.
+
+The Blockout replay initially kept the new Box child selected for material assignment. Its refusals do not establish assignment to the parent. The native component reader initially missed modifier headers with extra flags. A corrected offline reader verified the saved attach and undo snapshots. See `0630/follow-bo-_qn1fgum/rechecked.json`, `0630/follow-bo-recheck.py` and `0630/follow-lead.tsv`.
+
+### Disposition of the seven earlier failed checks
+
+| Original entry | Follow-up outcome |
+|---|---|
+| Edit operator Edge Split | **Passed on a separating seam.** The original single internal edge separated no face group. Splitting a closed 64-edge seam on 1,600 faces increased vertices from 1,681 to 1,745 and boundary edges from 160 to 288. Undo restored the original vertex positions and face indices. |
+| Edit operator Flatten Loops | **Passed on a nonplanar patch.** The original complete face was already planar, with a separate two-vertex edge and isolated vertex. The checked nonplanar fixture’s residual fell from 3.20888254 to 2.23×10⁻⁷. Topology stayed fixed, and undo restored the original positions. |
+| UV pane Reset button | **Dense case remains failed.** At 96 quads the clicked canvas matched the console Reset reference and differed from its starting image. On 6,144 quads the operator logged completion and the visible capture timed out at 60 seconds. The small comparison used the retained PNGs after the original wrapper failed to load its postprocessing script. |
+| Blockout Railing | **Geometry check remains failed.** All 50 arrangements built on each path. The original and clean repeat both flagged two exact cases and one field-grid case. |
+| Blockout Roof | **Geometry check remains failed.** All 50 arrangements built on each path. Both runs flagged zero exact cases and two grid cases. |
+| Blockout Stairs L | **Geometry check remains failed.** All 50 arrangements built on each path. Both runs flagged zero exact cases and one grid case. |
+| Blockout Spiral Stairs | **Geometry check remains failed.** All 50 arrangements built on each path. Both runs flagged zero exact cases and one grid case. |
+
+The four Blockout rows record the independent `problems` column. The stress report also gives separate counts for small overlapping faces, zero-area faces and unresolved places. The complete fixtures and original failing preconditions are recorded in `0630/follow-edit-notes.md`, `0630/follow-uv-quju9t30/hashes.json` and `0630/timed-ugvc6b9w/blockout/report/latest.md`.
