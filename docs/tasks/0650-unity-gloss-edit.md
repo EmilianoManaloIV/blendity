@@ -5,7 +5,7 @@
 - **Requirements:** R-04, Q-06.
 - **Decisions:** ADR 0157 refines automatic completion under ADR 0131.
 - **Implementation:** assigned handoff worker.
-- **PR:** Hub integration pending.
+- **PR:** Included in the local Pass 37 integration at `c17385d0`. Hub publication and owner merge are pending.
 
 ## Goal
 Preserve an unrelated, newer edit on a Unity material when its own texture finishes supplying a gloss measurement.
@@ -34,4 +34,6 @@ A numbered ADR, its index, the existing Learn wording about reimport if necessar
 ## Outcome
 Task 0643 reproduced the loss at a3d6cc8c (product-identical to d7503d4e). One frame after saving Metallic 0.37 on gloss_in_metal_alpha, automatic measurement read back Metallic 1.0. The explicit reimport control also read back 1.0. See [paired readbacks](D:/Blendity-agent-scratch/pass37/0643/material-edit.log).
 
-The implementation records the original requesting roughness so that a source scale change during measurement preserves an intervening edit and still updates untouched materials. Explicit reimport refreshes divergent history even when its changed-live count is zero. The independent source review approved product commit `7fafb39b`. Independent Windows verification against that commit is pending. See the [source review](C:/blab/pass37-hub/0650-review.md) and [native verification](C:/blab/pass37-hub/0650-test.md).
+The independent reviewer approved product commit `7fafb39b` after Windows verification. Automatic completion preserved Metallic 0.37 and applied measured Roughness 0.639216. Explicit reimport restored Metallic 1.0 and reported one live change. When the live material already matched its file, explicit reimport reported zero changes and Redo kept the source value. With a change to the source scale during measurement, an intervening Roughness edit stayed at 0.5 and the untouched material reached approximately 0.819608. [Independent review](C:/blab/pass37-hub/0650-review.md)
+
+Play and Stop retained Metallic 0.37. A command-line control with separate history checkpoints returned 1.0 on Undo and 0.37 on Redo, with Roughness 0.639216 throughout. The five focused regressions passed 46 checks, including saved-scene readback and clean-session reopen. The full assets group passed 3,628 checks in 378 tests and the full editor group passed 4,064 checks in 346 tests. [Windows verification](C:/blab/pass37-hub/0650-test.md)
