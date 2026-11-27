@@ -1,6 +1,6 @@
 # 0643: Reconcile Preferences, redo shortcuts and historical editor reports
 
-- **Status:** approved for implementation
+- **Status:** in review
 - **Authorization:** Owner-assigned Pass 37 Hub follow-up, round 661, base d7503d4e.
 - **Requirements:** HCI consistency and responsive editing.
 - **Decisions:** ADR 0085 and ADR 0134.
@@ -32,4 +32,12 @@ A custom chord can be empty. Worker completion order may differ from discovery o
 Round 661 fragment and per-item receipts for the inventory owner.
 
 ## Outcome
-Verification pending.
+The static shortcut audit returned zero, and the independent reviewer checked the tooltip implementation against default, Maya, rebound and cleared bindings. The Hub owns native candidate verification. [Review](C:/blab/pass37-hub/0643-review.md)
+
+1. Item 10 was fixed in [task 0593](0593-preferences-focus.md), which records the two focus regressions and passing Windows full/lite and Linux runs.
+2. Item 11 now draws the current chord on the actual Adjust Last Operation header. The previous label referenced Blender, so the existing audit intentionally exempted it. The rendered HCI test distinguishes the two implementations.
+3. Item 15 is [task 0648](0648-sky-direction.md). Item 18 is [task 0647](0647-shell-jobs.md).
+4. Item 16 did not reproduce in the tested cases. Four Live Link clients received seven texture sends across 120 painted dabs. Replacing an equal-size GUID in one write-time tick and switching project GUID indexes passed four and six checks. Reimporting a package with a GUID moved to a new pathname and another GUID removed produced one manifest row, naming only the new path. README's 142,033 checks in 3,951 tests match the unfiltered 31-group Windows full-library census in the [previous joined receipt](C:/blab/pass36-hub/0633-joined.md).
+5. Item 17 reproduced on the requesting Unity material: setting Metallic to 0.37 appeared in the saved scene, then one ordinary frame landed a gloss measurement and read Metallic back as 1.0. An explicit Reimport Unity Materials also restored 1.0. A separate eight-check control confirmed a background job on another material preserved the local edit. Task 0461 previously documented full-file refresh of requesting materials. The automatic and explicit paths have separate evidence for the Hub's follow-up decision. Scene-view performance and baking were routed to their owning lanes.
+
+The baseline app and tests came from the full-library Windows package at a3d6cc8c, which matches d7503d4e in src, tests, extern and build.bat. See the [functional evidence](C:/blab/pass37-hub/0643-receipt.md), [material readbacks](D:/Blendity-agent-scratch/pass37/0643/material-edit.log) and [test outputs](D:/Blendity-agent-scratch/pass37/0643/reproduce.log).
