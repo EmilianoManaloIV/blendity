@@ -1010,6 +1010,8 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
     // An edit and a surface worker publishing its result both invalidate resolved material textures.
     const size_t generation = material_textures_generation();
     mix(&generation, sizeof(generation));
+    const uint64_t registry = texture_assets_generation();
+    mix(&registry, sizeof(registry));
   }
   env_.sky = es.sky;
   env_.equator = es.equator;
@@ -1277,6 +1279,10 @@ uint64_t Editor::scene_hash_tail() {
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
+  if (es.mode == 2 && texture_ref_is_procedural(es.hdri)) {
+    const uint64_t registry = texture_assets_generation();
+    mix(&registry, sizeof(registry));
+  }
   /* Round 532 (review): a worker's splat order landed - here, not in an object's part, which the scene hash reuses while
    * the edit counter holds (a landing sort moves no counter: it would be a change the counter missed). */
   const uint64_t splat_gen = gsplat_sort_generation();

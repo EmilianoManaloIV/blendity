@@ -12741,6 +12741,29 @@ static void tests_round673() {
     CHECK(image && image == texture_load(resolve_asset_path(path), false));
   });
 
+  test("Deleting and recreating the selected procedural World updates the view and baked status", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "WorldDelete673", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    const std::string path = "Assets/Textures/WorldRegistry673.ptex";
+    ProceduralTexture source;
+    apply_texture_preset(source, "Bricks");
+    source.width = source.height = 64;
+    CHECK(create_texture_asset(source, path) != nullptr);
+    ed.command("world hdri " + path + "#albedo");
+    r35_bake(ed);
+    const uint64_t baked_key = ed.lighting_data_for_test().scene_key;
+    CHECK(baked_key && !ed.lighting_out_of_date_for_test());
+    CHECK(ed.make_lighting_for_test().environment->map != nullptr);
+    ed.command("deleteasset " + path);
+    CHECK(!fs::exists(resolve_asset_path(path)));
+    CHECK(ed.lighting_out_of_date_for_test() && ed.lightmap_scene_key_for_test() != baked_key);
+    CHECK(ed.make_lighting_for_test().environment->map == nullptr);
+    CHECK(create_texture_asset(source, path) != nullptr);
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.lightmap_scene_key_for_test() == baked_key);
+    CHECK(ed.make_lighting_for_test().environment->map != nullptr);
+  });
+
   test("A World surface follows the published worker image at the same reference", [] {
     Editor ed;
     r542_world(ed, 2);

@@ -1759,6 +1759,7 @@ bool load_texture_text(const std::string &text, ProceduralTexture &t) {
 }
 
 namespace {
+std::atomic<uint64_t> texture_registry_generation{1};
 struct TexEntry {
   ProceduralTexturePtr t;
   uint64_t saved_version = 0;
@@ -1779,6 +1780,8 @@ ProceduralTexturePtr read_texture_asset(const std::string &path) {
 }
 }  // namespace
 
+uint64_t texture_assets_generation() { return texture_registry_generation.load(std::memory_order_relaxed); }
+
 ProceduralTexturePtr texture_asset(const std::string &path_in) {
   if (path_in.empty()) return nullptr;
   const std::string path = follow_redirects(asset_key(path_in));
@@ -1787,7 +1790,10 @@ ProceduralTexturePtr texture_asset(const std::string &path_in) {
   auto it = lib.find(path);
   if (it != lib.end()) return it->second.t;
   const auto t = read_texture_asset(path);
-  if (t) lib.emplace(path, TexEntry{t, t->version});
+  if (t) {
+    lib.emplace(path, TexEntry{t, t->version});
+    ++texture_registry_generation;
+  }
   return t;
 }
 
@@ -1817,7 +1823,10 @@ std::vector<ProceduralTexturePtr> texture_assets_for_browser(const std::vector<s
       for (int64_t i = begin; i < end; ++i) decoded[(size_t)i] = read_texture_asset(keys[(size_t)i]);
     });
   for (size_t i = 0; i < keys.size(); ++i)
-    if (decoded[i]) lib.emplace(keys[i], TexEntry{decoded[i], decoded[i]->version});
+    if (decoded[i]) {
+      lib.emplace(keys[i], TexEntry{decoded[i], decoded[i]->version});
+      ++texture_registry_generation;
+    }
   for (const auto &[row, index] : missing) result[row] = decoded[index];
   return result;
 }
@@ -1833,7 +1842,9 @@ ProceduralTexturePtr create_texture_asset(const ProceduralTexture &src, const st
   const std::string file = resolve_asset_path(path);
   fs::make_dirs(fs::parent(file));
   if (!fs::write_file(file, save_texture_text(*t))) return nullptr;
+  if (texture_library().count(path)) procedural_texture_cache_forget(path);
   texture_library()[path] = {t, t->version};
+  ++texture_registry_generation;
   return t;
 }
 
@@ -1882,7 +1893,10 @@ size_t retarget_texture_assets(const std::string &from_in, const std::string &to
     }
     lib[kv.first] = kv.second;
   }
-  if (!moved.empty()) procedural_texture_cache_clear();  // (outputs are cached by path)
+  if (!moved.empty()) {
+    procedural_texture_cache_clear();  // outputs are cached by path
+    ++texture_registry_generation;
+  }
   return moved.size();
 }
 
@@ -1897,12 +1911,16 @@ size_t forget_texture_assets(const std::string &path_in) {
     }
     else ++it;
   }
-  if (n) procedural_texture_cache_clear();
+  if (n) {
+    procedural_texture_cache_clear();
+    ++texture_registry_generation;
+  }
   return n;
 }
 
 void clear_texture_assets() {
   texture_library().clear();
+  ++texture_registry_generation;
   procedural_texture_cache_clear();
 }
 
