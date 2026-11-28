@@ -13,6 +13,7 @@
 #include "../core/profiling.h"
 #include "../render/dof.h"
 #include "../render/display.h"
+#include "../texture/paint_layer.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -952,12 +953,23 @@ ProceduralTexturePtr Editor::world_texture(int &output) {
   return texture;
 }
 
+// A layer clone shares its PaintImages with the brush. Final jobs must retain the pixels at snapshot time.
+static void freeze_world_paint(TextureLayerList &layers) {
+  for (auto &layer : layers) {
+    if (auto *paint = dynamic_cast<PaintLayer *>(layer.get()); paint && paint->images)
+      paint->images = std::make_shared<PaintImages>(*paint->images);
+    if (auto *children = layer->children()) freeze_world_paint(*children);
+    freeze_world_paint(layer->mask_layers);
+  }
+}
+
 Editor::WorldTextureSnapshot Editor::snapshot_world_texture() {
   WorldTextureSnapshot snapshot;
   auto texture = world_texture(snapshot.output);
   if (texture && !procedural_texture_current_image(*texture, snapshot.output, env_.map)) {
     // A view may hold the previous surface or a small preview. Capture this revision for the job's worker.
     snapshot.texture = std::make_unique<ProceduralTexture>(*texture);
+    freeze_world_paint(snapshot.texture->layers);
   }
   return snapshot;
 }
