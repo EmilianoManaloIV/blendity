@@ -5,7 +5,7 @@
 **Fixed (task 0654)**
 - A World set to UV Grid or Color Grid uses the same built-in texture as the image picker and materials. The selected grid supplies the sky and environmental lighting.
 
-**Checked:** The Windows baseline preserved the generated selection on reopen but logged a file-read error. A disk HDRI changed 57,600 pixels and its rotation changed 51,233 pixels in the same fixture. Candidate verification is pending.
+**Checked:** The Windows baseline preserved the generated selection on reopen but logged a file-read error. A disk HDRI changed 57,600 pixels and its rotation changed 51,233 pixels in the same fixture. On the candidate both grids render distinctly, rotate, and survive reopening. Windows and Linux passed the four affected test groups. Five disk timing pairs had a median difference of 0.0 ms.
 
 <!-- README -->
 after: Find and apply Low, Medium or High Viewport Quality from the command palette.

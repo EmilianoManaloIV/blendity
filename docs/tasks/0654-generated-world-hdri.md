@@ -1,6 +1,6 @@
 # 0654: Render generated grids selected for the World HDRI
 
-- **Status:** approved
+- **Status:** in review
 - **Authorization:** The Hub assigned this owner-approved Pass 38 follow-up as round 672 on `a0cd6307`, conditional on independent confirmation of task 0652's disk control. The verifier confirmed the generated-image defect and working disk control on `d79d27a7`.
 - **Requirements:** R-05, Q-06.
 - **Decisions:** none needed. Retain the established World environment and file color-space conventions.
@@ -32,3 +32,7 @@ Round 672 changelog fragment, Learn help if needed and this outcome.
 
 ## Outcome
 The independent baseline showed zero changed pixels and a file-read warning for the offered UV Grid. A disk image changed all 57,600 pixels and rotating it by 45 degrees changed 51,233. [Baseline audit](D:/Blendity-agent-scratch/pass38/0652-independent/hdri-audit.json)
+
+On the candidate, both grids changed all 57,600 raster pixels against the empty control and against each other. Rotating UV Grid changed 57,196 pixels. Rotating Color Grid changed 47,086 raster pixels and 57,599 traced pixels. Fresh-process reopen retained the selected image, including the generated UV reference saved by the stock editor. Empty, missing, disk, disk rotation and their reopen controls retained exact stock raster pixels. Five alternating stock/candidate disk timing pairs had a median paired difference of 0.0 ms, with identical final output across all ten runs. [Native visible results](D:/Blendity-agent-scratch/pass38/0654-independent/visible1/receipt.json) · [Timing](D:/Blendity-agent-scratch/pass38/0654-independent/disk-pairs1/independent-summary.json)
+
+Full-library Windows and dependency-free Linux passed all assertions in lighting, render, assets and editor. The independent source review approved `e10a836b`. Task 0655 separately tracks the reproduced project procedural texture issue. [Independent tests](C:/blab/pass38-hub/0654-test.md) · [Source review](C:/blab/pass38-hub/0654-review.md)
