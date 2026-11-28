@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the modeling tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/core/hash.h"
 #include "../src/scene/uv_internal.h"
 #include "../src/scene/subdiv_chain.h"
 #include "../src/scene/dynamesh.h"
@@ -2059,6 +2060,197 @@ static void modeling_round10_tests() {
     ed.command("origin bottom");
     CHECK(std::fabs(g->world_position().y - before.min.y) < 1e-4f);
     CHECK(!ed.pivot_is_center());
+  });
+}
+
+/* Round 642 (task 0624): preserve Slice's geometry and index order on both paths. */
+static size_t r642_sequential_slice(Mesh &m, Vec3 p, Vec3 n, int clear = 0) {
+  // The original Slice, using the individual mesh operators as a reference on small fixtures.
+  n = normalize(n);
+  const float eps = 1e-5f * std::max(1.0f, length(m.bounds().extent()));
+  auto side = [&](uint32_t v) { return dot(m.positions[v] - p, n); };
+  const auto edges = m.edge_cache();
+  size_t changes = 0;
+  for (const auto &[a, b] : edges) {
+    const float da = side(a), db = side(b);
+    if ((da > eps && db < -eps) || (da < -eps && db > eps)) {
+      meshops::split_edge(m, a, b, da / (da - db));
+      changes++;
+    }
+  }
+  for (size_t f = 0; f < m.face_count(); f++) {
+    bool above = false, below = false;
+    std::vector<uint32_t> on;
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const uint32_t v = m.face_verts(f)[k];
+      const float d = side(v);
+      if (d > eps) above = true;
+      else if (d < -eps) below = true;
+      else on.push_back(v);
+    }
+    if (above && below && on.size() >= 2 && meshops::split_face(m, f, on[0], on[1])) changes++;
+  }
+  if (clear) {
+    std::vector<uint8_t> drop(m.face_count());
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const float d = dot(m.face_center(f) - p, n);
+      drop[f] = clear == 1 ? d > eps : d < -eps;
+    }
+    meshops::delete_faces(m, drop);
+  }
+  return changes;
+}
+
+static bool r642_slice_same(const Mesh &a, const Mesh &b) {
+  auto same = [](const auto &u, const auto &v) {
+    return u.size() == v.size() && (u.empty() || std::memcmp(u.data(), v.data(), u.size() * sizeof(u[0])) == 0);
+  };
+  return same(a.positions, b.positions) && a.face_offsets == b.face_offsets && a.corner_verts == b.corner_verts &&
+         same(a.uvs, b.uvs) && a.face_material == b.face_material && a.face_smooth == b.face_smooth &&
+         a.face_group == b.face_group && a.seams == b.seams && a.sharp_edges == b.sharp_edges && a.loose_edges == b.loose_edges;
+}
+
+static Mesh r642_marked_slice_mesh() {
+  Mesh m;
+  for (Vec3 p : {Vec3(-1, 0, 0), Vec3(3, 0, 0), Vec3(-1, 2, 0), Vec3(3, 2, 0), Vec3(-1, 0, 2), Vec3(3, 0, 2),
+                 Vec3(0, -2, 1), Vec3(0, 4, 0), Vec3(0, 5, 0), Vec3(0, 4, 1)})
+    m.add_vert(p);
+  m.add_face({0, 1, 3, 2});
+  m.add_face({1, 0, 4, 5});
+  m.add_face({0, 1, 6});  // a third face at the shared edge, ending on the plane
+  m.add_face({7, 8, 9});  // a separate face lying in the plane
+  for (size_t f = 0; f < m.face_count(); f++) {
+    for (uint32_t c = 0; c < m.face_size(f); c++) {
+      const Vec3 p = m.positions[m.face_verts(f)[c]];
+      m.uvs.push_back({2 * p.x + 8 * float(f), p.y + 2 * p.z + 4 * float(f)});
+    }
+  }
+  m.face_material = {2, 5, 7, 11};
+  m.face_smooth = {1, 0, 1, 0};
+  m.face_group = {4, -2, 3, 2};
+  m.set_seam(0, 1, true);
+  m.set_seam(2, 3, true);
+  m.set_seam(7, 8, true);
+  m.set_sharp(0, 1, true);
+  m.set_sharp(4, 5, true);
+  return m;
+}
+
+static void tests_round642_slice() {
+  test("Slice: shared crossings keep ordered faces, per-corner UVs, materials and edge marks", [] {
+    const Mesh before = r642_marked_slice_mesh();
+    for (int clear : {0, 1, 2}) {
+      Mesh actual = before, reference = before;
+      CHECK(r642_sequential_slice(reference, {0, 0, 0}, {1, 0, 0}, clear) == 6);
+      CHECK(meshops::slice(actual, {0, 0, 0}, {1, 0, 0}, clear) == 6);
+      CHECK(r642_slice_same(actual, reference));
+      if (clear) {
+        CHECK(actual.face_count() == 4);
+        continue;
+      }
+      CHECK(actual.vert_count() == 13);
+      CHECK(actual.face_offsets == (std::vector<uint32_t>{0, 4, 8, 12, 16, 19, 22, 25}));
+      CHECK(actual.corner_verts == (std::vector<uint32_t>{10, 1, 3, 11, 11, 2, 0, 10, 10, 0, 4, 12, 12, 5, 1, 10, 10, 1, 6, 6, 0, 10, 7, 8, 9}));
+      CHECK(actual.face_material == (std::vector<int32_t>{2, 2, 5, 5, 7, 7, 11}));
+      CHECK(actual.face_smooth == (std::vector<uint8_t>{1, 1, 0, 0, 1, 1, 0}));
+      CHECK(actual.is_seam(0, 10) && actual.is_seam(10, 1) && !actual.is_seam(0, 1));
+      CHECK(actual.is_sharp(0, 10) && actual.is_sharp(10, 1) && !actual.is_sharp(0, 1));
+      CHECK(actual.is_seam(7, 8));
+      if (actual.has_uvs() && actual.corner_verts.size() == 25) {
+        CHECK_NEAR(actual.uvs[0].x, 0.0f, 1e-6f);
+        CHECK_NEAR(actual.uvs[8].x, 8.0f, 1e-6f);  // the same crossing on the other UV island
+      }
+      CHECK(actual.has_uvs());
+    }
+  });
+  test("Slice: concave faces, painted corners and legacy wire edges retain their cut geometry", [] {
+    Mesh concave;
+    for (Vec3 p : {Vec3(-2, 0, 0), Vec3(2, 0, 0), Vec3(2, 1, 0), Vec3(-1, 1, 0), Vec3(-1, 2, 0), Vec3(2, 2, 0),
+                   Vec3(2, 3, 0), Vec3(-2, 3, 0)})
+      concave.add_vert(p);
+    concave.add_face({0, 1, 2, 3, 4, 5, 6, 7});  // four intersections with x = 0
+    Mesh reference = concave;
+    const size_t changes = r642_sequential_slice(reference, {0, 0, 0}, {1, 0, 0});
+    CHECK(changes > 4);
+    CHECK(meshops::slice(concave, {0, 0, 0}, {1, 0, 0}) == changes);
+    CHECK(r642_slice_same(concave, reference));
+
+    Mesh painted = r642_marked_slice_mesh();
+    auto color = painted.make_color("Paint", ColorAttribute::Domain::Corner, {0, 0, 0, 1});
+    for (size_t c = 0; c < color.rgba.size(); c++) color.rgba[c].x = float(c % 7) / 7.0f;
+    painted.color_attributes.push_back(std::move(color));
+    reference = painted;
+    CHECK(meshops::slice(painted, {0, 0, 0}, {1, 0, 0}) == r642_sequential_slice(reference, {0, 0, 0}, {1, 0, 0}));
+    CHECK(r642_slice_same(painted, reference));
+    CHECK(painted.color_attributes.size() == 1 && reference.color_attributes.size() == 1);
+    if (painted.color_attributes.size() == 1 && reference.color_attributes.size() == 1) {
+      const auto &got = painted.color_attributes.front();
+      const auto &want = reference.color_attributes.front();
+      CHECK(painted.color_fits(got) && got.corners == want.corners);
+      CHECK(got.rgba.size() == want.rgba.size() && std::memcmp(got.rgba.data(), want.rgba.data(), got.rgba.size() * sizeof(Vec4)) == 0);
+    }
+
+    Mesh wire;
+    wire.add_vert({-1, 0, 0});
+    wire.add_vert({3, 0, 0});
+    wire.add_loose_edge(0, 1);
+    wire.set_sharp(0, 1, true);
+    Mesh single = wire;
+    CHECK(meshops::slice(single, {0, 0, 0}, {1, 0, 0}) == 1);
+    CHECK(single.vert_count() == 3 && single.face_count() == 0);
+    CHECK(single.loose_edges == (std::vector<uint64_t>{Mesh::edge_key(0, 2), Mesh::edge_key(1, 2)}));
+    CHECK(single.sharp_edges == single.loose_edges);
+    // Older files can carry the same wire twice. Each occurrence has its own split vertex.
+    wire.loose_edges = {Mesh::edge_key(0, 1), Mesh::edge_key(0, 1)};
+    CHECK(meshops::slice(wire, {0, 0, 0}, {1, 0, 0}) == 2);
+    CHECK(wire.vert_count() == 4);
+    CHECK(wire.loose_edges == (std::vector<uint64_t>{Mesh::edge_key(0, 2), Mesh::edge_key(0, 3), Mesh::edge_key(1, 2), Mesh::edge_key(1, 3)}));
+  });
+  test("Slice: a cut through the selected sphere face clears selection and Undo restores it", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    GameObject *sphere = ed.scene().create("Slice sphere");
+    const auto before = primitives::uv_sphere(1.0f, 48, 32);
+    sphere->add<MeshFilter>()->mesh = before;
+    sphere->add<MeshRenderer>();
+    const uint64_t id = sphere->id;
+    ed.commit_change("Add slice sphere");
+    ed.step_frame_headless();
+    ed.select_object(id);
+    ed.command("edit face");
+    ed.command("fsel 100");
+    CHECK(ed.in_edit_mode() && ed.edit_face_selected(100));
+    Mesh expected = *before;
+    Vec3 center(0.0f);
+    std::vector<uint8_t> verts(before->vert_count(), 0);
+    for (uint32_t k = 0; k < before->face_size(100); k++) verts[before->face_verts(100)[k]] = 1;
+    for (size_t v = 0; v < verts.size(); v++)
+      if (verts[v]) center += before->positions[v];
+    center = center / float(before->face_size(100));
+    CHECK(r642_sequential_slice(expected, center, {0, 1, 0}) > 0);
+    ed.command("editop slice");
+    const auto result = sphere->get<MeshFilter>()->mesh;
+    CHECK(r642_slice_same(*result, expected));
+    CHECK(closed_manifold(*result));
+    auto selection_is = [&](bool restored) {
+      const auto &m = *ed.scene().find(id)->get<MeshFilter>()->mesh;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (ed.edit_face_selected(f) != (restored && f == 100)) return false;
+      for (size_t v = 0; v < m.vert_count(); v++)
+        if (ed.edit_vert_selected(v) != (restored && verts[v])) return false;
+      return ed.in_edit_mode();
+    };
+    CHECK(selection_is(false));
+    ed.command("undo");
+    sphere = ed.scene().find(id);
+    CHECK(sphere && r642_slice_same(*sphere->get<MeshFilter>()->mesh, *before));
+    if (!sphere) return;
+    CHECK(selection_is(true));
+    ed.command("redo");
+    sphere = ed.scene().find(id);
+    CHECK(sphere && r642_slice_same(*sphere->get<MeshFilter>()->mesh, expected));
+    if (sphere) CHECK(selection_is(false));
   });
 }
 
@@ -12568,6 +12760,415 @@ static void tests_round549() {
   });
 }
 
+/* Round 621: ordered bevel output, with independent receipts for matched builds of the same platform. */
+namespace r621 {
+
+template<class T>
+uint64_t hash_layer(uint64_t hash, const std::vector<T> &layer) {
+  const uint64_t count = layer.size();
+  hash = fnv1a(&count, sizeof(count), hash);
+  return fnv1a(layer.data(), layer.size() * sizeof(T), hash);
+}
+
+using Receipt = std::array<uint64_t, 5>;
+
+Receipt receipt(const Mesh &mesh, const std::vector<uint8_t> &verts, const std::vector<uint8_t> &faces) {
+  static_assert(sizeof(Vec2) == 2 * sizeof(float) && sizeof(Vec3) == 3 * sizeof(float) && sizeof(Vec4) == 4 * sizeof(float));
+  uint64_t topology = hash_layer(kFnvBasis, mesh.positions);
+  topology = hash_layer(topology, mesh.face_offsets);
+  topology = hash_layer(topology, mesh.corner_verts);
+  topology = hash_layer(topology, mesh.loose_edges);
+  uint64_t surfaces = hash_layer(kFnvBasis, mesh.uvs);
+  surfaces = hash_layer(surfaces, mesh.face_material);
+  surfaces = hash_layer(surfaces, mesh.face_smooth);
+  surfaces = hash_layer(surfaces, mesh.seams);
+  surfaces = hash_layer(surfaces, mesh.sharp_edges);
+  surfaces = hash_layer(surfaces, mesh.face_group);
+  const uint8_t flags[] = {static_cast<uint8_t>(mesh.smooth), static_cast<uint8_t>(mesh.seams_sharp)};
+  surfaces = fnv1a(flags, sizeof(flags), surfaces);
+  surfaces = fnv1a(&mesh.smooth_angle, sizeof(mesh.smooth_angle), surfaces);
+  const int active_layers[] = {mesh.active_color, mesh.render_color};
+  uint64_t colors = fnv1a(active_layers, sizeof(active_layers));
+  for (const auto &layer : mesh.color_attributes) {
+    colors = fnv1a(layer.name.c_str(), layer.name.size() + 1, colors);
+    colors = fnv1a(&layer.domain, sizeof(layer.domain), colors);
+    colors = hash_layer(colors, layer.rgba);
+    colors = hash_layer(colors, layer.corners);
+  }
+  uint64_t drawn = hash_layer(kFnvBasis, mesh.custom_normals);
+  if (mesh.face_count()) {
+    const RenderMesh &render = mesh.render_mesh();
+    drawn = hash_layer(drawn, render.positions);
+    drawn = hash_layer(drawn, render.normals);
+    drawn = hash_layer(drawn, render.uvs);
+    drawn = hash_layer(drawn, render.indices);
+    drawn = hash_layer(drawn, render.tri_face);
+    drawn = hash_layer(drawn, render.tri_corner);
+    drawn = hash_layer(drawn, render.tri_material);
+  }
+  return {topology, surfaces, colors, drawn, hash_layer(hash_layer(kFnvBasis, verts), faces)};
+}
+
+void print_receipt(const char *label, const Mesh &mesh, const Receipt &got, bool changed, size_t selected_edges = 0) {
+  if (!std::getenv("BLENDITY_BEVEL_621_RECEIPTS")) return;
+  std::printf("BEVEL621 %s changed=%d size=%zu/%zu/%zu edges=%zu topology=%016llx surfaces=%016llx colors=%016llx draw=%016llx selection=%016llx\n",
+              label, (int)changed, mesh.vert_count(), mesh.face_count(), mesh.corner_count(), selected_edges, (unsigned long long)got[0],
+              (unsigned long long)got[1], (unsigned long long)got[2], (unsigned long long)got[3], (unsigned long long)got[4]);
+}
+
+void paint(Mesh &mesh) {
+  mesh.smooth = true;
+  mesh.smooth_angle = 72.0f;
+  mesh.seams_sharp = true;
+  mesh.face_material.clear();
+  mesh.face_smooth.clear();
+  for (size_t f = 0; f < mesh.face_count(); ++f) {
+    mesh.face_material.push_back((int32_t)(f % 3));
+    mesh.face_smooth.push_back((uint8_t)(f % 2));
+  }
+  mesh.uvs.clear();
+  ColorAttribute corner = mesh.make_color("Corners", ColorAttribute::Domain::Corner, Vec4(1, 1, 1, 1));
+  for (size_t c = 0; c < mesh.corner_count(); ++c) {
+    const float value = float(c + 1) / float(mesh.corner_count() + 1);
+    mesh.uvs.emplace_back(value, value * value);
+    corner.rgba[c] = Vec4(value, 1.0f - value, value * value, 0.25f + 0.5f * value);
+  }
+  ColorAttribute point = mesh.make_color("Points", ColorAttribute::Domain::Point, Vec4(1, 1, 1, 1));
+  for (size_t v = 0; v < mesh.vert_count(); ++v) point.rgba[v].x = float(v + 1) / float(mesh.vert_count() + 1);
+  mesh.color_attributes = {std::move(corner), std::move(point)};
+  mesh.active_color = 1;
+  mesh.render_color = 0;
+  const auto edge = mesh.edge_cache().front();
+  mesh.set_seam(edge.first, edge.second, true);
+  mesh.set_sharp(edge.first, edge.second, true);
+  mesh.touch();
+}
+
+void check(const std::string &label, const Mesh &source, const std::unordered_set<uint64_t> &edges, int segments, bool changes) {
+  const auto run = [&](bool write) {
+    Mesh mesh = source;
+    std::vector<uint8_t> verts(mesh.vert_count(), 1), faces(mesh.face_count(), 0);
+    const Receipt before = receipt(mesh, verts, faces);
+    meshops::EdgeSelectionScope selection(&edges);
+    std::string err;
+    const bool changed = meshops::bevel_edges(mesh, verts, faces, 0.12f, segments, &err, true, 0.25f);
+    CHECK(changed == changes);
+    const Receipt got = receipt(mesh, verts, faces);
+    if (changed) {
+      CHECK(mesh.face_count() > source.face_count());
+      CHECK(faces.size() == mesh.face_count() && verts.size() == mesh.vert_count());
+      CHECK(std::count(faces.begin(), faces.end(), uint8_t(1)) > 0);
+      CHECK(std::all_of(mesh.corner_verts.begin(), mesh.corner_verts.end(), [&](uint32_t v) { return v < mesh.vert_count(); }));
+      CHECK(mesh.uvs.size() == mesh.corner_count());
+      CHECK(mesh.color_attributes.size() == 2);
+      if (mesh.color_attributes.size() == 2) {
+        CHECK(mesh.color_attributes[0].corners == mesh.corner_verts);
+        CHECK(mesh.color_attributes[0].rgba.size() == mesh.corner_count());
+        /* The low-level operator leaves new vertices unpainted. remove_loose_verts clears the
+         * mis-sized point layer, and the editor carries its colors at commit. */
+        CHECK(mesh.color_attributes[1].rgba.empty());
+      }
+    } else {
+      CHECK(!err.empty() && got == before);
+    }
+    if (write) print_receipt(label.c_str(), mesh, got, changed);
+    return got;
+  };
+  const Receipt first = run(true);
+  CHECK(run(false) == first);
+}
+
+}  // namespace r621
+
+static void tests_round621() {
+  test("round 621 bevel: ordered topology and painted attributes repeat for reversed, mixed, open and degenerate edges", [] {
+    for (int winding : {0, 1, 2}) {
+      Mesh box = *primitives::cube(1.0f);
+      for (auto &p : box.positions) p = {2.0f * p.x + 0.2f * p.y, 1.4f * p.y, p.z + 0.1f * p.x};
+      for (size_t f = 0; f < box.face_count(); ++f) {
+        if (winding == 1 || (winding == 2 && f % 2 == 0))
+          std::reverse(box.corner_verts.begin() + box.face_offsets[f], box.corner_verts.begin() + box.face_offsets[f + 1]);
+      }
+      box.touch();
+      r621::paint(box);
+      const auto &edges = box.edge_cache();
+      std::unordered_set<uint64_t> all;
+      for (const auto &edge : edges) all.insert(Mesh::edge_key(edge.first, edge.second));
+      const std::unordered_set<uint64_t> subset = {Mesh::edge_key(edges[0].second, edges[0].first),
+                                                   Mesh::edge_key(edges[1].first, edges[1].second)};
+      for (int segments : {1, 3}) {
+        r621::check(strprintf("box%d-all-%d", winding, segments), box, all, segments, true);
+        r621::check(strprintf("box%d-subset-%d", winding, segments), box, subset, segments, true);
+      }
+    }
+    Mesh fold;
+    fold.positions = {{0, 0, 0}, {2, 0, 0}, {0, 1, 0}, {2, 1, 1}};
+    fold.add_face({0, 1, 2});
+    fold.add_face({2, 1, 3});
+    r621::paint(fold);
+    const auto hinge = Mesh::edge_key(1, 2);
+    const auto boundary = Mesh::edge_key(0, 1);
+    for (int segments : {1, 3}) {
+      r621::check(strprintf("open-mixed-%d", segments), fold, {hinge, boundary}, segments, true);
+      r621::check(strprintf("boundary-only-%d", segments), fold, {boundary}, segments, false);
+      r621::check(strprintf("no-selection-%d", segments), fold, {}, segments, false);
+      r621::check(strprintf("empty-%d", segments), Mesh{}, {}, segments, false);
+    }
+    fold.positions[2] = fold.positions[1];  // the shared edge has zero length, with its original topological IDs
+    fold.touch();
+    r621::check("collapsed-edge-1", fold, {hinge}, 1, true);
+    r621::check("collapsed-edge-3", fold, {hinge}, 3, true);
+  });
+
+  test("round 621 bevel: Adjust Last reapplies from the original, and Undo restores painted topology and the plain bevel selection", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("keymap Unity");
+    const MeshPtr box = primitives::cube(1.0f);
+    r621::paint(*box);
+    /* A point layer needs the editor's post-operator color transfer, which invalidates Adjust
+     * Last in the baseline. Exercise the live panel with the corner-painted mesh first. */
+    box->color_attributes.pop_back();
+    box->active_color = box->render_color = 0;
+    GameObject *object = ed.scene().create("Bevel receipt");
+    const auto id = object->id;
+    object->add<MeshFilter>()->mesh = box;
+    object->add<MeshRenderer>();
+    ed.commit_change("Add bevel fixture");
+    ed.step_frame_headless();
+    ed.command("select Bevel receipt");
+    ed.command("edit edge");
+    const auto edge = box->edge_cache().front();
+    ed.command(strprintf("esel %u %u", edge.second, edge.first));
+    const auto capture = [&](const char *label, bool changed) {
+      const GameObject *current = ed.scene().find(id);
+      CHECK(current && current->get<MeshFilter>());
+      if (!current || !current->get<MeshFilter>()) return r621::Receipt{};
+      const Mesh &mesh = *current->get<MeshFilter>()->mesh;
+      const auto got = r621::receipt(mesh, ed.vert_sel_for_test(), ed.face_sel_for_test());
+      r621::print_receipt(label, mesh, got, changed, ed.edge_sel_count_for_test());
+      return got;
+    };
+    const auto before = capture("editor-before", false);
+    CHECK(ed.edge_sel_count_for_test() == 1);
+    ed.command("editop bevel");
+    ed.command("redo amount 0.12");
+    ed.command("redo segments 1");
+    const auto straight = capture("editor-straight", true);
+    CHECK(ed.last_op_name_for_test() == "bevel" && straight[0] != before[0]);
+
+    ed.step_frame_headless();
+    CHECK(ed.last_op_valid_for_test());
+    Recti field;
+    if (!ed.button_rect_for_test("lastop:Width", field)) {
+      const Recti view = ed.scene_view_rect();
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, view.x + view.w / 2, view.y + view.h / 2)});
+      platform::Event f9;
+      f9.type = platform::EventType::KeyDown;
+      f9.key = platform::KEY_F9;
+      ed.step_frame_headless({f9});
+      f9.type = platform::EventType::KeyUp;
+      ed.step_frame_headless({f9});
+    }
+    const bool has_width = ed.button_rect_for_test("lastop:Width", field);
+    CHECK(has_width);
+    if (has_width) {
+      r34_click(ed, field.x + field.w / 2, field.y + field.h / 2);
+      r34_click(ed, field.x + field.w / 2, field.y + field.h / 2);
+      platform::Event key;
+      key.type = platform::EventType::KeyDown;
+      key.key = platform::KEY_A;
+      key.mods = platform::MOD_CTRL;
+      ed.step_frame_headless({key});
+      for (char c : std::string("0.18")) {
+        platform::Event input;
+        input.type = platform::EventType::Text;
+        input.codepoint = (uint32_t)c;
+        ed.step_frame_headless({input});
+      }
+      key.key = platform::KEY_ENTER;
+      key.mods = 0;
+      ed.step_frame_headless({key});
+      r34_steps(ed, 2);
+      const auto wider = capture("editor-adjusted-width", true);
+      CHECK_NEAR(ed.last_op_amount_for_test(), 0.18f, 1e-6f);
+      CHECK(wider[0] != straight[0]);
+      ed.command("redo amount 0.12");
+      CHECK(capture("editor-original-width", true) == straight);
+    }
+    ed.command("redo segments 3");  // the console setter re-runs the same Adjust Last operation
+    const auto curved = capture("editor-curved", true);
+    CHECK(ed.last_op_segments_for_test() == 3 && curved[0] != straight[0]);
+    ed.command("redo segments 1");
+    CHECK(capture("editor-straight-again", true) == straight);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    object = ed.scene().find(id);
+    CHECK(object && ed.in_edit_mode());
+    if (!object) return;
+    const auto undone = capture("editor-undo", false);
+    /* The baseline's Adjust Last amendment consumes the original selection snapshot.
+     * Compare its resulting selection with the baseline receipt, and verify full selection on plain Undo below. */
+    CHECK(std::equal(undone.begin(), undone.end() - 1, before.begin()));
+
+    const auto painted = std::make_shared<Mesh>(*box);
+    r621::paint(*painted);
+    object->get<MeshFilter>()->mesh = painted;
+    ed.commit_change("Add point layer");
+    ed.step_frame_headless();
+    ed.command(strprintf("esel %u %u", edge.second, edge.first));
+    const auto painted_before = capture("editor-painted-before", false);
+    CHECK(ed.edge_sel_count_for_test() == 1);
+    ed.command("editop bevel");
+    ed.step_frame_headless();
+    const auto painted_after = capture("editor-painted-bevel", true);
+    CHECK(painted_after[0] != painted_before[0]);
+    const Mesh &result = *ed.scene().find(id)->get<MeshFilter>()->mesh;
+    const int point = result.find_color("Points");
+    CHECK(point >= 0 && result.color_attributes[(size_t)point].rgba.size() == result.vert_count());
+    ed.command("undo");
+    r34_steps(ed, 2);
+    CHECK(ed.in_edit_mode() && ed.edge_sel_count_for_test() == 1);
+    CHECK(capture("editor-painted-undo", false) == painted_before);
+  });
+}
+
+static void tests_round632() {
+  test("round 632 recalculate normals: mixed components keep exact winding and corner attributes", [] {
+    Mesh m;
+    m.positions = {
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1},
+        {0, 0, 9}, {0, -9, 18}, {9, 0, 9}, {0, 9, 9}, {-9, 0, 0},
+        {5, 0, 0}, {5, 2, 0}, {5, 0, 2}, {5, 0, -2}, {7, 0, 0},
+        {0, 0, 0}, {1e-12f, 0, 0}, {0, 1e-12f, 0}, {0, 0, 1e-12f},
+    };
+    /* Closed tetrahedron, with only its first face inward. */
+    m.add_face({1, 2, 0});
+    m.add_face({0, 1, 3});
+    m.add_face({0, 3, 2});
+    m.add_face({1, 2, 3});
+    /* In this open fan the first and last faces tie for farthest from the center.
+     * The first points toward it and the last points away. The first wins the tie,
+     * and the middle face's two reversals leave it in its original order. */
+    m.add_face({4, 5, 6});
+    m.add_face({7, 6, 4});
+    m.add_face({4, 7, 8});
+    /* Three faces on one edge. Each has its own component and center. */
+    m.add_face({9, 11, 10});
+    m.add_face({9, 10, 12});
+    m.add_face({9, 10, 13});
+    /* Inward tiny closed tetrahedron. Its volume is below the cutoff and its
+     * face normals round to zero, so the fallback keeps its input winding. */
+    m.add_face({15, 16, 14});
+    m.add_face({17, 15, 14});
+    m.add_face({16, 17, 14});
+    m.add_face({17, 16, 15});
+
+    m.uvs.resize(m.corner_count());
+    m.color_attributes.push_back(m.make_color("Corners", ColorAttribute::Domain::Corner, {}));
+    for (size_t k = 0; k < m.corner_count(); k++) {
+      const float n = float(k + 1) / 64.0f;
+      m.uvs[k] = {n, 1 - n};
+      m.color_attributes.front().rgba[k] = {n, 1 - n, 0.25f, 1};
+    }
+    const Mesh before = m;
+    meshops::recalc_normals_outside(m);
+    CHECK(m.positions == before.positions);
+    CHECK(m.face_offsets == before.face_offsets);
+    const bool corner_layers_fit = m.has_uvs() && m.color_attributes.size() == 1 &&
+                                   m.color_fits(m.color_attributes.front());
+    CHECK(corner_layers_fit);
+    if (!corner_layers_fit || m.corner_count() != before.corner_count() || m.face_offsets != before.face_offsets) return;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const bool reversed = f == 0 || f == 4 || f == 6;
+      for (uint32_t k = m.face_offsets[f]; k < m.face_offsets[f + 1]; k++) {
+        const uint32_t src = reversed ? m.face_offsets[f + 1] - 1 - (k - m.face_offsets[f]) : k;
+        CHECK(m.corner_verts[k] == before.corner_verts[src]);
+        CHECK(m.uvs[k].x == before.uvs[src].x && m.uvs[k].y == before.uvs[src].y);
+        CHECK(m.color_attributes.front().corners[k] == before.color_attributes.front().corners[src]);
+        const Vec4 got = m.color_attributes.front().rgba[k], want = before.color_attributes.front().rgba[src];
+        CHECK(got.xyz() == want.xyz() && got.w == want.w);
+      }
+    }
+    Mesh empty;
+    meshops::recalc_normals_outside(empty);
+    CHECK(empty.face_count() == 0 && empty.corner_count() == 0);
+  });
+
+  test("round 632 recalculate normals: a shell with a nonfinite vertex keeps its winding and UVs", [] {
+    Mesh m = *primitives::cube();
+    meshops::flip_normals(m);
+    m.positions[0].x = std::numeric_limits<float>::quiet_NaN();
+    const Mesh original = m;
+    meshops::recalc_normals_outside(m);
+    CHECK(m.positions.size() == original.positions.size() &&
+          std::memcmp(m.positions.data(), original.positions.data(), original.positions.size() * sizeof(Vec3)) == 0);
+    CHECK(m.face_offsets == original.face_offsets);
+    CHECK(m.corner_verts == original.corner_verts);
+    CHECK(m.uvs.size() == original.uvs.size());
+    for (size_t k = 0; k < std::min(m.uvs.size(), original.uvs.size()); k++)
+      CHECK(m.uvs[k].x == original.uvs[k].x && m.uvs[k].y == original.uvs[k].y);
+  });
+
+  for (const char *preset : {"Unity", "Blender"}) {
+    const std::string name = strprintf("round 632 recalculate normals: Shift+N corrects winding and Undo restores it (%s)", preset);
+    test(name.c_str(), [preset] {
+      Editor ed;
+      r34_open(ed);
+      ed.command(std::string("keymap ") + preset);
+      const MeshPtr outward = primitives::cube();
+      const MeshPtr inward = std::make_shared<Mesh>(*outward);
+      meshops::flip_normals(*inward);
+      const Mesh original = *inward;
+      GameObject *object = ed.scene().create("Normals fixture");
+      const auto id = object->id;
+      object->add<MeshFilter>()->mesh = inward;
+      object->add<MeshRenderer>();
+      ed.commit_change("Add normals fixture");
+      ed.step_frame_headless();
+      ed.command("select Normals fixture");
+      ed.command("edit face");
+      ed.step_frame_headless();
+      CHECK(ed.in_edit_mode());
+
+      const Recti view = ed.scene_view_rect();
+      const int x = view.x + view.w / 2, y = view.y + view.h / 2;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+      const auto press = [&](int key, int mods) {
+        platform::Event e;
+        e.type = R34ET::KeyDown;
+        e.key = key;
+        e.mods = mods;
+        ed.step_frame_headless({e});
+        e.type = R34ET::KeyUp;
+        e.mods = 0;
+        ed.step_frame_headless({e});
+      };
+      const auto check_mesh = [&](const Mesh &expected) {
+        const GameObject *current = ed.scene().find(id);
+        const MeshFilter *filter = current ? current->get<MeshFilter>() : nullptr;
+        CHECK(filter && filter->mesh);
+        if (!filter || !filter->mesh) return;
+        const Mesh &mesh = *filter->mesh;
+        CHECK(mesh.positions == expected.positions);
+        CHECK(mesh.face_offsets == expected.face_offsets);
+        CHECK(mesh.corner_verts == expected.corner_verts);
+        CHECK(mesh.uvs.size() == expected.uvs.size());
+        for (size_t k = 0; k < std::min(mesh.uvs.size(), expected.uvs.size()); k++)
+          CHECK(mesh.uvs[k].x == expected.uvs[k].x && mesh.uvs[k].y == expected.uvs[k].y);
+      };
+
+      press(platform::KEY_N, platform::MOD_SHIFT);
+      check_mesh(*outward);
+      CHECK(inward->corner_verts == original.corner_verts);
+      press(platform::KEY_Z, platform::MOD_CTRL);
+      CHECK(ed.in_edit_mode());
+      check_mesh(original);
+    });
+  }
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -12577,6 +13178,7 @@ void run_modeling_tests() {
   uv_tests();
   modeling_round9_tests();
   modeling_round10_tests();
+  tests_round642_slice();
   modeling_round11_tests();
   modeling_round12_tests();
   modeling_round13_tests();
@@ -12624,4 +13226,6 @@ void run_modeling_tests() {
   tests_round535();
   run_vertex_paint_tests();
   tests_round549();
+  tests_round621();
+  tests_round632();
 }

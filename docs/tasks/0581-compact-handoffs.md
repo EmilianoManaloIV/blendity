@@ -1,10 +1,10 @@
 # 0581: Compact Codex handoffs
 
-- **Status:** in review
+- **Status:** done
 - **Requirements:** Owner-approved workflow, round 599
 - **Decisions:** None needed
 - **Implementation:** Project implementer
-- **PR:** Hub publishes
+- **PR:** [#488](https://github.com/EmilianoManaloIV/blendity/pull/488), recorded merge `3d353efa`
 
 ## Goal and scope
 
@@ -28,3 +28,7 @@ Task 0580 owns AGENTS.md and METHOD.md crosslinks. Keep native code and shared r
 
 Run a scratch simulation, the role configuration checker, fragment check and diff check.
 Independently test the instructions and review the candidate. No native build or GPU run is needed.
+
+## Published outcome
+
+The [PR verification record](https://github.com/EmilianoManaloIV/blendity/pull/488) reports 13 exercised observations, four duplicates suppressed, and independent review approval. It records passing Codex configuration, fragment and whitespace checks at combined head `499a6bab`. The PR records the totals and verdict. The individual observations and their scratch fixture are absent from that record.

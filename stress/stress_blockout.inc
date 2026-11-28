@@ -699,7 +699,7 @@ static bool meet_at_a_ridge(const Mesh &m, uint32_t a, uint32_t b, double size) 
 /* One result judged. A problem: it is open, pinched or inside out, or two of its flat faces lie on top of each
  * other. Small faces of an unresolved place on top of others, flat faces that meet at a ridge, and faces of no area,
  * are counted apart. */
-static void judge(uint32_t seed, const char *name, const Mesh &m, const bl::blockout::Faces &named, const bl::blockout::Report &r, Tally &t) {
+static std::string judge(uint32_t seed, const char *name, const Mesh &m, const bl::blockout::Faces &named, const bl::blockout::Report &r, Tally &t) {
   t.built++, t.skipped += r.skipped.size(), t.unresolved += r.unresolved;
   std::string bad = problem(m);
   std::vector<std::pair<uint32_t, uint32_t>> pairs;
@@ -720,9 +720,10 @@ static void judge(uint32_t seed, const char *name, const Mesh &m, const bl::bloc
   for (size_t f = 0; f < m.face_count(); f++) flat_area += no_area(m, f, far);
   t.problems += !bad.empty(), t.overlaps += small, t.ridges += ridge, t.no_area += flat_area > 0;
   if (!bad.empty() && t.first.empty()) t.first = strprintf("seed %u: %s", seed, bad.c_str());
-  if (!std::getenv("BLENDITY_BLOCKOUT_DEBUG") || (bad.empty() && !small && !ridge && !flat_area && !r.unresolved)) return;
-  std::printf("  seed %u (%s): %s%s%s%s%s\n", seed, name, bad.c_str(), small ? " small faces on top of others;" : "", ridge ? " flat faces meeting at a ridge;" : "", flat_area ? strprintf(" %zu faces of no area;", flat_area).c_str() : "",
-              r.unresolved ? strprintf(" %zu unresolved", r.unresolved).c_str() : "");
+  if (std::getenv("BLENDITY_BLOCKOUT_DEBUG") && (!bad.empty() || small || ridge || flat_area || r.unresolved))
+    std::printf("  seed %u (%s): %s%s%s%s%s\n", seed, name, bad.c_str(), small ? " small faces on top of others;" : "", ridge ? " flat faces meeting at a ridge;" : "", flat_area ? strprintf(" %zu faces of no area;", flat_area).c_str() : "",
+                r.unresolved ? strprintf(" %zu unresolved", r.unresolved).c_str() : "");
+  return bad;
 }
 
 /* The sweep: hostile arrangements on each path; a refusal is not a problem. */
@@ -1727,6 +1728,9 @@ static std::vector<Piece> preset_arrangement(int preset, uint32_t seed, float gr
 static void preset_sweep(Report &rep, const Options &o, bool crisp) {
   const uint32_t cases = o.quick ? 50 : 500;
   const float cell = 0.08f;
+  const char *one = std::getenv("BLENDITY_BLOCKOUT_PRESET_SEED");
+  const char *kind = std::getenv("BLENDITY_BLOCKOUT_PRESET");
+  std::vector<std::string> findings;
   rep.table({"sweep of architectural pieces (round 500), alone and in a room", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
   for (int preset = bl::kPresetColumn; preset < bl::kBlockoutPresets; preset++)
     for (int k = 0; k < 2; k++) {
@@ -1734,8 +1738,6 @@ static void preset_sweep(Report &rep, const Options &o, bool crisp) {
       if (path == Path::Crisp && !crisp) continue;
       const std::string name = std::string(bl::kBlockoutPresetNames[preset]) + (path == Path::Crisp ? " on the exact path" : strprintf(" on the grid (cell %g)", cell));
       Tally t;
-      const char *one = std::getenv("BLENDITY_BLOCKOUT_PRESET_SEED");  // (one arrangement alone of the kind BLENDITY_BLOCKOUT_PRESET names (1 to 9), its pieces and overlapping faces listed)
-      const char *kind = std::getenv("BLENDITY_BLOCKOUT_PRESET");
       if (kind && std::atoi(kind) != preset) continue;
       for (uint32_t seed = 1; seed <= cases; seed++) {
         if (one && (uint32_t)std::atoi(one) != seed) continue;
@@ -1751,11 +1753,12 @@ static void preset_sweep(Report &rep, const Options &o, bool crisp) {
           if (std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  preset %d seed %u (%s) refused: %s\n", preset, seed, name.c_str(), rp.why.c_str());
           continue;
         }
-        judge(seed, name.c_str(), m, named, rp, t);
+        const std::string issue = judge(seed, name.c_str(), m, named, rp, t);
+        if (!issue.empty()) findings.push_back(strprintf("%s, seed %u: %s", name.c_str(), seed, issue.c_str()));
       }
-      rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved)});
-      if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+      rep.row({name, std::to_string(t.built + t.refused), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved)});
     }
+  for (const std::string &finding : findings) rep.note(finding);
 }
 
 /* Round 500: hostile numbers on every kind - each number the kind reads set, one at a time, to NaN, infinity, 0, a negative, a tiny and a huge value, and the counts to
@@ -1928,6 +1931,7 @@ static void test_blockout(Report &rep, const Options &o) {
   if (std::getenv("BLENDITY_BLOCKOUT_OUTLINE")) return outline_room_sweep(rep, o, crisp);  // (round 497: the outline rooms' sweep alone)
   if (std::getenv("BLENDITY_BLOCKOUT_WINDOWS")) return window_style_sweep(rep, o, crisp), window_hostile_row(rep, o, crisp), window_cost_row(rep, o, crisp), window_live_row(rep, o);  // (round 498: the styled windows' sweep, hostile and cost rows and live row alone)
   if (std::getenv("BLENDITY_BLOCKOUT_DOORS")) return door_style_sweep(rep, o, crisp), door_hostile_row(rep, o, crisp), door_live_row(rep, o);  // (round 499: the styled doors' sweep, hostile row and live row alone)
+  if (std::getenv("BLENDITY_BLOCKOUT_PRESET_SWEEP")) return preset_sweep(rep, o, crisp);  // (geometry only; the same preset and seed filters apply)
   if (std::getenv("BLENDITY_BLOCKOUT_PRESETS") || std::getenv("BLENDITY_BLOCKOUT_PRESET") || std::getenv("BLENDITY_BLOCKOUT_PRESET_SEED"))
     return preset_sweep(rep, o, crisp), preset_hostile_row(rep, o, crisp), preset_bench_row(rep, o), preset_wire_row(rep, o);  // (round 500: the architectural pieces' sweep, hostile row and bench row alone; BLENDITY_BLOCKOUT_PRESET=<1 to 9> one kind, BLENDITY_BLOCKOUT_PRESET_SEED=<n> one arrangement of it)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */

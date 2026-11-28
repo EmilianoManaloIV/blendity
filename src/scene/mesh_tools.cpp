@@ -776,6 +776,7 @@ size_t repair_rings(Mesh &m, const std::vector<uint8_t> &moved, std::vector<uint
 bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_sel, float width, int segments, std::string *err,
                  bool clamp_overlap, float profile) {
   segments = std::max(1, std::min(64, segments));
+  const bool curved = segments > 1;
   EdgeFaces ef(m);
   std::unordered_set<uint64_t> bev;
   std::vector<uint8_t> at_vert(m.vert_count(), 0);
@@ -879,7 +880,7 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   profile = std::isfinite(profile) ? clampf(profile, 0.0f, 1.0f) : 0.5f;
   const float r_exp = profile <= 0.5f ? std::max(0.02f, 4.0f * profile) : std::min(200.0f, 1.0f / std::max(1e-3f, 1.0f - profile));
   std::unordered_map<uint64_t, std::vector<uint32_t>> arcs;  // (f1 point, f2 point) -> arc
-  auto arc = [&](uint32_t p1, uint32_t p2, uint32_t corner) {
+  auto arc = [&](uint32_t p1, uint32_t p2, uint32_t corner) -> const std::vector<uint32_t> & {
     uint64_t k = ((uint64_t)p1 << 32) | p2;
     auto it = arcs.find(k);
     if (it != arcs.end()) return it->second;
@@ -894,10 +895,16 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
       pts.push_back(nv);
     }
     pts.push_back(p2);
-    return arcs[k] = pts;
+    return arcs.emplace(k, std::move(pts)).first->second;
   };
-  struct Strip { std::vector<uint32_t> A, B; int mat; uint32_t f1, f2; };
+  struct Strip {
+    uint32_t a[2], b[2];
+    int mat;
+    uint32_t f1, f2;
+    const std::vector<uint32_t> *arc_a = nullptr, *arc_b = nullptr;
+  };
   std::vector<Strip> strips;
+  strips.reserve(bev.size());
   for (uint64_t k : bev) {
     uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
     FaceList fs = ef.at(a, b);
@@ -911,7 +918,13 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
       auto it = near.find({f, v, o});
       return it == near.end() ? v : it->second;
     };
-    strips.push_back({arc(get(f1, a, b), get(f2, a, b), a), arc(get(f1, b, a), get(f2, b, a), b), m.material_of(f1), f1, f2});
+    Strip st{{get(f1, a, b), get(f2, a, b)}, {get(f1, b, a), get(f2, b, a)}, m.material_of(f1), f1, f2};
+    if (curved) {
+      // References to the stored arcs survive rehashing.
+      st.arc_a = &arc(st.a[0], st.a[1], a);
+      st.arc_b = &arc(st.b[0], st.b[1], b);
+    }
+    strips.push_back(st);
   }
   /* A face that ends at a beveled corner (its two slide points are an arc's
    * ends) takes the arc's vertices too, as Blender does, so it stays one face. */
@@ -934,21 +947,25 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
    * position inside the old face: the corners only slide along its edges). */
   FaceBuilder fb(m);
   std::vector<std::pair<uint32_t, float>> ex;
+  std::vector<uint32_t> expanded_verts;
   for (size_t f = 0; f < nf0; f++) {
     if (!touched[f]) {  // (no corner of it moved, no arc runs along it: the face as it was)
       fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f), f);
       continue;
     }
-    expand(new_faces[f], ex);
-    std::vector<uint32_t> verts;
-    for (auto &e : ex) verts.push_back(e.first);
+    if (curved) {
+      expand(new_faces[f], ex);
+      expanded_verts.clear();
+      for (const auto &e : ex) expanded_verts.push_back(e.first);
+    }
+    const auto &verts = curved ? expanded_verts : new_faces[f];
     std::vector<Vec2> uv;
     if (fb.has_uv) {
       const uint32_t b = m.face_offsets[f], n = m.face_size(f);
       const uint32_t *fv = m.face_verts(f);
-      for (auto &e : ex) {
-        uint32_t nvx = e.first;
-        if (e.second >= 0) { uv.push_back(Vec2(0, 0)); continue; }  // filled in below by interpolation
+      for (size_t i = 0; i < verts.size(); ++i) {
+        uint32_t nvx = verts[i];
+        if (curved && ex[i].second >= 0) { uv.push_back(Vec2(0, 0)); continue; }  // filled in below by interpolation
         auto o = origin.find(nvx);
         uint32_t src = o == origin.end() ? nvx : o->second;
         uint32_t ci = 0;
@@ -980,6 +997,8 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
   }
   std::vector<uint32_t> bevel_faces;
   for (const Strip &st : strips) {
+    const uint32_t *A = curved ? st.arc_a->data() : st.a;
+    const uint32_t *B = curved ? st.arc_b->data() : st.b;
     // Match the values already sampled on each trimmed face at its two ends.
     CornerSample ends[2][2];
     if (!fb.layers.empty()) {
@@ -987,12 +1006,12 @@ bool bevel_edges(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &
       for (int side = 0; side < 2; ++side) {
         const uint32_t face = side ? st.f2 : st.f1;
         triangulate_face_local(m, face, triangles);
-        const uint32_t vertices[] = {side ? st.A.back() : st.A.front(), side ? st.B.back() : st.B.front()};
+        const uint32_t vertices[] = {A[side * segments], B[side * segments]};
         for (int i = 0; i < 2; ++i) ends[side][i] = sample_face_corner(m, face, vertices[i], m.positions[vertices[i]], triangles);
       }
     }
     for (int s = 0; s < segments; s++) {
-      uint32_t q[4] = {st.B[s], st.A[s], st.A[s + 1], st.B[s + 1]};
+      uint32_t q[4] = {B[s], A[s], A[s + 1], B[s + 1]};
       fb.add(q, 4, nullptr, st.mat);
       for (size_t j = 0; j < fb.layers.size(); ++j) {
         const auto &layer = m.color_attributes[fb.layers[j]];
@@ -1816,12 +1835,15 @@ float sweep_limit(const Mesh &m, const Region &r, Vec3 dir, float tol) {
     const uint32_t n = m.face_size(f), *fv = m.face_verts(f);
     for (uint32_t i = 0; i < n; i++) {
       const uint32_t a = fv[i], b = fv[(i + 1) % n];
-      if (!done.insert(Mesh::edge_key(a, b)).second) continue;
       const Vec3 da = m.positions[a] - o, db = m.positions[b] - o;
       const Vec2 pa{dot(da, u), dot(da, w)}, pb{dot(db, u), dot(db, w)};
       if (std::max(pa.x, pb.x) < lo.x - tol || std::min(pa.x, pb.x) > hi.x + tol || std::max(pa.y, pb.y) < lo.y - tol ||
-          std::min(pa.y, pb.y) > hi.y + tol)
+          std::min(pa.y, pb.y) > hi.y + tol) {
+        // With NaN endpoints min/max may reject only one orientation of the edge.
+        if (nan_bits(pa.x) || nan_bits(pa.y) || nan_bits(pb.x) || nan_bits(pb.y)) done.insert(Mesh::edge_key(a, b));
         continue;
+      }
+      if (!done.insert(Mesh::edge_key(a, b)).second) continue;
       const float ha = dot(da, dir), hb = dot(db, dir);
       if (in_way(pa, pb)) take(ha);
       if (in_way(pb, pa)) take(hb);

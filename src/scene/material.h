@@ -325,6 +325,7 @@ size_t material_textures_generation();
 /* What a material's texture field shows: the image a renderer would use (an image file, a generated image or a
  * procedural texture's output; null when missing) and its name ("Bricks (albedo)" for a .ptex output). */
 TexturePtr resolve_texture_ref(const TextureRef &t);
+TexturePtr generated_grid_texture(const std::string &path);
 std::string texture_ref_label(const TextureRef &t);
 bool texture_ref_is_procedural(const TextureRef &t);  // a .ptex output: its colour space is the output's own
 

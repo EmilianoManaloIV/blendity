@@ -25,7 +25,7 @@ what should happen.
 3. Existing unit tests and the stress sections below show no regressions.
 
 ## Tests and checks to run
-- Unit: `BLENDITY_TEST_FILTER="..."`, then the full suite (Windows + Linux).
+- Unit: `BLENDITY_TEST_FILTER="..."`, then the affected groups and editor locally on Windows and Linux. Run the full local suite if the affected groups cannot be bounded, and the full suite on CI (ADR 0134).
 - Stress: `--only pushpull | modifiers_ngon | curved | editor` (as relevant) - problem and overlap counts
   must not rise.
 

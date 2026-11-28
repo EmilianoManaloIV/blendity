@@ -1814,7 +1814,7 @@ class Editor {
   struct GlossJob {
     struct Item {
       std::string guid, path, table;  // (the texture's GUID, its file, its package's folder - "" when it has none)
-      std::set<std::string> materials;  // (the .mat files that asked for its mean: read again when it lands, and no others)
+      std::map<std::string, float> materials;  // requesting .mat path and its original provisional roughness; main thread only
       float mean[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       int width = 0, height = 0;
       uint64_t bytes = 0;
@@ -1829,11 +1829,13 @@ class Editor {
   void poll_unity_gloss();
   void land_unity_gloss();
   size_t unity_rematerials();
-  /* The Unity materials the library holds under `under` ("" - all; `only`: of those, the ones at these paths) read
+  /* The Unity materials the library holds under `under` ("" - all) read
    * again from their files, in place; the copies the undo and redo states, the last committed state and the scene Stop
    * brings back keep of them take the new reading too - reading a file again is not an edit, and neither an Undo back
    * past this moment nor a Stop may bring the old reading back. How many changed. */
-  size_t reread_unity_materials(const std::string &under = std::string(), const std::set<std::string> *only = nullptr);
+  size_t reread_unity_materials(const std::string &under = std::string());
+  size_t apply_measured_unity_gloss(const std::map<std::string, std::map<std::string, float>> &requests);
+  void visit_material_states(const std::function<void(Material &)> &visit);
   bool unity_gloss_running_for_test() const { return gloss_job_ != nullptr; }
   /* A job as a worker left it - cancelled part way, say - landed on this thread: a headless editor runs its own jobs
    * to their end before anything can cancel them. */
@@ -2090,6 +2092,11 @@ class Editor {
     items_card_skin_ = false;
     outline_view_.on = false;
     return items;
+  }
+  struct DrawListStats { uint64_t generation; size_t size, capacity; };
+  DrawListStats draw_list_stats_for_test(int variant, bool tangents) const {
+    const auto &items = items_cache_[variant][tangents].items;
+    return {keeps_.items_gen[variant][tangents], items.size(), items.capacity()};
   }
   /* Round 522: the Game view's gather as a card view makes it - the flatten view on (render_deferred turns it on for every Game
    * view frame), from `eye` looking at `target` - without a card. The LOD and outline-distance views stay off. */
@@ -2605,7 +2612,7 @@ class Editor {
   const std::vector<DrawItem> &solid_items_ref(const Scene &s, bool game, uint64_t *gen);
   /* Round 436: the gather itself; `view_dep` set when an item depends on this view's eye (an outline's width, an LOD
    * Group's level, a camera-shaped mesh), so the kept list is keyed by the eye too. */
-  std::vector<DrawItem> collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod);
+  void collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod, std::vector<DrawItem> &items);
   uint64_t items_key(bool game, bool want_tangents);
   uint64_t items_view_key() const;
   /* Round 436 (ADR 0115): a per-frame walk that only reacts to edits (procedural shapes, colliders' Fit to Mesh, a
@@ -2719,6 +2726,14 @@ class Editor {
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
   /* Round 506: `sun_in` is the sun the lights' keep holds (no walk for it), `sun_out` where a walk leaves the one it found. */
+  struct WorldTextureSnapshot {
+    std::unique_ptr<ProceduralTexture> texture;
+    int output = 0;
+    void finish(Environment &env);
+  };
+  ProceduralTexturePtr world_texture(int &output);
+  void load_surface_record(ProceduralTexture &texture);
+  WorldTextureSnapshot snapshot_world_texture();
   void update_environment(const Vec3 *sun_in = nullptr, Vec3 *sun_out = nullptr);
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */
@@ -5790,6 +5805,7 @@ class Editor {
   void paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, const Mat4 &W, Vec2 centre, float radius, float k_max, bool all);
   std::vector<Vec3> paint_mirrors(Vec3 hit_local) const;
   void paint_end_stroke();
+  void paint_surface_changed(ProceduralTexture &pt);
   void paint_abort_stroke();
   static void paint_tile_write(PaintImages &im, const PaintDelta::Tile &t, bool before);
   void apply_paint_delta(UndoState s, std::vector<UndoState> &into, const char *verb, bool undo);
@@ -5807,6 +5823,7 @@ class Editor {
     std::string path;
     uint64_t hash = 0;
     ProceduralTexture copy;
+    ProceduralTexturePtr source;  // registry identity at dispatch
     std::shared_ptr<TextureOutputsHandle> built;  // the images with their mips, built on the worker
     ~SurfaceJob() {
       cancel.store(true, std::memory_order_relaxed);
@@ -6649,6 +6666,8 @@ class Editor {
   std::string bake_status_;
   double bake_start_ = 0;
   uint64_t bake_key_ = 0, lighting_gen_ = 0;
+  std::weak_ptr<ProceduralTexture> lightmap_painted_world_;
+  uint64_t lightmap_paint_version_ = 0, lightmap_paint_hash_ = 0;
   std::string lighting_dir() const;
   uint64_t lightmap_hash_of(const GameObject &g, const Mesh &m);
   uint64_t lightmap_scene_key();
@@ -6766,6 +6785,7 @@ class Editor {
     std::vector<BakeObject> objects;
     std::vector<BakeLight> lights;
     Environment env;
+    WorldTextureSnapshot world_texture;
     BakeSettings settings;
     int gpu = -1;
     uint64_t key = 0;
@@ -7167,6 +7187,7 @@ class Editor {
     std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> snapped;  // (a filter's vertex snapping: the copies the tracer reads)
     LightingEnv env;
     Environment environment;
+    WorldTextureSnapshot world_texture;
     ShadowMap shadow;  // (rendered by the worker from the casters below - the views' cache keeps its own)
     std::vector<uint32_t> shadow_casters;
     Vec3 shadow_dir;
@@ -7346,6 +7367,7 @@ class Editor {
     std::vector<SeeRel> see;
     std::vector<std::pair<std::weak_ptr<const Texture>, int>> deps;  // (for the whole keep made from a frame of copies)
     std::vector<gpu::SeeCorner> see_frame;  // the last frame's sorted corners, taken back after the render
+    uint64_t see_frame_generation = 0;  // gpu_calls_ when these sorted corners were packed
     bool see_frame_ok = false;
   };
   InstanceRows instance_rows_[gpu::Raster::kSlots];

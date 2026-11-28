@@ -18,6 +18,7 @@
 #include "../research/research.h"
 #include "../scene/pointcloud_object.h"  // (round 530: `pointcloud`)
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -198,6 +199,8 @@ struct SetFieldReflector : Reflector {
   std::string target;              // pass 2: the field to set
   bool done = false;
   bool all = true;  // every field, or only the ones shown (matset: a toon field reaches toon materials only)
+  bool check_view_transform = false;
+  bool view_transform_unavailable = false;
   bool all_fields() const override { return all; }
   bool hit(const char *n) {
     if (target.empty()) {
@@ -235,12 +238,29 @@ struct SetFieldReflector : Reflector {
   void color(const char *n, Vec3 &v) override { field(n, v); }
   void enumeration(const char *n, int &v, const char *const *opts, int count) override {
     if (!hit(n)) return;
+    const std::string choice = field_key(value);
     for (int k = 0; k < count; k++)
-      if (field_key(opts[k]).rfind(field_key(value), 0) == 0 && !field_key(value).empty()) {
+      if (!choice.empty() && field_key(opts[k]).rfind(choice, 0) == 0) {
         v = k;
         return;
       }
-    if (!value.empty() && std::isdigit((unsigned char)value[0])) v = std::max(0, std::min(count - 1, std::atoi(value.c_str())));
+    if (!check_view_transform || std::strcmp(n, "View Transform") != 0) {
+      if (!value.empty() && std::isdigit((unsigned char)value[0]))
+        v = std::max(0, std::min(count - 1, std::atoi(value.c_str())));
+      return;
+    }
+    unsigned index = 0;
+    const char *const begin = value.data();
+    const char *end = begin + value.size();
+    while (end != begin && std::isspace((unsigned char)end[-1])) --end;
+    const auto parsed = std::from_chars(begin, end, index);
+    if (parsed.ptr == end && parsed.ec == std::errc()) {
+      v = (int)std::min(index, (unsigned)(count - 1));
+    } else if (parsed.ptr == end && parsed.ec == std::errc::result_out_of_range) {
+      v = count - 1;
+    } else {
+      view_transform_unavailable = true;
+    }
   }
   void text(const char *n, std::string &v) override {
     if (hit(n)) v = value;
@@ -297,6 +317,7 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
       }
   if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
   reflect(sr);
+  if (sr.view_transform_unavailable) return false;
   if (sr.done) edit_epoch::bump();  // (round 435, ADR 0115: a field set by name is an edit the views must see)
   if (sr.bad) Log::warn("set %s: '%s' isn't a number (a number, or +=1, *=2 from its own value)", sr.target.c_str(), sr.value.c_str());
   return sr.done && !sr.bad;
@@ -921,7 +942,15 @@ bool Editor::set_field_command(const std::string &path, const std::string &value
   sr.value = value;
   auto apply = [&](const std::function<void(Reflector &)> &reflect) { return set_field_on(sr, reflect); };
   int n = 0;
-  if (owner == "render") n += apply([&](Reflector &r) { scene_->render.reflect(r); });
+  if (owner == "render") {
+    sr.check_view_transform = true;
+    n += apply([&](Reflector &r) { scene_->render.reflect(r); });
+    if (sr.view_transform_unavailable) {
+      Log::warn("Render View Transform '%s' is unavailable. Render settings list the available views. "
+                "OpenColorIO views require a loaded configuration.", value.c_str());
+      return false;
+    }
+  }
   else if (owner == "world") n += apply([&](Reflector &r) { scene_->environment.reflect(r); });
   else if (owner == "lighting") n += apply([&](Reflector &r) { scene_->lighting.reflect(r); });
   else
@@ -1011,15 +1040,52 @@ void Editor::run_console_command(const std::string &line) {
     else if (sub == "frames") {  // perf frames N (a script's, headless): N frames, whatever runs
       if (!headless_) { Log::info("perf frames: headless scripts only"); return; }
       const int n = std::max(0, std::min(1000000, std::atoi(arg(2, "1").c_str())));
+      const bool scene_raster = arg(3, "") == "scene-raster";
       FrameProfile acc;  // (round 468: every field of the stepped frames, for the posing lines below)
+      RasterStats raster;
+      int raster_frames = 0;
+      double shadow_ms = 0;
+      uint64_t shadow_renders = 0;
       const PoseCounts pose0 = pose_counts();
       const MeshCounts mesh0 = mesh_counts();
-      for (int i = 0; i < n; i++) step_frame_headless(), acc.add(prof_last_);
+      for (int i = 0; i < n; i++) {
+        step_frame_headless();
+        acc.add(prof_last_);
+        // A held view still has the previous render's stats. Sample only a fresh, unambiguous CPU Scene view.
+        if (!scene_raster || !scene_drawn_ || scene_rect_.w < 8 || scene_rect_.h < 8 ||
+            scene_on_gpu_ || scene_filters_ || piloted_camera() ||
+            shading_ != Shading::Shaded || prof_last_.view_renders != 1 || prof_last_.view_cache_hits)
+          continue;
+        raster_frames++;
+        raster.ms_clear += scene_stats_.ms_clear;
+        raster.ms_vertex += scene_stats_.ms_vertex;
+        raster.ms_setup += scene_stats_.ms_setup;
+        raster.ms_bin += scene_stats_.ms_bin;
+        raster.ms_raster += scene_stats_.ms_raster;
+        raster.ms_shade += scene_stats_.ms_shade;
+        raster.ms_gi += scene_stats_.ms_gi;
+        raster.ms_total += scene_stats_.ms_total;
+        raster.tris_submitted += scene_stats_.tris_submitted;
+        raster.tris_rasterized += scene_stats_.tris_rasterized;
+        raster.pixels_simd += scene_stats_.pixels_simd;
+        shadow_ms += prof_last_.ms_shadow;
+        shadow_renders += prof_last_.shadow_renders;
+      }
       Log::info("perf frames: %d frame(s)", n);
       const PoseCounts pose = pose_counts() - pose0;  // (read once: both lines are of the same counts)
       const MeshCounts mesh = mesh_counts() - mesh0;
       Log::info("perf frames parts ms (a frame's mean; nested, not to add up): %s", posing_parts_text(acc, pose, mesh, (double)n).c_str());
       Log::info("perf frames counts (a frame's mean): %s", posing_counts_text(acc, pose, mesh, (double)n).c_str());
+      if (scene_raster) {
+        const double d = std::max(1, raster_frames);
+        Log::info("perf frames scene raster: %d/%d fresh CPU Shaded renders; mean ms clear %.6f, vertex %.6f, setup %.6f, "
+                  "bin worker sum %.6f, raster %.6f, shade %.6f, GI %.6f, flush %.6f, shadow %.6f; "
+                  "mean tris submitted %.1f, rasterized %.1f, pixels SIMD %.1f, shadow renders %.1f",
+                  raster_frames, n, raster.ms_clear / d, raster.ms_vertex / d, raster.ms_setup / d, raster.ms_bin / d,
+                  raster.ms_raster / d, raster.ms_shade / d, raster.ms_gi / d, raster.ms_total / d, shadow_ms / d,
+                  (double)raster.tris_submitted / d, (double)raster.tris_rasterized / d, (double)raster.pixels_simd / d,
+                  (double)shadow_renders / d);
+      }
     }
     else if (sub == "drag" || sub == "clip" || sub == "pick") perf_script_command(sub, t);  // (round 468: the posing measurements, perf_script.cpp)
     else {

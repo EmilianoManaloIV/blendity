@@ -39,6 +39,25 @@
 #include "../src/scene/avatar_tools.h"
 #include "../extern/ufbx/ufbx.h"
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+// Keep the SDK's hotkey macros out of Blendity's platform modifier names.
+#  pragma push_macro("MOD_ALT")
+#  pragma push_macro("MOD_SHIFT")
+#  include <windows.h>
+#  include <winioctl.h>
+#  pragma pop_macro("MOD_SHIFT")
+#  pragma pop_macro("MOD_ALT")
+#  undef far
+#  undef near
+#  undef small
+#endif
+
 static void image_tests() {
   test("image: PNG round-trip is exact", [] {
     const int w = 37, h = 21;
@@ -14941,6 +14960,164 @@ static void tests_round485() {
     CHECK(std::fabs(typed->roughness - 0.75f) < 0.005f && r485a::reads_right(asks));
     r484a::cleanup();
   });
+  test("Automatic Unity gloss keeps edits on requesting materials and their undo and redo states; explicit Reimport restores the source", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string asset = r484a::mat_path("gloss_in_metal_alpha"), scaled = r484a::mat_path("gloss_scaled");
+    ed.command("select Cube");
+    ed.command("assignmat " + asset);
+    const MaterialPtr wall = material_asset(asset), other = material_asset(scaled);
+    CHECK(wall && other && wall->roughness == 0 && other->roughness == 0.5f);
+    if (!wall || !other) return;
+    const std::string guid = r485a::map_guid(1);
+    auto index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
+    const auto texture = index->find(guid);
+    CHECK(texture != index->end());
+    if (texture == index->end()) return;
+    auto job = std::make_shared<Editor::GlossJob>();
+    Editor::GlossJob::Item item;
+    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = unity_gloss_wanted().at(guid);
+    job->items.push_back(item);
+    job->run();  // The worker finished; the main thread has yet to land the measurement.
+    CHECK(job->items[0].ok);
+    r484a::forget_gloss();
+    r485a::steps(ed, 2);
+    ed.command("matset Metallic 0.37");
+    r485a::steps(ed, 2);
+    ed.command("matset Roughness 0.21");
+    r485a::steps(ed, 2);
+    ed.command("undo");
+    CHECK(wall->roughness == 0 && wall->metallic == 0.37f);
+    other->roughness = 0.44f;
+    other->touch();
+    const size_t depth = ed.undo_depth_for_test();
+    ed.land_unity_gloss_for_test(job);
+    const float measured = wall->roughness;
+    CHECK(material_asset(asset) == wall && std::fabs(measured - (1.0f - 92.0f / 255.0f)) < 0.005f);
+    CHECK(wall->metallic == 0.37f && other->roughness == 0.44f && ed.undo_depth_for_test() == depth);
+    ed.command("redo");
+    CHECK(wall->roughness == 0.21f && wall->metallic == 0.37f);
+    ed.command("undo");
+    CHECK(wall->roughness == measured && wall->metallic == 0.37f);
+    ed.command("undo");
+    CHECK(wall->roughness == measured && wall->metallic == 1.0f);
+    ed.command("redo");
+    const std::string scene = fs::join(test_dir(), "gloss-edits.scene");
+    std::string text;
+    CHECK(save_scene(ed.scene(), scene) && fs::read_file(scene, text) && text.find("Metallic 0.37") != std::string::npos);
+    ed.command("unity rematerials");
+    CHECK(wall->metallic == 1 && wall->roughness == measured && std::fabs(other->roughness - 0.819608f) < 0.005f);
+    clear_material_assets();
+    Editor next;
+    next.init_headless(800, 600);
+    next.command("open " + scene);
+    const MaterialPtr reopened = r485a::worn_by(next, "Cube");
+    CHECK(fs::normalize(next.scene().path) == fs::normalize(scene) && reopened && reopened->asset_path == asset && reopened->metallic == 1 && reopened->roughness == measured);
+    r484a::cleanup();
+  });
+
+  test("A same-GUID source scale change during Unity gloss measurement preserves edited roughness and updates untouched requesters", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string asset = r484a::mat_path("gloss_in_metal_alpha"), scaled = r484a::mat_path("gloss_scaled");
+    std::string original, updated;
+    CHECK(fs::read_file(resolve_asset_path(asset), original) && fs::read_file(resolve_asset_path(scaled), updated));
+    CHECK(fs::write_file(resolve_asset_path(scaled), original));
+    const MaterialPtr touched = material_asset(asset), untouched = material_asset(scaled);
+    CHECK(touched && untouched && touched->roughness == 0.0f && untouched->roughness == 0.0f);
+    if (!touched || !untouched) return;
+    const auto guid = r485a::map_guid(1);
+    auto index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
+    const auto texture = index->find(guid);
+    CHECK(texture != index->end());
+    if (texture == index->end()) return;
+    auto job = std::make_shared<Editor::GlossJob>();
+    Editor::GlossJob::Item item;
+    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = unity_gloss_wanted().at(guid);
+    job->items.push_back(item);
+    job->run();
+    CHECK(job->items[0].ok);
+    r484a::forget_gloss();
+    touched->roughness = 0.5f, touched->touch();
+    CHECK(fs::write_file(resolve_asset_path(asset), updated) && fs::write_file(resolve_asset_path(scaled), updated));
+    ed.land_unity_gloss_for_test(job);
+    CHECK(touched->roughness == 0.5f);  // matches the new fallback, but the original request showed zero
+    CHECK(std::fabs(untouched->roughness - 0.819608f) < 0.005f);
+    r484a::cleanup();
+  });
+
+  test("Explicit Unity material reimport clears an edited Redo copy when the current material already matches its file", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha");
+    ed.command("select Cube");
+    ed.command("assignmat " + path);
+    r485a::steps(ed, 2);
+    ed.command("matset Metallic 0.37");
+    r485a::steps(ed, 2);
+    ed.command("undo");
+    const auto m = r485a::worn_by(ed, "Cube");
+    CHECK(m && m->metallic == 1.0f);
+    if (!m) return;
+    const size_t mark = r484a::log_mark();
+    ed.command("unity rematerials");
+    CHECK(r484a::log_since(mark).find(", 0 changed") != std::string::npos);
+    ed.command("redo");
+    CHECK(r485a::worn_by(ed, "Cube") == m && m->metallic == 1.0f);
+    r484a::cleanup();
+  });
+
+  test("An available Unity gloss mean and a late worker preserve edits after multiple materials are reimported", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string asset = r484a::mat_path("gloss_in_metal_alpha"), scaled = r484a::mat_path("gloss_scaled");
+    const MaterialPtr a = material_asset(asset), b = material_asset(scaled);
+    CHECK(a && b);
+    if (!a || !b) return;
+    const std::string guid = r485a::map_guid(1);
+    auto index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
+    const auto texture = index->find(guid);
+    CHECK(texture != index->end());
+    if (texture == index->end()) return;
+    auto late = std::make_shared<Editor::GlossJob>();
+    Editor::GlossJob::Item item;
+    item.guid = guid, item.path = texture->second.path, item.table = texture->second.table, item.materials = unity_gloss_wanted().at(guid);
+    late->items.push_back(item);
+    late->run();
+    const auto &sample = late->items[0];
+    CHECK(sample.ok);
+    unity_gloss_session_means()[guid] = {sample.path, sample.bytes, {sample.mean[0], sample.mean[1], sample.mean[2], sample.mean[3]}};
+    a->metallic = 0.37f, a->touch();
+    b->roughness = 0.42f, b->touch();
+    ed.step_frame_headless();  // Both requesters find the mean without dispatching another job.
+    CHECK(a->metallic == 0.37f && std::fabs(a->roughness - 0.639216f) < 0.005f && b->roughness == 0.42f);
+    std::string replacement;
+    CHECK(fs::read_file(resolve_asset_path(r484a::mat_path("slot_without_keyword")), replacement));
+    CHECK(fs::write_file(resolve_asset_path(asset), replacement));
+    ed.command("unity rematerials");
+    CHECK(std::fabs(a->roughness - 0.7f) < 0.005f && std::fabs(a->metallic - 0.2f) < 0.005f);
+    CHECK(std::fabs(b->roughness - 0.819608f) < 0.005f);
+    a->roughness = 0.0f, a->touch();  // Matches the old provisional value, but this file no longer requests that map.
+    b->metallic = 0.29f, b->touch();
+    ed.land_unity_gloss_for_test(late);
+    CHECK(a->roughness == 0.0f && std::fabs(a->metallic - 0.2f) < 0.005f);
+    CHECK(b->metallic == 0.29f && std::fabs(b->roughness - 0.819608f) < 0.005f);
+    late->items[0].materials.clear();  // A full reimport superseded every requester before this landing.
+    const size_t mark = r484a::log_mark();
+    ed.land_unity_gloss_for_test(late);
+    const std::string report = r484a::log_since(mark);
+    CHECK(report.find("0 texture(s) measured") != std::string::npos && report.find("could not be read") == std::string::npos);
+    r484a::cleanup();
+  });
+
   test("A gloss job cancelled part way lands what it measured: those materials follow, the Console says how many textures are left, they are not sent again on their own, and `unity rematerials` measures them (round 485)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
@@ -14961,7 +15138,7 @@ static void tests_round485() {
       CHECK(it != index->end());
       if (it == index->end()) return;
       Editor::GlossJob::Item item;
-      item.guid = want.first, item.path = it->second.path, item.table = it->second.table, item.materials = {want.second};
+      item.guid = want.first, item.path = it->second.path, item.table = it->second.table, item.materials = unity_gloss_wanted().at(want.first);
       job->items.push_back(item);
     }
     Editor::GlossJob::Item &first = job->items[0];
@@ -15003,22 +15180,31 @@ static void tests_round485() {
     const MaterialPtr before = r485a::worn_by(ed, "Wall");
     CHECK(before && before->asset_path == path && before->roughness == 0.0f && !before->metallic_map.empty());
     if (!before) return;
+    before->specular = 0.37f;
+    before->touch();
     ed.command("play");
     r485a::steps(ed, 2);
+    MaterialPtr playing = r485a::worn_by(ed, "Wall");
+    CHECK(playing);
+    if (!playing) return;
+    playing->specular = 0.81f;
+    playing->touch();
     const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
     const auto it = index->find(mask);
     CHECK(it != index->end());
     if (it == index->end()) return;
     auto job = std::make_shared<Editor::GlossJob>();
     Editor::GlossJob::Item item;
-    item.guid = mask, item.path = it->second.path, item.table = it->second.table, item.materials = {path};
+    item.guid = mask, item.path = it->second.path, item.table = it->second.table, item.materials = {{path, before->roughness}};
     job->items.push_back(item);
     job->run();
     ed.land_unity_gloss_for_test(job);
     CHECK(r485a::reads_right(r485a::worn_by(ed, "Wall")) && r485a::reads_right(material_asset(path)));  // (in Play)
+    CHECK(playing->specular == 0.81f);
     ed.command("stop");
     r485a::steps(ed, 2);
     const MaterialPtr after = r485a::worn_by(ed, "Wall");
+    CHECK(after && after->specular == 0.37f);
     std::printf("    after Stop: roughness %.4f (0.6392 wanted; 0 is the reading from before the job)\n", after ? after->roughness : -1.0f);
     CHECK(r485a::reads_right(after) && r485a::reads_right(material_asset(path)));
     r484a::cleanup();
@@ -16217,6 +16403,506 @@ static void tests_round594() {
   });
 }
 
+static void tests_round617() {
+  test("Textures window: batch loading preserves row order, shared assets and edits, and retries repaired files", [] {
+    r594::Project project("r617-texture-batch");
+    Editor ed;
+    ed.init_headless(800, 600);
+    const std::string dir = "Assets/Library/";
+    const std::string old_path = dir + "Old.ptex", new_path = dir + "Renamed.ptex";
+    const std::string edited_path = dir + "Edited.ptex", missing = dir + "Missing.ptex", corrupt = dir + "Corrupt.ptex";
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(old_path, src));
+    const std::string old_file = resolve_asset_path(old_path);
+    CHECK(ed.move_project_entry(old_file, fs::parent(old_file), "Renamed.ptex"));
+    CHECK(fs::write_file(resolve_asset_path(corrupt), "invalid texture\n"));
+    const auto edited = create_texture_asset(src, edited_path);
+    CHECK(edited);
+    if (!edited) return;
+    edited->physical_size = 7.0f;
+    edited->touch();
+    CHECK(loaded_texture_assets().size() == 1);
+
+    std::vector<std::string> paths{missing, old_path, corrupt, edited_path, new_path, old_path};
+    // Cold misses span more than one worker chunk, with a distinct order from the directory.
+    for (int i = 15; i >= 0; --i) {
+      const std::string path = dir + strprintf("Cold%02d.ptex", i);
+      CHECK(r594::write(path, src));
+      paths.push_back(path);
+    }
+    const auto first = texture_assets_for_browser(paths);
+    CHECK(first.size() == paths.size());
+    if (first.size() != paths.size()) return;
+    CHECK(!first[0] && !first[2]);
+    CHECK(first[1] && first[1]->asset_path == new_path && first[1] == first[4] && first[1] == first[5]);
+    CHECK(first[3] == edited && edited->physical_size == 7.0f);
+    CHECK(loaded_texture_assets().size() == 18);
+    for (size_t row = 6; row < paths.size(); ++row)
+      CHECK(first[row] && first[row]->asset_path == paths[row]);
+
+    CHECK(r594::write(missing, src) && r594::write(corrupt, src));
+    const auto reopened = texture_assets_for_browser(paths);
+    CHECK(reopened.size() == first.size());
+    if (reopened.size() != first.size()) return;
+    CHECK(reopened[0] && reopened[0]->asset_path == missing);
+    CHECK(reopened[2] && reopened[2]->asset_path == corrupt);
+    CHECK(loaded_texture_assets().size() == 20);
+    for (size_t row = 0; row < paths.size(); ++row)
+      if (first[row]) CHECK(reopened[row] == first[row]);
+    CHECK(reopened[3] == edited && edited->physical_size == 7.0f);
+  });
+}
+
+/* Round 623 (task 0605): cold discovery through the Textures browser. */
+#ifdef _WIN32
+static DWORD r623_make_junction(const std::filesystem::path &link, const std::filesystem::path &target) {
+  // The mount-point tag lets the test create a junction without symlink privileges.
+  constexpr DWORD common_header = sizeof(DWORD) + 2 * sizeof(WORD);
+  constexpr DWORD mount_header = 4 * sizeof(WORD);
+  constexpr size_t name_capacity = (MAXIMUM_REPARSE_DATA_BUFFER_SIZE - common_header - mount_header) / sizeof(WCHAR);
+  static_assert(MAXIMUM_REPARSE_DATA_BUFFER_SIZE <= MAXWORD);
+  struct MountPointData {
+    DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    WORD length = 0, reserved = 0;
+    WORD substitute_offset = 0, substitute_length = 0;
+    WORD print_offset = 0, print_length = 0;
+    WCHAR names[name_capacity]{};
+  } data;
+  const std::wstring print = target.native(), substitute = L"\\??\\" + print;
+  const size_t name_count = substitute.size() + print.size() + 2;
+  if (name_count > name_capacity) return ERROR_FILENAME_EXCED_RANGE;
+  data.substitute_length = (WORD)(substitute.size() * sizeof(WCHAR));
+  data.print_offset = (WORD)(data.substitute_length + sizeof(WCHAR));
+  data.print_length = (WORD)(print.size() * sizeof(WCHAR));
+  data.length = (WORD)(mount_header + name_count * sizeof(WCHAR));
+  std::copy(substitute.begin(), substitute.end(), data.names);
+  std::copy(print.begin(), print.end(), data.names + substitute.size() + 1);
+
+  if (!CreateDirectoryW(link.c_str(), nullptr)) return GetLastError();
+  const HANDLE dir = CreateFileW(link.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (dir == INVALID_HANDLE_VALUE) return GetLastError();
+  DWORD returned = 0;
+  const BOOL made = DeviceIoControl(dir, FSCTL_SET_REPARSE_POINT, &data, common_header + data.length, nullptr, 0, &returned, nullptr);
+  const DWORD error = made ? ERROR_SUCCESS : GetLastError();
+  CloseHandle(dir);
+  return error;
+}
+#endif
+
+static void tests_round623() {
+  test("Textures window (round 623): searching for equal names keeps both thumbnails in path order and opens each file", [] {
+    r594::Project project("r623-texture-duplicate-names");
+    Editor ed;
+    r594::init(ed);
+    const std::string first_path = "Assets/Library/Zinc/Same.ptex", second_path = "Assets/Library/amber/Same.ptex";
+    const std::string other_path = "Assets/Library/00/Unrelated.ptex";
+    ProceduralTexture plain;
+    plain.width = plain.height = 64;
+    ProceduralTexture patterned = plain;
+    CHECK(patterned.add("Brick") && r594::write(second_path, patterned));
+    CHECK(r594::write(other_path, plain) && r594::write(first_path, plain));
+    r594::open(ed);
+    CHECK(ed.texture_count_shown_for_test() == 3);
+
+    // The first result after filtering takes the old first slot. Equal labels record only the last slot.
+    const Recti first = r594::thumb(ed, "Unrelated"), last_before = r594::thumb(ed, "Same");
+    CHECK(r594::click(ed, r594::search(ed)));
+    r594::type(ed, "sAmE");
+    const Recti second = r594::thumb(ed, "Same");
+    CHECK(ed.texture_count_shown_for_test() == 2 && r594::thumb(ed, "Unrelated").empty());
+    CHECK(!first.empty() && !second.empty() && first.y == second.y && first.x < second.x && second.x < last_before.x);
+    const auto first_pixels = r594::thumbnail_center(ed, first), second_pixels = r594::thumbnail_center(ed, second);
+    CHECK(first_pixels.size() == 64 && second_pixels.size() == 64 && first_pixels != second_pixels);
+    CHECK(r594::click(ed, first));
+    const auto selected_first = ed.texture_selected_for_test();
+    CHECK(selected_first && selected_first->asset_path == first_path && selected_first == texture_asset(first_path));
+    CHECK(r594::click(ed, second));
+    const auto selected_second = ed.texture_selected_for_test();
+    CHECK(selected_second && selected_second->asset_path == second_path && selected_second == texture_asset(second_path));
+    CHECK(selected_first != selected_second);
+  });
+
+#ifdef _WIN32
+  test("Textures window (round 623): a junction outside the project keeps the clicked thumbnail's alias path", [] {
+    r594::Project project("r623-texture-junction");
+    Editor ed;
+    r594::init(ed);
+    const std::string target = fs::join(fs::normalize(test_dir()), "r623-junction-source");
+    const std::string target_file = fs::join(target, "LinkedTile.PTEX");
+    const std::string link = resolve_asset_path("Assets/Junction.ptex");
+    struct RemoveFixture {
+      std::filesystem::path link, target, file;
+      ~RemoveFixture() {
+        RemoveDirectoryW(link.c_str());
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+        std::filesystem::remove(target, ec);
+      }
+    } fixture{std::filesystem::u8path(link).make_preferred(), std::filesystem::u8path(target).make_preferred(), std::filesystem::u8path(target_file)};
+    ProceduralTexture src;
+    src.width = src.height = 64;
+    CHECK(r594::write(target_file, src));
+    const DWORD error = r623_make_junction(fixture.link, fixture.target);
+    if (error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED) {
+      std::printf("    junction fixture skipped: the scratch filesystem does not support mount-point reparse data (%lu)\n", error);
+      return;
+    }
+    if (error != ERROR_SUCCESS) std::printf("    junction fixture creation failed (%lu)\n", error);
+    CHECK(error == ERROR_SUCCESS);
+    if (error != ERROR_SUCCESS) return;
+    r594::open(ed);
+    CHECK(ed.texture_count_shown_for_test() == 1);
+    CHECK(r594::click(ed, r594::thumb(ed, "LinkedTile")));
+    const auto selected = ed.texture_selected_for_test();
+    const std::string alias = fs::join(link, "LinkedTile.PTEX");
+    CHECK(selected && selected->asset_path == alias && selected == texture_asset(alias));
+  });
+#endif
+}
+
+/* Round 630 (task 0612): the texture grid draws fresh pixels on the first open, scroll or edit frame. */
+namespace r630 {
+static Recti picture(const Editor &ed, const Recti &cell) {
+  const int inset = ed.ui_for_test().px(4);
+  const int side = cell.w - 2 * inset;
+  // The upper half of the image excludes the label and the unused-asset badge.
+  return cell.empty() ? Recti{} : Recti{cell.x + inset, cell.y + inset, side, side / 2};
+}
+
+static std::vector<uint32_t> pixels(const Editor &ed, const std::string &name) {
+  Recti cell;
+  if (!ed.button_rect_for_test("tex:" + name, cell)) return {};
+  const Image &fb = ed.framebuffer();
+  return r34_crop(ed, picture(ed, cell).intersect({0, 0, fb.width, fb.height}));
+}
+
+static std::vector<uint32_t> expected(const Editor &ed, const ProceduralTexture &t, const Bitmap &albedo) {
+  Recti cell;
+  if (!ed.button_rect_for_test("tex:" + t.name, cell) || albedo.rgba8.empty()) return {};
+  const Recti r = picture(ed, cell);
+  std::vector<uint32_t> result;
+  for (int y = 0; y < r.h; y++) {
+    for (int x = 0; x < r.w; x++) {
+      const int sx = x * albedo.width / r.w, sy = y * albedo.height / r.w;
+      const uint8_t *p = &albedo.rgba8[((size_t)sy * albedo.width + sx) * 4];
+      result.push_back(0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]);
+    }
+  }
+  return result;
+}
+
+static Bitmap albedo(ProceduralTexture t) {
+  t.width = t.height = 64;
+  TexPlanes planes;
+  t.evaluate(planes);
+  return t.output(0, planes);
+}
+}  // namespace r630
+
+static void tests_round630() {
+  test("Textures window (round 630): thumbnail workers keep their inner loops local and leave other jobs parallel", [] {
+    JobSystem pool(2);
+    pool.set_backend(JobSystem::Backend::Builtin);
+    auto chunks = [&] {
+      std::atomic<int> calls{0};
+      pool.parallel_for(8, 1, [&](int64_t, int64_t) { ++calls; });
+      return calls.load();
+    };
+    CHECK(chunks() == 8);
+    run_job_loops_serial([&] {
+      CHECK(chunks() == 1);
+      run_job_loops_serial([&] { CHECK(chunks() == 1); });
+      CHECK(chunks() == 1);
+      int other_chunks = 0;
+      std::thread other([&] { other_chunks = chunks(); });
+      other.join();
+      CHECK(other_chunks == 8);
+    });
+    CHECK(chunks() == 8);
+    struct Interrupt {};
+    bool interrupted = false;
+    try {
+      run_job_loops_serial([] { throw Interrupt{}; });
+    } catch (const Interrupt &) {
+      interrupted = true;
+    }
+    CHECK(interrupted && chunks() == 8);
+  });
+
+  test("Textures window (round 630): an empty grid opens and a single texture has pixels on its first frame", [] {
+    {
+      r594::Project project("r630-empty-textures");
+      Editor ed;
+      r594::init(ed);
+      ed.command("window Textures");
+      ed.step_frame_headless();
+      CHECK(!ed.window_rect_for_test(WindowKind::Textures).empty());
+      CHECK(ed.texture_count_shown_for_test() == 0 && !ed.texture_selected_for_test());
+    }
+    r594::Project project("r630-one-texture");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture noise = r49_tex("Noise", 128);
+    noise.name = "OnlyNoise";
+    CHECK(r594::write("Assets/OnlyNoise.ptex", noise));
+    ed.command("window Textures");
+    ed.step_frame_headless();
+    CHECK(ed.texture_count_shown_for_test() == 1);
+    const auto first = r630::pixels(ed, noise.name);
+    CHECK(!first.empty() && first == r630::expected(ed, noise, r630::albedo(noise)));
+    ed.step_frame_headless();
+    CHECK(r630::pixels(ed, noise.name) == first);
+  });
+
+  test("Textures window (round 630): distinct layer stacks, a first scroll and a layer edit all draw immediately", [] {
+    r594::Project project("r630-distinct-textures");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture tile = r49_tex("Leaves", 128);
+    tile.name = "LeafCover";
+    tile.alpha_from_cover = true;
+    CHECK(tile.add("Tile") && r49_set(tile, "L1 Across", "2"));
+    ProceduralTexture brick = r49_tex("Brick", 128);
+    brick.name = "ChangedBrick";
+    CHECK(brick.add("Blur"));
+    ProceduralTexture unseen = r49_tex("Noise", 128);
+    unseen.name = "Unseen";
+    CHECK(unseen.add("Warp"));
+    CHECK(r594::write("Assets/00/LeafCover.ptex", tile));
+    CHECK(r594::write("Assets/00/ChangedBrick.ptex", brick));
+    CHECK(r594::write("Assets/02/Unseen.ptex", unseen));
+    ProceduralTexture placeholder;
+    for (int i = 0; i < 144; i++) CHECK(r594::write(strprintf("Assets/01/Filler%03d.ptex", i), placeholder));
+
+    ed.command("window Textures");
+    ed.step_frame_headless();
+    CHECK(ed.texture_count_shown_for_test() == 147);
+    const Bitmap leaf_image = r630::albedo(tile);
+    bool clear = false, opaque = false;
+    for (size_t i = 3; i < leaf_image.rgba8.size(); i += 4) {
+      clear |= leaf_image.rgba8[i] < 128;
+      opaque |= leaf_image.rgba8[i] >= 128;
+    }
+    CHECK(clear && opaque);
+    const auto leaf_pixels = r630::pixels(ed, tile.name), brick_pixels = r630::pixels(ed, brick.name);
+    CHECK(!leaf_pixels.empty() && leaf_pixels == r630::expected(ed, tile, leaf_image));
+    CHECK(!brick_pixels.empty() && brick_pixels == r630::expected(ed, brick, r630::albedo(brick)));
+    CHECK(leaf_pixels != brick_pixels && r630::pixels(ed, unseen.name).empty());
+
+    ed.command("settex Assets/00/ChangedBrick.ptex L0Rows 3");
+    CHECK(r49_set(brick, "L0 Rows", "3"));
+    ed.step_frame_headless();
+    const auto changed = r630::pixels(ed, brick.name);
+    CHECK(!changed.empty() && changed != brick_pixels && changed == r630::expected(ed, brick, r630::albedo(brick)));
+    CHECK(r630::pixels(ed, tile.name) == leaf_pixels);
+
+    const Recti card = r594::thumb(ed, tile.name), search = r594::search(ed);
+    CHECK(!card.empty() && !search.empty());
+    if (card.empty() || search.empty()) return;
+    const auto toolbar = r34_crop(ed, search);
+    r594::wheel(ed, card, -100.0f);
+    const auto scrolled = r630::pixels(ed, unseen.name);
+    CHECK(!scrolled.empty() && scrolled == r630::expected(ed, unseen, r630::albedo(unseen)));
+    CHECK(r34_crop(ed, search) == toolbar);
+    ed.step_frame_headless();
+    CHECK(r630::pixels(ed, unseen.name) == scrolled);
+  });
+
+  test("Textures window (round 630): painting the canvas updates the selected card on the next frame", [] {
+    r594::Project project("r630-paint-preview");
+    Editor ed;
+    r594::init(ed);
+    ProceduralTexture neighbor = r49_tex("Noise", 128);
+    neighbor.name = "Neighbor";
+    CHECK(r594::write("Assets/Neighbor.ptex", neighbor));
+    ed.command("select Cube");
+    ed.command("surface new PaintedCard");
+    ed.command("settex PaintedCard Width 128");
+    ed.command("settex PaintedCard Height 128");
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    r594::open(ed);
+    const auto selected = ed.texture_selected_for_test();
+    CHECK(ed.paint_for_test() && selected && selected->name == "PaintedCard");
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(!pane.empty());
+    if (pane.empty() || !selected) return;
+    const auto before = r630::pixels(ed, selected->name), other = r630::pixels(ed, neighbor.name);
+    CHECK(!before.empty() && !other.empty());
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    ed.step_frame_headless();
+    const auto after = r630::pixels(ed, selected->name);
+    CHECK(!after.empty() && after != before && after == r630::expected(ed, *selected, r630::albedo(*selected)));
+    CHECK(ed.texture_selected_for_test() == selected && r630::pixels(ed, neighbor.name) == other);
+    const auto images = ed.paint_images_for_test();
+    CHECK(images && std::any_of(images->cover.begin(), images->cover.end(), [](uint8_t alpha) { return alpha > 0; }));
+  });
+}
+
+static void tests_round645() {
+  test("PNG rows (round 645): repeated, zero and alpha-only rows keep their filters and pixels with a padded stride", [] {
+    constexpr int width = 3, height = 12, stride = 5;
+    constexpr uint32_t pixels[height][stride] = {
+        {0, 0, 0, 1, 2},
+        {0, 0, 0, 3, 4},
+        {0x12000000, 0x34104020, 0x56113122, 5, 6},
+        {0x12000000, 0x34104020, 0x56113122, 7, 8},
+        {0xFE000000, 0x80104020, 0x01113122, 9, 10},
+        {0xF4FF1234, 0x450400F1, 0x22FF0086, 11, 12},
+        {0x12000000, 0x34104020, 0x56113122, 13, 14},
+        {0xF4FF1234, 0x450400F1, 0x22FF0086, 15, 16},
+        {0xF4FF1234, 0x450400F1, 0x22FF0086, 17, 18},
+        {0, 0, 0, 19, 20},
+        {0, 0, 0, 21, 22},
+        {0xFF000000, 0x80000000, 0x01000000, 23, 24},
+    };
+    /* One legacy filter byte and its exact residuals per row. Compare after inflate so this also checks the
+     * library build, whose compressed bytes can differ from the built-in deflater's. */
+    constexpr uint8_t rgb[height][1 + width * 3] = {
+        {}, {}, {1, 0, 0, 0, 16, 64, 32, 1, 241, 2}, {2}, {2},
+        {0, 255, 18, 52, 4, 0, 241, 255, 0, 134}, {1, 0, 0, 0, 16, 64, 32, 1, 241, 2},
+        {0, 255, 18, 52, 4, 0, 241, 255, 0, 134}, {2}, {}, {}, {},
+    };
+    constexpr uint8_t rgba[height][1 + width * 4] = {
+        {}, {}, {1, 0, 0, 0, 18, 16, 64, 32, 34, 1, 241, 2, 34}, {2},
+        {2, 0, 0, 0, 236, 0, 0, 0, 76, 0, 0, 0, 171},
+        {0, 255, 18, 52, 244, 4, 0, 241, 69, 255, 0, 134, 34}, {1, 0, 0, 0, 18, 16, 64, 32, 34, 1, 241, 2, 34},
+        {0, 255, 18, 52, 244, 4, 0, 241, 69, 255, 0, 134, 34}, {2}, {}, {}, {3, 0, 0, 0, 255, 0, 0, 0, 1, 0, 0, 0, 193},
+    };
+    std::vector<uint32_t> input;
+    for (const auto &row : pixels) input.insert(input.end(), row, row + stride);
+    for (bool alpha : {false, true}) {
+      const std::string png = encode_png(input.data(), width, height, stride, alpha);
+      std::string idat;
+      for (size_t at = 8; at + 12 <= png.size();) {
+        const auto *p = reinterpret_cast<const uint8_t *>(png.data() + at);
+        const uint32_t len = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+        CHECK(len <= png.size() - at - 12);
+        if (len > png.size() - at - 12) break;
+        if (png.compare(at + 4, 4, "IDAT") == 0) idat.append(png, at + 8, len);
+        at += 12 + len;
+      }
+      std::vector<uint8_t> scanlines;
+      const size_t row_size = alpha ? sizeof(rgba[0]) : sizeof(rgb[0]);
+      const bool inflated = !idat.empty() && zlib_inflate(reinterpret_cast<const uint8_t *>(idat.data()), idat.size(), scanlines);
+      CHECK(inflated && scanlines.size() == height * row_size);
+      if (scanlines.size() == height * row_size) {
+        for (int y = 0; y < height; y++) {
+          const uint8_t *legacy = alpha ? rgba[y] : rgb[y];
+          const bool equal = std::equal(legacy, legacy + row_size, scanlines.data() + y * row_size);
+          if (!equal) std::printf("    %s row %d: legacy filter %u, got %u\n", alpha ? "RGBA" : "RGB", y,
+                                  (unsigned)legacy[0], (unsigned)scanlines[y * row_size]);
+          CHECK(equal);
+        }
+      }
+      Bitmap decoded;
+      std::string error;
+      CHECK(decode_image(png, decoded, error));
+      CHECK(decoded.width == width && decoded.height == height && !decoded.is_float);
+      std::vector<uint8_t> expected;
+      for (const auto &row : pixels) {
+        for (int x = 0; x < width; x++) {
+          const uint32_t px = row[x];
+          expected.insert(expected.end(), {(uint8_t)(px >> 16), (uint8_t)(px >> 8), (uint8_t)px,
+                                           alpha ? (uint8_t)(px >> 24) : (uint8_t)255});
+        }
+      }
+      CHECK(decoded.rgba8 == expected);
+    }
+  });
+
+  test("separate texture export (round 645): Assign preserves all seven PNGs and the material links survive Undo, Redo and reopening", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("select Cube");
+    ed.command("surface new Export645");
+    const auto surface = ed.texture_selected_for_test();
+    CHECK(surface && surface->surface);
+    if (!surface || !surface->surface) return;
+    const std::string name = surface->name;
+    ed.command("surface set Width 64");
+    ed.command("surface set Height 128");
+    ed.command("surface set L0 Roughness 0.25");
+    ed.command("surface set L0 Metallic 0.75");
+    ed.command("surface set L0 Emission 0.8,0.2,0.1");
+    ed.command("surface set L0 Writes Emission 1");
+    ed.command("surface add Gradient");
+    ed.command("surface set L1 Writes Roughness 0");
+    ed.step_frame_headless();
+    CHECK(surface->width == 64 && surface->height == 128 && surface->layers.size() == 2);
+
+    const std::string dir = "Exports/" + name;
+    const auto material = [&]() -> const Material * {
+      const GameObject *cube = ed.scene().find_by_name("Cube");
+      const MeshRenderer *mr = cube ? cube->get<MeshRenderer>() : nullptr;
+      return mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
+    };
+    const std::string live = surface->asset_path + "#albedo";
+    const auto check_live = [&] {
+      const Material *m = material();
+      CHECK(m && m->base_map.path == live);
+    };
+    const auto check_assigned = [&] {
+      const Material *m = material();
+      CHECK(m);
+      if (!m) return;
+      const std::string prefix = dir + "/assigned/" + name + "_";
+      CHECK(m->base_map.path == prefix + "Albedo.png" && !m->base_map.non_color);
+      CHECK(m->normal_map.path == prefix + "Normal.png" && m->normal_map.non_color);
+      CHECK(m->roughness_map.path == prefix + "Roughness.png" && m->roughness_map.non_color && m->roughness == 1.0f);
+      CHECK(m->metallic_map.path == prefix + "Metallic.png" && m->metallic_map.non_color && m->metallic == 1.0f);
+      CHECK(m->emission_map.path == prefix + "Emission.png" && !m->emission_map.non_color);
+    };
+    check_live();
+    const size_t before = ed.undo_steps_for_test();
+    ed.command("export textures separate " + dir + "/control");
+    ed.step_frame_headless();
+    check_live();
+    CHECK(ed.undo_steps_for_test() == before);
+    const std::string blocker = dir + "/blocked";
+    CHECK(fs::write_file(ed.resolve_asset_path_for_test(blocker), "A file where a directory would be"));
+    ed.command("export textures separate " + blocker + " --assign");
+    ed.step_frame_headless();
+    check_live();
+    CHECK(ed.undo_steps_for_test() == before);
+
+    ed.command("export textures Separate " + dir + "/assigned --assign");
+    ed.step_frame_headless();
+    check_assigned();
+    CHECK(ed.undo_steps_for_test() == before + 1);
+    for (const char *map : {"Albedo", "Normal", "Roughness", "Metallic", "Height", "Emission", "AO"}) {
+      const std::string file = name + "_" + map + ".png";
+      Bitmap control, assigned;
+      std::string error;
+      const bool same = load_image(ed.resolve_asset_path_for_test(dir + "/control/" + file), control, error) &&
+                        load_image(ed.resolve_asset_path_for_test(dir + "/assigned/" + file), assigned, error) &&
+                        control.width == 64 && control.height == 128 && assigned.width == 64 && assigned.height == 128 &&
+                        assigned.rgba8 == control.rgba8;
+      std::printf("    %s: %s\n", map, same ? "all pixels match" : "missing, wrong size or differs");
+      CHECK(same);
+      if (!same || assigned.rgba8.empty()) continue;
+      const std::string channel = map;
+      if (channel == "Roughness") CHECK(assigned.rgba8[0] == 64);
+      if (channel == "Metallic") CHECK(assigned.rgba8[0] == 191);
+      if (channel == "Emission") CHECK(assigned.rgba8[0] > assigned.rgba8[1] && assigned.rgba8[1] > assigned.rgba8[2]);
+    }
+
+    ed.command("undo");
+    check_live();
+    ed.command("redo");
+    check_assigned();
+    const std::string scene = "Assets/Scenes/" + name + ".scene";
+    ed.command("save " + scene);
+    ed.command("newscene");
+    ed.command("open " + scene);
+    check_assigned();
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -16284,4 +16970,94 @@ void run_assets_tests() {
   tests_round507_import();
   tests_round507_te();
   tests_round594();
+  tests_round617();
+  tests_round623();
+  tests_round630();
+
+  test("live textures (round 636): a straight stack and identity Tile agree at seams and invalid UVs", [] {
+    ProceduralTexture bricks;
+    CHECK(apply_texture_preset(bricks, "Bricks"));
+    if (bricks.layers.empty()) return;
+    bricks.width = 128;
+    bricks.height = 64;
+    ProceduralTexture masked = bricks;
+    masked.layers[0]->map_offset[0] = 0.19f;
+    masked.layers[0]->map_rotation = 90.0f;
+    CHECK(masked.add("Warp"));
+    masked.layers.back()->enabled = false;
+    CHECK(masked.add("Mask by Height"));
+    TextureLayer *group = masked.add("Group");
+    CHECK(group && group->children());
+    if (!group || !group->children()) return;
+    group->use_mask = true;
+    group->opacity = 0.4f;
+    group->mask_layers.push_back(create_texture_layer("Gradient"));
+    group->children()->push_back(create_texture_layer("Noise"));
+    TextureLayer *cover = masked.add("Leaves");
+    CHECK(cover);
+    if (!cover) return;
+    cover->use_mask = true;
+    cover->targets |= TargetAlpha;
+    const size_t fill_idx = masked.layers.size();
+    TextureLayer *fill = masked.add("Fill");
+    CHECK(fill);
+    if (!fill) return;
+    fill->targets = TargetMetallic | TargetEmission;
+    CHECK(r49_set(masked, strprintf("L%zu Metallic", fill_idx).c_str(), "0.75"));
+    CHECK(r49_set(masked, strprintf("L%zu Emission", fill_idx).c_str(), "0.25 0.5 0.75"));
+
+    ProceduralTexture empty;
+    empty.width = empty.height = 64;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const Vec2 points[] = {{0.0f, 0.0f}, {1.0f, 1.0f}, {-0.01f, 0.99f}, {1.01f, -1.03f},
+                          {0.237f, 0.123f}, {0.993f, 0.995f}, {nan, 0.3f}, {0.3f, -inf}};
+    for (const ProceduralTexture *t : {&bricks, &masked, &empty}) {
+      ProceduralTexture identity = *t;
+      const size_t tile = identity.layers.size();
+      CHECK(identity.add("Tile"));
+      /* An active Tile with a 1-by-1 grid uses the general evaluator but leaves all planes alone. */
+      CHECK(r49_set(identity, strprintf("L%zu Across", tile).c_str(), "1"));
+      CHECK(r49_set(identity, strprintf("L%zu Down", tile).c_str(), "1"));
+      const R53Eval straight = r53_eval(*t), general = r53_eval(identity);
+      for (const Vec2 uv : points) {
+        const TexPoint a = straight.live->at(uv.x, uv.y), b = general.live->at(uv.x, uv.y);
+        CHECK(a.albedo == b.albedo && a.height == b.height && a.rough == b.rough && a.mask == b.mask);
+        CHECK(a.alpha == b.alpha && a.alpha_written == b.alpha_written && a.metal == b.metal && a.emit == b.emit);
+        CHECK(straight.live->normal(uv.x, uv.y, &a.height) == general.live->normal(uv.x, uv.y, &b.height));
+        CHECK(straight.live->normal(uv.x, uv.y) == general.live->normal(uv.x, uv.y));
+      }
+    }
+  });
+
+  test("live textures (round 636): a partial Tile blends samples and a published texture survives edits", [] {
+    ProceduralTexture t = r49_tex("Gradient");
+    CHECK(t.layers.size() == 1);
+    if (t.layers.empty()) return;
+    TextureLayer *tile = t.add("Tile");
+    CHECK(tile);
+    if (!tile) return;
+    tile->opacity = 0.5f;
+    const R53Eval published = r53_eval(t);
+    const float u = 0.125f, v = 0.25f;
+    // The linear gradient is 1 - U. A double repeat samples U = 0.25 here and blends it with U = 0.125.
+    const float height = 0.8125f;
+    const Vec3 expected_normal = normalize(Vec3(1.5f / 64.0f, 0.0f, 1.0f));
+    const auto check_published = [&] {
+      const TexPoint p = published.live->at(u, v);
+      CHECK(p.height == height && p.albedo == Vec3(height));
+      CHECK_NEAR(length(published.live->normal(u, v, &p.height) - expected_normal), 0.0f, 1e-6f);
+      CHECK_NEAR(length(published.live->normal(u, v) - expected_normal), 0.0f, 1e-6f);
+    };
+    check_published();
+    tile->enabled = false;
+    t.normal_strength = 0.0f;
+    const R53Eval edited = r53_eval(t);
+    tile->enabled = true;
+    t.normal_strength = 1.0f;
+    CHECK(edited.live->at(u, v).height == 0.875f);
+    CHECK(edited.live->normal(u, v) == Vec3(0.0f, 0.0f, 1.0f));
+    check_published();
+  });
+  tests_round645();
 }

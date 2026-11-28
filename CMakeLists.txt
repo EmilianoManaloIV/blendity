@@ -118,8 +118,16 @@ if(BLENDITY_USE_LIBS)
            WIN ffmpeg/lib/avformat.lib ffmpeg/lib/avcodec.lib ffmpeg/lib/swscale.lib ffmpeg/lib/avutil.lib
            UNIX ${_ff} zlib/lib/libz.a)
   endif()
-  if(EXISTS "${BLENDITY_LIBDIR}/vulkan/include")  # GPU rendering; the loader comes with the driver
-    bl_lib(shaderc BL_WITH_VULKAN INC shaderc/include vulkan/include WIN shaderc/lib/shaderc_shared.lib UNIX shaderc/lib/libshaderc_combined.a)
+  # GPU rendering needs both public headers and the shaderc link library. The Vulkan loader comes with the driver.
+  if(WIN32)
+    set(_shaderc_lib shaderc/lib/shaderc_shared.lib)
+  else()
+    set(_shaderc_lib shaderc/lib/libshaderc_combined.a)
+  endif()
+  if(EXISTS "${BLENDITY_LIBDIR}/vulkan/include/vulkan/vulkan.h"
+      AND EXISTS "${BLENDITY_LIBDIR}/shaderc/include/shaderc/shaderc.h"
+      AND EXISTS "${BLENDITY_LIBDIR}/${_shaderc_lib}")
+    bl_lib(shaderc BL_WITH_VULKAN INC shaderc/include vulkan/include WIN ${_shaderc_lib} UNIX ${_shaderc_lib})
   endif()
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
   if(NOT WIN32)

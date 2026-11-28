@@ -94,7 +94,7 @@ struct EngineTextures {
   std::map<std::string, Entry> by_path;
   int reading = 0;  // (workers at it: at most kReaders - review 399: a world names hundreds)
 };
-const int kReaders = std::max(2, (int)std::thread::hardware_concurrency() / 2);  // (round 422: most reads are a header now: cheap to run wide)
+const int kReaders = std::min(sys::hardware_threads(), std::max(2, sys::hardware_threads() / 2));
 thread_local size_t t_textures_unread = 0;  // (the count in progress's engine-only textures not read yet)
 
 EngineTextures &engine_textures() {

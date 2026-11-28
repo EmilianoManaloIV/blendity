@@ -290,6 +290,7 @@ struct LayerPrefixReflector : Reflector {
   std::string n(const char *name) const { return prefix + name; }
   bool all_fields() const override { return in.all_fields(); }
   bool hashing() const override { return in.hashing(); }
+  bool serializing() const override { return in.serializing(); }
   bool group(const char *name, bool open) override { return in.group(name, open); }
   void group_end() override { in.group_end(); }
   void field(const char *name, float &v, float speed, float mn, float mx) override { in.field(n(name).c_str(), v, speed, mn, mx); }
@@ -492,7 +493,7 @@ Vec3 texture_blend_color(int mode, Vec3 below, Vec3 v) { return blend_color(mode
 /* ===================================================================== */
 
 size_t LiveTexture::memory_bytes() const {
-  size_t n = 0;
+  size_t n = (stack_.capacity() + height_stack_.capacity()) * sizeof(size_t);
   for (const LayerAux &a : aux_) n += (a.a.capacity() + a.b.capacity()) * sizeof(float) + a.c.capacity() * sizeof(Vec3);
   return n;
 }
@@ -503,7 +504,6 @@ LiveTexture::LiveTexture(const ProceduralTexture &t, std::vector<LayerAux> aux, 
   ns_ = clampf(fin1(tex_.normal_strength, 1.0f), 0.0f, 10.0f);
   hash_ = tex_.hash() ^ ((uint64_t)w << 40 | (uint64_t)h << 20);
   aux_.resize(tex_.layers.size());
-  for (const auto &l : tex_.layers) shapes_height_.push_back((l->targets & (TargetHeight | TargetMask)) != 0);
   /* The copy's mask effects are made mask effects once here (task 0244), so a point evaluation applies them as they
    * are instead of cloning each one per point. */
   std::function<void(TextureLayerList &)> prepare = [&](TextureLayerList &ls) {
@@ -513,6 +513,16 @@ LiveTexture::LiveTexture(const ProceduralTexture &t, std::vector<LayerAux> aux, 
     }
   };
   prepare(tex_.layers);
+  may_remap_ = std::any_of(tex_.layers.begin(), tex_.layers.end(), [](const auto &l) {
+    return l->enabled && l->reads_anywhere();
+  });
+  if (may_remap_) return;
+  for (size_t i = 0; i < tex_.layers.size(); i++) {
+    const TextureLayer &l = *tex_.layers[i];
+    if (!l.enabled) continue;
+    stack_.push_back(i);
+    if (l.targets & (TargetHeight | TargetMask)) height_stack_.push_back(i);
+  }
 }
 
 TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
@@ -521,6 +531,17 @@ TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
   if (!finite_bits(u) || !finite_bits(v)) u = v = 0.0f;
   n = std::min(n, tex_.layers.size());
   TexPoint p;
+  /* Only remappers recurse into prefixes. Ordinary stacks can apply the snapshot's enabled layers
+   * directly and the normal's height samples can visit just the height and mask writers, in order. */
+  if (!may_remap_) {
+    for (size_t i : height_only ? height_stack_ : stack_) {
+      const TextureLayer &l = *tex_.layers[i];
+      if (!l.mask_layers.empty()) p.layer_mask = own_mask_at(l, p, u, v, ctx_);
+      l.apply_point(p, u, v, ctx_, aux_[i].empty() ? nullptr : &aux_[i]);
+      p.layer_mask = 1.0f;
+    }
+    return p;
+  }
   size_t start = 0;
   /* A Warp / Tile at full opacity over every plane, with nothing above it reading the mask, replaces what is below
    * with what is below at the moved point: start there (stacked ones would otherwise each re-evaluate the layers
@@ -542,7 +563,7 @@ TexPoint LiveTexture::eval(size_t n, float u, float v, bool height_only) const {
   }
   for (size_t i = start; i < n; i++) {
     const TextureLayer &l = *tex_.layers[i];
-    if (!l.enabled || (height_only && !shapes_height_[i])) continue;
+    if (!l.enabled || (height_only && !(l.targets & (TargetHeight | TargetMask)))) continue;
     float mu = u, mv = v;
     if (l.remap(mu, mv, ctx_)) {
       /* Warp / Tile: what the layers below give at the moved point, blended in as apply() does. */
@@ -822,6 +843,13 @@ bool procedural_texture_cached(const std::string &asset_path, uint64_t hash) {
   return it != g_cache.end() && it->second.hash == hash && it->second.have[0];
 }
 
+
+bool procedural_texture_current_image(ProceduralTexture &texture, int output, const TexturePtr &image) {
+  const uint64_t hash = cache_hash(texture);
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  const auto it = g_cache.find(texture.asset_path);
+  return image && it != g_cache.end() && it->second.hash == hash && it->second.tex[output] == image;
+}
 
 struct TextureOutputsHandle {
   CachedOutput out;

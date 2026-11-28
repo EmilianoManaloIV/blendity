@@ -7,6 +7,7 @@
 #include "../src/core/view_perf.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
+#include "../src/render/colormanagement.h"
 #include "../src/scene/budget.h"
 #include "../src/scene/unity_package.h"
 #include "../src/texture/smart_material.h"
@@ -7962,12 +7963,13 @@ static void tests_round412() {
       (void)a, (void)b;
     });
     t.join();
+    const int lanes = js.thread_count();
     js.set_backend(was);
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    std::printf("    %u hardware threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", hw, bg_ids.size(), main_ids.size(),
+    std::printf("    %d available threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", lanes, bg_ids.size(), main_ids.size(),
                 bg_flag ? "true" : "false", JobSystem::in_background() ? "true" : "false");
     CHECK(bg_flag && !JobSystem::in_background());
-    CHECK(hw < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
+    CHECK(bg_ids.size() <= (size_t)std::max(1, lanes - 2) && main_ids.size() <= (size_t)lanes);
+    CHECK(lanes < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
     for (const std::thread::id &id : bg_ids) CHECK(!main_ids.count(id));  // (the two pools share no thread)
   });
 }
@@ -8186,28 +8188,53 @@ static void tests_round418() {
     CHECK(!named);
   });
   test("sweep rows (round 418): a screenshot's PNG is written on a worker the tray lists, and lands as a file; without workers it lands in the frame", [] {
+    constexpr int width = 640, height = 400;
+    const std::string root = test_run_dir(test_dir(), test_run_stamp(), std::random_device{}() % 100000u);
+    const bool fresh = !fs::exists(root);
+    CHECK(fresh);
+    if (!fresh) return;
+    const char *project_env = std::getenv("BLENDITY_PROJECT");
+    const std::string previous_project = project_env ? project_env : "";
+    const std::string previous_asset_root = asset_root();
     for (bool async : {true, false}) {
+      const std::string project = fs::normalize(fs::join(root, async ? "async" : "sync"));
+      set_env("BLENDITY_PROJECT", project);
       Editor ed;
-      ed.init_headless(640, 400);
+      ed.init_headless(width, height);
+      if (previous_project.empty()) clear_env("BLENDITY_PROJECT");
+      else set_env("BLENDITY_PROJECT", previous_project);
+      const std::string dir = fs::join(project, "Screenshots");
+      CHECK(ed.screenshots_dir_for_test() == dir);
+      if (ed.screenshots_dir_for_test() != dir) continue;
+      const auto pngs = [&] { return fs::find_files(dir, ".png", 0); };
       ed.set_async_jobs_for_test(async);
       ed.step_frame_headless();
-      ed.run_action_for_test("render.screenshot");
-      bool listed = false;
-      std::string label;
-      for (int i = 0; i < 40; i++) {
-        ed.step_frame_headless();
-        for (const Editor::JobView &j : ed.jobs_for_test())
-          if (j.label == "Saving screenshot") listed = true;
-        if (!ed.file_jobs_running() && i > 2) break;
+      CHECK(ed.run_action_for_test("render.screenshot"));
+      ed.step_frame_headless();
+      CHECK(pngs().empty() && !ed.file_jobs_running());
+      /* The action defers capture by two frames so the menu has closed. Check the tray at capture, before the next poll. */
+      ed.step_frame_headless();
+      const auto jobs = ed.jobs_for_test();
+      const bool listed = std::any_of(jobs.begin(), jobs.end(), [](const Editor::JobView &job) { return job.label == "Saving screenshot"; });
+      CHECK(listed == async);
+      if (async) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (ed.file_jobs_running() && std::chrono::steady_clock::now() < deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          ed.step_frame_headless();
+        }
       }
-      std::vector<std::string> pngs;
-      for (const DirEntry &de : fs::list(ed.screenshots_dir_for_test()))
-        if (!de.is_dir && fs::extension(de.name) == ".png") pngs.push_back(de.name);
-      std::printf("    %s: %zu png(s), the tray listed the job: %s\n", async ? "with workers" : "without workers", pngs.size(), listed ? "yes" : "no");
-      CHECK(!pngs.empty());
-      CHECK(async ? listed : !listed);
-      for (const std::string &n : pngs) fs::remove_file(fs::join(ed.screenshots_dir_for_test(), n));
+      /* Without workers this is still the capture frame. In either mode require this project's own readable file. */
+      CHECK(!ed.file_jobs_running());
+      const auto landed = pngs();
+      std::printf("    %s: %zu png(s), the tray listed the job: %s\n", async ? "with workers" : "without workers", landed.size(), listed ? "yes" : "no");
+      CHECK(landed.size() == 1);
+      if (landed.size() != 1) continue;
+      Bitmap shot;
+      std::string error;
+      CHECK(load_image(fs::join(dir, landed[0]), shot, error) && shot.width == width && shot.height == height && !shot.is_float);
     }
+    set_asset_root(previous_asset_root);
   });
   test("sweep rows (round 418): 10,000 cold render meshes built on every core before the gather are the ones a serial gather builds, and the frame that lands them is one frame", [] {
     Editor ed;
@@ -11569,16 +11596,9 @@ static void tests_round468() {
     CHECK(length(ed.scene_eye() - eye0) < 1e-3f);
   });
 
-  /* Round 568: this test counted the view's renders over 24 frames paced 17 ms apart and asked for at least half as many
-   * with the Centre of Mass shown as hidden. A clip plays by the real clock, and the perf clip moves for its first 30
-   * frames of 60 (half a second in every second): how many of the 24 frames fell in the moving half was the machine's
-   * speed, in both runs separately - 11 hidden / 5 shown in a sanitizer shard, 20 / 12 and 10 / 17 here under load,
-   * with the view drawing every frame the avatar moved in all of them. Now the clip is slowed to a frame a second, so its
-   * rising half (frames 0 to 15: every bone turning one way) lasts 15 s, and exactly 24 frames are stepped: each one
-   * whose playhead moved on inside that half - all 24 unless the 26 steps together take over 15 s - must draw the view, hidden
-   * and shown. That is stricter than the old ratio (every moving frame, not half of them) and no longer a measurement.
-   * The editor's own clock is pinned (the toasts, the measured rate); the clip's is the real one and cannot be, so each
-   * frame is given 5 ms for the playhead to move: a floor a slow machine only raises. */
+  /* Round 568 checked that every moving frame draws the Scene view with Centre of Mass hidden and shown.
+   * Preview now follows the editor clock. Step it explicitly so all 24 frames stay inside the clip's rising half
+   * regardless of host speed and both cases see the same playhead sequence. */
   test("a clip playing with Centre of Mass shown (round 468): the Scene view still draws the moving avatar - every stepped frame the clip moved it in, as with it hidden (the stress row 'Centre of Mass shown: the clip playing' read NO VIEW)", [] {
     const int kFrames = 24;
     int moved[2] = {0, 0}, drawn[2] = {0, 0};
@@ -11598,21 +11618,25 @@ static void tests_round468() {
       if (!clip) return;
       clip->frame_rate = 1.0f;  // (the perf clip's keys: 0, 15, 30 - the rising half is 15 s long now)
       const float rising_end = 15.0f;
-      ed.set_clock_for_test(100.0);
+      double clock = 100.0;
+      ed.set_clock_for_test(clock);
       ed.command("anim play");
+      const auto step = [&] {
+        clock += 0.01;
+        ed.set_clock_for_test(clock);
+        ed.step_frame_headless();
+      };
       /* Two frames first, as before: the pose a frame draws may be the one the frame before applied, so a frame counts
        * as "moved" when the playhead rose over both of the last two steps. */
       float before = ed.anim_frame_for_test(), last = before;
       for (int i = 0; i < 2; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        ed.step_frame_headless();
+        step();
         before = last, last = ed.anim_frame_for_test();
       }
       const PoseCounts c0 = ed.pose_counts_total_for_test();
       for (int i = 0; i < kFrames; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         const uint64_t r0 = ed.frame_profile_totals().view_renders;
-        ed.step_frame_headless();
+        step();
         const uint64_t r = ed.frame_profile_totals().view_renders - r0;
         const float now = ed.anim_frame_for_test();
         const bool moving = before < last && last < now && now <= rising_end;
@@ -11626,7 +11650,7 @@ static void tests_round468() {
       ed.command("anim stop");
       std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
     }
-    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] > 0 && drawn[shown] == moved[shown]);
+    for (int shown = 0; shown < 2; shown++) CHECK(moved[shown] == kFrames && drawn[shown] == moved[shown]);
   });
 
   test("perf drag key with nothing under it (round 468): an origin off the Scene view (behind the camera, far to the side) is refused and the key never left pressed; with no active object likewise", [r468t_clean, r468t_click_selects, r468t_settle] {
@@ -15602,6 +15626,8 @@ static void tests_round542() {
     /* Each change made straight on the settings, no undo step: only the keep's key can see it. */
     const std::pair<const char *, std::function<void()>> edits[] = {
         {"Sun Lights Scene off", [&] { es.sun_lights_scene = false; }},
+        {"Sky elevation with ambient alone", [&] { es.sun_elevation = 15.0f; }},
+        {"Sky rotation with ambient alone", [&] { es.sun_rotation = 90.0f; }},
         {"Sun Lights Scene on", [&] { es.sun_lights_scene = true; }},
         {"Sun Intensity 3", [&] { es.sun_intensity = 3.0f; }},
         {"Turbidity 8", [&] { es.turbidity = 8.0f; }},
@@ -15640,8 +15666,8 @@ static void tests_round542() {
         p = end == std::string::npos ? body.size() : end;
       }
     }
-    CHECK(tries.size() == 3);
-    if (tries.size() != 3) return;
+    CHECK(tries.size() == 4);
+    if (tries.size() != 4) return;
     Editor ed;
     ed.init_headless(800, 600);
     auto strip = [](std::string s) {
@@ -15673,6 +15699,18 @@ static void tests_round542() {
     run(tries[2]);
     CHECK(ed.scene().environment.sun_lights_scene && ed.scene().environment.sun_intensity == 2.0f);
     CHECK(suns(&i2) == 1 && std::fabs(i2 - 2.0f * i1) < 1e-4f * i1);
+    run(tries[3]);
+    const auto env = ed.make_lighting_for_test();
+    const Vec3 expected{std::cos(15.0f * kDeg2Rad), std::sin(15.0f * kDeg2Rad), 0.0f};
+    CHECK(env.environment && length(env.environment->sun_dir - expected) < 1e-5f);
+    for (const auto &l : env.lights)
+      if (l.type == RenderLight::Directional) CHECK(length(l.direction + expected) < 1e-5f);
+    const std::string path = fs::join(test_dir(), "sky-orientation.scene");
+    CHECK(save_scene(ed.scene(), path));
+    Scene reopened;
+    std::string err;
+    CHECK(load_scene(path, reopened, err));
+    CHECK(reopened.environment.sun_elevation == 15.0f && reopened.environment.sun_rotation == 90.0f);
     std::printf("    the sky's sun: intensity %.3f, at Sun Intensity 2: %.3f\n", i1, i2);
   });
 }
@@ -16842,6 +16880,493 @@ static void tests_round556() {
   });
 }
 
+static void tests_round622_editor() {
+  test("draw lists keep hits and refill after a move, undo and scene shrink in two views (round 622)", [] {
+    Editor ed;
+    ed.init_headless(640, 420);
+    ed.set_render_cache_verify(false);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const auto id = cube->id;
+    const auto position = cube->local().position;
+    const MeshPtr mesh = cube->get<MeshFilter>()->mesh;
+    GameObject *group = ed.scene().create("Round 622 instances");
+    const auto group_id = group->id;
+    for (int i = 0; i < 1100; ++i) {
+      GameObject *child = ed.scene().create("Round 622 item");
+      child->add<MeshFilter>()->mesh = mesh;
+      child->add<MeshRenderer>();
+      ed.scene().set_parent(child, group);
+    }
+    ed.mark_changed_for_test("populate draw lists");
+    ed.step_frame_headless();  // Commit the fixture as its own undo step before the move.
+    constexpr int scene_slot = 0, game_slot = 1;
+    auto stats = [&](int slot) { return ed.draw_list_stats_for_test(slot, slot == scene_slot); };
+    auto same_stats = [](const Editor::DrawListStats &a, const Editor::DrawListStats &b) {
+      return a.generation == b.generation && a.size == b.size && a.capacity == b.capacity;
+    };
+    const Vec3 eye(0.0f, 2.0f, -8.0f);
+    const Mat4 view = Mat4::look_at(eye, {0, 0.5f, 0}, {0, 1, 0});
+    const Mat4 proj = Mat4::perspective(50.0f * kDeg2Rad, 1.6f, 0.1f, 100.0f);
+    auto collect = [&](bool game) {
+      if (game) return ed.collect_items_for_test(true, view, proj, eye);
+      return ed.collect_items_card_for_test(false, true);
+    };
+    auto model_x = [id](const std::vector<DrawItem> &items) {
+      const auto it = std::find_if(items.begin(), items.end(), [id](const DrawItem &item) { return item.id == id; });
+      CHECK(it != items.end());
+      return it == items.end() ? std::numeric_limits<float>::quiet_NaN() : it->model.m[12];
+    };
+    const auto scene_before = collect(false);
+    const auto game_before = collect(true);
+    const auto scene_warm = stats(scene_slot);
+    const auto game_warm = stats(game_slot);
+    CHECK(scene_before.size() > 1100);
+    CHECK(game_before.size() > 1100);
+    CHECK(scene_warm.size == scene_before.size() && game_warm.size == game_before.size());
+    CHECK(scene_warm.generation != 0 && game_warm.generation != 0 && scene_warm.generation != game_warm.generation);
+    view_perf::reset();
+    collect(false);
+    collect(true);
+    CHECK(view_perf::counters.item_gathers == 0);
+    CHECK(same_stats(stats(scene_slot), scene_warm) && same_stats(stats(game_slot), game_warm));
+
+    view_perf::reset();
+    ed.command("position 1.5 0.75 0.25");
+    const auto scene_moved = collect(false);
+    const auto scene_refilled = stats(scene_slot);
+    CHECK(scene_refilled.generation != scene_warm.generation);
+    CHECK(scene_refilled.capacity == scene_warm.capacity);
+    CHECK(same_stats(stats(game_slot), game_warm));
+    const auto game_moved = collect(true);
+    const auto game_refilled = stats(game_slot);
+    CHECK(game_refilled.generation != game_warm.generation && game_refilled.generation != scene_refilled.generation);
+    CHECK(game_refilled.capacity == game_warm.capacity);
+    CHECK(same_stats(stats(scene_slot), scene_refilled));
+    CHECK(view_perf::counters.item_gathers == 2);
+    CHECK(scene_moved.size() == scene_before.size());
+    CHECK(game_moved.size() == game_before.size());
+    CHECK_NEAR(model_x(scene_moved), 1.5f, 1e-6f);
+    CHECK_NEAR(model_x(game_moved), 1.5f, 1e-6f);
+    CHECK_NEAR(model_x(scene_before), position.x, 1e-6f);
+    CHECK_NEAR(model_x(game_before), position.x, 1e-6f);
+
+    ed.set_render_cache_verify(true);
+    const uint64_t mismatches = Editor::render_cache_mismatches_all();
+    view_perf::reset();
+    collect(false);
+    collect(true);
+    CHECK(view_perf::counters.item_gathers == 2);
+    CHECK(Editor::render_cache_mismatches_all() == mismatches);
+    CHECK(same_stats(stats(scene_slot), scene_refilled) && same_stats(stats(game_slot), game_refilled));
+    ed.set_render_cache_verify(false);
+    ed.command("undo");
+    CHECK_NEAR(model_x(collect(false)), position.x, 1e-6f);
+    CHECK_NEAR(model_x(collect(true)), position.x, 1e-6f);
+    GameObject *restored_group = ed.scene().find(group_id);
+    CHECK(restored_group != nullptr);
+    if (!restored_group) return;
+    ed.scene().destroy(restored_group);
+    ed.mark_changed_for_test("remove draw-list instances");
+    view_perf::reset();
+    const auto scene_small = collect(false);
+    const auto game_small = collect(true);
+    CHECK(view_perf::counters.item_gathers == 2);
+    CHECK(scene_small.size() + 1100 == scene_before.size());
+    CHECK(game_small.size() + 1100 == game_before.size());
+    CHECK(stats(scene_slot).capacity < scene_warm.capacity / 4);
+    CHECK(stats(game_slot).capacity < game_warm.capacity / 4);
+    CHECK_NEAR(model_x(scene_small), position.x, 1e-6f);
+    CHECK_NEAR(model_x(game_small), position.x, 1e-6f);
+  });
+}
+
+static void tests_round639_paint_undo() {
+  test("round 639: Textures cards and saved pixels follow a first canvas stroke and a second drag through Undo and Redo", [] {
+    Editor ed;
+    ed.init_headless(1600, 1200);
+    ed.set_render_cache_verify(false);
+    ed.record_buttons_for_test(true);
+    ed.command("keymap Unity");
+    ed.command("shading wire");
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("surface new R639Neighbor");
+    ed.step_frame_headless();
+    ed.command("surface new R639Painted");
+    ed.command("settex R639Painted Width 128");
+    ed.command("settex R639Painted Height 128");
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("paint size 20");
+    ed.command("window Textures");
+    r34_steps(ed, 2);
+    const std::string texture_layout = strprintf("layout H(0.42,L(%d:0),L(%d:0))", (int)WindowKind::Scene, (int)WindowKind::Textures);
+    ed.command(texture_layout);
+    r34_steps(ed, 2);
+
+    const auto painted = ed.texture_selected_for_test();
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(ed.paint_for_test() && painted && painted->name == "R639Painted" && !pane.empty());
+    if (!painted || pane.empty()) return;
+    const std::string path = resolve_asset_path(painted->asset_path);
+    const std::string neighbor_path = resolve_asset_path("Assets/Textures/R639Neighbor.ptex");
+    auto card = [&](const char *name) {
+      Recti cell;
+      if (!ed.button_rect_for_test(std::string("tex:") + name, cell)) return Recti{};
+      const int inset = ed.ui_for_test().px(4);
+      const int side = cell.w - 2 * inset;
+      return Recti{cell.x + inset, cell.y + inset, side, side / 2};  // exclude the label and unused badge
+    };
+    const Recti painted_card = card("R639Painted"), neighbor_card = card("R639Neighbor");
+    CHECK(!painted_card.empty() && !neighbor_card.empty());
+    if (painted_card.empty() || neighbor_card.empty()) return;
+    const auto neighbor_pixels = r34_crop(ed, neighbor_card);
+    std::string neighbor_text;
+    CHECK(fs::read_file(neighbor_path, neighbor_text) && !neighbor_pixels.empty());
+
+    struct State {
+      std::vector<uint32_t> card;
+      std::vector<uint8_t> albedo;
+    };
+    auto state = [&](const char *stage, int stamp) {
+      State result;
+      result.card = r34_crop(ed, painted_card);
+      CHECK(ed.texture_selected_for_test() == painted && r34_crop(ed, neighbor_card) == neighbor_pixels);
+      CHECK(painted->layers.size() == (stamp < 0 ? 1u : 2u));
+      // Explicit Save exercises the editor's normal write of the .ptex and its Paint PNGs.
+      ed.command("save Assets/Scenes/R639PaintUndo.scene");
+      std::string text, other;
+      ProceduralTexture saved;
+      CHECK(fs::read_file(neighbor_path, other) && other == neighbor_text);
+      const bool read = fs::read_file(path, text) && load_texture_text(text, saved);
+      CHECK(read && text == save_texture_text(*painted));
+      if (!read) return result;
+      CHECK(!saved.layers.empty() && std::strcmp(saved.layers.front()->type_name(), "Fill") == 0);
+      int saved_stamp = -1;
+      if (stamp >= 0) {
+        const auto *layer = saved.layers.size() == 2 ? dynamic_cast<const PaintLayer *>(saved.layers.back().get()) : nullptr;
+        CHECK(layer && layer->stamp == stamp);
+        if (layer) {
+          saved_stamp = layer->stamp;
+          PaintImages images;
+          std::string err;
+          const bool load = paint_images_load(resolve_asset_path(layer->base), images, &err);
+          const bool covered = std::any_of(images.cover.begin(), images.cover.end(), [](uint8_t pixel) { return pixel > 0; });
+          CHECK(load && covered == (stamp > 0));
+        }
+      }
+      // Evaluate from disk at the thumbnail resolution and compare the visible card pixels.
+      saved.width = saved.height = 64;
+      const Bitmap bitmap = saved.output(0);
+      result.albedo = bitmap.rgba8;
+      std::vector<uint32_t> expected;
+      for (int y = 0; y < painted_card.h; y++) {
+        const int sy = y * bitmap.height / painted_card.w;
+        for (int x = 0; x < painted_card.w; x++) {
+          const int sx = x * bitmap.width / painted_card.w;
+          const uint8_t *p = &bitmap.rgba8[((size_t)sy * bitmap.width + sx) * 4];
+          expected.push_back(0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]);
+        }
+      }
+      const bool matches = result.card == expected;
+      std::printf("    %s: %zu persisted layers, saved Paint stamp %d (want %d), card matches saved pixels %d\n", stage, saved.layers.size(), saved_stamp, stamp, (int)matches);
+      CHECK(matches);
+      return result;
+    };
+    auto history = [&](int key) {
+      auto e = key_ev(key, platform::MOD_CTRL);
+      ed.step_frame_headless({e});
+      e.type = R34ET::KeyUp;
+      ed.step_frame_headless({e});
+    };
+
+    const State original = state("before paint", -1);
+    const size_t steps = ed.undo_steps_for_test();
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    CHECK(ed.undo_steps_for_test() == steps + 2 && ed.undo_label_for_test(0) == "Paint" && ed.undo_label_for_test(1) == "Add Paint Layer");
+    history(platform::KEY_Z);  // Undo on the frame immediately after release.
+    const State quick_undo = state("first stroke undone immediately", 0);
+    CHECK(quick_undo.card == original.card && quick_undo.albedo == original.albedo);
+    history(platform::KEY_Y);
+    const State first = state("first stroke after redo", 1);
+    CHECK(first.card != original.card && first.albedo != original.albedo);
+    history(platform::KEY_Z);
+    const State unpainted = state("first stroke undone", 0);
+    CHECK(unpainted.card == original.card && unpainted.albedo == original.albedo);
+    history(platform::KEY_Y);
+    const State first_redone = state("first stroke redone", 1);
+    CHECK(first_redone.card == first.card && first_redone.albedo == first.albedo);
+
+    ed.command("paint color 0 0 1");
+    const int x = pane.x + pane.w / 4, y = pane.y + pane.h / 4;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y + pane.h / 10)});
+    CHECK(ed.undo_steps_for_test() == steps + 2);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y + pane.h / 10)});
+    ed.step_frame_headless();
+    CHECK(ed.undo_steps_for_test() == steps + 3);
+    const State second = state("second stroke", 2);
+    CHECK(second.card != first.card && second.albedo != first.albedo);
+    auto same = [&](const State &want, const char *stage, int stamp) {
+      const State got = state(stage, stamp);
+      CHECK(got.card == want.card && got.albedo == want.albedo);
+    };
+    history(platform::KEY_Z);
+    same(first, "second stroke undone", 1);
+    history(platform::KEY_Z);
+    same(original, "both strokes undone", 0);
+    history(platform::KEY_Y);
+    same(first, "first of two strokes redone", 1);
+    history(platform::KEY_Y);
+    same(second, "both strokes redone", 2);
+
+    auto hide_textures = [&] {
+      ed.command(strprintf("layout L(%d:0)", (int)WindowKind::Scene));
+      ed.step_frame_headless();
+      CHECK(card("R639Painted").empty());
+    };
+    auto check_preview = [&](const State &saved) {
+      ed.command("perf wait");
+      ed.step_frame_headless();
+      const Recti view = ed.texture_ui_rect_for_test("preview");
+      CHECK(!view.empty() && saved.albedo.size() == 64 * 64 * 4);
+      if (view.empty() || saved.albedo.size() != 64 * 64 * 4) return;
+      // Sample the selected preview at the centers of the three potential marks.
+      const Image &frame = ed.framebuffer();
+      for (int quarter : {1, 2, 3}) {
+        const int sx = view.w * quarter / 4, sy = view.h / 4;
+        const size_t i = ((size_t)(sy * 64 / view.h) * 64 + sx * 64 / view.w) * 4;
+        const uint8_t *p = &saved.albedo[i];
+        const uint32_t expected = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+        CHECK(frame.pixels[(size_t)(view.y + sy) * frame.width + view.x + sx] == expected);
+      }
+    };
+
+    ed.command("perf wait");
+    const uint64_t second_hash = painted->hash();
+    hide_textures();
+    history(platform::KEY_Z);
+    ed.command("paint color 0 1 0");
+    ed.command("paint 2d dab 0.75 0.75");
+    CHECK(painted->hash() == second_hash && card("R639Painted").empty());
+    ed.command(texture_layout);
+    r34_steps(ed, 2);
+    const State new_branch = state("reopened after a different second stroke", 2);
+    CHECK(new_branch.card != second.card && new_branch.albedo != second.albedo);
+    check_preview(new_branch);
+    history(platform::KEY_Y);
+    same(new_branch, "discarded stroke cannot be redone", 2);
+
+    history(platform::KEY_Z);
+    check_preview(first);
+    hide_textures();
+    const size_t before_fast_stroke = ed.undo_steps_for_test();
+    ed.command("paint 2d dab 0.75 0.75");
+    CHECK(ed.undo_steps_for_test() == before_fast_stroke + 1);
+    ed.command("undo");  // No intervening frame for the new stroke to replace the warmed output.
+    CHECK(ed.undo_steps_for_test() == before_fast_stroke);
+    ed.command(texture_layout);
+    r34_steps(ed, 2);
+    same(first, "reopened after an immediate undo", 1);
+    check_preview(first);
+  });
+
+  test("round 639: a saved maximum Paint stamp accepts a new canvas stroke through Undo and Redo", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("shading wire");
+    const int max_stamp = std::numeric_limits<int>::max();
+    const std::string asset = "Assets/Textures/R639MaxPaintStamp.ptex";
+    const std::string path = resolve_asset_path(asset);
+    ProceduralTexture seed;
+    seed.width = seed.height = 128;
+    seed.surface = true;
+    seed.add("Fill");
+    auto *layer = static_cast<PaintLayer *>(seed.add("Paint"));
+    layer->base = "Assets/Textures/R639MaxPaintStamp_L1";
+    layer->stamp = max_stamp;
+    const std::string text = save_texture_text(seed);
+    const size_t stamp_line = text.find("  L1_Stamp ");
+    CHECK(stamp_line != std::string::npos);
+    if (stamp_line == std::string::npos) return;
+    std::string legacy = text;
+    legacy.erase(stamp_line, legacy.find('\n', stamp_line) - stamp_line + 1);
+    ProceduralTexture legacy_read;
+    CHECK(load_texture_text(legacy, legacy_read) && legacy_read.layers.size() == 2 && static_cast<PaintLayer &>(*legacy_read.layers[1]).stamp == 0);
+    CHECK(fs::make_dirs(fs::parent(path)) && fs::write_file(path, text));
+    const auto loaded = texture_asset(asset);
+    CHECK(loaded && loaded->layers.size() == 2);
+    if (!loaded || loaded->layers.size() != 2) return;
+
+    ed.command("select Cube");
+    ed.assign_texture_asset_for_test(asset);
+    ed.select_texture_for_test(loaded);
+    ed.command("paint on");
+    ed.command("paint 2d on");
+    ed.command("paint color 1 0 0");
+    ed.command("window Textures");
+    r34_steps(ed, 2);
+    const Recti pane = ed.texture_ui_rect_for_test("preview");
+    CHECK(ed.paint_for_test() && !pane.empty());
+    if (pane.empty()) return;
+
+    auto saved_pixels = [&](int stamp) {
+      ed.command("save Assets/Scenes/R639MaxPaintStamp.scene");
+      std::string saved_text;
+      ProceduralTexture saved;
+      const bool read = fs::read_file(path, saved_text) && load_texture_text(saved_text, saved) && saved.layers.size() == 2;
+      CHECK(read && static_cast<PaintLayer &>(*saved.layers[1]).stamp == stamp);
+      return read ? saved.output(0).rgba8 : std::vector<uint8_t>{};
+    };
+    const auto original = saved_pixels(max_stamp);
+    const size_t steps = ed.undo_steps_for_test();
+    r34_click(ed, pane.x + pane.w / 2, pane.y + pane.h / 4);
+    const auto painted = saved_pixels(0);
+    CHECK(!original.empty() && !painted.empty() && painted != original);
+    CHECK(ed.undo_steps_for_test() == steps + 1 && ed.undo_label_for_test(0) == "Paint");
+    ed.command("undo");
+    CHECK(saved_pixels(max_stamp) == original);
+    ed.command("redo");
+    CHECK(saved_pixels(0) == painted);
+  });
+}
+
+static void tests_round653_flip_rotate() {
+  test("Flip / Rotate (round 653): quarter turns preserve every RGBA word on and across tile edges", [] {
+    for (const auto &[width, height] : {std::pair<int, int>{1, 33}, {33, 1}, {16, 17}, {17, 16}, {33, 47}}) {
+      edit::Image input;
+      input.resize(width, height);
+      constexpr uint32_t words[] = {0x7fc01234u, 0x7fa05678u, 0x7f800000u, 0xff800000u, 0x80000000u, 1u, 0x7f7fffffu};
+      for (size_t i = 0; i < input.px.size(); ++i) {
+        const uint32_t word = i % 19 < std::size(words) ? words[i % 19] : 0x3f000000u | ((uint32_t)i * 2654435761u & 0x00ffffffu);
+        std::memcpy(&input.px[i], &word, sizeof(word));
+      }
+      edit::FilterKeep keep;
+      for (int quarter : {1, 3}) {
+        for (int flips = 0; flips < 4; ++flips) {
+          const bool horizontal = (flips & 1) != 0, vertical = (flips & 2) != 0;
+          edit::Adjustment adjustment = edit::make_adjustment("Flip / Rotate");
+          adjustment.set("Flip Horizontal", horizontal ? 1.0f : 0.0f);
+          adjustment.set("Flip Vertical", vertical ? 1.0f : 0.0f);
+          adjustment.set("Quarter Turns", (float)quarter);
+          edit::Image actual, expected;
+          expected.resize(height, width);
+          for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+              const int sx = horizontal ? width - 1 - x : x, sy = vertical ? height - 1 - y : y;
+              const int dx = quarter == 1 ? height - 1 - sy : sy, dy = quarter == 1 ? sx : width - 1 - sx;
+              std::memcpy(expected.at(dx, dy), input.at(x, y), 4 * sizeof(float));
+            }
+          }
+          edit::apply(adjustment, input, actual, 1.0f, &keep);
+          CHECK(r508te::same_bits(actual, expected));
+        }
+      }
+    }
+  });
+}
+
+static void tests_round657_view_transform() {
+  test("round 657: the console explains an unavailable Render view transform and keeps the current setting", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.clear_scene_dirty_for_test();
+    ed.command("set Render.ViewTransform ACES (built-in)");
+    CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::ACES));
+    CHECK(ed.scene_dirty_for_test());
+
+    const auto reject = [&](const std::string &requested) {
+      const int transform = ed.scene().render.view_transform;
+      const bool dirty = ed.scene_dirty_for_test();
+      const size_t undo_steps = ed.undo_steps_for_test();
+      const size_t before = r468_log_mark();
+      ed.command("set Render.ViewTransform " + requested);
+      std::vector<LogEntry> entries;
+      Log::fetch(before, entries);
+      CHECK(std::any_of(entries.begin(), entries.end(), [&](const LogEntry &entry) {
+        return entry.level == LogLevel::Warning && entry.text.find("View Transform") != std::string::npos &&
+               entry.text.find(requested) != std::string::npos && entry.text.find("unavailable") != std::string::npos;
+      }));
+      CHECK(ed.scene().render.view_transform == transform);
+      CHECK(ed.scene_dirty_for_test() == dirty);
+      CHECK(ed.undo_steps_for_test() == undo_steps);
+    };
+
+    reject("Missing Test Transform");
+    ed.clear_scene_dirty_for_test();
+    reject("Missing Test Transform");
+    reject("35mm Film");
+    reject("999999999999999999999999 Film");
+
+    const int agx = colormanagement::view_index("AgX");
+    if (agx < 0) {
+      reject("AgX");
+    } else {
+      ed.command("set Render.ViewTransform AgX");
+      const auto expected = static_cast<ViewTransform>(static_cast<int>(ViewTransform::OcioView) + agx);
+      CHECK(ed.scene().render.view_transform == view_transform_setting(expected));
+      CHECK(ed.scene_dirty_for_test());
+    }
+
+    ed.clear_scene_dirty_for_test();
+    ed.command("set Render.ViewTransform 0 \t ");
+    CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::Standard));
+    CHECK(ed.scene_dirty_for_test());
+
+    for (const char *index : {"999", "999999999999999999999999"}) {
+      ed.command("set Render.ViewTransform 0");
+      ed.clear_scene_dirty_for_test();
+      ed.command(std::string("set Render.ViewTransform ") + index);
+      CHECK(ed.scene().render.view_transform == view_transform_setting(ViewTransform::AcesFull));
+      CHECK(ed.scene_dirty_for_test());
+    }
+  });
+}
+
+static void tests_round671_scene_raster() {
+  test("round 671: the Scene raster report counts freshly rendered CPU frames and excludes held views", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.set_render_cache_verify(false);  // This test checks the ordinary cache hit rather than its verification redraw.
+    ed.command("viewport device cpu");
+    ed.command("layout L(0:0)");
+    ed.command("shading shaded");
+    ed.step_frame_headless();
+
+    const auto sample = [&](const char *command, const char *expected) {
+      const size_t before = r468_log_mark();
+      ed.command(command);
+      std::vector<LogEntry> entries;
+      Log::fetch(before, entries);
+      const auto is_raster = [](const LogEntry &entry) { return entry.text.rfind("perf frames scene raster:", 0) == 0; };
+      CHECK(std::count_if(entries.begin(), entries.end(), is_raster) == (expected ? 1 : 0));
+      if (expected) CHECK(std::any_of(entries.begin(), entries.end(), [&](const LogEntry &entry) {
+        return is_raster(entry) && entry.text.find(expected) != std::string::npos;
+      }));
+    };
+
+    ed.command("camera 8 9 5 0 1 0");
+    sample("perf frames 1 scene-raster", "1/1 fresh CPU Shaded renders");
+    CHECK(ed.scene_stats_for_test().tris_rasterized > 0);
+    sample("perf frames 2 scene-raster", "0/2 fresh CPU Shaded renders");
+    ed.command("layout H(0.008,L(0:0),L(1:0))");
+    const uint64_t renders = ed.frame_profile_totals().view_renders;
+    sample("perf frames 1 scene-raster", "0/1 fresh CPU Shaded renders");
+    CHECK(ed.scene_view_rect().w > 0 && ed.scene_view_rect().w < 8);
+    CHECK(ed.game_rect_for_test().w >= 8 && ed.game_rect_for_test().h >= 8);
+    CHECK(ed.frame_profile_totals().view_renders == renders + 1);
+
+    ed.command("layout L(2:0)");
+    sample("perf frames 1 scene-raster", "0/1 fresh CPU Shaded renders");
+    sample("perf frames 1", nullptr);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -16959,5 +17484,10 @@ void run_editor_tests() {
   tests_round544();
   tests_round549();
   tests_round556();
+  tests_round622_editor();
+  tests_round639_paint_undo();
+  tests_round653_flip_rotate();
+  tests_round657_view_transform();
+  tests_round671_scene_raster();
   coverage_tests();
 }

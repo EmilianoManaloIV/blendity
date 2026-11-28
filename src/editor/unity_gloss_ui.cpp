@@ -11,6 +11,7 @@
 #include "../core/core.h"
 
 #include <chrono>
+#include <iterator>
 #include <thread>
 #include <unordered_map>
 
@@ -34,41 +35,74 @@ void Editor::GlossJob::run() {
   done.store(true);
 }
 
-namespace {
-
-/* Every slot of `scene` that wears a copy of one of `fresh` (by its .mat's path) takes its values and its version. */
-void take_reread_materials(Scene *scene, const std::unordered_map<std::string, const Material *> &fresh) {
-  if (!scene) return;
-  scene->for_each([&](GameObject &g) {
-    MeshRenderer *mr = g.get<MeshRenderer>();
-    if (!mr) return;
-    for (MaterialPtr &m : mr->materials) {
-      const auto it = m && !m->asset_path.empty() ? fresh.find(m->asset_path) : fresh.end();
-      if (it != fresh.end() && m.get() != it->second) *m = *it->second;
-    }
-  });
+/* Undo/Redo, Stop and the current scene can each own a different copy of the same asset. */
+void Editor::visit_material_states(const std::function<void(Material &)> &visit) {
+  auto scene_materials = [&](Scene *scene) {
+    if (!scene) return;
+    scene->for_each([&](GameObject &g) {
+      if (auto *mr = g.get<MeshRenderer>())
+        for (const MaterialPtr &m : mr->materials)
+          if (m && !m->asset_path.empty()) visit(*m);
+    });
+  };
+  scene_materials(scene_.get());
+  scene_materials(stable_.get());
+  scene_materials(play_backup_.get());
+  for (UndoState &state : undo_) scene_materials(state.scene.get());
+  for (UndoState &state : redo_) scene_materials(state.scene.get());
 }
 
-}  // namespace
-
-size_t Editor::reread_unity_materials(const std::string &under, const std::set<std::string> *only) {
-  std::vector<MaterialPtr> changed;
-  reload_foreign_materials(under, &changed, only);
-  if (changed.empty()) return 0;
-  /* Every copy of a scene the editor keeps has its own copies of a .mat's values. The states an Undo or Redo would
-   * bring back: a restored state's values win over the asset's when their versions differ (relink_material_assets), so
-   * left alone an Undo back past this moment would put the old reading on the asset again for the rest of the session.
-   * The scene Stop brings back, which is not linked again (review 485: a job landing in Play left it the old reading).
-   * And the scene itself, whose slots are such copies after a Stop. */
+size_t Editor::reread_unity_materials(const std::string &under) {
+  // The full read registers its own requests. Older requests for these paths
+  // must not apply to materials that an explicit import has since replaced.
+  auto &wanted = unity_gloss_wanted();
+  auto pending = std::move(wanted);
+  wanted.clear();
+  std::vector<MaterialPtr> reread;
+  const size_t changed = reload_foreign_materials(under, nullptr, nullptr, &reread);
   std::unordered_map<std::string, const Material *> fresh;
-  for (const MaterialPtr &m : changed) fresh[m->asset_path] = m.get();
-  take_reread_materials(scene_.get(), fresh);
-  take_reread_materials(stable_.get(), fresh);
-  take_reread_materials(play_backup_.get(), fresh);
-  for (UndoState &s : undo_) take_reread_materials(s.scene.get(), fresh);
-  for (UndoState &s : redo_) take_reread_materials(s.scene.get(), fresh);
+  for (const MaterialPtr &m : reread) fresh[m->asset_path] = m.get();
+  for (const auto &[guid, materials] : pending)
+    for (const auto &[path, provisional] : materials)
+      if (!fresh.count(path)) wanted[guid].emplace(path, provisional);
+  if (fresh.empty()) return 0;
+  if (gloss_job_)
+    for (auto &item : gloss_job_->items)
+      for (auto it = item.materials.begin(); it != item.materials.end();)
+        it = fresh.count(it->first) ? item.materials.erase(it) : std::next(it);
+  visit_material_states([&](Material &m) {
+    const auto it = fresh.find(m.asset_path);
+    if (it != fresh.end() && &m != it->second) m = *it->second;
+  });
   ui_.redraw = true;
-  return changed.size();
+  return changed;
+}
+
+size_t Editor::apply_measured_unity_gloss(const std::map<std::string, std::map<std::string, float>> &requests) {
+  struct Update { float provisional, measured; };
+  std::unordered_map<std::string, Update> updates;
+  std::set<Material *> visited;
+  auto apply = [&](Material &m) {
+    const auto it = updates.find(m.asset_path);
+    if (it == updates.end() || !m.foreign || !visited.insert(&m).second) return;
+    if (m.roughness == it->second.provisional) m.roughness = it->second.measured;
+    // Move every version once, including a copy with a hand-edited roughness.
+    // Undo compares versions before restoring the copy's other material fields.
+    m.touch();
+  };
+  for (const auto &[path, material] : loaded_material_assets()) {
+    const auto it = requests.find(path);
+    Update update;
+    if (it == requests.end() || !material->foreign ||
+        !measured_unity_roughness(path, it->second, update.provisional, update.measured)) continue;
+    updates.emplace(path, update);
+    apply(*material);
+  }
+  if (!updates.empty()) {
+    visit_material_states(apply);
+    ui_.redraw = true;
+  }
+  return updates.size();
 }
 
 /* A finished job on the main thread: each package's new lines added to its table (a texture of no package folder is
@@ -81,10 +115,12 @@ void Editor::land_unity_gloss() {
   const std::shared_ptr<GlossJob> job = std::move(gloss_job_);
   ScopedTimer landing;
   std::map<std::string, std::string> lines;  // (a package folder: its new lines)
-  std::set<std::string> asked;               // (the .mat files whose maps were measured)
-  size_t measured = 0;
+  std::map<std::string, std::map<std::string, float>> asked;  // .mat path to GUID and original roughness
+  size_t measured = 0, left = 0;
   for (const GlossJob::Item &it : job->items) {
+    if (it.materials.empty()) continue;  // a full reimport superseded all requests for this measurement
     if (!it.ok) {
+      ++left;
       gloss_failed_.insert(it.guid);  // (unreadable, or not reached before Cancel: not sent again on its own)
       continue;
     }
@@ -92,7 +128,7 @@ void Editor::land_unity_gloss() {
     /* Kept for the session whatever becomes of the table (a folder that can't be written): a texture measured once is
      * not sent to the worker again while its file stays the one that was measured. */
     unity_gloss_session_means()[it.guid] = UnityGlossMean{it.path, it.bytes, {it.mean[0], it.mean[1], it.mean[2], it.mean[3]}};
-    asked.insert(it.materials.begin(), it.materials.end());
+    for (const auto &[path, provisional] : it.materials) asked[path][it.guid] = provisional;
     if (!it.table.empty()) lines[it.table] += unity_stats_line(it.guid, it.bytes, it.width, it.height, it.mean);
   }
   for (const auto &[dir, added] : lines) {
@@ -101,8 +137,7 @@ void Editor::land_unity_gloss() {
     if (!text.empty() && text.back() != '\n') text += '\n';  // (a table cut short, or edited by hand: the new lines start on their own)
     if (!fs::write_file(fs::join(dir, ".unity-stats"), text + added)) Log::warn("Unity materials: %s could not be written - their gloss is measured again next time", fs::join(dir, ".unity-stats").c_str());
   }
-  const size_t changed = asked.empty() ? 0 : reread_unity_materials(std::string(), &asked);
-  const size_t left = job->items.size() - measured;
+  const size_t changed = asked.empty() ? 0 : apply_measured_unity_gloss(asked);
   const std::string rest = !left ? std::string()
                            : job->cancel.load() ? strprintf(" (cancelled with %zu left: Assets > Reimport Unity Materials measures them)", left)
                                                 : strprintf(" (%zu could not be read)", left);
@@ -127,16 +162,17 @@ void Editor::stop_unity_gloss() {
 void Editor::poll_unity_gloss() {
   if (pkg_job_) return;
   if (gloss_job_ && gloss_job_->done.load()) land_unity_gloss();
-  std::map<std::string, std::set<std::string>> &wanted = unity_gloss_wanted();
+  auto &wanted = unity_gloss_wanted();
   if (gloss_job_ || wanted.empty()) return;
   const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets_dir_, project_root_);
   auto job = std::make_shared<GlossJob>();
-  std::set<std::string> known, known_guids;  // (materials whose map has a mean by now - measured since they asked: read again at once)
+  std::map<std::string, std::map<std::string, float>> known;
+  std::set<std::string> known_guids;  // (materials whose map has a mean by now - measured since they asked: read again at once)
   for (const auto &[guid, materials] : wanted) {
     const auto it = index->find(guid);
     if (it == index->end() || gloss_failed_.count(guid)) continue;
     if (it->second.has_mean || unity_gloss_session_mean(guid, it->second.path)) {
-      known.insert(materials.begin(), materials.end());
+      for (const auto &[path, provisional] : materials) known[path][guid] = provisional;
       known_guids.insert(guid);
       continue;
     }
@@ -145,7 +181,7 @@ void Editor::poll_unity_gloss() {
     job->items.push_back(item);
   }
   wanted.clear();
-  if (!known.empty()) reread_unity_materials(std::string(), &known);
+  if (!known.empty()) apply_measured_unity_gloss(known);
   /* (A material that asks again for a map whose mean is there - one no alpha comes out of - is not read a second time:
    * once a frame for ever otherwise.) */
   for (const std::string &guid : known_guids) wanted.erase(guid);

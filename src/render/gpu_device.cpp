@@ -115,7 +115,7 @@ struct VkGlobal {
   InstanceFns f;
   VkInstance instance = VK_NULL_HANDLE;
   uint32_t api = VK_API_VERSION_1_0;
-  std::vector<VkPhysicalDevice> phys;  // parallel to devices()
+  std::vector<vk::PhysicalDevice> phys;  // parallel to devices()
   std::vector<DeviceInfo> infos;
   std::string error;
   bool tried = false;
@@ -280,7 +280,7 @@ bool init_global() {
       info.hardware_rt = rq.rayQuery && as.accelerationStructure && v12.bufferDeviceAddress;
     }
     g.infos.push_back(info);
-    g.phys.push_back(pd);
+    g.phys.push_back({pd, has_ext(dexts, vk::kPortabilitySubsetExtension)});
   }
   if (g.infos.empty()) g.error = "Vulkan found no GPU";
   return true;
@@ -385,7 +385,8 @@ class VulkanRenderer final : public Renderer {
     index_ = index;
     VkGlobal &g = G();
     info_ = g.infos[(size_t)index];
-    pd_ = g.phys[(size_t)index];
+    const vk::PhysicalDevice &physical = g.phys[(size_t)index];
+    pd_ = physical.handle;
     rt_ = want_rt && info_.hardware_rt;
     g.f.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
     uint32_t qn = 0;
@@ -404,13 +405,15 @@ class VulkanRenderer final : public Renderer {
     qci.queueFamilyIndex = qfam_;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
-    std::vector<const char *> exts;
+    std::vector<const char *> exts = vk::base_device_extensions(physical.portability_subset, false);
     VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     VkPhysicalDeviceRayQueryFeaturesKHR rqf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     if (rt_) {
-      exts = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
+      exts.insert(exts.end(), {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                               VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                               VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME});
       v12.bufferDeviceAddress = VK_TRUE;
       asf.accelerationStructure = VK_TRUE;
       rqf.rayQuery = VK_TRUE;
@@ -1355,7 +1358,7 @@ bool pipeline_cache_load(int index, const std::string &path, std::string &blob) 
   std::memcpy(&vendor, blob.data() + 8, 4);
   std::memcpy(&device, blob.data() + 12, 4);
   VkPhysicalDeviceProperties props;
-  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index].handle, &props);
   const bool ok = hsize >= 32 && hsize <= blob.size() && version == 1 && vendor == props.vendorID && device == props.deviceID &&
                   std::memcmp(blob.data() + 16, props.pipelineCacheUUID, 16) == 0;
   if (!ok) blob.clear();
@@ -1383,14 +1386,14 @@ void pipeline_cache_store(const std::string &path, std::string data) {
 std::string raster_pipeline_cache_file(int index) {
   if (!available() || index < 0 || index >= (int)G().infos.size()) return "";
   VkPhysicalDeviceProperties props;
-  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index].handle, &props);
   return fs::join(cache_dir(), strprintf("raster_pipelines_%04x_%04x.bin", props.vendorID, props.deviceID));
 }
 
 std::string pipeline_cache_file(int index, bool hardware_rt) {
   if (!available() || index < 0 || index >= (int)G().infos.size()) return "";
   VkPhysicalDeviceProperties props;
-  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index], &props);
+  G().f.vkGetPhysicalDeviceProperties(G().phys[(size_t)index].handle, &props);
   const std::string dir = cache_dir();
   return fs::join(dir, strprintf("pipeline_%04x_%04x_%s.bin", props.vendorID, props.deviceID, hardware_rt && G().infos[(size_t)index].hardware_rt ? "rt" : "bvh"));
 }
@@ -1498,7 +1501,8 @@ class VulkanCompute final : public Compute {
   bool init(int index, const std::string &glsl, std::string *err) {
     VkGlobal &g = G();
     info_ = g.infos[(size_t)index];
-    pd_ = g.phys[(size_t)index];
+    const vk::PhysicalDevice &physical = g.phys[(size_t)index];
+    pd_ = physical.handle;
     g.f.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
     uint32_t qn = 0;
     g.f.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &qn, nullptr);
@@ -1518,9 +1522,12 @@ class VulkanCompute final : public Compute {
     qci.queueFamilyIndex = qfam_;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
+    const std::vector<const char *> exts = vk::base_device_extensions(physical.portability_subset, false);
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
+    dci.enabledExtensionCount = (uint32_t)exts.size();
+    dci.ppEnabledExtensionNames = exts.data();
     if (g.f.vkCreateDevice(pd_, &dci, nullptr, &dev_) != VK_SUCCESS) {
       if (err) *err = "could not open " + info_.name;
       dev_ = VK_NULL_HANDLE;
@@ -1751,8 +1758,8 @@ class VulkanCompute final : public Compute {
 namespace vk {
 PFN_vkGetInstanceProcAddr get_instance_proc_addr() { return available() ? G().f.vkGetInstanceProcAddr : nullptr; }
 VkInstance instance() { return available() ? G().instance : VK_NULL_HANDLE; }
-VkPhysicalDevice physical(int index) {
-  if (!available() || index < 0 || index >= (int)G().phys.size()) return VK_NULL_HANDLE;
+PhysicalDevice physical(int index) {
+  if (!available() || index < 0 || index >= (int)G().phys.size()) return {};
   return G().phys[(size_t)index];
 }
 bool surfaces() { return available() && G().surfaces; }
