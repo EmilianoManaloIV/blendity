@@ -9,6 +9,7 @@
 #include "../src/render/canvas.h"
 #include "../src/image/image.h"
 #include <chrono>
+#include <set>
 #include <thread>
 #include "../src/core/json.h"
 #include "../src/scene/budget.h"
@@ -2340,6 +2341,145 @@ static void tests_round382() {
   });
 }
 
+static void tests_round639_live_paint() {
+  test("round 639: Live Link updates a height-only paint burst and gives existing and late peers the final surface maps", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("shading wire");
+    ed.command("select Cube");
+    ed.command("surface new R639WirePaint");
+    ed.command("settex R639WirePaint Width 128");
+    ed.command("settex R639WirePaint Height 128");
+    ed.command("paint on");
+    ed.command("paint channels height");
+    ed.command("paint size 12");
+    ed.step_frame_headless();
+    ed.command("perf wait");
+    const bool started = ed.paint_for_test() && ed.livelink_start(0);
+    CHECK(started);
+    if (!started) return;
+    auto *link = ed.livelink_for_test();
+    link->set_interval_for_test(0);
+    double now = 100.0;
+    ed.set_clock_for_test(now);
+
+    auto open_peer = [&](net::LineClient &peer) {
+      CHECK(peer.connect(link->port()));
+      auto messages = until(ed, peer, "sync_end");
+      CHECK(count_of(messages, "sync_end") == 1);
+      auto maps = drain(ed, peer, 1, 100);
+      messages.insert(messages.end(), maps.begin(), maps.end());
+      return messages;
+    };
+    auto map_message = [](const std::vector<Message> &messages, const char *output) {
+      const std::string name = std::string("R639WirePaint (") + output + ")";
+      auto it = std::find_if(messages.rbegin(), messages.rend(), [&](const Message &m) { return m.type() == "texture" && m.j["name"].str == name; });
+      return it == messages.rend() ? nullptr : &*it;
+    };
+    net::LineClient existing;
+    const auto initial = open_peer(existing);
+    const Message *initial_normal = map_message(initial, "normal");
+    CHECK(initial_normal);
+
+    std::set<std::string> changed_normals;
+    std::string last_normal;
+    for (int i = 0; i < 30; i++) {
+      now += 0.14;
+      ed.set_clock_for_test(now);
+      ed.command(strprintf("paint height %.2f", (i + 1) * 0.03));
+      ed.command("paint 2d dab 0.25 0.75");
+      ed.step_frame_headless();
+      ed.command("perf wait");
+      const auto during = drain(ed, existing, 1, 15);
+      const Message *normal = map_message(during, "normal");
+      if (!normal || (initial_normal && normal->j["hash"].str == initial_normal->j["hash"].str)) continue;
+      int w = 0, h = 0;
+      if (!png_size(normal->bin, w, h) || w != 128 || h != 128) continue;
+      last_normal = normal->j["hash"].str;
+      changed_normals.insert(last_normal);
+      if (changed_normals.size() >= 2) break;
+    }
+    std::printf("    height-only paint at %.2f s: %zu changed normal payloads while painting\n", now - 100.0, changed_normals.size());
+    CHECK(changed_normals.size() >= 2);
+
+    now += 0.01;
+    ed.set_clock_for_test(now);
+    ed.command("paint channels all");
+    ed.command("paint color 0.2 0.7 0.1");
+    ed.command("paint height 1");
+    ed.command("paint roughness 0.15");
+    ed.command("paint metallic 0.75");
+    ed.command("paint emission 0.25 0.5 0.75");
+    ed.command("paint 2d dab 0.75 0.75");
+    ed.step_frame_headless();
+    ed.command("perf wait");
+    net::LineClient late;
+    const auto snapshot = open_peer(late);
+    auto settled = drain(ed, existing, 1, 30);
+    CHECK(!map_message(settled, "normal"));
+
+    ed.set_clock_for_test(now + 0.5);
+    const auto after_pause = drain(ed, existing, 2, 100);
+    settled.insert(settled.end(), after_pause.begin(), after_pause.end());
+    for (const char *output : {"albedo", "normal", "roughness", "metallic", "emission"}) {
+      const Message *latest = map_message(settled, output), *joined = map_message(snapshot, output);
+      std::printf("    final %s hash: existing %s, late %s\n", output, latest ? latest->j["hash"].str.c_str() : "missing",
+                  joined ? joined->j["hash"].str.c_str() : "missing");
+      CHECK(latest && joined && latest->j["hash"].str == joined->j["hash"].str);
+      const Message *image = latest ? latest : joined;
+      CHECK(image);
+      if (!image) continue;
+      const std::string file = fs::join(test_dir(), std::string("r639-wire-") + output + ".png");
+      const TexturePtr expected = resolve_texture_ref({std::string("Assets/Textures/R639WirePaint.ptex#") + output, true});
+      Bitmap got;
+      std::string error;
+      const bool loaded = fs::write_file(file, image->bin) && load_image(file, got, error);
+      CHECK(loaded && expected && !expected->levels.empty());
+      if (!loaded || !expected || expected->levels.empty()) continue;
+      const Texture::Level &level = expected->levels[0];
+      const bool exact = got.width == level.w && got.height == level.h && got.rgba8.size() == level.px8.size() * 4;
+      CHECK(exact && std::memcmp(got.rgba8.data(), level.px8.data(), got.rgba8.size()) == 0);
+      if (std::strcmp(output, "normal") == 0) CHECK(!last_normal.empty() && image->j["hash"].str != last_normal);
+    }
+
+    const Message *before_undo = map_message(settled, "albedo");
+    if (!before_undo) return;
+    now += 0.51;
+    ed.set_clock_for_test(now);
+    ed.command("paint channels color");
+    ed.command("paint color 1 0 0");
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("paint 2d dab 0.5 0.75");
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+    ed.step_frame_headless();
+    ed.command("perf wait");
+    net::LineClient ahead;
+    const auto ahead_snapshot = open_peer(ahead);
+    const Message *painted = map_message(ahead_snapshot, "albedo");
+    CHECK(painted && painted->j["hash"].str != before_undo->j["hash"].str);
+    CHECK(!map_message(drain(ed, existing, 1, 30), "albedo"));
+
+    ed.command("undo");
+    CHECK(ed.undo_steps_for_test() == steps);
+    ed.step_frame_headless();
+    ed.command("perf wait");
+    ed.set_clock_for_test(now + 0.5);
+    const auto returned = drain(ed, ahead, 2, 100);
+    const auto kept = drain(ed, existing, 1, 30);
+    const Message *restored = map_message(returned, "albedo"), *existing_albedo = map_message(kept, "albedo");
+    CHECK(restored && restored->j["hash"].str == before_undo->j["hash"].str && restored->bin == before_undo->bin);
+    CHECK(!existing_albedo || existing_albedo->bin == before_undo->bin);
+
+    net::LineClient matching;
+    const auto matching_snapshot = open_peer(matching);
+    const Message *matching_albedo = map_message(matching_snapshot, "albedo");
+    CHECK(matching_albedo && matching_albedo->bin == before_undo->bin);
+    ed.set_clock_for_test(now + 1.0);
+    CHECK(count_of(drain(ed, existing, 2, 100), "texture") == 0);
+    ed.livelink_stop();
+  });
+}
+
 void run_livelink_tests() {
   livelink_tests();
   livelink_fixture_tests();
@@ -2357,4 +2497,5 @@ void run_livelink_tests() {
   tests_round382();
   tests_round396();
   tests_round397();
+  tests_round639_live_paint();
 }

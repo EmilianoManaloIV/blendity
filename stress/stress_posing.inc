@@ -65,10 +65,12 @@ static std::string card_detail_text(const gpu::RasterDetail &a, const gpu::Raste
     if (v >= 0.005) s += strprintf(" %s %.2f,", gpu::RasterDetail::host_name(k), v);
   }
   s += strprintf(" in all %.2f; a card frame held: instances %.0f, draw calls %.0f, pipeline binds %.0f, mesh binds %.0f, set rewrites %.2f, lights %.0f, outline ids %.0f, "
-                 "see-through corners %.0f, overlay lines and dots %.0f, pixels %.0f, see-through corners sent %.2f and kept %.2f",
+                 "see-through corners %.0f, overlay lines and dots %.0f, pixels %.0f, see-through corners sent %.2f and kept %.2f, "
+                 "see-through comparisons %.2f and generation hits %.2f",
                  host, (b.instances - a.instances) / n, (b.draws - a.draws) / n, (b.pipeline_binds - a.pipeline_binds) / n, (b.mesh_binds - a.mesh_binds) / n,
                  (b.set_writes - a.set_writes) / n, (b.lights - a.lights) / n, (b.outline_ids - a.outline_ids) / n, (b.see_corners - a.see_corners) / n,
-                 (b.overlay_prims - a.overlay_prims) / n, (b.pixels - a.pixels) / n, (b.see_sent - a.see_sent) / n, (b.see_kept - a.see_kept) / n);
+                 (b.overlay_prims - a.overlay_prims) / n, (b.pixels - a.pixels) / n, (b.see_sent - a.see_sent) / n, (b.see_kept - a.see_kept) / n,
+                 (b.see_compared - a.see_compared) / n, (b.see_generation_hits - a.see_generation_hits) / n);
   return s;
 }
 

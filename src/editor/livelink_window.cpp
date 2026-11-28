@@ -112,7 +112,7 @@ void Editor::livelink_tick() {
   blend_job_poll();   // (round 374)
   if (livelink_ && livelink_->running() && scene_) poll_snapshot_inbox(false);
   if (livelink_ && scene_) livelink_->set_light_volume_bakes(&light_volume_bakes_, lv_bake_gen_);  // (round 398)
-  if (livelink_ && scene_) livelink_->tick(*scene_, playing_, now_seconds());
+  if (livelink_ && scene_) livelink_->tick(*scene_, playing_, clock_now());
 }
 
 void Editor::livelink_status() {

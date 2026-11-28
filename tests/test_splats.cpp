@@ -677,6 +677,23 @@ PointCloud r531_spz_expected(const R531Spz &z) {
   return pc;
 }
 
+template <class T>
+bool r619_same_bytes(const std::vector<T> &a, const std::vector<T> &b) {
+  return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+}
+
+void r619_check_cloud(const PointCloud &disk, const PointCloud &borrowed) {
+  static_assert(sizeof(Vec3) == 3 * sizeof(float) && sizeof(Quat) == 4 * sizeof(float));
+  CHECK(disk.consistent() && borrowed.consistent());
+  CHECK(disk.type == borrowed.type && disk.sh_degree == borrowed.sh_degree && disk.count() == borrowed.count());
+  CHECK(r619_same_bytes(disk.position, borrowed.position));
+  CHECK(r619_same_bytes(disk.color, borrowed.color));
+  CHECK(r619_same_bytes(disk.opacity, borrowed.opacity));
+  CHECK(r619_same_bytes(disk.scale, borrowed.scale));
+  CHECK(r619_same_bytes(disk.rotation, borrowed.rotation));
+  CHECK(r619_same_bytes(disk.sh_rest, borrowed.sh_rest));
+}
+
 /* A .glb holding one POINTS primitive with KHR_gaussian_splatting's attributes (degree 1), from r531_splat's values
  * activated (the extension stores linear scale and opacity). */
 std::string r531_glb(int n, bool with_extension = true) {
@@ -847,6 +864,34 @@ static void tests_round531() {
     if (pc4) CHECK(r531_diff(*pc4, r531_spz_expected(z4), kR531MirrorX) < 2e-4);
   });
 
+  test("splat import: byte gzip output is exact and survives rejected replacements", [] {
+    const std::string data("a\0b\xff", 4);
+    std::string packed = gzip(data), why;
+    std::vector<uint8_t> bytes{42};
+    CHECK(gunzip(packed, bytes, why, data.size()));
+    const std::vector<uint8_t> expected(data.begin(), data.end());
+    CHECK(bytes == expected);
+    CHECK(!gunzip(packed, bytes, why, data.size() - 1));
+    CHECK(bytes == expected && why == "too large to unpack");
+    packed[packed.size() - 4] = 3;
+    CHECK(!gunzip(packed, bytes, why));
+    CHECK(bytes == expected && why.find("length") != std::string::npos);
+    // A forged ISIZE within the limit still cannot make the inflater produce extra bytes.
+    CHECK(!gunzip(packed, bytes, why, 3));
+    CHECK(bytes == expected && !why.empty());
+    CHECK(gunzip(gzip(""), bytes, why, 0) && bytes.empty());
+  });
+
+  test("splat import: the gzip string caller keeps binary data and its previous output on failure", [] {
+    const std::string data("a\0b\xff", 4);
+    std::string out("previous"), why;
+    const std::string packed = gzip(data);
+    CHECK(gunzip(packed, out, why, data.size()) && out == data);
+    CHECK(!gunzip(packed, out, why, data.size() - 1));
+    CHECK(out == data && why == "too large to unpack");
+    CHECK(gunzip(gzip(""), out, why, 0) && out.empty());
+  });
+
   test("splat import: bad SPZ files refuse cleanly - wrong magic, version 9, degree 5, cut short, a count the data can't hold, not gzip", [] {
     const R531Spz z = r531_spz(2, 10, 1);
     std::string raw = r531_spz_raw(z, z.n);
@@ -893,15 +938,27 @@ static void tests_round531() {
       data += c;
     }
     SplatReadReport rep;
-    PointCloudPtr pc = read_spz(head + toc + data, rep);
+    const std::string encoded = head + toc + data;
+    std::string borrowed = encoded;
+    PointCloudPtr pc = read_spz(borrowed, rep);
+    CHECK(borrowed == encoded);
     CHECK(pc != nullptr);
     if (!pc) std::printf("    %s\n", rep.error.c_str());
     if (pc) CHECK(pc->count() == 25 && pc->sh_degree == 2 && r531_diff(*pc, r531_spz_expected(z), kR531MirrorX) < 2e-4);
+    ImportResult disk;
+    CHECK(import_spz_file(r531_write("r619-valid-v4.spz", encoded), disk));
+    CHECK(disk.nodes.size() == 1 && disk.nodes[0].points);
+    if (pc && disk.nodes.size() == 1 && disk.nodes[0].points) r619_check_cloud(*disk.nodes[0].points, *pc);
     /* A stream that says it holds other than the points need: refused. */
     std::string bad = head + toc + data;
     bad[32 + 8] ^= 1;
+    const std::string original_bad = bad;
     SplatReadReport rb;
     CHECK(!read_spz(bad, rb) && !rb.error.empty());
+    CHECK(bad == original_bad);
+    ImportResult bad_disk;
+    CHECK(!import_spz_file(r531_write("r619-bad-v4.spz", original_bad), bad_disk));
+    CHECK(bad_disk.error == rb.error && bad_disk.nodes.empty());
 #else
     for (const std::string *b : blocks) {
       const uint64_t cs = b->size(), us = b->size();
@@ -909,7 +966,13 @@ static void tests_round531() {
       data += *b;
     }
     SplatReadReport rep;
-    CHECK(!read_spz(head + toc + data, rep) && rep.error.find("Zstandard") != std::string::npos);
+    const std::string encoded = head + toc + data;
+    std::string borrowed = encoded;
+    CHECK(!read_spz(borrowed, rep) && rep.error.find("Zstandard") != std::string::npos);
+    CHECK(borrowed == encoded);
+    ImportResult disk;
+    CHECK(!import_spz_file(r531_write("r619-no-zstd.spz", encoded), disk));
+    CHECK(disk.error == rep.error && disk.nodes.empty());
 #endif
   });
 
@@ -1682,10 +1745,293 @@ static void tests_round567() {
   });
 }
 
+static void tests_round619() {
+  test("splat import (round 619): legacy files and borrowed bytes produce the same six arrays", [] {
+    for (uint32_t version : {1u, 2u, 3u}) {
+      const R531Spz z = r531_spz(version, 300, 3);
+      std::string raw = r531_spz_raw(z, z.n);
+      raw[14] = 1;  // The anti-aliasing flag also produces an import note.
+      const std::string encoded = gzip(raw);
+      SplatReadReport report;
+      PointCloudPtr borrowed_cloud;
+      {
+        std::string caller_bytes = encoded;
+        borrowed_cloud = read_spz(caller_bytes, report);
+        CHECK(caller_bytes == encoded);
+        std::fill(caller_bytes.begin(), caller_bytes.end(), '\0');
+      }
+      CHECK(borrowed_cloud && borrowed_cloud->count() == z.n && borrowed_cloud->sh_degree == 3);
+      CHECK(report.error.empty() && !report.notes.empty());
+      const auto &times = report.times;
+      for (double ms : {times.unpack_ms, times.setup_ms, times.decode_ms, times.axes_ms, times.validate_ms})
+        CHECK(std::isfinite(ms) && ms >= 0.0);
+
+      const std::string name = strprintf("r619-valid-v%u", version);
+      const std::string path = r531_write(name + ".spz", encoded);
+      ImportResult disk;
+      CHECK(import_spz_file(path, disk));
+      CHECK(disk.source == path && disk.error.empty() && disk.notes == report.notes);
+      CHECK(disk.nodes.size() == 1 && disk.nodes[0].points && disk.nodes[0].name == name);
+      if (borrowed_cloud && disk.nodes.size() == 1 && disk.nodes[0].points) {
+        CHECK(r531_diff(*borrowed_cloud, r531_spz_expected(z), kR531MirrorX) < 2e-4);
+        r619_check_cloud(*disk.nodes[0].points, *borrowed_cloud);
+      }
+    }
+  });
+
+  test("splat import (round 619): damaged files and borrowed bytes report the same refusal", [] {
+    const R531Spz z = r531_spz(3, 30, 3);
+    const std::string raw = r531_spz_raw(z, z.n);
+    const std::string encoded = gzip(raw);
+    std::string wrong_length = encoded;
+    wrong_length[wrong_length.size() - 4] ^= 1;  // Damaged gzip ISIZE.
+    const struct {
+      const char *name;
+      std::string bytes;
+      const char *reason;
+    } cases[] = {
+        {"truncated-gzip", encoded.substr(0, encoded.size() / 2), "gzip stream can't be read"},
+        {"bad-gzip-length", wrong_length, "length doesn't match the gzip trailer"},
+        {"short-splat-data", gzip(raw.substr(0, raw.size() - 1)), "the data ends before its points do"},
+        {"wrong-signature", "not an SPZ", "neither gzip nor NGSP"},
+    };
+    for (const auto &bad : cases) {
+      SplatReadReport report;
+      std::string borrowed = bad.bytes;
+      CHECK(!read_spz(borrowed, report) && report.error.find(bad.reason) != std::string::npos);
+      CHECK(borrowed == bad.bytes);
+      ImportResult disk;
+      CHECK(!import_spz_file(r531_write(std::string("r619-") + bad.name + ".spz", bad.bytes), disk));
+      CHECK(disk.error == report.error && disk.nodes.empty());
+    }
+  });
+}
+
+/* ------------------------------------------------------------- round 633: disk PLY import */
+
+namespace {
+
+constexpr size_t kR633Batch = 8u << 20;
+constexpr size_t kR633MixedStride = 1 + 8 + 2 + 2 + 4 + 4 + 64 * 8;
+
+PointCloudPtr r633_compare_ply(const std::string &name, const std::string &bytes, size_t n, int degree, bool splats) {
+  const std::string path = r531_write(name + ".ply", bytes);
+  ImportResult disk, borrowed;
+  CHECK(import_ply_file(path, disk));
+  CHECK(import_ply_point_cloud(path, bytes, borrowed));
+  CHECK(disk.source == path && disk.source == borrowed.source && disk.error.empty() && disk.error == borrowed.error
+        && disk.notes == borrowed.notes && disk.summary == borrowed.summary);
+  CHECK(disk.nodes.size() == 1 && disk.nodes[0].name == name && disk.nodes[0].points && !disk.nodes[0].mesh);
+  if (disk.nodes.size() != 1 || !disk.nodes[0].points || borrowed.nodes.size() != 1 || !borrowed.nodes[0].points) return nullptr;
+  CHECK(disk.nodes[0].name == borrowed.nodes[0].name && !borrowed.nodes[0].mesh);
+  const PointCloud &cloud = *disk.nodes[0].points;
+  CHECK(cloud.name == name && cloud.count() == n && cloud.sh_degree == degree && cloud.is_splats() == splats);
+  r619_check_cloud(cloud, *borrowed.nodes[0].points);
+  return disk.nodes[0].points;
+}
+
+std::string r633_mixed_points(int format, size_t n) {
+  std::string header = format == 1 ? "ply\nformat binary_little_endian 1.0\n" : "ply\nformat binary_big_endian 1.0\n";
+  header += "element camera 2\nproperty short id\nelement vertex " + std::to_string(n) + "\n";
+  header += "property uchar diffuse_blue\nproperty double z\nproperty ushort diffuse_red\n"
+            "property short y\nproperty float diffuse_green\nproperty int x\n";
+  for (int k = 0; k < 64; k++) header += "property double unused_" + std::to_string(k) + "\n";
+  header += "element face 0\nproperty list uchar int vertex_indices\ncomment ";
+  header.resize(4092, 'a');  // The marker crosses the first header probe read.
+  std::string bytes = header + "\nend_header\r\n";
+  r531e_put(bytes, "short", 123, format);
+  r531e_put(bytes, "short", -456, format);
+  for (size_t i = 0; i < n; i++) {
+    r531e_put(bytes, "uchar", (double)(i % 256), format);
+    r531e_put(bytes, "double", (double)i * 0.25, format);
+    r531e_put(bytes, "ushort", (double)(i % 65536), format);
+    r531e_put(bytes, "short", (double)(i % 1000) - 500, format);
+    r531e_put(bytes, "float", (double)(i % 16) / 16, format);
+    r531e_put(bytes, "int", (double)i - 100, format);
+    bytes.append(64 * 8, '\0');
+  }
+  return bytes;
+}
+
+}  // namespace
+
+static void tests_round633() {
+  test("PLY disk import: padded, reordered mixed-width points keep their colours and order across batches in both byte orders", [] {
+    const size_t batch = kR633Batch / kR633MixedStride;
+    const size_t n = 2 * batch + 3;
+    for (int format : {1, 2}) {
+      const PointCloudPtr cloud =
+          r633_compare_ply(format == 1 ? "r633-padded-le" : "r633-padded-be", r633_mixed_points(format, n), n, 0, false);
+      if (!cloud || cloud->count() != n) continue;
+      for (size_t i : {batch - 1, batch, batch + 1, 2 * batch - 1, 2 * batch, n - 1}) {
+        const Vec3 p = cloud->position[i];
+        CHECK(p.x == 100.0f - (float)i && p.y == (float)i * 0.25f && p.z == 500.0f - (float)(i % 1000));
+      }
+    }
+  });
+
+  test("PLY disk import: a final full batch ends at EOF and a missing final byte is reported", [] {
+    const size_t n = 2 * (kR633Batch / kR633MixedStride);
+    std::string ply = r633_mixed_points(1, n);
+    r633_compare_ply("r633-full-batches", ply, n, 0, false);
+    ply.pop_back();
+    const std::string path = r531_write("r633-missing-final-byte.ply", ply);
+    ImportResult disk, borrowed;
+    CHECK(!import_ply_file(path, disk));
+    CHECK(!import_ply_point_cloud(path, ply, borrowed));
+    CHECK(disk.error == "PLY: the file ends before its points do" && disk.error == borrowed.error);
+    CHECK(disk.source == borrowed.source && disk.notes == borrowed.notes && disk.summary == borrowed.summary && disk.nodes.empty());
+  });
+
+  test("PLY disk import: a long header terminator line is accepted and a missing marker is rejected", [] {
+    const std::string header = "ply\nformat binary_little_endian 1.0\nelement vertex 1\n"
+                               "property float x\nproperty float y\nproperty float z\n";
+    std::string ply = header + "end_header" + std::string((1u << 20) + 8192, ' ') + "\n";
+    ply += r531e_floats({1, 2, 3});
+    ply.resize(kR633Batch + 1, '\0');
+    r633_compare_ply("r633-long-terminator", ply, 1, 0, false);
+
+    ply = header;
+    ply.resize(kR633Batch + 1, ' ');
+    const std::string path = r531_write("r633-no-terminator.ply", ply);
+    ImportResult disk, borrowed;
+    CHECK(!import_ply_file(path, disk));
+    CHECK(!import_ply_point_cloud(path, ply, borrowed));
+    CHECK(disk.error == "PLY: not a PLY file" && disk.error == borrowed.error && disk.nodes.empty());
+  });
+
+  test("PLY disk import: large files with an incomplete unused property or an empty predecessor use the whole-file reader", [] {
+    const std::string intro = "ply\nformat binary_little_endian 1.0\n";
+    const std::string vertex = "element vertex 2\nproperty float x\nproperty float y\nproperty float z\n";
+    const std::string headers[] = {
+      intro + vertex + "property float\n",
+      intro + "element camera 2\n" + vertex,
+    };
+    for (size_t i = 0; i < std::size(headers); i++) {
+      std::string ply = headers[i] + "end_header\n" + r531e_floats({1, 2, 3, 4, 5, 6});
+      ply.resize(kR633Batch + 1, '\0');
+      const std::string path = r531_write(strprintf("r633-whole-file-%zu.ply", i), ply);
+      ImportResult probe, disk, borrowed;
+      std::string whole;
+      CHECK(!try_import_binary_ply_point_cloud(path, whole, probe).has_value() && whole == ply);
+      CHECK(import_ply_file(path, disk) && import_ply_point_cloud(path, ply, borrowed));
+      CHECK(disk.source == borrowed.source && disk.notes == borrowed.notes && disk.summary == borrowed.summary);
+      CHECK(disk.nodes.size() == 1 && borrowed.nodes.size() == 1 && disk.nodes[0].points && borrowed.nodes[0].points);
+      if (disk.nodes.size() == 1 && borrowed.nodes.size() == 1 && disk.nodes[0].points && borrowed.nodes[0].points)
+        r619_check_cloud(*disk.nodes[0].points, *borrowed.nodes[0].points);
+    }
+  });
+
+  test("PLY import: a safely padded incomplete binary declaration keeps its whole-file values in both byte orders", [] {
+    for (int format : {1, 2}) {
+      std::string header = format == 1 ? "ply\nformat binary_little_endian 1.0\n" : "ply\nformat binary_big_endian 1.0\n";
+      header += "element vertex 2\nproperty float x\nproperty float y\nproperty float\nproperty float z\nend_header\n";
+      std::string body;
+      for (int value : {1, 2, 3, 4, 5, 6, 7}) r531e_put(body, "float", value, format);
+      const PointCloudPtr cloud = r633_compare_ply(format == 1 ? "r633-padded-incomplete-le" : "r633-padded-incomplete-be",
+                                                   header + body, 2, 0, false);
+      // The unused slot shifts z while the stored record stride stays three floats. The final z is in the padding.
+      if (!cloud || cloud->count() != 2) continue;
+      const Vec3 a = cloud->position[0], b = cloud->position[1];
+      CHECK(a.x == -1 && a.y == 4 && a.z == -2 && b.x == -4 && b.y == 7 && b.z == -5);
+    }
+  });
+
+  test("PLY disk import: degree-4 splats keep all six decoded arrays and the band-discard note across batches", [] {
+    const int n = (int)(kR633Batch / (89 * 4)) + 3;
+    const std::string ply = r531_ply(1, n, 24);
+    ImportResult out;
+    CHECK(import_ply_file(r531_write("r633-degree4-note.ply", ply), out));
+    CHECK(out.notes == std::vector<std::string>{"PLY: spherical harmonics of degree 4 - Blendity keeps bands 1 to 3"});
+    r633_compare_ply("r633-degree4", ply, (size_t)n, 3, true);
+  });
+
+  test("PLY disk import: vertex counts and skipped elements that exceed the file are refused with the borrowed reader's diagnostics", [] {
+    const std::string intro = "ply\nformat binary_little_endian 1.0\n";
+    const std::string xyz = "\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
+    const std::string body(kR633Batch + 1, '\0');
+    const char *elements[] = {
+      "element vertex 1000000",
+      "element camera 1000000000000000\nproperty double a\nelement vertex 3",
+      "element camera 1\nproperty list uchar float a\nelement vertex 3",
+      "element vertex 268435457",
+      "element vertex 0",
+      "element vertex 1000000\nproperty float",
+    };
+    for (size_t i = 0; i < std::size(elements); i++) {
+      const std::string ply = intro + elements[i] + xyz + body;
+      CHECK(ply_is_point_cloud(ply));
+      const std::string path = r531_write(strprintf("r633-short-%zu.ply", i), ply);
+      ImportResult disk, borrowed;
+      CHECK(!import_ply_file(path, disk));
+      CHECK(!import_ply_point_cloud(path, ply, borrowed));
+      CHECK(disk.source == path && !disk.error.empty() && disk.error == borrowed.error && disk.notes == borrowed.notes && disk.nodes.empty());
+    }
+  });
+
+  test("PLY disk import: large ASCII point files and binary triangle files keep their existing dispatch", [] {
+    std::string ascii = r531_ply(0, 3, 0);
+    ascii.append(kR633Batch, ' ');
+    r633_compare_ply("r633-ascii", ascii, 3, 0, true);
+
+    std::string triangle = "ply\nformat binary_little_endian 1.0\nelement vertex 3\n"
+                           "property float x\nproperty float y\nproperty float z\nelement face 1\n"
+                           "property list uchar int vertex_indices\nend_header\n";
+    triangle += r531e_floats({0, 0, 0, 1, 0, 0, 0, 1, 0});
+    r531e_put(triangle, "uchar", 3, 1);
+    for (int i : {0, 1, 2}) r531e_put(triangle, "int", i, 1);
+    triangle.append(kR633Batch, '\0');
+    ImportResult mesh;
+    CHECK(import_ply_file(r531_write("r633-triangle.ply", triangle), mesh));
+    CHECK(mesh.nodes.size() == 1 && !mesh.nodes[0].points && mesh.nodes[0].mesh && mesh.nodes[0].mesh->face_count() == 1);
+  });
+
+  test("PLY disk import: the editor command creates a named points object in one undo step", [] {
+    std::string ply = "ply\nformat binary_little_endian 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\n"
+                    + std::string("element user_data ") + std::to_string(kR633Batch) + "\nproperty uchar value\nend_header\n";
+    ply += r531e_floats({1, 2, 3, 4, 5, 6});
+    ply.append(kR633Batch, '\0');
+    const std::string path = r531_write("r633-editor-points.ply", ply);
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test();
+    ed.command("import " + path);
+    ed.step_frame_headless();
+    GameObject *g = r530_find_cloud(ed);
+    CHECK(g && g->name == "r633-editor-points" && r530_count_clouds(ed) == 1);
+    const PointCloudPtr cloud = g ? g->get<PointCloudObject>()->data : nullptr;
+    CHECK(cloud && !cloud->is_splats() && cloud->count() == 2);
+    if (cloud && cloud->count() == 2)
+      CHECK(cloud->position[1].x == -4 && cloud->position[1].y == 6 && cloud->position[1].z == -5);
+    CHECK(ed.undo_steps_for_test() == steps + 1);
+  });
+}
+
+static void tests_round659() {
+  test("PLY disk diagnostics count complete vertex batches and preserve the same imported cloud", [] {
+    const size_t count = kR633Batch / kR633MixedStride + 1;
+    const std::string path = r531_write("r659-disk-telemetry.ply", r633_mixed_points(1, count));
+    std::string fallback;
+    ImportResult unmeasured, measured;
+    DiskPlyTimes times;
+    CHECK(import_ply_file(path, unmeasured));
+    CHECK(try_import_binary_ply_point_cloud(path, fallback, measured, &times) == std::optional<bool>(true));
+    CHECK(fallback.empty() && times.read_bytes == count * kR633MixedStride && times.read_batches == 2);
+    CHECK(measured.source == unmeasured.source && measured.notes == unmeasured.notes && measured.summary == unmeasured.summary);
+    CHECK(measured.nodes.size() == 1 && measured.nodes[0].points);
+    if (measured.nodes.size() == 1 && measured.nodes[0].points && unmeasured.nodes.size() == 1 && unmeasured.nodes[0].points)
+      r619_check_cloud(*measured.nodes[0].points, *unmeasured.nodes[0].points);
+  });
+}
+
 void run_splats_tests() {
   tests_round530();
   tests_round531();
   tests_round531_engineer();
   tests_round561();
   tests_round567();
+  tests_round619();
+  tests_round633();
+  tests_round659();
 }

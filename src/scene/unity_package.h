@@ -17,6 +17,8 @@ namespace bl {
 /* A gzip member's contents (RFC 1952: the header's optional fields skipped, the deflate stream inflated, its length
  * checked against the trailer). False with why; nothing past `limit` bytes is kept. */
 bool gunzip(const std::string &gz, std::string &out, std::string &why, size_t limit = (size_t)3 << 30);
+/* Byte consumers take ownership of the validated inflate buffer. Both overloads preserve out on failure. */
+bool gunzip(const std::string &gz, std::vector<uint8_t> &out, std::string &why, size_t limit = (size_t)3 << 30);
 
 /* A tar's files and folders (POSIX ustar with its prefix field, GNU long names, pax `path`); links and devices are
  * skipped. False with why for a truncated or malformed archive. */

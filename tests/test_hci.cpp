@@ -583,6 +583,30 @@ bool all_say(const Lines &l, const char *state, const char *want, const char *ne
 }  // namespace R570
 
 void tests_round570_adjust_key() {
+  test("Adjust Last Operation panel header shows the active shortcut, including rebound and unbound keys", [] {
+    Editor ed;
+    ed.init_headless(1024, 768);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("create Cube");
+    const auto edge = ed.selected_object()->get<MeshFilter>()->mesh->edge_cache()[0];
+    ed.command(strprintf("esel %u %u", edge.first, edge.second));
+    ed.command("editop bevel");
+    const auto header = [&]() {
+      ed.step_frame_headless();
+      for (const auto &entry : ed.ui_for_test().tooltip_texts)
+        if (entry.second.find("Changing a value re-runs the operator") != std::string::npos) return entry.second;
+      return std::string();
+    };
+    CHECK(header().find("Adjust Last Operation (F9).") == 0);
+    ed.command("keymap Maya");
+    CHECK(header().find("Adjust Last Operation (Ctrl+F9).") == 0);
+    ed.set_binding("edit.adjust_last", {KeyChord{platform::KEY_U, platform::MOD_CTRL | platform::MOD_SHIFT}});
+    CHECK(header().find("Adjust Last Operation (Ctrl+Shift+U).") == 0);
+    ed.set_binding("edit.adjust_last", {});
+    CHECK(header().find("Adjust Last Operation. Changing") == 0);
+  });
+
   test("hci: the log lines that point at Adjust Last Operation - an operator's 'done', the drag helper's, a box, a cone and a Push/Pull from construction lines - name the keymap's key: F9, Ctrl+F9 in Maya's preset, a rebound chord (round 570, task 0552)", [] {
     CHECK(R570::all_say(R570::run([](Editor &) {}), "default", "F9", "Ctrl+"));
     CHECK(R570::all_say(R570::run([](Editor &ed) { ed.command("keymap Maya"); }), "Maya", "Ctrl+F9", nullptr));
@@ -747,6 +771,149 @@ void tests_round573() {
     std::printf("    wheeled away: out of view %s, six frames later %s\n", scrolled_away ? "yes" : "no", whole_in_area() ? "BROUGHT BACK" : "still away");
     CHECK(scrolled_away);
     CHECK(!whole_in_area());
+  });
+
+  test("hci: layout changes keep keyboard editing visible and preserve the caret, selection and walk (round 611)", [] {
+    ui::Context u;
+    Image img;
+    img.resize(300, 200);
+    Recti area{10, 10, 200, 100};
+    const ui::Id scroll = u.id("focus_area");
+    int above = 170, content = 260;
+    std::string text = "hello";
+    float number = 12;
+    double t = 0;
+    auto frame = [&] {
+      u.begin_frame(&img, t += 0.1);
+      const int y = area.y + above - u.begin_scroll(scroll, area, content);
+      u.text_field(u.id("name"), {20, y, 120, 18}, text);
+      u.float_field(u.id("amount"), {20, y + 20, 120, 18}, number);
+      u.end_scroll();
+      u.end_frame();
+      u.in = {};
+    };
+    auto key = [&](int code, int mods = 0) {
+      u.in.key_pressed[code] = true;
+      u.in.key_mods[code] = u.in.mods = mods;
+      frame();
+    };
+    auto visible = [&] {
+      const Recti r = u.edit_rect_for_test();
+      return r.h > 0 && r.y >= area.y && r.bottom() <= area.bottom();
+    };
+    u.scroll_to(scroll, 160);
+    u.focus_first_in(area);
+    for (int i = 0; i < 6; ++i) frame();
+    CHECK(visible());
+    key(platform::KEY_HOME);
+    key(platform::KEY_RIGHT);
+    above -= 100;
+    content -= 60;  // fewer rows above, additional rows below: automatic clamp from 160 to 100
+    frame();
+    CHECK(!visible());
+    frame();
+    CHECK(visible());
+    u.in.text = "x";
+    frame();
+    CHECK(text == "hxello");
+    key(platform::KEY_TAB);
+    for (int i = 0; i < 6; ++i) frame();
+    above += 100;
+    content += 100;
+    area.h -= 10;
+    for (int i = 0; i < 3; ++i) frame();
+    CHECK(visible());
+    u.in.text = "73";  // the Tab selection still replaces the whole original number
+    frame();
+    CHECK(number == 12);
+    key(platform::KEY_TAB, platform::MOD_SHIFT);
+    frame();
+    CHECK(number == 73);
+    CHECK(visible());
+    u.in.text = "back";
+    frame();
+    CHECK(text == "back");
+    above += 140;
+    content += 140;
+    frame();
+    CHECK(!visible());  // another reveal has just been requested
+    u.in.mx = 50;
+    u.in.my = 50;
+    u.in.wheel_y = 8;
+    for (int i = 0; i < 6; ++i) frame();
+    CHECK(!visible());
+    CHECK(u.scroll_offset(scroll) == 0);
+  });
+
+  test("hci: real Preferences accepts a keyboard scale edit and respects the wheel on the next field (round 611)", [] {
+    Editor ed;
+    R573::open(ed);
+    using ET = platform::EventType;
+    const auto tab = [&] {
+      ed.step_frame_headless({ev(ET::KeyDown, 5, 5, platform::KEY_TAB)});
+      ed.step_frame_headless();
+    };
+    tab();  // UI Scale
+    CHECK(ed.ui_for_test().any_editing());
+    for (char c : std::string("1.5")) {
+      platform::Event e;
+      e.type = ET::Text;
+      e.codepoint = c;
+      ed.step_frame_headless({e});
+    }
+    tab();  // commit the resize, then Theme
+    CHECK(ed.ui_scale_pref_for_test() == 1.5f && ed.ui_for_test().scale == 1.5f);
+    tab();  // Move Snap
+    Recti dlg = ed.top_popup_rect_for_test();
+    CHECK(ed.ui_for_test().any_editing() && inside(ed.ui_for_test().edit_rect_for_test(), dlg));
+    platform::Event wheel = ev(ET::Wheel, dlg.x + dlg.w / 2, dlg.y + dlg.h / 2);
+    wheel.wheel_y = -20;
+    ed.step_frame_headless({ev(ET::MouseMove, wheel.x, wheel.y), wheel});
+    for (int n = 0; n < 6; ++n) ed.step_frame_headless();
+    CHECK(ed.prefs_open_for_test() && ed.ui_for_test().any_editing());
+    CHECK(ed.ui_for_test().edit_rect_for_test().bottom() < dlg.y);
+  });
+
+  test("hci: a resizing Preferences-style popup keeps an edited field visible when its scroll is clamped (round 611)", [] {
+    ui::Context u;
+    Image img;
+    img.resize(300, 100);
+    const ui::Id dialog = u.id("preferences");
+    std::string value = "original";
+    int above = 170;
+    double t = 0;
+    auto frame = [&] {
+      u.begin_frame(&img, t += 0.1);
+      u.popup(dialog, 240, [&] {
+        u.popup_row(above);
+        u.text_field(u.id("name"), u.popup_row(18), value);
+        u.popup_row(230 - above);  // results filled in below as the status rows above disappeared
+      });
+      u.end_frame();
+      u.in = {};
+    };
+    u.open_popup(dialog, {0, 0, 1, 1});
+    frame();
+    frame();
+    u.in.mx = 50;
+    u.in.my = 50;
+    u.in.wheel_y = -20;
+    frame();
+    u.in.key_pressed[platform::KEY_TAB] = true;
+    for (int i = 0; i < 6; ++i) frame();
+    const int old_offset = u.top_popup_scroll();
+    CHECK(old_offset > 100);
+    CHECK(u.edit_rect_for_test().y >= 0);
+    above -= 100;
+    img.resize(300, 140);
+    frame();
+    CHECK(u.edit_rect_for_test().y < 0);
+    for (int i = 0; i < 4; ++i) frame();
+    const Recti field = u.edit_rect_for_test();
+    CHECK(field.h == 18 && field.y >= 0 && field.bottom() <= img.height);
+    u.in.text = "replacement";
+    frame();
+    CHECK(value == "replacement");
   });
 
   test("hci: a list inside a scrolling panel - wheeling the panel until the list's focused row is partly out of view leaves the list's own scroll alone (round 573, task 0555, the review)", [] {
@@ -1407,6 +1574,15 @@ void run_hci_tests() {
       e.mods = mods;
       ed.step_frame_headless({e});
       ed.step_frame_headless();
+    }
+    static void type(Editor &ed, const std::string &value) {
+      std::vector<platform::Event> text;
+      for (const char c : value) {
+        platform::Event e = ev(ET::Text, 5, 5);
+        e.codepoint = c;
+        text.push_back(e);
+      }
+      ed.step_frame_headless(text);
     }
     static void settle(Editor &ed, int n = 3) {
       for (int i = 0; i < n; i++) ed.step_frame_headless();
@@ -4099,4 +4275,156 @@ void run_hci_tests() {
   tests_round559_layout();
   tests_round570_adjust_key();
   tests_round573();
+
+  test("hci: viewport quality is searchable by keyboard in Unity and Blender, and leaves render settings and undo intact (round 635)", [] {
+    struct Preset {
+      const char *name;
+      int palette_key;
+      int mods;
+    };
+    struct Quality {
+      const char *query;
+      Editor::QualityTier tier;
+      float scale;
+    };
+    const Quality low{"low viewport", Editor::TierLow, 0.67f};
+    const Quality medium{"medium quality", Editor::TierMedium, 0.85f};
+    const Quality high{"high viewport", Editor::TierHigh, 1.0f};
+
+    for (const Preset &preset : {Preset{"Unity", platform::KEY_K, platform::MOD_CTRL}, Preset{"Blender", platform::KEY_F3, 0}}) {
+      Editor ed;
+      ed.init_headless(1024, 640);
+      ed.command(std::string("keymap ") + preset.name);
+      CHECK(ed.keymap_preset_name() == preset.name);
+      ed.command("viewscale 73");
+      ed.scene().render.width = 832;
+      ed.scene().render.percent = 90;
+      ed.scene().render.samples = 31;
+      ed.scene().render.shadow_resolution = 1536;
+      ed.mark_changed_for_test("Set render options");
+      Kb::settle(ed);
+      auto render_settings = [&] { return reflect_to_json([&](Reflector &r) { ed.scene().render.reflect(r); }); };
+      const std::string before_render = render_settings();
+      const size_t before_edit = ed.undo_depth_for_test();
+      const size_t before_objects = ed.scene().object_count();
+      ed.command("create Sphere");
+      Kb::settle(ed);
+      const size_t after_edit = ed.undo_depth_for_test();
+      CHECK(after_edit == before_edit + 1);
+      CHECK(ed.scene().object_count() == before_objects + 1);
+      // Creation selects the new sphere. The default scene already has a sphere named Sphere.
+      const GameObject *created = ed.active_object_for_test();
+      CHECK(created != nullptr);
+      if (!created) continue;
+      const uint64_t created_id = created->id;
+
+      auto search = [&](const char *query) {
+        Kb::key(ed, preset.palette_key, preset.mods);
+        CHECK(ed.ui_for_test().any_popup_open());
+        Kb::type(ed, query);
+      };
+      for (const Quality &quality : {low, medium, high}) {
+        const int prior_tier = ed.quality_tier();
+        search(quality.query);
+        CHECK(ed.quality_tier() == prior_tier);
+        Kb::key(ed, platform::KEY_ENTER);
+        const bool closed = !ed.ui_for_test().any_popup_open();
+        std::printf("    %s '%s': tier %d, viewport scale %.0f%%, palette %s\n", preset.name, quality.query, ed.quality_tier(),
+                    ed.view_scale() * 100.0f, closed ? "closed" : "open");
+        CHECK(closed);
+        CHECK(ed.quality_tier() == quality.tier);
+        CHECK(std::fabs(ed.view_scale() - quality.scale) < 1e-6f);
+        CHECK(render_settings() == before_render);
+        CHECK(ed.undo_depth_for_test() == after_edit);
+        if (!closed) Kb::key(ed, platform::KEY_ESCAPE);
+      }
+
+      search(low.query);
+      Kb::key(ed, platform::KEY_ESCAPE);
+      CHECK(!ed.ui_for_test().any_popup_open());
+      CHECK(ed.quality_tier() == high.tier);
+      CHECK(std::fabs(ed.view_scale() - high.scale) < 1e-6f);
+      CHECK(render_settings() == before_render);
+      CHECK(ed.undo_depth_for_test() == after_edit);
+      CHECK(ed.scene().find(created_id) != nullptr);
+
+      Kb::key(ed, platform::KEY_Z, platform::MOD_CTRL);
+      CHECK(ed.scene().find(created_id) == nullptr);
+      CHECK(ed.scene().object_count() == before_objects);
+      CHECK(ed.undo_depth_for_test() == before_edit);
+      CHECK(render_settings() == before_render);
+      CHECK(ed.quality_tier() == high.tier);
+    }
+  });
+
+  test("hci: Learn teaches how to find and apply the three viewport quality presets (round 635)", [] {
+    for (int i = 0; i < lesson_count(); i++) {
+      const Lesson &entry = lesson(i);
+      if (std::string(entry.title) != "Performance and Stress Testing") continue;
+      const std::string body = entry.body;
+      CHECK(body.find("command palette") != std::string::npos);
+      CHECK(body.find("low viewport quality") != std::string::npos);
+      CHECK(body.find("medium viewport quality") != std::string::npos);
+      CHECK(body.find("high viewport quality") != std::string::npos);
+      CHECK(body.find("Press Enter") != std::string::npos);
+      return;
+    }
+    CHECK(false && "Performance and Stress Testing lesson missing");
+  });
+
+  test("hci: a saved quality shortcut and Quick Favorite still work alongside the viewport preset names (round 635)", [] {
+    using ET = platform::EventType;
+    const std::string prefs = fs::join(test_dir(), "r635-quality-prefs.txt");
+    // The old editor saved the console command as the user action's label and the favorite's name.
+    const bool saved = fs::write_file(prefs, "workspace=Default\nkeymap_preset=Unity\nquality_tier=2\n"
+                                            "useraction=user.1|quality low|quality low\n"
+                                            "keymap=user.1=Ctrl+Alt+L\nfavorites=Default|quality low\n");
+    CHECK(saved);
+    if (!saved) return;
+    Editor ed;
+    ed.init_headless(1024, 640);
+    ed.prefs_for_test(prefs);
+    ed.load_prefs_for_test();
+    ed.record_buttons_for_test(true);
+    Kb::settle(ed);
+    CHECK(ed.quality_tier() == Editor::TierHigh);
+
+    Kb::key(ed, platform::KEY_Q, platform::MOD_SHIFT);
+    const Recti row = Kb::button_named(ed, "menu:quality low");
+    CHECK(!row.empty());
+    CHECK(ed.menu_shortcut_for_test("quality low") == "Ctrl+Alt+L");
+    if (!row.empty()) {
+      for (const ET event : {ET::MouseMove, ET::MouseDown, ET::MouseUp})
+        ed.step_frame_headless({ev(event, row.x + row.w / 2, row.y + row.h / 2)});
+    }
+    CHECK(ed.quality_tier() == Editor::TierLow);
+    CHECK_NEAR(ed.view_scale(), 0.67f, 1e-6f);
+    CHECK(!ed.ui_for_test().any_popup_open());
+    if (ed.ui_for_test().any_popup_open()) Kb::key(ed, platform::KEY_ESCAPE);
+
+    ed.command("quality high");
+    Kb::key(ed, platform::KEY_L, platform::MOD_CTRL | platform::MOD_ALT);
+    CHECK(ed.quality_tier() == Editor::TierLow);
+
+    const auto by_command = ed.palette_names_for_test("quality low");
+    const auto by_label = ed.palette_names_for_test("low viewport");
+    CHECK(!by_command.empty() && by_command.front() == "quality low");
+    CHECK(!by_label.empty() && by_label.front() == "Low Viewport Quality");
+    for (const char *query : {"quality low", "low viewport"}) {
+      ed.command("quality high");
+      Kb::key(ed, platform::KEY_K, platform::MOD_CTRL);
+      Kb::type(ed, query);
+      Kb::key(ed, platform::KEY_ENTER);
+      CHECK(ed.quality_tier() == Editor::TierLow);
+      CHECK(!ed.ui_for_test().any_popup_open());
+      if (ed.ui_for_test().any_popup_open()) Kb::key(ed, platform::KEY_ESCAPE);
+    }
+
+    ed.command("shortcut Ctrl+Alt+M Medium Viewport Quality");
+    Kb::key(ed, platform::KEY_M, platform::MOD_CTRL | platform::MOD_ALT);
+    CHECK(ed.quality_tier() == Editor::TierMedium);
+    Kb::key(ed, platform::KEY_L, platform::MOD_CTRL | platform::MOD_ALT);
+    CHECK(ed.quality_tier() == Editor::TierLow);
+    std::remove(prefs.c_str());
+  });
 }

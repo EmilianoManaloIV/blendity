@@ -13,6 +13,7 @@
 #include "../core/profiling.h"
 #include "../render/dof.h"
 #include "../render/display.h"
+#include "../texture/paint_layer.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -494,14 +495,21 @@ const std::vector<DrawItem> &Editor::collect_items_ref(bool game, bool want_tang
     return c.items;
   }
   view_perf::counters.item_gathers++;
-  std::vector<DrawItem> items = collect_items_build(game, want_tangents, view_dep, lod);
+  // Only verification needs the old list during a gather. A moving object can invalidate a
+  // large list every frame; refill its storage without growing a second list beside it.
+  std::vector<DrawItem> verification_items;
+  std::vector<DrawItem> &items = hit ? verification_items : c.items;
+  items.clear();
+  collect_items_build(game, want_tangents, view_dep, lod, items);
+  if (items.capacity() > 1024 && items.size() < items.capacity() / 4)
+    items.shrink_to_fit();  // A smaller scene or a newly hidden hierarchy releases the old allocation.
   const bool same = hit && same_draw_items(items, c.items);  // (verify mode: the kept list gathered again)
   if (hit && !same) note_render_cache_mismatch();
   c.base = base, c.view = view, c.view_dep = view_dep;
   c.flattening = flatten_any_ || view_shapes_any_;
   c.lod = lod;
   c.valid = !c.flattening && !c.lod && !skin_settling_;  // (round 519: a rest settling after shape keys counts gathers until it is back on the card)
-  if (!same) c.items = std::move(items);
+  if (hit && !same) c.items = std::move(verification_items);
   skin_list_stands(c);
   if (c.valid && !same) keeps_.items_gen[variant][want_tangents] = view_keeps::next_items_gen();  // (a new list: what was kept of the old one is stale)
   *gen = c.valid ? keeps_.items_gen[variant][want_tangents] : 0;
@@ -541,12 +549,11 @@ const std::vector<DrawItem> &Editor::solid_items_ref(const Scene &s, bool game, 
   return c.items;
 }
 
-std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod) {
+void Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod, std::vector<DrawItem> &items) {
   BL_ZONE("collect_items");
   ProfileScope prof{prof_.ms_collect, {}};
   skin_settling_ = false;
   prebuild_render_meshes(*scene_, game);
-  std::vector<DrawItem> items;
   flatten_pivots_.clear();
   view_refs_.clear();
   flatten_any_ = view_shapes_any_ = false;
@@ -608,7 +615,6 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
   });
   set_view_lattices(false);  // (out of this collect: the Scene view, exports and bakes see the model)
   if (items_card_skin_) skin_prune_stands();
-  return items;
 }
 
 /* A mesh's draw item as every view builds it (the import preview too, task 0152). */
@@ -836,6 +842,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   mix((uint64_t)rasterized | (uint64_t)unity_lights_gamma() << 1 | (uint64_t)scene_->lighting.baked_gi << 2);
   mix((uint64_t)(uintptr_t)&ld), mix((uint64_t)ld.light_modes.size()), mix(lighting_gen_);
   mix((uint64_t)reflection_probe_bakes_.size()), mix(reflection_probe_gen_);
+  mix(sky_world_orientation_key(es));
   mix(sky_sun_key(es));  // (round 542: the sky's sun is in the list)
   for (const auto &[id, bake] : reflection_probe_bakes_) mix(id), mix((uint64_t)(uintptr_t)&bake);
   const uint64_t epoch = edit_epoch::now(), structure = edit_epoch::structure();  // (read before the walks: a bump during them walks again next frame)
@@ -937,15 +944,55 @@ std::vector<RenderProbe> Editor::render_reflection_probes() {
   return out;
 }
 
+ProceduralTexturePtr Editor::world_texture(int &output) {
+  auto &world = scene_->environment;
+  std::string path;
+  if (world.mode != 2 || !split_texture_ref(world.hdri.path, path, output)) return nullptr;
+  ProceduralTexturePtr texture = texture_asset(path);
+  if (texture && texture->surface) load_surface_record(*texture);
+  return texture;
+}
+
+// A layer clone shares its PaintImages with the brush. Final jobs must retain the pixels at snapshot time.
+static void freeze_world_paint(TextureLayerList &layers) {
+  for (auto &layer : layers) {
+    if (auto *paint = dynamic_cast<PaintLayer *>(layer.get()); paint && paint->images)
+      paint->images = std::make_shared<PaintImages>(*paint->images);
+    if (auto *children = layer->children()) freeze_world_paint(*children);
+    freeze_world_paint(layer->mask_layers);
+  }
+}
+
+Editor::WorldTextureSnapshot Editor::snapshot_world_texture() {
+  WorldTextureSnapshot snapshot;
+  auto texture = world_texture(snapshot.output);
+  if (texture && !procedural_texture_current_image(*texture, snapshot.output, env_.map)) {
+    // A view may hold the previous surface or a small preview. Capture this revision for the job's worker.
+    snapshot.texture = std::make_unique<ProceduralTexture>(*texture);
+    freeze_world_paint(snapshot.texture->layers);
+  }
+  return snapshot;
+}
+
+void Editor::WorldTextureSnapshot::finish(Environment &env) {
+  if (!texture) return;
+  auto image = std::make_shared<Texture>();
+  image->name = texture->name + "#" + texture_output_name(output);
+  image->build(texture->output(output), output == (int)TextureOutput::Albedo);
+  env.map = std::move(image);
+  env.compute_sh();
+  texture.reset();
+}
+
 void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   const EnvironmentSettings &es = scene_->environment;
-  Vec3 sun{0.35f, 0.75f, -0.55f};
-  if (sun_in) sun = *sun_in;  // (round 506: make_lighting's keep holds the sun; no walk)
-  else
+  Vec3 sun = sun_in ? *sun_in : sky_world_sun(es);
+  if (!sun_in) {
     scene_->for_each([&](GameObject &g) {
       if (auto *l = g.get<Light>())
         if (l->enabled && l->type == 0 && g.active_in_hierarchy()) sun = -normalize(g.world_rotation().rotate({0, 0, 1}));
     });
+  }
   if (sun_out) *sun_out = sun;
   /* Cache key: everything the baked environment depends on. */
   uint64_t key = kFnvBasis;
@@ -956,6 +1003,16 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   mix(&es.rotation, 4);
   mix(es.hdri.path.data(), es.hdri.path.size());
   if (es.mode == 1) mix(&sun, sizeof(sun));
+  std::string asset;
+  int output = 0;
+  const bool procedural = es.mode == 2 && split_texture_ref(es.hdri.path, asset, output);
+  if (procedural) {
+    // An edit and a surface worker publishing its result both invalidate resolved material textures.
+    const size_t generation = material_textures_generation();
+    mix(&generation, sizeof(generation));
+    const uint64_t registry = texture_assets_generation();
+    mix(&registry, sizeof(registry));
+  }
   env_.sky = es.sky;
   env_.equator = es.equator;
   env_.ground = es.ground;
@@ -979,7 +1036,14 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   }
   else if (es.mode == 2 && !es.hdri.empty()) {
     std::string err;
-    env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
+    if (procedural) {
+      if (auto texture = world_texture(output)) {
+        if (texture->surface) procedural_texture_set_async(texture->asset_path, true);
+        env_.map = procedural_texture_output(*texture, output);
+      }
+    }
+    else env_.map = generated_grid_texture(es.hdri.path);
+    if (!env_.map) env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
     if (!env_.map) Log::warn("World HDRI: %s", err.c_str());
   }
   if ((es.mode == 1 || es.mode == 2) && !env_.map) env_.mode = Environment::Gradient;
@@ -1202,6 +1266,8 @@ uint64_t Editor::scene_hash_tail() {
   mix(&es.turbidity, 4);
   const uint64_t sky_sun = sky_sun_key(es);  // (round 542)
   mix(&sky_sun, 8);
+  const uint64_t orientation = sky_world_orientation_key(es);
+  mix(&orientation, sizeof(orientation));
   mix(&es.color, sizeof(Vec3));
   mix(&es.sky, sizeof(Vec3) * 3);
   mix(es.hdri.path.data(), es.hdri.path.size());
@@ -1213,6 +1279,10 @@ uint64_t Editor::scene_hash_tail() {
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
+  if (es.mode == 2 && texture_ref_is_procedural(es.hdri)) {
+    const uint64_t registry = texture_assets_generation();
+    mix(&registry, sizeof(registry));
+  }
   /* Round 532 (review): a worker's splat order landed - here, not in an object's part, which the scene hash reuses while
    * the edit counter holds (a landing sort moves no counter: it would be a change the counter missed). */
   const uint64_t splat_gen = gsplat_sort_generation();
@@ -1670,6 +1740,23 @@ void Editor::set_quality_tier(int tier) {
   struct Tier { float scale; int shadow, rays, rsm, fps; };
   static const Tier kTiers[3] = {{0.67f, 1024, 4, 128, 60}, {0.85f, 2048, 8, 256, 120}, {1.0f, 0, 0, 0, 144}};
   const Tier &t = kTiers[quality_tier_];
+  if (quality_tier_ == TierLow && (tier_shadow_cap_ == 0 || t.shadow < tier_shadow_cap_)) {
+    const size_t max_depth = (size_t)t.shadow * t.shadow;
+    auto trim = [&](auto &entry) {
+      if (entry.map.size > t.shadow) {
+        entry = {};
+      } else if (entry.map.depth.capacity() > max_depth) {
+        /* A smaller map may have inherited an oversized plane from the rasterizer. Keep its depth and cache key. */
+        auto &depth = entry.map.depth;
+        if (!entry.map.valid()) depth.clear();
+        std::vector<float>(depth).swap(depth);
+      }
+    };
+    for (ShadowEntry &e : shadow_cache_) trim(e);
+    for (ShadowLayer &l : shadow_static_) trim(l);
+    /* The viewport flushes before the editor can change tier. Interactive F12 has its own map and thread. */
+    trim_shadow_map_scratch(max_depth);
+  }
   view_scale_ = t.scale;
   tier_shadow_cap_ = t.shadow;
   tier_gi_rays_cap_ = t.rays;
@@ -2276,6 +2363,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     j->target = std::max(1, preview ? rs.preview_samples : rs.samples);
   }
   j->environment = env_;
+  j->world_texture = snapshot_world_texture();
   env.environment = &j->environment;
   const char *split = traced ? nullptr : std::getenv("BLENDITY_RENDER_COMPONENTS");  // (round 451: the Unity comparison's split by component)
   if (split && *split) {
@@ -2623,6 +2711,7 @@ void Editor::render_job_start(std::unique_ptr<RenderJob> job) {
   rendering_ = true;
   auto run = [j, pt] {
     JobSystem::global().run_background([j, pt] {
+      j->world_texture.finish(j->environment);
       if (j->traced) trace_picture(*j, *pt);
       else raster_picture(*j);
     });

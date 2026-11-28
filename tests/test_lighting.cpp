@@ -10,6 +10,7 @@
 #include "../src/scene/unity_scene.h"
 #include "../src/render/light_pick.h"
 #include "../src/render/sampler.h"
+#include "../src/texture/paint_layer.h"
 #include <random>
 #include <set>
 #include <tuple>
@@ -12328,6 +12329,37 @@ static void tests_round542() {
     const LightingEnv again = ed.make_lighting_for_test();
     CHECK(again.lights.size() == 1 && again.lights[0].intensity == on.lights[0].intensity);
   });
+  test("An older baked Gradient or Sky scene reopens current; only a change to the active sky sun invalidates its bake", [] {
+    for (const std::string mode : {"gradient", "sky"}) {
+      const std::string dir = fs::join(test_dir(), "legacy-sun-" + mode);
+      std::error_code ec;
+      std::filesystem::copy(fs::join("tests/fixtures/sky_sun_bakes", mode), dir,
+                            std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+      CHECK(!ec);
+      if (ec) continue;
+      Editor ed;
+      ed.init_headless(400, 300);
+      ed.command("open " + fs::join(dir, "Legacy.scene"));
+      CHECK(ed.scene().environment.mode == (mode == "sky" ? 1 : 0));
+      CHECK(!ed.lighting_data_for_test().empty());
+      CHECK(!ed.lighting_out_of_date_for_test());
+      const uint64_t baked = ed.lighting_data_for_test().scene_key;
+      CHECK(ed.lightmap_scene_key_for_test() == baked);
+      ed.command("set World.SunRotation 90");
+      if (mode == "gradient") {
+        // Store dormant Sky settings, as would switching worlds after an edit.
+        ed.scene().environment.sun_rotation = 90.0f;
+        CHECK(ed.lightmap_scene_key_for_test() == baked);
+      } else {
+        CHECK(ed.lightmap_scene_key_for_test() != baked && ed.lighting_out_of_date_for_test());
+        GameObject *sun = ed.scene().create("Sun");
+        sun->add<Light>()->type = 0;
+        const uint64_t overridden = ed.lightmap_scene_key_for_test();
+        ed.scene().environment.sun_rotation = 120.0f;
+        CHECK(ed.lightmap_scene_key_for_test() == overridden);
+      }
+    }
+  });
   test("Sky world: the switch toggled between two calls changes the light list at once, with no scene edit in between", [] {
     Editor ed;
     r542_world(ed, 1);
@@ -12366,6 +12398,10 @@ static void tests_round542() {
     ed.commit_change("sun");
     LightingEnv le = ed.make_lighting_for_test();
     CHECK(r542_directional_count(le) == 1 && le.lights.size() == 1);
+    const Vec3 lamp_direction = le.environment->sun_dir;
+    ed.scene().environment.sun_elevation = 12.0f;
+    ed.scene().environment.sun_rotation = 300.0f;
+    CHECK(length(ed.make_lighting_for_test().environment->sun_dir - lamp_direction) < 1e-6f);
     /* Disabled, it is no sun: the sky's comes back (still one). */
     l->enabled = false;
     ed.commit_change("sun off");
@@ -12544,6 +12580,255 @@ static void tests_round549() {
   });
 }
 
+static void tests_round672() {
+  test("A generated World HDRI renders its selected grid and orientation", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ed.command("set Render.ResolutionX 128");
+    ed.command("set Render.ResolutionY 72");
+    auto render = [&] {
+      ed.command("render wait");
+      return ed.render_image_for_test().pixels;
+    };
+    const auto empty = render();
+    CHECK(empty.size() == 128 * 72);
+    ed.command("world hdri generated:UV Grid");
+    const auto uv = render();
+    CHECK(uv.size() == empty.size() && uv != empty);
+    ed.command("world hdri generated:Color Grid");
+    const auto colors = render();
+    CHECK(colors.size() == uv.size() && colors != uv && colors != empty);
+    ed.command("set World.Rotation 45");
+    const auto rotated = render();
+    CHECK(rotated.size() == colors.size() && rotated != colors);
+    CHECK(render() == rotated);
+    ed.command("world hdri missing-0654.hdr");
+    CHECK(render() == empty);
+  });
+}
+
+static void tests_round673() {
+  test("The World follows the selected procedural output through edits and Undo", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ProceduralTexture bricks;
+    apply_texture_preset(bricks, "Bricks");
+    bricks.width = bricks.height = 64;
+    const std::string path = "Assets/Textures/WorldBricks673.ptex";
+    auto asset = create_texture_asset(bricks, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    auto map = [&] { return ed.make_lighting_for_test().environment->map; };
+    const TexturePtr initial = map();
+    CHECK(initial && initial == resolve_texture_ref({path + "#albedo", false}));
+    ed.step_frame_headless();
+    const uint64_t before = asset->hash();
+    ed.command("settex WorldBricks673 L0Rows 12");
+    const TexturePtr edited = map();
+    CHECK(edited && edited != initial && edited == resolve_texture_ref({path + "#albedo", false}));
+    ed.command("undo");
+    CHECK(asset->hash() == before);
+    CHECK(map() == resolve_texture_ref({path + "#albedo", false}));
+    ed.command("world hdri " + path + "#height");
+    CHECK(map() == resolve_texture_ref({path + "#height", true}) && map() != edited);
+  });
+
+  test("Cold and previewed World surfaces render and bake at full resolution", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "WorldBake673", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    ed.command("lighting seed 673");
+    ed.command("set Render.ResolutionX 128");
+    ed.command("set Render.ResolutionY 72");
+    ProceduralTexture bricks;
+    apply_texture_preset(bricks, "Bricks");
+    bricks.width = bricks.height = 64;
+    bricks.surface = true;
+    const std::string path = "Assets/Textures/WorldFinal673.ptex";
+    auto asset = create_texture_asset(bricks, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    ed.step_frame_headless();
+    auto reset = [&] {
+      procedural_texture_cache_forget(path);
+      invalidate_material_textures();
+    };
+    reset();
+    {
+      ProceduralTextureFinalScope full;
+      auto image = procedural_texture_output(*asset, 0);
+      CHECK(image && image->width == 64);
+    }
+    auto render = [&] {
+      ed.command("render wait");
+      return ed.render_image_for_test().pixels;
+    };
+    r35_bake(ed);
+    const LightingData baked = ed.lighting_data_for_test();
+    CHECK(!baked.empty());
+    const auto reference = render();
+    CHECK(reference.size() == 128 * 72);
+    auto prepare = [&](bool warmed) {
+      reset();
+      if (warmed) {
+        auto image = ed.make_lighting_for_test().environment->map;
+        CHECK(image && image->width == 16);
+      }
+    };
+    for (bool warmed : {false, true}) {
+      prepare(warmed);
+      CHECK(render() == reference);
+      prepare(warmed);
+      r35_bake(ed);
+      CHECK(r463::same_pages(baked, ed.lighting_data_for_test()));
+    }
+    CHECK(!ed.lighting_out_of_date_for_test());
+    ed.command("settex WorldFinal673 L0Rows 12");
+    CHECK(ed.lightmap_scene_key_for_test() != baked.scene_key && ed.lighting_out_of_date_for_test());
+    ed.command("undo");
+    CHECK(ed.lightmap_scene_key_for_test() == baked.scene_key && !ed.lighting_out_of_date_for_test());
+  });
+
+  test("A procedural World bake distinguishes nested paint pixels at the same Undo stamp after reopen", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ProceduralTexture surface;
+    surface.width = surface.height = 64;
+    auto *group = surface.add("Group");
+    group->children()->push_back(create_texture_layer("Paint"));
+    const std::string path = "Assets/Textures/WorldPaint673.ptex";
+    PaintLayer &layer = static_cast<PaintLayer &>(*group->children()->back());
+    layer.base = "Assets/Textures/WorldPaint673_pixels";
+    layer.stamp = 1;
+    layer.images = std::make_shared<PaintImages>();
+    layer.images->reset(64, 64);
+    layer.images->cover[0] = 255;
+    layer.images->channels[0] = paint_channel_bit(PaintColor);
+    layer.images->color[0] = 0x00ff0000;
+    auto asset = create_texture_asset(surface, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    auto key = [&] { return ed.lightmap_scene_key_for_test(); };
+    const uint64_t red = key();
+    // The source version advances on Undo and a new stroke. Its serialized stamp returns to 1 for both branches.
+    auto &paint = static_cast<PaintLayer &>(*asset->layers.front()->children()->front());
+    paint.stamp = 0;
+    paint.images->cover[0] = 0;
+    asset->touch();
+    CHECK(key() != red);
+    paint.stamp = 1;
+    paint.images->cover[0] = 255;
+    paint.images->color[0] = 0x000000ff;
+    asset->touch();
+    const uint64_t blue = key();
+    CHECK(blue != red && key() == blue);
+    CHECK(paint_images_save(*paint.images, resolve_asset_path(paint.base)));
+    CHECK(forget_texture_assets(path) == 1);
+    CHECK(key() == blue);
+  });
+
+  test("World accepts a literal image filename resembling a missing procedural output", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    const std::string path = fs::join(test_dir(), "literal-world-673.ptex#albedo");
+    const uint32_t pixels[] = {0xff112233, 0xff998877, 0xff009988, 0xff554466};
+    CHECK(write_png(path, pixels, 2, 2, 2, true));
+    ed.command("world hdri " + path);
+    auto image = ed.make_lighting_for_test().environment->map;
+    CHECK(image && image == texture_load(resolve_asset_path(path), false));
+  });
+
+  test("Deleting and recreating the selected procedural World updates the view and baked status", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "WorldDelete673", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    const std::string path = "Assets/Textures/WorldRegistry673.ptex";
+    ProceduralTexture source;
+    apply_texture_preset(source, "Bricks");
+    source.width = source.height = 64;
+    CHECK(create_texture_asset(source, path) != nullptr);
+    ed.command("world hdri " + path + "#albedo");
+    r35_bake(ed);
+    const uint64_t baked_key = ed.lighting_data_for_test().scene_key;
+    CHECK(baked_key && !ed.lighting_out_of_date_for_test());
+    CHECK(ed.make_lighting_for_test().environment->map != nullptr);
+    ed.command("deleteasset " + path);
+    CHECK(!fs::exists(resolve_asset_path(path)));
+    CHECK(ed.lighting_out_of_date_for_test() && ed.lightmap_scene_key_for_test() != baked_key);
+    CHECK(ed.make_lighting_for_test().environment->map == nullptr);
+    CHECK(create_texture_asset(source, path) != nullptr);
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.lightmap_scene_key_for_test() == baked_key);
+    CHECK(ed.make_lighting_for_test().environment->map != nullptr);
+  });
+
+  test("A replaced World surface cannot publish its old worker pixels at the same paint stamp", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    clear_texture_assets();
+    const std::string path = "Assets/Textures/WorldWorker673.ptex";
+    auto painted = [&](uint32_t rgb) {
+      ProceduralTexture source;
+      source.width = source.height = 64;
+      source.surface = true;
+      auto *paint = static_cast<PaintLayer *>(source.add("Paint"));
+      paint->stamp = 1;
+      PaintImages &im = paint->ensure_images(64);
+      std::fill(im.color.begin(), im.color.end(), rgb);
+      std::fill(im.channels.begin(), im.channels.end(), paint_channel_bit(PaintColor));
+      std::fill(im.cover.begin(), im.cover.end(), 255);
+      return create_texture_asset(source, path);
+    };
+    auto first = painted(0x00ff0000);
+    ed.command("world hdri " + path + "#albedo");
+    ed.step_frame_headless();  // the original worker can finish, but cannot publish before the next poll
+    CHECK(ed.surface_busy_for_test());
+    auto replacement = painted(0x000000ff);
+    CHECK(first && replacement && first != replacement);
+    if (!first || !replacement) return;
+    const uint64_t hash = procedural_texture_cache_hash(*replacement);
+    CHECK(hash == procedural_texture_cache_hash(*first));
+    const double deadline = now_seconds() + 8;
+    while (!procedural_texture_cached(path, hash) && now_seconds() < deadline) ed.step_frame_headless();
+    CHECK(procedural_texture_cached(path, hash));
+    const auto image = ed.make_lighting_for_test().environment->map;
+    Texture expected;
+    expected.build(replacement->output(0), true);
+    CHECK(image && image->levels.front().px8 == expected.levels.front().px8);
+  });
+
+  test("A World surface follows the published worker image at the same reference", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ProceduralTexture surface;
+    apply_texture_preset(surface, "Bricks");
+    surface.width = surface.height = 64;
+    surface.surface = true;
+    const std::string path = "Assets/Textures/WorldSurface673.ptex";
+    auto asset = create_texture_asset(surface, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    auto map = [&] { return ed.make_lighting_for_test().environment->map; };
+    auto settle = [&] {
+      const uint64_t hash = procedural_texture_cache_hash(*asset);
+      const double deadline = now_seconds() + 8;
+      while (!procedural_texture_cached(path, hash) && now_seconds() < deadline) ed.step_frame_headless();
+      return procedural_texture_cached(path, hash);
+    };
+    CHECK(map() != nullptr);
+    CHECK(settle());
+    const TexturePtr initial = map();
+    CHECK(initial && initial == resolve_texture_ref({path + "#albedo", false}));
+    ed.command("settex WorldSurface673 L0Rows 12");
+    CHECK(map() == initial);
+    CHECK(settle());
+    CHECK(map() && map() != initial && map() == resolve_texture_ref({path + "#albedo", false}));
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -12593,4 +12878,6 @@ void run_lighting_tests() {
   tests_round542();
   tests_round545b2();
   tests_round549();
+  tests_round672();
+  tests_round673();
 }

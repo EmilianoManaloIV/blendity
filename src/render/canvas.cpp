@@ -1012,6 +1012,13 @@ static std::string png_filtered_rows(const uint32_t *pixels, int width, int heig
       cur[x * bpp + 2] = (uint8_t)row[x];
       if (bpp == 4) cur[x * 4 + 3] = (uint8_t)(row[x] >> 24);
     }
+    if (cur == prev) {
+      /* Up gives zero residuals. None comes first on an all-zero row. */
+      const bool all_zero = std::all_of(cur.begin(), cur.end(), [](uint8_t byte) { return byte == 0; });
+      out.push_back(all_zero ? '\0' : '\2');
+      out.append(rb, '\0');
+      continue;
+    }
     int best = 0;
     uint64_t best_cost = UINT64_MAX;
     for (int f = 0; f < 5; f++) {

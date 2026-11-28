@@ -175,7 +175,8 @@ struct TextureLayer {
   virtual bool needs_aux() const { return false; }
   /* Called with the planes this layer receives, before apply(). */
   virtual void make_aux(const TexPlanes &, const LayerContext &, LayerAux &) const {}
-  /* Warp and Tile read the layers below somewhere else: the point they read (u, v in the tile). */
+  /* Warp and Tile read the layers below somewhere else: the point they read (u, v in the tile).
+   * Layers that remap must also declare reads_anywhere(). */
   virtual bool remap(float &, float &, const LayerContext &) const { return false; }
   /* The blend, opacity, targets and mask fields (reflected first by every layer). */
   void reflect_common(Reflector &r, bool with_enabled = true);
@@ -271,7 +272,7 @@ class LiveTexture {
   Vec3 normal(float u, float v, const float *height_here = nullptr) const;
   int width() const { return w_; }
   int height() const { return h_; }
-  size_t memory_bytes() const;  // (task 0421) the kept planes of its layers
+  size_t memory_bytes() const;  // (task 0421) the kept planes and layer index storage
   uint64_t hash() const { return hash_; }
   bool output_on(int which) const { return tex_.output_on(which); }  // the texture's Normal / Roughness / Height Map switches
   bool alpha_from_cover() const { return tex_.alpha_from_cover; }       // (task 0150: the albedo's alpha is the cover plane)
@@ -282,7 +283,8 @@ class LiveTexture {
   TexPoint eval(size_t n, float u, float v, bool height_only) const;
   ProceduralTexture tex_;
   std::vector<LayerAux> aux_;
-  std::vector<uint8_t> shapes_height_;  // per layer: it can change the height
+  std::vector<size_t> stack_, height_stack_;  // enabled layers in evaluation order when there is no remap
+  bool may_remap_ = false;
   LayerContext ctx_;
   int w_ = 0, h_ = 0;
   float ns_ = 1.0f;
@@ -320,6 +322,8 @@ struct ProceduralTextureFinalScope {
 };
 uint64_t procedural_texture_cache_hash(ProceduralTexture &t);                 // the hash the cache keys outputs by (Live Shading left out)
 bool procedural_texture_cached(const std::string &asset_path, uint64_t hash);  // the cache holds this hash's outputs
+/* Whether this particular resolved image is the current full output (a final job can retain it directly). */
+bool procedural_texture_current_image(ProceduralTexture &texture, int output, const TexturePtr &image);
 /* The outputs built from evaluated planes (the six images with their mips, the live snapshot) - on any thread - and
  * stored under the asset's path on the main thread. */
 struct TextureOutputsHandle;

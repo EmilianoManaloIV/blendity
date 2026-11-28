@@ -11,3 +11,6 @@
 tests/fixtures/unity_gloss/** -text
 # Keep the generated Workshop fixtures byte-identical across checkout platforms.
 tests/fixtures/source_workshop/layout/** -text
+docs/perf/0630-inventory.tsv text eol=lf
+# Signed TSV has intentional empty final gap cells. Preserve their tab delimiters.
+docs/perf/0656-lighting-evidence.tsv text eol=lf whitespace=-blank-at-eol
