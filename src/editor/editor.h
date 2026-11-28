@@ -2726,6 +2726,14 @@ class Editor {
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
   /* Round 506: `sun_in` is the sun the lights' keep holds (no walk for it), `sun_out` where a walk leaves the one it found. */
+  struct WorldTextureSnapshot {
+    std::unique_ptr<ProceduralTexture> texture;
+    int output = 0;
+    void finish(Environment &env);
+  };
+  ProceduralTexturePtr world_texture(int &output);
+  void load_surface_record(ProceduralTexture &texture);
+  WorldTextureSnapshot snapshot_world_texture();
   void update_environment(const Vec3 *sun_in = nullptr, Vec3 *sun_out = nullptr);
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */
@@ -5815,6 +5823,7 @@ class Editor {
     std::string path;
     uint64_t hash = 0;
     ProceduralTexture copy;
+    ProceduralTexturePtr source;  // registry identity at dispatch
     std::shared_ptr<TextureOutputsHandle> built;  // the images with their mips, built on the worker
     ~SurfaceJob() {
       cancel.store(true, std::memory_order_relaxed);
@@ -6657,6 +6666,8 @@ class Editor {
   std::string bake_status_;
   double bake_start_ = 0;
   uint64_t bake_key_ = 0, lighting_gen_ = 0;
+  std::weak_ptr<ProceduralTexture> lightmap_painted_world_;
+  uint64_t lightmap_paint_version_ = 0, lightmap_paint_hash_ = 0;
   std::string lighting_dir() const;
   uint64_t lightmap_hash_of(const GameObject &g, const Mesh &m);
   uint64_t lightmap_scene_key();
@@ -6774,6 +6785,7 @@ class Editor {
     std::vector<BakeObject> objects;
     std::vector<BakeLight> lights;
     Environment env;
+    WorldTextureSnapshot world_texture;
     BakeSettings settings;
     int gpu = -1;
     uint64_t key = 0;
@@ -7175,6 +7187,7 @@ class Editor {
     std::unordered_map<uint64_t, std::shared_ptr<RenderMesh>> snapped;  // (a filter's vertex snapping: the copies the tracer reads)
     LightingEnv env;
     Environment environment;
+    WorldTextureSnapshot world_texture;
     ShadowMap shadow;  // (rendered by the worker from the casters below - the views' cache keeps its own)
     std::vector<uint32_t> shadow_casters;
     Vec3 shadow_dir;

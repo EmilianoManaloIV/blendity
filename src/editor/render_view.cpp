@@ -13,6 +13,7 @@
 #include "../core/profiling.h"
 #include "../render/dof.h"
 #include "../render/display.h"
+#include "../texture/paint_layer.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -943,6 +944,46 @@ std::vector<RenderProbe> Editor::render_reflection_probes() {
   return out;
 }
 
+ProceduralTexturePtr Editor::world_texture(int &output) {
+  auto &world = scene_->environment;
+  std::string path;
+  if (world.mode != 2 || !split_texture_ref(world.hdri.path, path, output)) return nullptr;
+  ProceduralTexturePtr texture = texture_asset(path);
+  if (texture && texture->surface) load_surface_record(*texture);
+  return texture;
+}
+
+// A layer clone shares its PaintImages with the brush. Final jobs must retain the pixels at snapshot time.
+static void freeze_world_paint(TextureLayerList &layers) {
+  for (auto &layer : layers) {
+    if (auto *paint = dynamic_cast<PaintLayer *>(layer.get()); paint && paint->images)
+      paint->images = std::make_shared<PaintImages>(*paint->images);
+    if (auto *children = layer->children()) freeze_world_paint(*children);
+    freeze_world_paint(layer->mask_layers);
+  }
+}
+
+Editor::WorldTextureSnapshot Editor::snapshot_world_texture() {
+  WorldTextureSnapshot snapshot;
+  auto texture = world_texture(snapshot.output);
+  if (texture && !procedural_texture_current_image(*texture, snapshot.output, env_.map)) {
+    // A view may hold the previous surface or a small preview. Capture this revision for the job's worker.
+    snapshot.texture = std::make_unique<ProceduralTexture>(*texture);
+    freeze_world_paint(snapshot.texture->layers);
+  }
+  return snapshot;
+}
+
+void Editor::WorldTextureSnapshot::finish(Environment &env) {
+  if (!texture) return;
+  auto image = std::make_shared<Texture>();
+  image->name = texture->name + "#" + texture_output_name(output);
+  image->build(texture->output(output), output == (int)TextureOutput::Albedo);
+  env.map = std::move(image);
+  env.compute_sh();
+  texture.reset();
+}
+
 void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   const EnvironmentSettings &es = scene_->environment;
   Vec3 sun = sun_in ? *sun_in : sky_world_sun(es);
@@ -962,6 +1003,16 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   mix(&es.rotation, 4);
   mix(es.hdri.path.data(), es.hdri.path.size());
   if (es.mode == 1) mix(&sun, sizeof(sun));
+  std::string asset;
+  int output = 0;
+  const bool procedural = es.mode == 2 && split_texture_ref(es.hdri.path, asset, output);
+  if (procedural) {
+    // An edit and a surface worker publishing its result both invalidate resolved material textures.
+    const size_t generation = material_textures_generation();
+    mix(&generation, sizeof(generation));
+    const uint64_t registry = texture_assets_generation();
+    mix(&registry, sizeof(registry));
+  }
   env_.sky = es.sky;
   env_.equator = es.equator;
   env_.ground = es.ground;
@@ -985,7 +1036,14 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   }
   else if (es.mode == 2 && !es.hdri.empty()) {
     std::string err;
-    env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
+    if (procedural) {
+      if (auto texture = world_texture(output)) {
+        if (texture->surface) procedural_texture_set_async(texture->asset_path, true);
+        env_.map = procedural_texture_output(*texture, output);
+      }
+    }
+    else env_.map = generated_grid_texture(es.hdri.path);
+    if (!env_.map) env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
     if (!env_.map) Log::warn("World HDRI: %s", err.c_str());
   }
   if ((es.mode == 1 || es.mode == 2) && !env_.map) env_.mode = Environment::Gradient;
@@ -1221,6 +1279,10 @@ uint64_t Editor::scene_hash_tail() {
   mix(&lighting_gen_, 8);  // a bake finished, was cleared or loaded
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
+  if (es.mode == 2 && texture_ref_is_procedural(es.hdri)) {
+    const uint64_t registry = texture_assets_generation();
+    mix(&registry, sizeof(registry));
+  }
   /* Round 532 (review): a worker's splat order landed - here, not in an object's part, which the scene hash reuses while
    * the edit counter holds (a landing sort moves no counter: it would be a change the counter missed). */
   const uint64_t splat_gen = gsplat_sort_generation();
@@ -2301,6 +2363,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     j->target = std::max(1, preview ? rs.preview_samples : rs.samples);
   }
   j->environment = env_;
+  j->world_texture = snapshot_world_texture();
   env.environment = &j->environment;
   const char *split = traced ? nullptr : std::getenv("BLENDITY_RENDER_COMPONENTS");  // (round 451: the Unity comparison's split by component)
   if (split && *split) {
@@ -2648,6 +2711,7 @@ void Editor::render_job_start(std::unique_ptr<RenderJob> job) {
   rendering_ = true;
   auto run = [j, pt] {
     JobSystem::global().run_background([j, pt] {
+      j->world_texture.finish(j->environment);
       if (j->traced) trace_picture(*j, *pt);
       else raster_picture(*j);
     });

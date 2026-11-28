@@ -2281,6 +2281,14 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
       continue;
     }
     if (l.type == RenderLight::Directional) L = -l.direction;
+    else if (l.type == RenderLight::Point) {
+      const Vec3 d = l.position - sp.position;
+      const float dist = length(d);
+      atten *= range_falloff(l, dist);
+      // Point lights outside their range do not need a normalized direction.
+      if (atten <= 0.0f) continue;
+      L = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
+    }
     else {
       Vec3 d = l.position - sp.position;
       float dist = length(d);

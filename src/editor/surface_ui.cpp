@@ -324,11 +324,22 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
  * built on the worker), the cache answering with the last images for it meanwhile - so the views show the last result
  * until the next lands, whichever texture is selected. A surface whose maps were lost with the text (an undo, a
  * reopened file) reloads them from its record first. */
+void Editor::load_surface_record(ProceduralTexture &t) {
+  if (t.maps || t.maps_from.empty() || surface_maps_failed_.count(t.asset_path)) return;
+  auto maps = std::make_shared<SurfaceMaps>();
+  std::string err;
+  if (load_surface_maps(resolve_asset_path(t.maps_from), std::max(t.width, t.height), *maps, &err)) t.maps = maps;
+  else {
+    surface_maps_failed_.insert(t.asset_path);
+    Log::warn("Surface %s: %s (Mesh Map layers read flat grey; Textures > Load Mesh Maps after a new bake)", t.name.c_str(), err.c_str());
+  }
+}
+
 void Editor::surface_poll() {
   if (surface_job_ && surface_job_->done.load(std::memory_order_acquire)) {
     std::unique_ptr<SurfaceJob> job = std::move(surface_job_);
     if (job->thread.joinable()) job->thread.join();
-    if (!job->cancel.load(std::memory_order_relaxed)) {
+    if (!job->cancel.load(std::memory_order_relaxed) && job->source == texture_asset(job->path)) {
       procedural_texture_cache_store(job->path, job->built);
       procedural_texture_cache_trim();  // (task 0421: over its budget, the least recently used images only the cache holds go)
       surface_sync_emission(job->copy);  // (a layer started or stopped writing emission since the material was assigned)
@@ -341,15 +352,7 @@ void Editor::surface_poll() {
     ProceduralTexturePtr t = entry.second;
     if (!t || !t->surface) continue;
     procedural_texture_set_async(t->asset_path, true);  // (a surface is always async: a material asking for a hash the cache lacks gets the last images, never a main-thread evaluation after the first)
-    if (!t->maps && !t->maps_from.empty() && !surface_maps_failed_.count(t->asset_path)) {
-      auto maps = std::make_shared<SurfaceMaps>();
-      std::string err;
-      if (load_surface_maps(resolve_asset_path(t->maps_from), std::max(t->width, t->height), *maps, &err)) t->maps = maps;
-      else {
-        surface_maps_failed_.insert(t->asset_path);
-        Log::warn("Surface %s: %s (Mesh Map layers read flat grey; Textures > Load Mesh Maps after a new bake)", t->name.c_str(), err.c_str());
-      }
-    }
+    load_surface_record(*t);
     const uint64_t h = procedural_texture_cache_hash(*t);
     if (procedural_texture_trimmed(t->asset_path, h)) continue;  // (task 0421: dropped to fit the budget as it is now; an edit or a request brings it back)
     if (procedural_texture_cached(t->asset_path, h)) continue;
@@ -357,6 +360,7 @@ void Editor::surface_poll() {
     auto job = std::make_unique<SurfaceJob>();
     job->path = t->asset_path;
     job->hash = h;
+    job->source = t;
     job->copy = *t;
     SurfaceJob *raw = job.get();
     job->thread = std::thread([raw] {

@@ -17328,6 +17328,45 @@ static void tests_round657_view_transform() {
   });
 }
 
+static void tests_round671_scene_raster() {
+  test("round 671: the Scene raster report counts freshly rendered CPU frames and excludes held views", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.set_render_cache_verify(false);  // This test checks the ordinary cache hit rather than its verification redraw.
+    ed.command("viewport device cpu");
+    ed.command("layout L(0:0)");
+    ed.command("shading shaded");
+    ed.step_frame_headless();
+
+    const auto sample = [&](const char *command, const char *expected) {
+      const size_t before = r468_log_mark();
+      ed.command(command);
+      std::vector<LogEntry> entries;
+      Log::fetch(before, entries);
+      const auto is_raster = [](const LogEntry &entry) { return entry.text.rfind("perf frames scene raster:", 0) == 0; };
+      CHECK(std::count_if(entries.begin(), entries.end(), is_raster) == (expected ? 1 : 0));
+      if (expected) CHECK(std::any_of(entries.begin(), entries.end(), [&](const LogEntry &entry) {
+        return is_raster(entry) && entry.text.find(expected) != std::string::npos;
+      }));
+    };
+
+    ed.command("camera 8 9 5 0 1 0");
+    sample("perf frames 1 scene-raster", "1/1 fresh CPU Shaded renders");
+    CHECK(ed.scene_stats_for_test().tris_rasterized > 0);
+    sample("perf frames 2 scene-raster", "0/2 fresh CPU Shaded renders");
+    ed.command("layout H(0.008,L(0:0),L(1:0))");
+    const uint64_t renders = ed.frame_profile_totals().view_renders;
+    sample("perf frames 1 scene-raster", "0/1 fresh CPU Shaded renders");
+    CHECK(ed.scene_view_rect().w > 0 && ed.scene_view_rect().w < 8);
+    CHECK(ed.game_rect_for_test().w >= 8 && ed.game_rect_for_test().h >= 8);
+    CHECK(ed.frame_profile_totals().view_renders == renders + 1);
+
+    ed.command("layout L(2:0)");
+    sample("perf frames 1 scene-raster", "0/1 fresh CPU Shaded renders");
+    sample("perf frames 1", nullptr);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -17449,5 +17488,6 @@ void run_editor_tests() {
   tests_round639_paint_undo();
   tests_round653_flip_rotate();
   tests_round657_view_transform();
+  tests_round671_scene_raster();
   coverage_tests();
 }

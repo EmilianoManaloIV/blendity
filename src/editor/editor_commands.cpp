@@ -1040,15 +1040,52 @@ void Editor::run_console_command(const std::string &line) {
     else if (sub == "frames") {  // perf frames N (a script's, headless): N frames, whatever runs
       if (!headless_) { Log::info("perf frames: headless scripts only"); return; }
       const int n = std::max(0, std::min(1000000, std::atoi(arg(2, "1").c_str())));
+      const bool scene_raster = arg(3, "") == "scene-raster";
       FrameProfile acc;  // (round 468: every field of the stepped frames, for the posing lines below)
+      RasterStats raster;
+      int raster_frames = 0;
+      double shadow_ms = 0;
+      uint64_t shadow_renders = 0;
       const PoseCounts pose0 = pose_counts();
       const MeshCounts mesh0 = mesh_counts();
-      for (int i = 0; i < n; i++) step_frame_headless(), acc.add(prof_last_);
+      for (int i = 0; i < n; i++) {
+        step_frame_headless();
+        acc.add(prof_last_);
+        // A held view still has the previous render's stats. Sample only a fresh, unambiguous CPU Scene view.
+        if (!scene_raster || !scene_drawn_ || scene_rect_.w < 8 || scene_rect_.h < 8 ||
+            scene_on_gpu_ || scene_filters_ || piloted_camera() ||
+            shading_ != Shading::Shaded || prof_last_.view_renders != 1 || prof_last_.view_cache_hits)
+          continue;
+        raster_frames++;
+        raster.ms_clear += scene_stats_.ms_clear;
+        raster.ms_vertex += scene_stats_.ms_vertex;
+        raster.ms_setup += scene_stats_.ms_setup;
+        raster.ms_bin += scene_stats_.ms_bin;
+        raster.ms_raster += scene_stats_.ms_raster;
+        raster.ms_shade += scene_stats_.ms_shade;
+        raster.ms_gi += scene_stats_.ms_gi;
+        raster.ms_total += scene_stats_.ms_total;
+        raster.tris_submitted += scene_stats_.tris_submitted;
+        raster.tris_rasterized += scene_stats_.tris_rasterized;
+        raster.pixels_simd += scene_stats_.pixels_simd;
+        shadow_ms += prof_last_.ms_shadow;
+        shadow_renders += prof_last_.shadow_renders;
+      }
       Log::info("perf frames: %d frame(s)", n);
       const PoseCounts pose = pose_counts() - pose0;  // (read once: both lines are of the same counts)
       const MeshCounts mesh = mesh_counts() - mesh0;
       Log::info("perf frames parts ms (a frame's mean; nested, not to add up): %s", posing_parts_text(acc, pose, mesh, (double)n).c_str());
       Log::info("perf frames counts (a frame's mean): %s", posing_counts_text(acc, pose, mesh, (double)n).c_str());
+      if (scene_raster) {
+        const double d = std::max(1, raster_frames);
+        Log::info("perf frames scene raster: %d/%d fresh CPU Shaded renders; mean ms clear %.6f, vertex %.6f, setup %.6f, "
+                  "bin worker sum %.6f, raster %.6f, shade %.6f, GI %.6f, flush %.6f, shadow %.6f; "
+                  "mean tris submitted %.1f, rasterized %.1f, pixels SIMD %.1f, shadow renders %.1f",
+                  raster_frames, n, raster.ms_clear / d, raster.ms_vertex / d, raster.ms_setup / d, raster.ms_bin / d,
+                  raster.ms_raster / d, raster.ms_shade / d, raster.ms_gi / d, raster.ms_total / d, shadow_ms / d,
+                  (double)raster.tris_submitted / d, (double)raster.tris_rasterized / d, (double)raster.pixels_simd / d,
+                  (double)shadow_renders / d);
+      }
     }
     else if (sub == "drag" || sub == "clip" || sub == "pick") perf_script_command(sub, t);  // (round 468: the posing measurements, perf_script.cpp)
     else {

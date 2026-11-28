@@ -14080,6 +14080,69 @@ static void tests_round652() {
   });
 }
 
+static void tests_round671_point_light_range() {
+  test("round 671: a point light shades the visible surface up to its range in the scalar CPU view", [] {
+    constexpr int size = 64, row = 32, near_column = 16, far_column = 48;
+    const MeshPtr mesh = primitives::quad(4.0f);
+    std::vector<MaterialPtr> materials = {make_material("Range test", Vec3(0.5f))};
+    DrawItem item;
+    item.mesh = &mesh->render_mesh();
+    item.model = Mat4::translate({0, 0, 2});
+    item.materials = &materials;
+    item.id = 1;
+    const auto pixels = [&](const std::vector<RenderLight> &lights) {
+      Image image;
+      image.resize(size, size);
+      RenderTarget target;
+      target.attach(image, {0, 0, size, size});
+      LightingEnv env;
+      env.lights = lights;
+      RasterOptions options;
+      options.shade = ShadeMode::Deferred;
+      options.simd_shading = false;
+      Renderer3D renderer;
+      renderer.begin(&target, Mat4::identity(), Mat4::ortho(2.0f, 1.0f, 0.1f, 10.0f), env, options);
+      renderer.clear(0xFF000000);
+      renderer.add(item);
+      renderer.flush();
+      CHECK(target.id_at(near_column, row) == item.id && target.id_at(far_column, row) == item.id);
+      CHECK(renderer.stats().pixels_simd == 0);
+      return image.pixels;
+    };
+
+    const auto ambient = pixels({});
+    RenderLight lamp;
+    lamp.type = RenderLight::Point;
+    lamp.intensity = 10.0f;
+    lamp.position = {-0.96875f, -0.03125f, 1.0f};  // centred on the near pixel, one metre in front of its surface
+    const size_t near = row * size + near_column, far = row * size + far_column;
+    uint32_t live_center = 0;
+    for (bool baked_falloff : {false, true}) {
+      lamp.baked_falloff = baked_falloff;
+      lamp.range = 1.5f;
+      const auto lit = pixels({lamp});
+      CHECK(lit[near] != ambient[near] && lit[far] == ambient[far]);
+      // The quad sits fully inside this forward-facing spot's hard hemispherical cone. The spot uses the
+      // same range curve through its existing lighting branch with cone weight one across the surface.
+      RenderLight reference = lamp;
+      reference.type = RenderLight::Spot;
+      reference.direction = {0, 0, 1};
+      reference.cos_inner = reference.cos_outer = 0.0f;
+      CHECK(lit == pixels({reference}));
+      if (baked_falloff) CHECK(lit[near] != live_center);
+      else live_center = lit[near];
+      lamp.range = 1.0f;
+      CHECK(pixels({lamp}) == ambient);
+    }
+
+    lamp.baked_falloff = false;
+    lamp.range = 0.0f;
+    lamp.position.z = 1.9995f;  // the legacy minimum range still lights the pixel directly under it
+    const auto near_contact = pixels({lamp});
+    CHECK(near_contact[near] != ambient[near] && near_contact[far] == ambient[far]);
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -14143,4 +14206,5 @@ void run_render_tests() {
   tests_round631();
   tests_round647();
   tests_round652();
+  tests_round671_point_light_range();
 }

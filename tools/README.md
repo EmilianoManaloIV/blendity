@@ -42,3 +42,7 @@ many-object editing workloads. Add `--candidate PATH` for paired trials. See
 [the fixtures and verification](../docs/perf/0624-mesh-editing.md).
 
 - `python tools/bench_animation_rigs.py --exe <editor> --out <fresh scratch directory>` measures the editor's animation and rigging actions on generated control, humanoid and creature fixtures. See [task 0628's measurements](../docs/perf/0628-animation.md).
+
+## Round 669: Texture and Editing pointer controls
+
+Use the [round 669 replay instructions](../docs/perf/0651-texture-paint-controls.md) to verify Editing stack, mask, Textures, procedural-layer and Paint controls against saved outputs. The report includes a separate exact-key overlay and commands for both stock-editor drivers.

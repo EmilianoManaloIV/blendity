@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import StringIO
 import itertools
+import json
 from pathlib import Path
 import re
 import sys
@@ -1393,7 +1394,7 @@ def app_args(inventory, sources):
         inventory.add("cli", option, option, "executable handover", launch.ref(match.start()))
 
 
-def attach_evidence(inventory, path):
+def evidence_records(inventory, path):
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
         fields = reader.fieldnames or []
@@ -1411,8 +1412,6 @@ def attach_evidence(inventory, path):
             seen.add(key)
             evidence = {field: record[field].strip() for field in EVIDENCE_FIELDS[1:]}
             source = inventory.rows[key]
-            if evidence == {field: source[field] for field in EVIDENCE_FIELDS[1:]}:
-                continue
             status = evidence["status"]
             if status not in STATUSES:
                 raise ValueError(f"Invalid evidence status on {key}: {status}")
@@ -1423,7 +1422,68 @@ def attach_evidence(inventory, path):
                     raise ValueError(f"Unexercised entry needs a gap: {key}")
             elif not all(evidence[field] for field in ("action", "workload", "result", "evidence")):
                 raise ValueError(f"Observed entry needs action, workload, result and evidence: {key}")
-            source.update(evidence)
+            yield source, evidence
+
+
+def attach_evidence(inventory, path, *, require_complete=False):
+    count = 0
+    for source, evidence in evidence_records(inventory, path):
+        source.update(evidence)
+        count += 1
+    if require_complete and count != len(inventory.rows):
+        raise ValueError(f"Pass 38 requires the complete prior register: received {count} of {len(inventory.rows)} keys")
+
+
+def join_pass38(inventory):
+    """Apply the signed texture and lighting cohorts to an existing evidence register."""
+    sources = (
+        ("0651-texture-paint-controls.tsv", "D:/Blendity-agent-scratch/pass38/0651/",
+         "32997ccc8961a84bfa14b0322783089ba8d0340df8300e293c5af8fd7c9de50c"),
+        ("0656-lighting-evidence.tsv", "",
+         "7b7a39a917e22084730320b425c3a748818283051a742bf611b4442789813d24"),
+    )
+    # A source-only export has all the keys but none of the prior observations.
+    # Ignore regenerated source locations when authenticating the evidence columns.
+    evidence_rows = [[inventory.rows[key][col] for col in EVIDENCE_FIELDS]
+                     for key in sorted(inventory.rows)]
+    payload = json.dumps(evidence_rows, separators=(",", ":"), ensure_ascii=True)
+    accepted = {
+        "a576279d198a808c4b60e679802972057a943220887dc6be204da4894b27b62d",  # parent
+        "df1344151788490fa609527fb28e900db6d2828213e368a0ad9d4ac56e235a95",  # joined
+    }
+    if sha256(payload.encode("ascii")).hexdigest() not in accepted:
+        raise ValueError("Pass 38 requires the recorded parent evidence or its completed join")
+    joined = set()
+    for filename, evidence_root, signed_digest in sources:
+        path = OUTPUT.parent / filename
+        if sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != signed_digest:
+            raise ValueError(f"Evidence differs from the signed Pass 38 overlay: {filename}")
+        for row, observation in evidence_records(inventory, path):
+            key = row["key"]
+            if key in joined or observation["status"] != "end-state":
+                raise ValueError(f"Invalid Pass 38 overlay entry: {key}")
+            joined.add(key)
+            if evidence_root:
+                observation["evidence"] = "; ".join(
+                    evidence_root + ref.strip() for ref in observation["evidence"].split(";")
+                )
+            if row["status"] == "unexercised":
+                row.update(observation)
+                continue
+            if row["status"] != "end-state":
+                raise ValueError(f"Unexpected prior evidence status on {key}: {row['status']}")
+            if all(row[field] == value for field, value in observation.items()):
+                continue
+            # The 21 previously checked lighting rows have a console-setter observation.
+            # Keep its complete historical scope alongside the visible Inspector gesture.
+            if not row["action"].startswith("set "):
+                raise ValueError(f"Unrecognized existing observation on {key}")
+            for field in EVIDENCE_FIELDS[2:]:
+                suffix = " | 0652 Inspector: " + (observation[field] or "(no additional gap recorded)")
+                if not row[field].endswith(suffix):
+                    if " | 0652 Inspector: " in row[field] or evidence_root:
+                        raise ValueError(f"Conflicting Pass 38 observation on {key}")
+                    row[field] += suffix
 
 
 def serialize(inventory):
@@ -1495,14 +1555,19 @@ def main():
     parser.add_argument("--check", action="store_true", help="compare output without writing")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--evidence", type=Path, help="exact-key TSV, including a previously joined inventory")
+    parser.add_argument("--pass38", action="store_true", help="join the signed 0651 and 0652 inputs to the evidence register")
     args = parser.parse_args()
+    if args.pass38 and not args.evidence and args.output.resolve() != OUTPUT.resolve():
+        parser.error("--pass38 needs --evidence with a separate output path")
     if args.output.resolve() == OUTPUT.resolve() and args.evidence is None:
         args.evidence = OUTPUT
         args.check = True
     try:
         inventory = build()
         if args.evidence:
-            attach_evidence(inventory, args.evidence)
+            attach_evidence(inventory, args.evidence, require_complete=args.pass38)
+        if args.pass38:
+            join_pass38(inventory)
         generated = serialize(inventory).encode("utf-8")
         if args.check:
             if not args.output.is_file() or args.output.read_bytes() != generated:

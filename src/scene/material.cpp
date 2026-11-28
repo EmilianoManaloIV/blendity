@@ -89,10 +89,15 @@ std::string make_asset_relative(const std::string &abs_path) {
   return abs_path;
 }
 
+TexturePtr generated_grid_texture(const std::string &path) {
+  if (path == "generated:UV Grid") return texture_uv_grid();
+  if (path == "generated:Color Grid") return texture_color_grid();
+  return nullptr;
+}
+
 TexturePtr resolve_texture_ref(const TextureRef &t) {
   if (t.empty()) return nullptr;
-  if (t.path == "generated:UV Grid") return texture_uv_grid();
-  if (t.path == "generated:Color Grid") return texture_color_grid();
+  if (TexturePtr grid = generated_grid_texture(t.path)) return grid;
   std::string asset;
   int output = 0;
   if (split_texture_ref(t.path, asset, output)) {
@@ -501,8 +506,7 @@ const Material::Resolved &Material::textures() const {
   auto load = [&](const TextureRef &t) -> TexturePtr {
     const int s = slot++;
     if (t.empty()) return nullptr;
-    if (t.path == "generated:UV Grid") return texture_uv_grid();
-    if (t.path == "generated:Color Grid") return texture_color_grid();
+    if (TexturePtr grid = generated_grid_texture(t.path)) return grid;
     std::string asset;
     int output = 0;
     if (split_texture_ref(t.path, asset, output)) {  // a procedural texture's output (ADR 0017)
