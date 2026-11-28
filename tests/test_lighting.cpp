@@ -12633,6 +12633,74 @@ static void tests_round673() {
     CHECK(map() == resolve_texture_ref({path + "#height", true}) && map() != edited);
   });
 
+  test("Cold and previewed World surfaces render and bake at full resolution", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "WorldBake673", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    ed.command("lighting seed 673");
+    ed.command("set Render.ResolutionX 128");
+    ed.command("set Render.ResolutionY 72");
+    ProceduralTexture bricks;
+    apply_texture_preset(bricks, "Bricks");
+    bricks.width = bricks.height = 64;
+    bricks.surface = true;
+    const std::string path = "Assets/Textures/WorldFinal673.ptex";
+    auto asset = create_texture_asset(bricks, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    ed.step_frame_headless();
+    auto reset = [&] {
+      procedural_texture_cache_forget(path);
+      invalidate_material_textures();
+    };
+    reset();
+    {
+      ProceduralTextureFinalScope full;
+      auto image = procedural_texture_output(*asset, 0);
+      CHECK(image && image->width == 64);
+    }
+    auto render = [&] {
+      ed.command("render wait");
+      return ed.render_image_for_test().pixels;
+    };
+    r35_bake(ed);
+    const LightingData baked = ed.lighting_data_for_test();
+    CHECK(!baked.empty());
+    const auto reference = render();
+    CHECK(reference.size() == 128 * 72);
+    auto prepare = [&](bool warmed) {
+      reset();
+      if (warmed) {
+        auto image = ed.make_lighting_for_test().environment->map;
+        CHECK(image && image->width == 16);
+      }
+    };
+    for (bool warmed : {false, true}) {
+      prepare(warmed);
+      CHECK(render() == reference);
+      prepare(warmed);
+      r35_bake(ed);
+      CHECK(r463::same_pages(baked, ed.lighting_data_for_test()));
+    }
+    CHECK(!ed.lighting_out_of_date_for_test());
+    ed.command("settex WorldFinal673 L0Rows 12");
+    CHECK(ed.lightmap_scene_key_for_test() != baked.scene_key && ed.lighting_out_of_date_for_test());
+    ed.command("undo");
+    CHECK(ed.lightmap_scene_key_for_test() == baked.scene_key && !ed.lighting_out_of_date_for_test());
+  });
+
+  test("World accepts a literal image filename resembling a missing procedural output", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    const std::string path = fs::join(test_dir(), "literal-world-673.ptex#albedo");
+    const uint32_t pixels[] = {0xff112233, 0xff998877, 0xff009988, 0xff554466};
+    CHECK(write_png(path, pixels, 2, 2, 2, true));
+    ed.command("world hdri " + path);
+    auto image = ed.make_lighting_for_test().environment->map;
+    CHECK(image && image == texture_load(resolve_asset_path(path), false));
+  });
+
   test("A World surface follows the published worker image at the same reference", [] {
     Editor ed;
     r542_world(ed, 2);

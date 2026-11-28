@@ -322,6 +322,8 @@ struct ProceduralTextureFinalScope {
 };
 uint64_t procedural_texture_cache_hash(ProceduralTexture &t);                 // the hash the cache keys outputs by (Live Shading left out)
 bool procedural_texture_cached(const std::string &asset_path, uint64_t hash);  // the cache holds this hash's outputs
+/* Whether this particular resolved image is the current full output (a final job can retain it directly). */
+bool procedural_texture_current_image(ProceduralTexture &texture, int output, const TexturePtr &image);
 /* The outputs built from evaluated planes (the six images with their mips, the live snapshot) - on any thread - and
  * stored under the asset's path on the main thread. */
 struct TextureOutputsHandle;

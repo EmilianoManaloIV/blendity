@@ -943,6 +943,35 @@ std::vector<RenderProbe> Editor::render_reflection_probes() {
   return out;
 }
 
+ProceduralTexturePtr Editor::world_texture(int &output) {
+  auto &world = scene_->environment;
+  std::string path;
+  if (world.mode != 2 || !split_texture_ref(world.hdri.path, path, output)) return nullptr;
+  ProceduralTexturePtr texture = texture_asset(path);
+  if (texture && texture->surface) load_surface_record(*texture);
+  return texture;
+}
+
+Editor::WorldTextureSnapshot Editor::snapshot_world_texture() {
+  WorldTextureSnapshot snapshot;
+  auto texture = world_texture(snapshot.output);
+  if (texture && !procedural_texture_current_image(*texture, snapshot.output, env_.map)) {
+    // A view may hold the previous surface or a small preview. Capture this revision for the job's worker.
+    snapshot.texture = std::make_unique<ProceduralTexture>(*texture);
+  }
+  return snapshot;
+}
+
+void Editor::WorldTextureSnapshot::finish(Environment &env) {
+  if (!texture) return;
+  auto image = std::make_shared<Texture>();
+  image->name = texture->name + "#" + texture_output_name(output);
+  image->build(texture->output(output), output == (int)TextureOutput::Albedo);
+  env.map = std::move(image);
+  env.compute_sh();
+  texture.reset();
+}
+
 void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
   const EnvironmentSettings &es = scene_->environment;
   Vec3 sun = sun_in ? *sun_in : sky_world_sun(es);
@@ -991,16 +1020,15 @@ void Editor::update_environment(const Vec3 *sun_in, Vec3 *sun_out) {
     env_.map = generate_sky_texture(sun, es.turbidity, es.ground_albedo, 512);
     env_.rotation = 0.0f;  // the sky is baked in world space
   }
-  else if (procedural) {
-    if (ProceduralTexturePtr texture = texture_asset(asset)) {
-      if (texture->surface) procedural_texture_set_async(texture->asset_path, true);
-      env_.map = procedural_texture_output(*texture, output);
-    }
-    if (!env_.map) Log::warn("World HDRI: cannot resolve %s", es.hdri.path.c_str());
-  }
   else if (es.mode == 2 && !es.hdri.empty()) {
     std::string err;
-    env_.map = generated_grid_texture(es.hdri.path);
+    if (procedural) {
+      if (auto texture = world_texture(output)) {
+        if (texture->surface) procedural_texture_set_async(texture->asset_path, true);
+        env_.map = procedural_texture_output(*texture, output);
+      }
+    }
+    else env_.map = generated_grid_texture(es.hdri.path);
     if (!env_.map) env_.map = texture_load(resolve_asset_path(es.hdri.path), false, &err);
     if (!env_.map) Log::warn("World HDRI: %s", err.c_str());
   }
@@ -2317,6 +2345,7 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     j->target = std::max(1, preview ? rs.preview_samples : rs.samples);
   }
   j->environment = env_;
+  j->world_texture = snapshot_world_texture();
   env.environment = &j->environment;
   const char *split = traced ? nullptr : std::getenv("BLENDITY_RENDER_COMPONENTS");  // (round 451: the Unity comparison's split by component)
   if (split && *split) {
@@ -2664,6 +2693,7 @@ void Editor::render_job_start(std::unique_ptr<RenderJob> job) {
   rendering_ = true;
   auto run = [j, pt] {
     JobSystem::global().run_background([j, pt] {
+      j->world_texture.finish(j->environment);
       if (j->traced) trace_picture(*j, *pt);
       else raster_picture(*j);
     });

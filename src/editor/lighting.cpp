@@ -88,6 +88,8 @@ uint64_t Editor::lightmap_scene_key() {
   const bool use_angles = world.mode == 1 && !directional_sun && finite_bits(world.sun_elevation) && finite_bits(world.sun_rotation) &&
                           (world.sun_elevation != world.default_sun_elevation || world.sun_rotation != world.default_sun_rotation);
   mix(hash_reflect([&](Reflector &r) { world.reflect(r, use_angles); }));
+  int output = 0;
+  if (auto texture = world_texture(output)) mix(procedural_texture_cache_hash(*texture));
   /* The settings a bake depends on (not Realtime GI's or Auto Generate). */
   const LightingSettings &ls = scene_->lighting;
   mix(ls.baked_gi);
@@ -502,6 +504,7 @@ void Editor::bake_start() {
   }
   update_environment();
   job->env = env_;
+  job->world_texture = snapshot_world_texture();
   part(1);
   BakeSettings &s = job->settings;
   s.splats = scene_splat_views(*scene_);  // (round 533: the splats shine on the lightmaps and shade them)
@@ -586,6 +589,7 @@ void Editor::bake_job_run(BakeJob &j) {
     std::lock_guard<std::mutex> lock(j.mutex);
     j.status = text;
   };
+  j.world_texture.finish(j.env);
   baker_.begin(j.objects, j.lights, j.env, j.settings);
   Log::info("Generate Lighting: %zu objects, %zu texels", j.objects.size(), baker_.texel_count());
   while (!j.cancel.load(std::memory_order_relaxed)) {

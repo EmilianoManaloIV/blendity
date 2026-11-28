@@ -844,6 +844,13 @@ bool procedural_texture_cached(const std::string &asset_path, uint64_t hash) {
 }
 
 
+bool procedural_texture_current_image(ProceduralTexture &texture, int output, const TexturePtr &image) {
+  const uint64_t hash = cache_hash(texture);
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  const auto it = g_cache.find(texture.asset_path);
+  return image && it != g_cache.end() && it->second.hash == hash && it->second.tex[output] == image;
+}
+
 struct TextureOutputsHandle {
   CachedOutput out;
 };
