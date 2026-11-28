@@ -10,6 +10,7 @@
 #include "../src/scene/unity_scene.h"
 #include "../src/render/light_pick.h"
 #include "../src/render/sampler.h"
+#include "../src/texture/paint_layer.h"
 #include <random>
 #include <set>
 #include <tuple>
@@ -12688,6 +12689,45 @@ static void tests_round673() {
     CHECK(ed.lightmap_scene_key_for_test() != baked.scene_key && ed.lighting_out_of_date_for_test());
     ed.command("undo");
     CHECK(ed.lightmap_scene_key_for_test() == baked.scene_key && !ed.lighting_out_of_date_for_test());
+  });
+
+  test("A procedural World bake distinguishes nested paint pixels at the same Undo stamp after reopen", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    ProceduralTexture surface;
+    surface.width = surface.height = 64;
+    auto *group = surface.add("Group");
+    group->children()->push_back(create_texture_layer("Paint"));
+    const std::string path = "Assets/Textures/WorldPaint673.ptex";
+    PaintLayer &layer = static_cast<PaintLayer &>(*group->children()->back());
+    layer.base = "Assets/Textures/WorldPaint673_pixels";
+    layer.stamp = 1;
+    layer.images = std::make_shared<PaintImages>();
+    layer.images->reset(64, 64);
+    layer.images->cover[0] = 255;
+    layer.images->channels[0] = paint_channel_bit(PaintColor);
+    layer.images->color[0] = 0x00ff0000;
+    auto asset = create_texture_asset(surface, path);
+    CHECK(asset != nullptr);
+    if (!asset) return;
+    ed.command("world hdri " + path + "#albedo");
+    auto key = [&] { return ed.lightmap_scene_key_for_test(); };
+    const uint64_t red = key();
+    // The source version advances on Undo and a new stroke. Its serialized stamp returns to 1 for both branches.
+    auto &paint = static_cast<PaintLayer &>(*asset->layers.front()->children()->front());
+    paint.stamp = 0;
+    paint.images->cover[0] = 0;
+    asset->touch();
+    CHECK(key() != red);
+    paint.stamp = 1;
+    paint.images->cover[0] = 255;
+    paint.images->color[0] = 0x000000ff;
+    asset->touch();
+    const uint64_t blue = key();
+    CHECK(blue != red && key() == blue);
+    CHECK(paint_images_save(*paint.images, resolve_asset_path(paint.base)));
+    CHECK(forget_texture_assets(path) == 1);
+    CHECK(key() == blue);
   });
 
   test("World accepts a literal image filename resembling a missing procedural output", [] {

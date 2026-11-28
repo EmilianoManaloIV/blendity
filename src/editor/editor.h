@@ -6665,6 +6665,8 @@ class Editor {
   std::string bake_status_;
   double bake_start_ = 0;
   uint64_t bake_key_ = 0, lighting_gen_ = 0;
+  std::weak_ptr<ProceduralTexture> lightmap_painted_world_;
+  uint64_t lightmap_paint_version_ = 0, lightmap_paint_hash_ = 0;
   std::string lighting_dir() const;
   uint64_t lightmap_hash_of(const GameObject &g, const Mesh &m);
   uint64_t lightmap_scene_key();

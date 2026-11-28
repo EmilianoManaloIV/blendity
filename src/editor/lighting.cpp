@@ -7,6 +7,7 @@
 #include "../core/core.h"
 #include "../core/jobs.h"
 #include "../core/view_perf.h"
+#include "../texture/paint_layer.h"
 #include "../render/gpu_device.h"
 #include "../render/pathtracer.h"
 
@@ -44,6 +45,26 @@ uint64_t Editor::mesh_hash_of(const Mesh &m) {
 }
 
 uint64_t Editor::lightmap_hash_of(const GameObject &g, const Mesh &m) { return lightmap_placed_hash(mesh_hash_of(m), g.world_matrix()); }
+
+// Paint stamps repeat on divergent Undo branches. Hash the image channels in their saved representation.
+static uint64_t world_paint_hash(const TextureLayerList &layers, int size, uint64_t h) {
+  for (const auto &layer : layers) {
+    if (auto *paint = dynamic_cast<const PaintLayer *>(layer.get()); paint && (!paint->base.empty() || (paint->images && !paint->images->empty()))) {
+      const PaintImages &im = paint->ensure_images(size);
+      h = hash_mix(h, (uint64_t)(uint32_t)im.w << 32 | (uint32_t)im.h);
+      for (size_t i = 0; i < im.size(); ++i) {
+        // Color and emission PNGs store coverage in alpha; the buffers' own high bytes are unused.
+        const uint64_t rgb = (uint64_t)(im.color[i] & 0xffffff) << 24 | (im.emit[i] & 0xffffff);
+        h = hash_mix(h, rgb);
+      }
+      for (const auto *plane : {&im.cover, &im.channels, &im.rough, &im.metal, &im.height})
+        h = mix_bytes(h, plane->data(), plane->size());
+    }
+    if (const auto *children = layer->children_const()) h = world_paint_hash(*children, size, h);
+    h = world_paint_hash(layer->mask_layers, size, h);
+  }
+  return h;
+}
 
 /* What the baked lighting depends on: the contributing objects (shape, place, material colours),
  * the Baked and Mixed lights, the world and the lighting settings. Different from the bake's = out of date. */
@@ -89,7 +110,15 @@ uint64_t Editor::lightmap_scene_key() {
                           (world.sun_elevation != world.default_sun_elevation || world.sun_rotation != world.default_sun_rotation);
   mix(hash_reflect([&](Reflector &r) { world.reflect(r, use_angles); }));
   int output = 0;
-  if (auto texture = world_texture(output)) mix(procedural_texture_cache_hash(*texture));
+  if (auto texture = world_texture(output)) {
+    mix(procedural_texture_cache_hash(*texture));
+    if (lightmap_painted_world_.lock() != texture || lightmap_paint_version_ != texture->version) {
+      lightmap_paint_hash_ = world_paint_hash(texture->layers, std::max(texture->width, texture->height), kFnvBasis);
+      lightmap_painted_world_ = texture;
+      lightmap_paint_version_ = texture->version;
+    }
+    mix(lightmap_paint_hash_);
+  }
   /* The settings a bake depends on (not Realtime GI's or Auto Generate). */
   const LightingSettings &ls = scene_->lighting;
   mix(ls.baked_gi);
