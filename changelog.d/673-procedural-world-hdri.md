@@ -5,7 +5,7 @@
 **Fixed (task 0655)**
 - Selecting a procedural output uses the same texture as the picker thumbnail and materials. The World refreshes its background and environmental lighting when the texture changes or a surface worker publishes new pixels.
 
-**Checked:** On stock Windows the selected Bricks albedo reference survived reopening and its thumbnail changed after a layer edit. The World continued to render the empty background. Candidate verification is pending.
+**Checked:** On stock Windows the selected Bricks albedo reference survived reopening and its thumbnail changed after a layer edit. The World continued to render the empty background. On the candidate, picking Bricks changed 57,600 F12 pixels and editing the same asset changed 56,123. Undo, Redo and fresh-process reopen matched the expected images exactly.
 
 <!-- README -->
 after: The World HDRI picker can use a generated UV Grid or Color Grid to light the scene.

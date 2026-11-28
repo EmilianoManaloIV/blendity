@@ -1,6 +1,6 @@
 # 0655: Render procedural texture outputs selected for the World HDRI
 
-- **Status:** approved
+- **Status:** in review
 - **Authorization:** Owner-approved Pass 38 follow-up, round 673. The Hub reserved 0655 conditional on a stock picker reproduction. It depends on 0654 at `e10a836b`.
 - **Requirements:** R-05, Q-06.
 - **Decisions:** retain the existing shared procedural texture evaluation and worker contract.
@@ -32,3 +32,7 @@ Round 673 changelog, lighting help and verified results in this task.
 
 ## Outcome
 Stock retained `Assets/Textures/A0655.ptex#albedo` across reopen. Editing the brick rows from 4 to 12 changed the picker thumbnail in 1,161 RGB channels. The selected, edited and reopened F12 renders all matched the empty slot in all 57,600 pixels. The editor logged a file-read failure for the output name. [Stock evidence](D:/Blendity-agent-scratch/pass38/0652/ptex1/results.json)
+
+The final Windows picker rendered the Bricks selection in all 57,600 F12 pixels that previously matched the empty environment. Editing Rows at the same reference changed 56,123 F12 pixels and 687,574 Scene view pixels. Undo, Redo, an unchanged repeat and a fresh-process reopen matched their expected images exactly. The normal output, a disk image with a literal # and the generated UV Grid also rendered. Missing assets and unknown output names retained the empty fallback and a diagnostic. [Native picker receipt](D:/Blendity-agent-scratch/pass38/0655-independent/final-picker/receipt.json)
+
+Product revision `4f6766a38a1fd498e7e0f92cbe2b128ec1a7d7ec` freezes the selected full-resolution output for renders and bakes. Pending final jobs own their procedural source and paint images. The bake key includes painted layer contents across groups and masks, while runtime caches observe registry replacement. A background surface job checks its originating asset before publishing. The source reviewer approved the same-stamp paint and same-path replacement cases. [Source review](C:/blab/pass38-hub/0655-review.md)
