@@ -2,6 +2,60 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-27 (round 674): Join verified texture and lighting controls
+
+**Asked:** Consolidate the two reviewed Pass 38 control overlays into the canonical tool inventory.
+
+**Changed (task 0656):** The register now includes all 57 texture and paint controls and 87 lighting controls. Of these, 123 reached checked status for the first time and 21 gained Inspector evidence alongside their earlier console results.
+
+**Checked:** The 5,907 distinct keys include 1,638 end-state, 92 measured, 756 dispatch-only and 3,421 unexercised entries. The exact-key join retains the scope and individual evidence for each observation.
+
+## 2026-11-27 (round 673): Procedural textures in the World HDRI
+
+**Asked:** Use a project procedural texture selected in the Lighting window for the World environment.
+
+**Fixed (task 0655)**
+- Selecting a procedural output uses the same texture as the picker thumbnail and materials. The World refreshes its background and environmental lighting when the texture changes or a surface worker publishes new pixels.
+
+**Checked:** On stock Windows the selected Bricks albedo reference survived reopening and its thumbnail changed after a layer edit. The World continued to render the empty background. On the candidate, picking Bricks changed 57,600 F12 pixels and editing the same asset changed 56,123. Undo, Redo and fresh-process reopen matched the expected images exactly.
+
+## 2026-11-27 (round 672): Generated grids in the World HDRI
+
+**Asked:** Make the World HDRI use the generated image selected in the Lighting window.
+
+**Fixed (task 0654)**
+- A World set to UV Grid or Color Grid uses the same built-in texture as the image picker and materials. The selected grid supplies the sky and environmental lighting.
+
+**Checked:** The Windows baseline preserved the generated selection on reopen but logged a file-read error. A disk HDRI changed 57,600 pixels and its rotation changed 51,233 pixels in the same fixture. On the candidate both grids render distinctly, rotate, and survive reopening. Windows and Linux passed the four affected test groups. Five disk timing pairs had a median difference of 0.0 ms.
+
+## 2026-11-27 (round 671): Faster dense rig playback in the CPU Scene view
+
+**Asked:** Break down the remaining dense humanoid and quadruped playback cost, measure the instrumentation, and test a bounded improvement on the same scenes.
+
+**Changed (task 0653)**
+
+- The scalar PBR renderer checks a point light's existing attenuation before normalizing its direction. In the measured dense CPU scenes, the combined editor's median playback frame fell from 32.94 to 31.02 ms for the humanoid and from 33.36 to 31.55 ms for the quadruped.
+- The opt-in headless command `perf frames N scene-raster` reports CPU Scene renderer stages and the number of eligible fresh frames.
+
+**Checked:** The combined editor reproduced all 15 reference Scene images and the corresponding fixed-pose geometry exactly. See `docs/perf/0653-dense-playback.md` for the paired measurements, workload settings and control results.
+
+## 2026-11-27 (round 670): Visible lighting and sky controls
+
+**Asked:** Exercise the visible controls that set World lighting, lightmapping and individual lights, including both new Sky sun angles.
+
+**Added (task 0652)**
+- A stock Windows replay checks the Lighting window and Light Inspector with mouse presses, drags and contrasting missed hits. It saves the scene, verifies Undo, reopens the edited file and checks applicable rendered effects.
+
+**Checked:** Across 87 keys, edits and Undo restored the expected property values. Opening each disclosure exposed an editable child, and closing it restored the original label pixels. Both physical Sky angles matched the explicit reference render at each orientation and gave an unchanged picture under a directional lamp. A separate driver checked both angles and Spot Range with opposite gestures and fresh-process reopen.
+
+## 2026-11-27 (round 669): Textures, Paint and Editing pointer controls
+
+**Asked:** Exercise previously untested texture and image controls through the UI and profile a complex texture workflow on the frozen combined editor.
+
+**Added (task 0651):** Repeatable pointer batches check 57 exact controls against persisted adjustments, mask pixels, exported maps, material assignments and preview changes. The tests distinguish Undo of a first stroke from Undo of the automatically added Paint layer and cover the outer edge and an internal tile junction on the 2D canvas.
+
+**Checked:** The stock Windows CPU-path profile ran 24 fresh processes. At 2048² and two workers, Undo took 1.0 ms and its restored preview took 1,792.8 ms to settle. At default concurrency the corresponding medians were 1.3 and 469.4 ms.
+
 ## 2026-11-27 (round 668): Keep Unity material edits when gloss finishes loading
 
 **Asked:** A background texture measurement reset an edited Metallic value on a Unity material.

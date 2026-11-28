@@ -4730,3 +4730,13 @@ An early filename filter saved a median 0.3 ms at default concurrency and 1.7 ms
 ## Splat axis-conversion experiment (round 664)
 
 On the two-CPU WSL ext4 profile, specializing three spherical-harmonic band loops moved median axis conversion from 122.71 to 123.29 ms and total PLY import from 285.28 to 288.75 ms. The [experiment record](tasks/0646-splat-axes.md) documents byte parity, matched pairs and the rejection.
+
+## Round 669: Complex texture preview, paint and bake
+
+A four-layer 2048-square texture on the frozen Windows CPU path took 442.0 ms to settle its painted preview at default concurrency and 1,865.0 ms at two workers. The texture bake took 1,680.5 and 7,207.9 ms, respectively. Each figure is a median of three fresh processes. [Inputs, timing boundaries and checks](perf/0651-texture-paint-controls.md)
+
+Task 0652 records [visible Lighting and World field checks](perf/0652-lighting-inspector.md), including the generated HDRI picker failure and its working disk control.
+
+## Round 674: Pass 38 coverage consolidation
+
+The [inventory reconciliation](tasks/0656-inventory-consolidation.md) records the signed inputs, counts and reproduction command for the [tool register](perf/0630-inventory.tsv).

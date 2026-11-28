@@ -47,6 +47,8 @@ in **[docs/INSTALL.md](docs/INSTALL.md)**. Every version is on the
   The Lighting window shows the active update mode first and reveals the full bake counts on hover.
   Selecting Low releases oversized shadow planes in CPU viewports (round 631).
   Find and apply Low, Medium or High Viewport Quality from the command palette.
+  The World HDRI picker can use a generated UV Grid or Color Grid to light the scene.
+  A procedural texture selected for the World updates its sky and lighting when the texture changes.
   The physical Sky world's Sun Elevation and Sun Rotation position its sun when there is no enabled Directional Light.
 - **Rig and animate**: bones, IK, automatic weights, a dopesheet and curves, a Sequencer, walk cycles, spring bones.
 - **Work with other tools**: import and export OBJ, FBX, glTF, STL, PLY and USD; Unity packages and scenes, VRM and
@@ -93,7 +95,7 @@ Blender's prebuilt libraries (faster rendering, denoising, video export), CMake 
 **[docs/BUILDING.md](docs/BUILDING.md)**.
 
 <!-- The unit-check count: the pass write-up updates this one line (tools/dev/changelog.py fold --checks). -->
-Each build is tested: `blendity_tests` (142273 unit checks in 3965 tests with Blender's libraries), on Windows, Linux and
+Each build is tested: `blendity_tests` (142372 unit checks in 3975 tests with Blender's libraries), on Windows, Linux and
 macOS by GitHub Actions.
 
 ## License
