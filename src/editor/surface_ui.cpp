@@ -339,7 +339,7 @@ void Editor::surface_poll() {
   if (surface_job_ && surface_job_->done.load(std::memory_order_acquire)) {
     std::unique_ptr<SurfaceJob> job = std::move(surface_job_);
     if (job->thread.joinable()) job->thread.join();
-    if (!job->cancel.load(std::memory_order_relaxed)) {
+    if (!job->cancel.load(std::memory_order_relaxed) && job->source == texture_asset(job->path)) {
       procedural_texture_cache_store(job->path, job->built);
       procedural_texture_cache_trim();  // (task 0421: over its budget, the least recently used images only the cache holds go)
       surface_sync_emission(job->copy);  // (a layer started or stopped writing emission since the material was assigned)
@@ -360,6 +360,7 @@ void Editor::surface_poll() {
     auto job = std::make_unique<SurfaceJob>();
     job->path = t->asset_path;
     job->hash = h;
+    job->source = t;
     job->copy = *t;
     SurfaceJob *raw = job.get();
     job->thread = std::thread([raw] {

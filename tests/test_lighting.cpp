@@ -12764,6 +12764,41 @@ static void tests_round673() {
     CHECK(ed.make_lighting_for_test().environment->map != nullptr);
   });
 
+  test("A replaced World surface cannot publish its old worker pixels at the same paint stamp", [] {
+    Editor ed;
+    r542_world(ed, 2);
+    clear_texture_assets();
+    const std::string path = "Assets/Textures/WorldWorker673.ptex";
+    auto painted = [&](uint32_t rgb) {
+      ProceduralTexture source;
+      source.width = source.height = 64;
+      source.surface = true;
+      auto *paint = static_cast<PaintLayer *>(source.add("Paint"));
+      paint->stamp = 1;
+      PaintImages &im = paint->ensure_images(64);
+      std::fill(im.color.begin(), im.color.end(), rgb);
+      std::fill(im.channels.begin(), im.channels.end(), paint_channel_bit(PaintColor));
+      std::fill(im.cover.begin(), im.cover.end(), 255);
+      return create_texture_asset(source, path);
+    };
+    auto first = painted(0x00ff0000);
+    ed.command("world hdri " + path + "#albedo");
+    ed.step_frame_headless();  // the original worker can finish, but cannot publish before the next poll
+    CHECK(ed.surface_busy_for_test());
+    auto replacement = painted(0x000000ff);
+    CHECK(first && replacement && first != replacement);
+    if (!first || !replacement) return;
+    const uint64_t hash = procedural_texture_cache_hash(*replacement);
+    CHECK(hash == procedural_texture_cache_hash(*first));
+    const double deadline = now_seconds() + 8;
+    while (!procedural_texture_cached(path, hash) && now_seconds() < deadline) ed.step_frame_headless();
+    CHECK(procedural_texture_cached(path, hash));
+    const auto image = ed.make_lighting_for_test().environment->map;
+    Texture expected;
+    expected.build(replacement->output(0), true);
+    CHECK(image && image->levels.front().px8 == expected.levels.front().px8);
+  });
+
   test("A World surface follows the published worker image at the same reference", [] {
     Editor ed;
     r542_world(ed, 2);

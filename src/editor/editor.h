@@ -5823,6 +5823,7 @@ class Editor {
     std::string path;
     uint64_t hash = 0;
     ProceduralTexture copy;
+    ProceduralTexturePtr source;  // registry identity at dispatch
     std::shared_ptr<TextureOutputsHandle> built;  // the images with their mips, built on the worker
     ~SurfaceJob() {
       cancel.store(true, std::memory_order_relaxed);
