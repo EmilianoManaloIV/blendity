@@ -42,3 +42,15 @@ py -3 -B tools/dev/lighting_inspector_0652.py --app $env:BLENDITY_TEST_APP --wor
 ```
 
 Omit the `--field` arguments for the complete matrix. The driver retains each invocation, editor log, saved scene and render, plus `results.json` and `per-key.tsv` in the work directory.
+
+## Realistic scene timings
+
+The stock editor loaded the WorldLike fixture with 600 parts, 40 distinct meshes, 180 GI contributors, 70 lights and 64 textures of 512 × 512 pixels. Each run timed both a missed gesture and the visible edit. The table gives the median of three runs' longest measured frames across press, movement, release and the frame after release. Preview Lighting used the native windowed frame loop. Picker gestures used the headless frame harness. The timing window reported zero taint. [Raw timings and saved states](D:/Blendity-agent-scratch/pass38/0652/latency3/latency.json) · [Scheduler receipt](C:/blab/pass37-hub/timing-queue/0652-world-latency3.result.json)
+
+| Saved change | Missed gesture | Edit |
+| --- | ---: | ---: |
+| Preview Lighting off → on | 2.7 ms | 2.7 ms |
+| Light Cookie empty → generated UV Grid | 0.6 ms | 21.9 ms |
+| World HDRI empty → WorldLike disk image, observed | 0.8 ms | 11.3 ms |
+
+The Cookie's longest frame followed selection in all three runs (21.5–22.0 ms). The benchmark's intended generated World HDRI check failed and returned exit 1. The populated menu selected `Assets/Textures/WorldLike/tex_043.png` in all three runs. The saved World blocks establish the disk selection shown in the table. Generated World HDRI selection latency remains unmeasured. The smaller fixture separately verifies selection, Undo, fresh relative-path execution and disk rotation. [Relative-path disk replay](D:/Blendity-agent-scratch/pass38/0652/relative-disk2/results.json)
